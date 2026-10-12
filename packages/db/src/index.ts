@@ -210,6 +210,7 @@ import {
 } from "./organization-api-key-access";
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
 export * from "./personal-api-keys";
+export * from "./organization-privacy-preferences";
 import { personalApiKeyAccess } from "./personal-api-keys";
 import {
   effectiveKeyPermissions,

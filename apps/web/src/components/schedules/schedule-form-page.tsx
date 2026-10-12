@@ -505,13 +505,27 @@ function AgentScheduleForm({
 
   /* ----- who can see it */
   const [canCreatePrivate, setCanCreatePrivate] = useState<boolean | null>(null);
+  // A new schedule starts with the organization's default audience until the
+  // person picks one.
+  const audienceChosenRef = useRef(false);
+  const creating = mode.kind === "create";
   useEffect(() => {
     if (personal) return;
     let live = true;
     void client
       .getSessionTenancyCreateCapabilities(workspaceId)
       .then((capabilities) => {
-        if (live) setCanCreatePrivate(capabilities.canCreatePrivate === true);
+        if (!live) return;
+        setCanCreatePrivate(capabilities.canCreatePrivate === true);
+        if (
+          creating &&
+          capabilities.canCreatePrivate === true &&
+          capabilities.defaultVisibility === "private" &&
+          !audienceChosenRef.current
+        )
+          setDraft((current) =>
+            current.visibility === "private" ? current : { ...current, visibility: "private" },
+          );
       })
       .catch(() => {
         if (live) setCanCreatePrivate(false);
@@ -519,7 +533,7 @@ function AgentScheduleForm({
     return () => {
       live = false;
     };
-  }, [client, personal, workspaceId]);
+  }, [client, creating, personal, workspaceId]);
   const audienceTarget =
     draft.runMode === "existing_session"
       ? sessions.find((session) => session.id === draft.targetSessionId)
@@ -1140,7 +1154,10 @@ function AgentScheduleForm({
             >
               <FieldSegmented<"workspace" | "private">
                 value={draft.visibility}
-                onValueChange={(visibility) => update({ visibility })}
+                onValueChange={(visibility) => {
+                  audienceChosenRef.current = true;
+                  update({ visibility });
+                }}
                 options={[
                   {
                     value: "workspace",

@@ -27,6 +27,11 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import {
+  privacyDeploymentLimits,
+  requireDeploymentAllowsOnlyMe,
+  resolveOrganizationPrivacy,
+} from "./organization-privacy";
+import {
   requirePermission,
   hasVerifiedOwningUserAuthorization,
   type AccessGrantAuthorization,
@@ -82,7 +87,7 @@ export function requireVerifiedOwningUser(
 }
 
 export async function getManagedHumanSessionCreateCapabilities(
-  deps: Pick<SessionTenancyDependencies, "db">,
+  deps: Pick<SessionTenancyDependencies, "db" | "settings">,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): Promise<SessionTenancyCreateCapabilities> {
@@ -104,12 +109,17 @@ export async function getManagedHumanSessionCreateCapabilities(
   // workspace is always private-capable, while a shared organization workspace
   // additionally needs the owner/admin Only-me product setting.
   let activated = false;
+  let sharedWorkspace = false;
   try {
     const policy = await getPrivateSessionCreatePolicy(deps.db, {
       workspaceId,
       actorSubjectId: authorization.grant.subjectId,
     });
-    activated = policy.personalWorkspace ? policy.platformAvailable : policy.organizationEnabled;
+    sharedWorkspace = !policy.personalWorkspace;
+    // A deployment that turns Only me off narrows every shared workspace.
+    activated = policy.personalWorkspace
+      ? policy.platformAvailable
+      : policy.organizationEnabled && privacyDeploymentLimits(deps.settings).onlyMeAllowed;
   } catch (error) {
     // A canonical managed human without an active organization membership or
     // stated workspace authority (legacy managed access) is simply not
@@ -122,15 +132,22 @@ export async function getManagedHumanSessionCreateCapabilities(
       throw error;
     }
   }
+  // The organization's default audience applies to shared workspaces where
+  // Only me is available; a Personal workspace has nobody else to share with.
+  const defaultVisibility =
+    activated && sharedWorkspace
+      ? (await resolveOrganizationPrivacy(deps, authorization.grant.accountId)).defaultVisibility
+      : "workspace";
   return SessionTenancyCreateCapabilities.parse({
     activated,
     canCreatePrivate: activated,
     reason: activated ? "available" : "not_activated",
+    defaultVisibility,
   });
 }
 
 export async function requireManagedHumanPrivateSessionCreate(
-  deps: Pick<SessionTenancyDependencies, "db">,
+  deps: Pick<SessionTenancyDependencies, "db" | "settings">,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): Promise<void> {
@@ -139,6 +156,10 @@ export async function requireManagedHumanPrivateSessionCreate(
   // fence, after keyed replay resolution), so a committed keyed success still
   // replays after the setting is disabled while a fresh key fails closed.
   await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:create"]);
+  await requireDeploymentAllowsOnlyMe(deps, {
+    workspaceId,
+    actorSubjectId: authorization.grant.subjectId,
+  });
 }
 
 async function requireSessionTenancyMutationGate(
@@ -256,6 +277,12 @@ export async function updateManagedHumanSessionVisibility(
     operation: "session.visibility.write",
     surface: authorizationSurface,
   });
+  if (request.visibility === "private") {
+    await requireDeploymentAllowsOnlyMe(deps, {
+      workspaceId,
+      actorSubjectId: authorization.grant.subjectId,
+    });
+  }
 
   const result = await runTenancyMutation(
     async () =>
@@ -301,6 +328,12 @@ export async function forkManagedHumanSession(
     "sessions:read",
     "sessions:create",
   ]);
+  if (request.visibility === "private") {
+    await requireDeploymentAllowsOnlyMe(deps, {
+      workspaceId,
+      actorSubjectId: authorization.grant.subjectId,
+    });
+  }
   const beforeCommit = externalContinuationCommitAuthorizer(authorization);
   const forkInput = {
     sourceWorkspaceId: workspaceId,

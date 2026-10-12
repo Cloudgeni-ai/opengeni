@@ -581,6 +581,7 @@ export async function createValidatedScheduledTask(input: {
       : undefined;
   const visibility = await resolveScheduledTaskVisibility({
     db: input.db,
+    settings: input.settings,
     grant: input.grant,
     requested: "visibility" in input.payload ? input.payload.visibility : undefined,
     current: null,
@@ -588,7 +589,7 @@ export async function createValidatedScheduledTask(input: {
     personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
     ownerSubjectId:
       action.kind === "agent_turn"
-        ? (await scheduledTaskViewerForGrant(input.db, input.grant)).subjectId
+        ? (await scheduledTaskViewerForGrant(input.db, input.grant, input.settings)).subjectId
         : null,
   });
   await requirePersonalMachineAudience({
@@ -1342,6 +1343,7 @@ export async function validatedScheduledTaskUpdate(
   const agentConfig = update.agentConfig ?? input.existing.agentConfig;
   const visibility = await resolveScheduledTaskVisibility({
     db: input.db,
+    settings: input.settings,
     grant: input.grant,
     requested: input.payload.visibility,
     current: input.existing,

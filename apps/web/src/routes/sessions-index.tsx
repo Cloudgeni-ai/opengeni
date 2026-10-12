@@ -391,10 +391,15 @@ function SessionsIndexRouteContent({
     activated: boolean;
     canCreatePrivate: boolean;
     reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
+    defaultVisibility?: "private" | "workspace";
   } | null>(null);
   const tenancyCapabilityGeneration = useRef(0);
+  // Whether the person picked who can see this new chat. Until they do, it
+  // starts with the organization's default.
+  const visibilityChosenRef = useRef(false);
   useEffect(() => {
     const generation = ++tenancyCapabilityGeneration.current;
+    visibilityChosenRef.current = false;
     setTenancyCapabilities(null);
     void context.client
       .getSessionTenancyCreateCapabilities(workspaceId)
@@ -404,6 +409,10 @@ function SessionsIndexRouteContent({
         if (!capabilities.canCreatePrivate) {
           setDraft((current) =>
             current.visibility === "private" ? { ...current, visibility: "workspace" } : current,
+          );
+        } else if (capabilities.defaultVisibility === "private" && !visibilityChosenRef.current) {
+          setDraft((current) =>
+            current.visibility === "private" ? current : { ...current, visibility: "private" },
           );
         }
       })
@@ -1376,7 +1385,15 @@ function SessionsIndexRouteContent({
                     newSessionDraft.isCurrentSignature(visibleSignature)
                   ) {
                     setMessage("");
-                    setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
+                    visibilityChosenRef.current = false;
+                    setDraft({
+                      ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
+                      visibility:
+                        tenancyCapabilities?.canCreatePrivate === true &&
+                        tenancyCapabilities.defaultVisibility === "private"
+                          ? "private"
+                          : "workspace",
+                    });
                     attachments.removeReadyFiles(
                       submittedResources.flatMap((resource) =>
                         resource.kind === "file" ? [resource.fileId] : [],
@@ -1762,9 +1779,10 @@ function SessionsIndexRouteContent({
                             <VisibilityMenuBody
                               value={draft.visibility}
                               disabled={busy || newSessionDraft.loading}
-                              onChange={(visibility) =>
-                                setDraft((current) => ({ ...current, visibility }))
-                              }
+                              onChange={(visibility) => {
+                                visibilityChosenRef.current = true;
+                                setDraft((current) => ({ ...current, visibility }));
+                              }}
                             />
                           ),
                         },

@@ -481,6 +481,14 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsOauthShortStateEnabled: EnvBoolean.default(false),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
+  // Privacy limits a deployment (for example a product that embeds Opengeni)
+  // sets for every organization. They only narrow what organizations choose:
+  // Only me chats and schedules off in shared workspaces, new chats and
+  // schedules always starting as Workspace, and admins always seeing that
+  // other people's Only me schedules exist.
+  privacyOnlyMeAllowed: EnvBoolean.default(true),
+  privacyWorkspaceDefaultRequired: EnvBoolean.default(false),
+  privacyAdminScheduleSummariesRequired: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
   gmailWatchTopicName: z
     .string()
@@ -4470,6 +4478,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsOauthShortStateEnabled: optional("OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
+    ),
+    privacyOnlyMeAllowed: optional("OPENGENI_PRIVACY_ONLY_ME_ALLOWED"),
+    privacyWorkspaceDefaultRequired: optional("OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED"),
+    privacyAdminScheduleSummariesRequired: optional(
+      "OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),

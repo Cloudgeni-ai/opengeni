@@ -1057,6 +1057,30 @@
     },
     {
       "method": "GET",
+      "path": "/v1/organizations/:organizationId/privacy-settings",
+      "sdk": [
+        "OpenGeniClient.getOrganizationPrivacySettings"
+      ],
+      "request": [],
+      "response": [
+        "OrganizationPrivacySettings"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/privacy-settings",
+      "sdk": [
+        "OpenGeniClient.updateOrganizationPrivacySettings"
+      ],
+      "request": [
+        "UpdateOrganizationPrivacySettingsRequest"
+      ],
+      "response": [
+        "OrganizationPrivacySettings"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/organizations/:organizationId/private-session-settings",
       "sdk": [
         "getOrganizationPrivateSessionSettings",
@@ -19214,6 +19238,22 @@
         "$.totalTokens": "string!"
       }
     },
+    "OrganizationPrivacySettings": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.adminsSeePrivateSchedules": "boolean!",
+        "$.defaultVisibility": "ref(SessionVisibility)!",
+        "$.limits": "object!",
+        "$.limits.adminsSeePrivateSchedulesLocked": "boolean!",
+        "$.limits.defaultVisibilityLocked": "boolean!",
+        "$.limits.onlyMeAllowed": "boolean!",
+        "$.organizationId": "string!",
+        "$.updatedAt": "string! null"
+      }
+    },
     "OrganizationPrivateSessionSettings": {
       "io": [
         "output"
@@ -23053,6 +23093,7 @@
         "$": "object",
         "$.activated": "boolean!",
         "$.canCreatePrivate": "boolean!",
+        "$.defaultVisibility": "enum!=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]",
         "$.reason": "enum!=[\"\\\"available\\\"\",\"\\\"managed_session_required\\\"\",\"\\\"not_activated\\\"\",\"\\\"unavailable\\\"\"]"
       }
     },
@@ -25264,6 +25305,16 @@
         "$.expectedUpdatedAt": "string!",
         "$.name": "string!",
         "$.operationId": "string!"
+      }
+    },
+    "UpdateOrganizationPrivacySettingsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.adminsSeePrivateSchedules": "boolean?",
+        "$.defaultVisibility": "ref(SessionVisibility)?"
       }
     },
     "UpdateOrganizationPrivateSessionSettingsRequest": {
@@ -28681,6 +28732,7 @@
       "OrganizationModelDefaults": "type",
       "OrganizationModelProviderConnection": "type",
       "OrganizationModelProviderKind": "type",
+      "OrganizationPrivacySettings": "type",
       "OrganizationPrivateSessionSettings": "type",
       "OrganizationProviderCustomModel": "type",
       "OrganizationProviderCustomModelsResponse": "type",
@@ -29197,6 +29249,7 @@
       "UpdateOrganizationModelAccountSettingsRequest": "type",
       "UpdateOrganizationModelDefaultsRequest": "type",
       "UpdateOrganizationNameRequest": "type",
+      "UpdateOrganizationPrivacySettingsRequest": "type",
       "UpdateOrganizationPrivateSessionSettingsRequest": "type",
       "UpdateOrganizationServiceAccountRequest": "type",
       "UpdateOrganizationWebhookRequest": "type",
@@ -32814,6 +32867,7 @@
       "getOrganizationModelDefaults",
       "getOrganizationModelProviderConnection",
       "getOrganizationModelUsage",
+      "getOrganizationPrivacySettings",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationServiceAccount",
@@ -33198,6 +33252,7 @@
       "updateOrganizationModelAccountSettings",
       "updateOrganizationModelDefaults",
       "updateOrganizationName",
+      "updateOrganizationPrivacySettings",
       "updateOrganizationRetentionPolicy",
       "updateOrganizationServiceAccount",
       "updateOrganizationWorkspace",
@@ -33476,6 +33531,7 @@
       "getOrganizationModelDefaults",
       "getOrganizationModelProviderConnection",
       "getOrganizationModelUsage",
+      "getOrganizationPrivacySettings",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationServiceAccount",
@@ -33855,6 +33911,7 @@
       "updateOrganizationModelAccountSettings",
       "updateOrganizationModelDefaults",
       "updateOrganizationName",
+      "updateOrganizationPrivacySettings",
       "updateOrganizationRetentionPolicy",
       "updateOrganizationServiceAccount",
       "updateOrganizationWorkspace",
@@ -34154,6 +34211,7 @@
       "getOrganizationModelDefaults",
       "getOrganizationModelProviderConnection",
       "getOrganizationModelUsage",
+      "getOrganizationPrivacySettings",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationServiceAccount",
@@ -34555,6 +34613,7 @@
       "updateOrganizationModelAccountSettings",
       "updateOrganizationModelDefaults",
       "updateOrganizationName",
+      "updateOrganizationPrivacySettings",
       "updateOrganizationRetentionPolicy",
       "updateOrganizationServiceAccount",
       "updateOrganizationWorkspace",
@@ -35814,6 +35873,9 @@
       "getOrganizationModelUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}},{\"computed\":false,\"key\":{\"name\":\"afterWorkspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationModelUsage\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/organization-model-usage\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationRecovery": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryOverview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -37020,6 +37082,9 @@
       "updateOrganizationName": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationNameRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationPrivacySettingsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateOrganizationRetentionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationRetentionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRetentionPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -38050,6 +38115,9 @@
       ],
       "getOrganizationModelUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}},{\"computed\":false,\"key\":{\"name\":\"afterWorkspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationModelUsage\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/organization-model-usage\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getOrganizationRecovery": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryOverview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39206,6 +39274,9 @@
       "updateOrganizationName": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationNameRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationPrivacySettingsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateOrganizationRetentionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationRetentionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRetentionPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -40118,6 +40189,9 @@
       ],
       "getOrganizationModelUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}},{\"computed\":false,\"key\":{\"name\":\"afterWorkspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationModelUsage\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/organization-model-usage\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getOrganizationRecovery": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryOverview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -41228,6 +41302,9 @@
       ],
       "updateOrganizationName": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationNameRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationPrivacySettingsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateOrganizationRetentionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationRetentionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRetentionPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42325,6 +42402,9 @@
       "getOrganizationModelUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}},{\"computed\":false,\"key\":{\"name\":\"afterWorkspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationModelUsage\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/organization-model-usage\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationRecovery": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryOverview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -43464,6 +43544,9 @@
       ],
       "updateOrganizationName": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationNameRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationPrivacySettingsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateOrganizationRetentionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationRetentionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRetentionPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44380,6 +44463,9 @@
       "getOrganizationModelUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"period\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"qualifier\":{\"name\":\"OrganizationUsagePeriod\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts\"},\"type\":\"TSImportType\"}},{\"computed\":false,\"key\":{\"name\":\"afterWorkspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"OrganizationModelUsage\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/organization-model-usage\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getOrganizationRecovery": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRecoveryOverview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45519,6 +45605,9 @@
       ],
       "updateOrganizationName": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationNameRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateOrganizationPrivacySettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationPrivacySettingsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationPrivacySettings\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateOrganizationRetentionPolicy": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateOrganizationRetentionPolicyRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OrganizationRetentionPolicy\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

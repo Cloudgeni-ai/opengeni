@@ -253,7 +253,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       }
       await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     }
-    const viewer = await scheduledTaskViewerForGrant(db, grant);
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const tasks = await listScheduledTasks(
       db,
       workspaceId,
@@ -275,11 +275,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const viewer = await scheduledTaskViewerForGrant(db, grant);
-    const schedules = await listPrivateScheduledTaskSummaries(db, {
-      workspaceId,
-      excludeOwnerSubjectId: viewer.subjectId,
-    });
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
+    // The organization can choose that admins don't see these at all.
+    const schedules = viewer.seesPrivateSummaries
+      ? await listPrivateScheduledTaskSummaries(db, {
+          workspaceId,
+          excludeOwnerSubjectId: viewer.subjectId,
+        })
+      : [];
     return c.json(ListPrivateScheduledTaskSummariesResponse.parse({ schedules }));
   });
 
@@ -290,7 +293,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-      const viewer = await scheduledTaskViewerForGrant(db, grant);
+      const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
       const pausable = await requirePausableScheduledTask(db, grant, c.req.param("taskId"), viewer);
       if (pausable.access !== "summary")
         throw new HTTPException(404, { message: "scheduled task not found" });
@@ -410,7 +413,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/pause", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
-    const viewer = await scheduledTaskViewerForGrant(db, grant);
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
     const previous = await captureScheduledTaskRestoreState(db, existing);
     const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
@@ -554,7 +557,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const target = await getScheduledTaskIncludingDeleted(db, workspaceId, c.req.param("taskId"));
     if (
       target &&
-      scheduledTaskAccess(await scheduledTaskViewerForGrant(db, grant), target) !== "full"
+      scheduledTaskAccess(await scheduledTaskViewerForGrant(db, grant, deps.settings), target) !==
+        "full"
     )
       throw new HTTPException(404, { message: "scheduled task not found" });
     await deleteScheduledTaskWithDurableCleanup(deps, {
