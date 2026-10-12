@@ -207,8 +207,9 @@ result.
 Variable sets retired. Secrets now live in vaults and are used by reference
 from any session, so there is nothing to attach and no `variable_set_list`
 tool. Integration setup discovery starts at the capability catalog, and the
-child-session Variable Set workaround is gone. The legacy prompt is locked and
-keeps its text.
+child-session Variable Set workaround is gone. The legacy operational prompt
+gets the same two edits, because it would otherwise name a removed tool and a
+field that now returns 422.
 
 ```diff
 - If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.
