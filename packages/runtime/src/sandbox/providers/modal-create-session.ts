@@ -23,10 +23,24 @@ import {
 } from "./modal-create-boundary";
 import { prepareCanonicalModalCreateImage } from "./modal-registry-image";
 import { modalCommandStartCleanupIsSafe } from "./modal-command-start-errors";
+import {
+  modalNativeBrokerInitialCommand,
+  parseModalNativeBrokerCreatePlan,
+  type ModalNativeBrokerCreatePlan,
+} from "./modal-native-broker-create";
 
 export type ModalCreateLifecycle = {
   beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
   onCreated: (session: ModalSandboxSession, intent: ModalCreateIntent) => Promise<void>;
+  /** Internal opt-in only, not a create option. Both extra gates are required:
+   * persist qualified broker creation after ordinary lease admission, then
+   * verify/retain authenticated initial bootstrap before any manifest setup.
+   * No application caller selects this while qualification is incomplete. */
+  nativeBroker?: {
+    plan: ModalNativeBrokerCreatePlan;
+    beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
+    verifyCreated: (session: ModalSandboxSession, intent: ModalCreateIntent) => Promise<void>;
+  };
 };
 
 /** Release local transport after a failed create, but never stop a box whose
@@ -119,6 +133,19 @@ export async function createModalSessionWithLifecycle(
   lifecycle: ModalCreateLifecycle,
   installPolicy: (session: ModalSandboxSession) => ModalSandboxSession,
 ): Promise<ModalSandboxSession> {
+  const nativeBroker = lifecycle.nativeBroker
+    ? {
+        plan: parseModalNativeBrokerCreatePlan(lifecycle.nativeBroker.plan),
+        beforeDispatch: lifecycle.nativeBroker.beforeDispatch,
+        verifyCreated: lifecycle.nativeBroker.verifyCreated,
+      }
+    : undefined;
+  if (
+    nativeBroker &&
+    (typeof nativeBroker.beforeDispatch !== "function" ||
+      typeof nativeBroker.verifyCreated !== "function")
+  )
+    throw new Error("Modal native broker creation requires durable admission and bootstrap gates");
   const create = normalizeSandboxClientCreateArgs(args);
   if (create.snapshot !== undefined) unsupported("snapshot");
   const overrides = create.options as Partial<ModalSandboxClientOptions> | undefined;
@@ -153,6 +180,7 @@ export async function createModalSessionWithLifecycle(
   }
   const manifest = create.manifest;
   validateManifest(manifest);
+  if (nativeBroker && manifest.mountTargets().length) unsupported("native broker initial mounts");
   // Validate mount configuration before any provider resource is requested.
   for (const { entry } of manifest.mountTargets()) {
     buildModalCloudBucketMountConfig(
@@ -181,9 +209,15 @@ export async function createModalSessionWithLifecycle(
         createModalProviderCreateBoundary({
           operationId: crypto.randomUUID(),
           imagePreparation: () => imagePreparation,
+          ...(nativeBroker ? { nativeBroker: nativeBroker.plan } : {}),
           beforeDispatch: async (intent) => {
             if (timedOut) throw new Error("Modal create expired before provider dispatch");
             await lifecycle.beforeDispatch(intent, { modal });
+            if (nativeBroker) {
+              if (timedOut) throw new Error("Modal broker create expired before durable admission");
+              await nativeBroker.beforeDispatch(intent, { modal });
+            }
+            if (timedOut) throw new Error("Modal create expired during durable admission");
           },
           onReceipt: async (receipt) => {
             const constructorArgs = {
@@ -213,6 +247,11 @@ export async function createModalSessionWithLifecycle(
               modal.close();
             };
             await lifecycle.onCreated(session, receipt);
+            if (nativeBroker) {
+              if (timedOut) throw new Error("Modal broker receipt arrived after create timeout");
+              await nativeBroker.verifyCreated(session, receipt);
+              if (timedOut) throw new Error("Modal broker bootstrap exceeded create containment");
+            }
           },
         }),
       ],
@@ -267,6 +306,12 @@ export async function createModalSessionWithLifecycle(
     const prepared = await prepareCanonicalModalCreateImage(modal, app, selector);
     const image = prepared.image;
     imagePreparation = prepared.preparation;
+    if (
+      nativeBroker &&
+      (prepared.preparation.kind === "unqualified-image" ||
+        prepared.preparation.imageId !== nativeBroker.plan.imageId)
+    )
+      throw new Error("Modal native broker creation selected an unqualified physical image");
     cloudBucketMounts = await resolveMounts(manifest);
     state = {
       manifest,
@@ -291,15 +336,19 @@ export async function createModalSessionWithLifecycle(
       endpoint: options.endpoint,
       imageBuilderVersion: options.imageBuilderVersion,
       nativeCloudBucketSecretName: options.nativeCloudBucketSecretName,
-      useSleepCmd: options.useSleepCmd ?? true,
+      useSleepCmd: nativeBroker ? false : (options.useSleepCmd ?? true),
     };
     const physicalCreate = modal.sandboxes.create(
       app,
       image,
       defined({
-        workdir: manifest.root,
+        workdir: nativeBroker ? "/" : manifest.root,
         env: environment,
-        command: state.useSleepCmd ? ["sleep", "infinity"] : undefined,
+        command: nativeBroker
+          ? modalNativeBrokerInitialCommand(nativeBroker.plan)
+          : state.useSleepCmd
+            ? ["sleep", "infinity"]
+            : undefined,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
         cpu: options.cpu,

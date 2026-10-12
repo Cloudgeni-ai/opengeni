@@ -110,6 +110,10 @@ Then open the smallest source files that answer the question:
   stdin delivery, not provider acknowledgement or broker acceptance.
   The retained route carries that admission in private runtime context, not
   command arguments, and requires atomic output and native cancellation.
+  `modal-native-broker-create.ts` binds the internal fixed initial-process
+  recipe to the physical create wire request. Its lifecycle requires separate
+  durable admission and post-receipt bootstrap gates before manifest setup;
+  application selection and qualification remain separate, incomplete gates.
   Journal capture/dispatch and a passing native fixture do not imply canonical
   application admission or old-group enrollment. Follow the remaining gates in
   `docs/design/native-command-broker.md` before enabling that path.

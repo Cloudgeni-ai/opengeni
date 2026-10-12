@@ -76,6 +76,10 @@ delivery before another byte range is reserved, independently of provider ACK.
 Already-retained broker routes carry server-created stdin admission in private
 runtime context, require atomic capture and reject legacy PID/marker controls.
 This bridge does not yet select a protocol or admit application commands.
+The internal Modal creation opt-in binds a fixed image-owned initial broker to
+the actual physical request and requires durable admission and post-receipt
+bootstrap gates before manifest setup (`modal-native-broker-create.ts`). This
+request binding is not qualification; application selection remains disabled.
 The native supervisor's distinct `broker` mode multiplexes initial-process
 input/output and launches sealed per-command supervisors through its private
 `launch-channel` primitive, not a guest-path authentication fallback. Its native

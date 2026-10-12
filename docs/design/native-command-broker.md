@@ -73,6 +73,35 @@ bootstrap or granted capability was involved. The successful observation covers
 only this fresh-image bootstrap primitive; it does not qualify arbitrary command
 admission, cancellation, durable input/output replay, or old-snapshot handling.
 
+## Image-bound creation envelope
+
+`modal-native-broker-create.ts` supplies an internal, immutable recipe for fresh
+physical creation: broker UUID, independently selected source/artifact pin and
+exact provider image ID. The fixed initial command is the image's static broker,
+with workdir `/`; it accepts no caller argv, shell or PATH launcher. Initial
+mounts, PTY and readiness execs are refused by this image-only recipe rather than
+allowed to shadow or precede the selected executable. Ordinary Modal creation
+and existing warm instances remain unchanged.
+
+The existing `modal-create-session.ts` lifecycle has an internal broker opt-in,
+not a public/model create option. It requires a separate durable broker admission
+callback after ordinary lease admission, and a bootstrap verification/retention
+callback after recording the physical receipt but before runtime manifest setup.
+The physical middleware checks the actual SDK image/entrypoint/workdir envelope,
+binds it to the request digest, and exposes the frozen plan only on the original
+intent and receipt objects. Copies have no issuance. It refuses changed request
+bytes after an awaited admission. Late receipts are still recorded; timeouts,
+rejected admission and failed bootstrap never proceed to manifest setup.
+
+This is request binding and lifecycle ordering, not provider qualification.
+Neither the plan nor its in-memory proof grants command authority or verifies
+the initial stream. Application code does not yet select the opt-in. The frozen
+cohort/qualified image decision, durable plan/receipt binding, authenticated task
+and initial stdout/stderr verification, journal registration/recovery and session
+adapter must be composed before activation. Fake-provider lifecycle tests do not
+replace that physical proof, and this recipe cannot enroll an old warm sandbox
+or authorize a snapshot derivation.
+
 ## Bounded framing
 
 The native `launch-channel` primitive supplies the broker's per-command control

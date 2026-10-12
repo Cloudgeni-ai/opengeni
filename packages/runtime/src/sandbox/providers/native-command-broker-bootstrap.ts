@@ -4,7 +4,7 @@ import { encodeNativeBrokerFrame, type NativeBrokerFrame } from "./native-comman
 import type { DurableNativeBrokerTransport } from "./native-command-broker-transport";
 
 const target = z.enum(["linux-amd64", "linux-arm64"]);
-const pinSchema = z
+export const NativeBrokerArtifactPinSchema = z
   .object({
     artifactSha256: z.string().regex(/^[a-f0-9]{64}$/),
     byteSize: z
@@ -40,7 +40,7 @@ const helloSchema = z
       .strict(),
   })
   .strict();
-export type NativeBrokerArtifactPin = z.infer<typeof pinSchema>;
+export type NativeBrokerArtifactPin = z.infer<typeof NativeBrokerArtifactPinSchema>;
 
 function invalid(): never {
   throw new Error("Native broker bootstrap transcript is incomplete or mismatched");
@@ -56,7 +56,7 @@ export function verifyNativeBrokerBootstrap(
   expected: NativeBrokerArtifactPin,
   frames: readonly NativeBrokerFrame[],
 ) {
-  const parsed = pinSchema.safeParse(expected);
+  const parsed = NativeBrokerArtifactPinSchema.safeParse(expected);
   if (!parsed.success || frames.length < 2 || frames.length > 33) invalid();
   const pin = parsed.data,
     hash = createHash("sha256"),
@@ -125,7 +125,7 @@ export async function readNativeBrokerBootstrap(
   journal: DurableNativeBrokerTransport,
   expected: NativeBrokerArtifactPin,
 ) {
-  const parsed = pinSchema.safeParse(expected);
+  const parsed = NativeBrokerArtifactPinSchema.safeParse(expected);
   if (!parsed.success) invalid();
   const pin = parsed.data;
   const state = await journal.read();
