@@ -20,6 +20,7 @@ export {
 export { NativeBrokerRetainedCommand } from "./providers/native-command-broker-retained-command";
 export { startNativeBrokerCommand } from "./providers/native-command-broker-start";
 export { NativeBrokerCommandSession } from "./providers/native-command-broker-session";
+export { installModalNativeBrokerSession } from "./providers/modal-native-broker-session";
 export {
   NativeBrokerCoordinator,
   NativeBrokerReconciliationRequiredError,

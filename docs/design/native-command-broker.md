@@ -8,8 +8,8 @@ initial-process command multiplexer, journal-backed host transport driver and
 canonical retained-command descriptor/output fences, a retained-command
 control bridge, shared host coordinator, pre-reserved idle-launch primitive and
 dedicated broker command-session surface.
-The native `broker` mode and host driver can launch fixture commands, but no
-application command-admission route selects this protocol.
+The native `broker` mode and host driver can launch fixture commands, but the
+application lifecycle does not yet construct an admitted broker session.
 These increments do not change a production protocol tuple or qualify an
 existing sandbox. The existing [command supervision](../command-supervision.md)
 and [native keeper](../../agent/native/command-supervisor/README.md) contracts
@@ -132,6 +132,25 @@ verification, qualified verified-prefix composition and session adapter must be
 connected to application creation before activation. Fake-provider lifecycle tests do not
 replace that physical proof, and this recipe cannot enroll an old warm sandbox
 or authorize a snapshot derivation.
+
+`modal-native-broker-session.ts` bridges an already-qualified command session
+to the real SDK's manifest/editor/filesystem surface. The SDK's internal exec
+sites re-enter canonical synchronous routing on the enclosing operation's exact
+backend. Each helper has its own pipe-command reservation, output custody and
+settlement; an outer PTY request does not change its shape. A closed, missing or
+foreign routing scope refuses before dispatch. There is no TaskExec fallback,
+and unsupported foreground options are rejected, not discarded. Native file
+writes require the enclosing canonical mutation admission. The existing list
+compatibility shim receives the same scoped runner instead of its cached SDK
+command methods. Keep the physical sandbox object's identity so existing
+snapshot-retention wrappers are not applied twice.
+
+Adapter close releases host ownership only, never initial stdin or the physical
+sandbox. SDK restore and readiness execs remain refused: fresh/warm application
+establishment must explicitly connect qualified bootstrap, lease publication,
+deferred initial setup and the shared coordinator before this adapter can be
+activated. Real-SDK/local-native tests prove this bridge, not that missing
+application lifecycle or remote provider qualification.
 
 ## Bounded framing
 

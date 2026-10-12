@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { ModalBrokerProviderCommand } from "@opengeni/contracts";
+import { modalBrokerSdkFixture } from "../../runtime/test/fixtures/modal-broker-sdk-session";
 import {
   bootstrapWorkspace,
   createDb,
@@ -49,6 +50,15 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { encodeNativeBrokerCommandDefinition } from "../../runtime/src/sandbox/providers/native-command-broker-definition";
 import { nativeBrokerStdinChunkRequestId } from "../../runtime/src/sandbox/providers/native-command-broker-stdin";
+import {
+  installModalNativeBrokerSession,
+  withModalNativeBrokerSetupCommands,
+} from "../../runtime/src/sandbox/providers/modal-native-broker-session";
+import {
+  observeSynchronousCommand,
+  synchronousCommandPage,
+} from "../../runtime/src/sandbox/synchronous-command";
+import type { ChannelAExecArgs } from "../../runtime/src/sandbox/channel-a";
 import {
   createDurableNativeBrokerTransport,
   registerCapturedNativeBrokerBootstrap,
@@ -3009,7 +3019,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
             frame.commandId === partialId && ["stdout", "stderr", "exit"].includes(frame.kind),
         ),
       ).toBe(false);
-      const startRetained = async (cmd: string, handle: number) => {
+      const startRetained = async (cmd: string | ChannelAExecArgs, handle: number) => {
         let commandCustody!: Awaited<ReturnType<typeof retainNativeFixture>>;
         const started = await withProviderCommandHandle(handle, () =>
           withCommandSupervisionReady(
@@ -3030,7 +3040,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
                     );
                   },
                 },
-                () => brokerSession!.execCommand({ cmd }),
+                () => brokerSession!.execCommand(typeof cmd === "string" ? { cmd } : cmd),
               ),
             "native-subreaper-broker-channel-v1",
           ),
@@ -3163,6 +3173,54 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       );
       expect(presentations).toBeGreaterThan(1);
       expect((await bulk.custody.settle()).settled).toBe(true);
+
+      // The actual installed SDK's hidden path/archive execs use the same
+      // unchanged native ELF and canonical retained output. This scoped test
+      // executor seeds fixture admissions; it is not application activation.
+      const sdk = modalBrokerSdkFixture({
+        sandboxId: f.binding.sandboxId,
+        root: directory,
+        environment: { PATH: "/usr/bin:/bin" },
+        readFile: async (path) => await readFile(path),
+      });
+      installModalNativeBrokerSession(sdk, brokerSession, async () => {});
+      let setupHandle = 20;
+      await withModalNativeBrokerSetupCommands(
+        sdk,
+        async (args) => {
+          const handle = setupHandle++;
+          const started = await startRetained(args, handle);
+          await brokerSession!.releaseSupervisedCommand(handle);
+          const result = await observeSynchronousCommand(
+            { stdout: "", stderr: "", exitCode: null, sessionId: handle, wallTimeSeconds: 0 },
+            async () => {
+              const response = await brokerSession!.writeStdin({
+                sessionId: handle,
+                yieldTimeMs: 250,
+              });
+              const setupPage = synchronousCommandPage(brokerSession!, response, handle);
+              expect(await brokerSession!.captureCommandOutput(response)).toBe(true);
+              return setupPage;
+            },
+          );
+          expect((await started.custody.settle(result.exitCode)).settled).toBe(true);
+          return result;
+        },
+        async () => {
+          expect(await sdk.pathExists("once")).toBe(true);
+          const internal = sdk as unknown as {
+            archiveIo(): {
+              runCommand(
+                command: string,
+              ): Promise<{ status: number; stdout: string; stderr: string }>;
+            };
+          };
+          expect(
+            await internal.archiveIo().runCommand("printf 'SDK €'; printf 'ERR €' >&2"),
+          ).toEqual({ status: 0, stdout: "SDK €", stderr: "ERR €" });
+        },
+      );
+      expect(setupHandle).toBe(23);
 
       // A third real command exercises controller-owned release, durable
       // cancellation, repeated status and receipt ACK through a fresh object.

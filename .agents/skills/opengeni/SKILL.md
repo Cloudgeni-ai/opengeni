@@ -119,6 +119,12 @@ Then open the smallest source files that answer the question:
   frozen tuple's pipe/PTY protocol. Retained exact-protocol inspection remains
   separate; neither adapter capability nor launch failure permits a fallback.
   The selector does not install broker creation or its setup-command ownership.
+  `modal-native-broker-session.ts` bridges SDK-internal foreground execs and
+  cached list helpers to exact-backend synchronous routing, with distinct
+  canonical pipe admissions and retained output. Unscoped calls and unsupported
+  SDK restore/readiness refuse; file writes retain enclosing mutation authority.
+  Host-only close preserves physical ownership and snapshot-wrapper identity.
+  Fresh/warm application installation remains separate and incomplete.
   `native-command-broker-coordinator.ts` shares one demand-driven output reader,
   serializes input through native acceptance and never silently replays uncertain
   dispatch. Explicit global output ACK retires only the committed transport

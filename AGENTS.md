@@ -599,6 +599,13 @@ qualification before admission. Keep exact-protocol retained inspection separate
 never infer broker selection from adapter presence or retry a rejected broker
 launch through the router. Worker and API-direct starts use the same selector.
 
+The broker SDK bridge routes internal helper execs through the enclosing
+operation's exact backend with separate canonical pipe admissions. Do not let
+SDK path, editor, archive or cached list helpers regain TaskExec. File writes
+need the enclosing mutation admission. Preserve the sandbox object's identity
+for snapshot wrappers; closing the bridge never terminates the physical box.
+Fresh/warm application installation and initial setup remain incomplete.
+
 Broker stdin framing preserves one canonical child admission for the full
 write. Retain the complete payload and byte range before chunk dispatch; frame
 UUIDs are transport identities, not new authority. Require exact native

@@ -49,6 +49,8 @@ import {
   completePendingCommandPreparation,
   markPendingCommandNotDispatched,
   withSupervisedLaunchReservation,
+  withTurnCommandSupervision,
+  withRequiredCommandSupervision,
   ProviderCommandStartRejectedError,
   ProviderCommandStartOutcomeUnknownError,
   ProviderCommandInputOutcomeUnknownError,
@@ -59,6 +61,7 @@ import {
   type ProviderCommandInputAdmission,
   type AdmittedCommandSupervisionProtocol,
 } from "../provider-command-session";
+import { withModalNativeBrokerSetupCommands } from "../providers/modal-native-broker-session";
 import type { SandboxProviderCommand, CommandSupervisionProtocol } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import {
@@ -1975,7 +1978,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // mutation generation, fail before the provider sees the operation.
       const prepare = async () => {
         const turnProtocol =
-          backend.kind === "modal" ? turnCommandSupervisionProtocol() : undefined;
+          commandStart && backend.kind === "modal" ? turnCommandSupervisionProtocol() : undefined;
         const requestedProtocol =
           turnProtocol ?? (commandStart ? supervisionShape?.protocol : undefined);
         const supervisionEligible = supervisionShape?.supported === true;
@@ -1997,7 +2000,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         )
           throw new Error("Qualified Modal command protocol changed its requested pipe/PTY shape");
         const requiredProtocol =
-          backend.kind === "modal"
+          commandStart && backend.kind === "modal"
             ? qualification.status === "enrolled"
               ? qualification.protocol
               : requiredCommandSupervisionProtocol()
@@ -2195,7 +2198,21 @@ export class RoutingSandboxSession implements RoutableBackendSession {
                           record.durable = true;
                         },
                       },
-                      () => fn(backend.session, backend),
+                      () =>
+                        withModalNativeBrokerSetupCommands(
+                          backend.session,
+                          (args) =>
+                            withRequiredCommandSupervision(undefined, () =>
+                              withTurnCommandSupervision("native-subreaper-v1", () =>
+                                this.execSynchronousOnBackend(
+                                  args,
+                                  executeSynchronousCommand,
+                                  backend,
+                                ),
+                              ),
+                            ),
+                          () => fn(backend.session, backend),
+                        ),
                     ),
                   supervisionProtocol,
                 ),
