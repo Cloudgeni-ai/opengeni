@@ -266,6 +266,13 @@ for it until the matching requirement below is implemented:
   converts to portable compaction at its next compaction while Codex has
   capacity; until then it fails over only within Codex and otherwise waits
   with an explained reason. Verification: pending (failover).
+- Dormant conversion preparation for **SUB-FAIL-09** (design PR #4167, E1;
+  not activation or verification of the restriction above): policy/reference
+  cases in `packages/subscriptions/test/failover-policy.test.ts`, reconstruction
+  in `packages/runtime/test/compaction-conversion.test.ts`, bounded complete-history
+  coverage/reduction in `packages/runtime/test/compaction-conversion-planner.test.ts`,
+  and real-PostgreSQL snapshot/checkpoint/request/install/refusal fencing in
+  `packages/db/test/context-compaction-conversion-postgres.test.ts`.
 - **SUB-FAIL-10** Voice, transcription and media generation do not fail over
   across providers in the first release. Verification: pending (consumers).
 - **SUB-FAIL-11** Failover within one turn is bounded and recorded per account,

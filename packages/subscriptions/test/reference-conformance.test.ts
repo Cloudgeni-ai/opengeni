@@ -33,6 +33,39 @@ const SEEDS = Array.from({ length: 4000 }, (_, index) => index + 1);
 /** Each world is also judged later, as cooldowns and quota windows reset. */
 const OFFSETS = [0, 30_000, 120_000];
 
+test("SUB-FAIL-09 convertible locks independently conform across generated worlds and refusal states", () => {
+  let conversions = 0;
+  for (let seed = 1; seed <= 200; seed++) {
+    for (const refused of [undefined, false, true]) {
+      for (const enabled of [false, true]) {
+        const { world, sessionId } = generateTieredReferenceWorld(seed);
+        const session = world.sessions.find((value) => value.id === sessionId)!;
+        session.compactionProviderLock = world.models.find(
+          (model) => model.id === session.preferredModelId,
+        )!.provider;
+        if (refused !== undefined) session.compactionConversionRefused = refused;
+        world.settings.organization.crossProviderFailover = enabled;
+        world.settings.workspaceOverrides = {};
+        const actual = production(world, sessionId, REFERENCE_NOW);
+        expect(actual).toEqual(decide(world, sessionId, REFERENCE_NOW));
+        expect(checkDecision(world, sessionId, REFERENCE_NOW, actual)).toEqual([]);
+        if (actual.kind === "run" && actual.convertsCompaction) {
+          conversions++;
+          expect(enabled && refused === false).toBe(true);
+          const wrong = { ...actual };
+          delete wrong.convertsCompaction;
+          expect(
+            checkDecision(world, sessionId, REFERENCE_NOW, wrong).some(
+              (v) => v.requirement === "SUB-FAIL-09",
+            ),
+          ).toBe(true);
+        }
+      }
+    }
+  }
+  expect(conversions).toBeGreaterThan(0);
+});
+
 function production(world: ReferenceWorld, sessionId: string, now: number): ReferenceDecision {
   const input = toPlacementInput(world, sessionId, now);
   return toReferenceDecision(decidePlacement(input), input);

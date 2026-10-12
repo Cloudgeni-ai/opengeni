@@ -25,6 +25,91 @@ import { decide as decideReference } from "../src/reference-model";
 
 const NOW = 20_000_000;
 
+describe("dormant compaction conversion (SUB-FAIL-09)", () => {
+  test("requires enabled failover and explicit no-refusal evidence, including reference conformance", () => {
+    for (const crossProviderFailover of [true, false]) {
+      for (const refusal of [undefined, true, false]) {
+        const placement = input({
+          settings: { crossProviderFailover },
+          session: {
+            compactionProviderLock: "alpha",
+            ...(refusal !== undefined ? { compactionConversionRefused: refusal } : {}),
+          },
+        });
+        const decision = decideChecked(placement);
+        if (crossProviderFailover && refusal === false) {
+          expect(decision).toMatchObject({
+            kind: "run",
+            provider: "beta",
+            convertsCompaction: true,
+          });
+        } else {
+          expect(decision.kind).toBe("wait");
+        }
+      }
+    }
+  });
+
+  test("pins, only-this-model, workspace ceilings and private personal authority remain binding", () => {
+    const placement = input({
+      session: {
+        compactionProviderLock: "alpha",
+        compactionConversionRefused: false,
+        onlyThisModel: true,
+      },
+    });
+    expect(decideChecked(placement).kind).toBe("wait");
+    placement.session.onlyThisModel = false;
+    placement.session.binding = {
+      connectionId: "alpha-1",
+      provider: "alpha",
+      modelId: "alpha/top",
+      choice: "explicit",
+      lastModelCallAt: NOW,
+    };
+    expect(decideChecked(placement)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+    });
+    placement.session.binding = null;
+    placement.workspace.allowedModelIds = ["alpha/top"];
+    expect(decideChecked(placement).kind).toBe("wait");
+    placement.workspace.allowedModelIds = null;
+    placement.connections = [
+      connection("private-other", "beta", {
+        ownership: { kind: "personal", ownerMembershipId: "other" },
+      }),
+    ];
+    placement.session.visibility = "private";
+    expect(decideChecked(placement).kind).toBe("wait");
+  });
+
+  test("a same-provider run has no conversion marker even when conversion is permitted", () => {
+    const placement = input({
+      session: { compactionProviderLock: "alpha", compactionConversionRefused: false },
+      connections: [connection("home", "alpha")],
+    });
+    const decision = decideChecked(placement);
+    expect(decision).toMatchObject({ kind: "run", provider: "alpha" });
+    expect(decision).not.toHaveProperty("convertsCompaction");
+  });
+
+  test("disabled failover keeps the lock even if the preferred model already names the target", () => {
+    const placement = input({
+      settings: { crossProviderFailover: false },
+      session: {
+        preferredModelId: "beta/top",
+        compactionProviderLock: "alpha",
+        compactionConversionRefused: false,
+      },
+    });
+    expect(decideChecked(placement)).toMatchObject({
+      kind: "wait",
+      reason: "compaction_provider_locked",
+    });
+  });
+});
+
 /**
  * Declaration order is deliberately not provider-id order (gamma before
  * beta), and each provider mixes tiers, so the derived order's provider

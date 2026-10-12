@@ -123,7 +123,12 @@ export function modelPermitted(
   if (!modelAllowedInWorkspace(input.workspace, modelId)) return false;
   if (!providerEnabled(input, model.provider)) return false;
   const lock = input.session.compactionProviderLock;
-  return !honourCompactionLock || lock === null || model.provider === lock;
+  return (
+    !honourCompactionLock ||
+    lock === null ||
+    model.provider === lock ||
+    (input.settings.crossProviderFailover && input.session.compactionConversionRefused === false)
+  );
 }
 
 /**
@@ -281,6 +286,10 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     ),
     switch: kind,
     personal: connection.ownership.kind === "personal",
+    ...(session.compactionProviderLock !== null &&
+    connection.provider !== session.compactionProviderLock
+      ? { convertsCompaction: true as const }
+      : {}),
   });
   const servableAutomatically = (modelId: ModelId) =>
     connections.some(

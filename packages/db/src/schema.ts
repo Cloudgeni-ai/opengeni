@@ -1,5 +1,5 @@
 import { createSubscriptionPoolTables } from "./subscription-pool-schema";
-import { subscriptionConnections } from "./subscription-core-schema";
+import { subscriptionConnections, subscriptionOperationLeases } from "./subscription-core-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
 import {
   commentaryInclusiveMeaningfulSessionEventSql,
@@ -5005,6 +5005,10 @@ export const sessions = pgTable(
     // or portable (plaintext compaction + free provider switching). Existing
     // rows backfill to portable. CHECK lives in the migration.
     codexCompactionMode: text("codex_compaction_mode").notNull().default("portable"),
+    // Dormant remote-to-portable conversion refuses permanently when provenance is incomplete.
+    compactionConversionRefusedAt: timestamp("compaction_conversion_refused_at", {
+      withTimezone: true,
+    }),
     // Frozen at create (migration 0520): whether the optional Jev-backed
     // code_search tool is offered. NULL, as on every older row, means off.
     codeSearchEnabled: boolean("code_search_enabled"),
@@ -9606,6 +9610,59 @@ export const sessionHumanInputRequests = pgTable(
       "session_human_input_requests_actor_bytes_check",
       sql`${table.respondedBy} is null or octet_length(${table.respondedBy}) <= 1024`,
     ),
+  }),
+);
+
+/** Dormant conversion receipts. Append-only, FORCE-RLS; never model history. */
+export const sessionCompactionConversionChunks = pgTable(
+  "session_compaction_conversion_chunks",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    generation: integer("generation").notNull(),
+    snapshotId: text("snapshot_id").notNull(),
+    sourceDigest: text("source_digest").notNull(),
+    chunkKey: text("chunk_key").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    targetProvider: text("target_provider").notNull(),
+    targetModel: text("target_model").notNull(),
+    targetConnectionId: uuid("target_connection_id").notNull(),
+    checkpoint: jsonb("checkpoint")
+      .$type<import("@opengeni/codex").ConversionCheckpoint>()
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.workspaceId, table.sessionId, table.snapshotId, table.chunkKey],
+    }),
+    operation: unique().on(table.accountId, table.operationId),
+    workspace: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    session: foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    turn: foreignKey({
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    attempt: foreignKey({
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("cascade"),
+    receipt: foreignKey({
+      columns: [table.accountId, table.operationId],
+      foreignColumns: [
+        subscriptionOperationLeases.accountId,
+        subscriptionOperationLeases.operationId,
+      ],
+    }).onDelete("restrict"),
   }),
 );
 

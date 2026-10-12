@@ -18,3 +18,5 @@ export * from "./images";
 export * from "./realtime";
 export * from "./realtime-v3";
 export * from "./reasoning-configuration";
+export * from "./compaction-conversion-source";
+export * from "./compaction-conversion-units";

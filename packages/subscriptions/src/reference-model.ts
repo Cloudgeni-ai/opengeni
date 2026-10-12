@@ -117,6 +117,8 @@ export type Session = {
   onlyThisModel: boolean;
   /** A compaction completed or the model changed since the last placement (SUB-STICK-05). */
   reselectionPoint?: boolean;
+  compactionProviderLock?: ProviderId | null;
+  compactionConversionRefused?: boolean;
 };
 
 export type World = {
@@ -155,6 +157,7 @@ export type Decision =
       modelId: ModelId;
       reasoningLevel: string;
       switch: SwitchKind;
+      convertsCompaction?: true;
     }
   | { kind: "wait"; reason: WaitReason; earliestResetAt: number | null };
 
@@ -228,10 +231,15 @@ function spendsCredits(connection: Connection, now: number): boolean {
   );
 }
 
-function modelAllowed(world: World, session: Session, modelId: ModelId): boolean {
+export function modelAllowed(world: World, session: Session, modelId: ModelId): boolean {
   const workspace = byId(world.workspaces, session.workspaceId);
   return (
-    !!workspace && (workspace.allowedModels === null || workspace.allowedModels.includes(modelId))
+    !!workspace &&
+    (workspace.allowedModels === null || workspace.allowedModels.includes(modelId)) &&
+    (session.compactionProviderLock == null ||
+      byId(world.models, modelId)?.provider === session.compactionProviderLock ||
+      (effectiveSettings(world.settings, session.workspaceId).values.crossProviderFailover &&
+        session.compactionConversionRefused === false))
   );
 }
 
@@ -620,6 +628,10 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     modelId,
     reasoningLevel: level(modelId),
     switch: kind,
+    ...(session.compactionProviderLock != null &&
+    byId(world.models, modelId)?.provider !== session.compactionProviderLock
+      ? { convertsCompaction: true as const }
+      : {}),
   });
 
   // A restricted preferred model falls through to its allowed failover
@@ -809,6 +821,12 @@ export function checkDecision(
       byId(world.models, session.preferredModelId)?.provider;
     if (crossProvider && (!settings.crossProviderFailover || session.onlyThisModel)) {
       fail("SUB-FAIL-03", "moved across providers although that is not allowed");
+    }
+    const conversionRequired =
+      session.compactionProviderLock != null &&
+      byId(world.models, decision.modelId)?.provider !== session.compactionProviderLock;
+    if (Boolean(decision.convertsCompaction) !== conversionRequired) {
+      fail("SUB-FAIL-09", "conversion preparation marker does not match the compaction lock");
     }
     const expectedLevel = nearestReasoningLevel(
       byId(world.models, decision.modelId)!,

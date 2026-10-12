@@ -6,8 +6,9 @@
  * raw inputs, never the production eligibility or placement functions, so a
  * policy bug cannot hide from the checker:
  *
- * - A provider switched off, a compaction provider lock and the workspace
- *   model ceiling become the workspace's allowed model list.
+ * - A provider switched off and the workspace model ceiling become the
+ *   workspace's allowed model list. Compaction locks and refusal evidence
+ *   remain explicit inputs to the independent model.
  * - Shared connections a workspace does not manage while organization
  *   accounts are off, and personal connections without frozen personal
  *   authority for their provider, are left out (nothing may use them).
@@ -137,9 +138,7 @@ export function toReferenceWorld(input: PlacementInput): {
     .filter(
       (model) =>
         (workspace.allowedModelIds === null || workspace.allowedModelIds.includes(model.id)) &&
-        switches(model.provider)?.enabled !== false &&
-        (session.compactionProviderLock === null ||
-          model.provider === session.compactionProviderLock),
+        switches(model.provider)?.enabled !== false,
     )
     .map((model) => model.id);
   const usable = input.connections.filter((connection) => {
@@ -219,6 +218,10 @@ export function toReferenceWorld(input: PlacementInput): {
           pinnedConnectionId: binding?.choice === "explicit" ? binding.connectionId : null,
           onlyThisModel: session.onlyThisModel,
           reselectionPoint: session.reselectionPoints.length > 0,
+          compactionProviderLock: session.compactionProviderLock,
+          ...(session.compactionConversionRefused !== undefined
+            ? { compactionConversionRefused: session.compactionConversionRefused }
+            : {}),
         },
       ],
       cacheTtlMs: Object.fromEntries(
@@ -252,6 +255,7 @@ export function toReferenceDecision(
       modelId: decision.modelId,
       reasoningLevel: decision.reasoningLevel,
       switch: decision.switch,
+      ...(decision.convertsCompaction ? { convertsCompaction: true as const } : {}),
     };
   }
   if (decision.reason !== "compaction_provider_locked") {
@@ -259,10 +263,9 @@ export function toReferenceDecision(
   }
   const { world, sessionId } = toReferenceWorld(input);
   const session = world.sessions.find((candidate) => candidate.id === sessionId)!;
-  const allowed = world.workspaces[0]!.allowedModels;
   const anyAllowed = reference
     .candidateModels(world, session)
-    .some((modelId) => allowed === null || allowed.includes(modelId));
+    .some((modelId) => reference.modelAllowed(world, session, modelId));
   return {
     kind: "wait",
     reason: anyAllowed ? "no_eligible_capacity" : "model_not_allowed",

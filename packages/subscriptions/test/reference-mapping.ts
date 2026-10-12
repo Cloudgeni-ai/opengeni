@@ -258,7 +258,10 @@ export function toPlacementInput(
               ownerMembershipId,
             }))
           : [],
-      compactionProviderLock: null,
+      compactionProviderLock: session.compactionProviderLock ?? null,
+      ...(session.compactionConversionRefused !== undefined
+        ? { compactionConversionRefused: session.compactionConversionRefused }
+        : {}),
     },
     settings: effectiveSettings(mapSettingsPolicy(world), workspace.id).values,
     people: world.people.map((person) => ({

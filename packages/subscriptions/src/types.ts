@@ -251,9 +251,12 @@ export type PlacementSession = {
   personalAuthority: readonly PersonalAuthority[];
   /**
    * Set while the session's compaction mode ties it to one provider (remote
-   * history compaction, SUB-FAIL-09): models of other providers are excluded.
+   * history compaction, SUB-FAIL-09): other providers are excluded unless
+   * effective failover and explicit no-refusal evidence permit conversion.
    */
   compactionProviderLock: ProviderId | null;
+  /** Explicit durable refusal evidence. Only false permits dormant conversion (SUB-FAIL-09). */
+  compactionConversionRefused?: boolean;
 };
 
 /** How the provider prompt cache expires (SUB-STICK-04, design 6.1). */
@@ -337,5 +340,7 @@ export type PlacementDecision =
       reasoningLevel: string;
       switch: PlacementSwitch;
       personal: boolean;
+      /** Preparation required before inference; absent for ordinary placements. */
+      convertsCompaction?: true;
     }
   | { kind: "wait"; reason: WaitReason; earliestResetAt: number | null };

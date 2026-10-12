@@ -1,5 +1,46 @@
 # Conversation context compaction
 
+Dormant conversion preparation (design PR #4167, E1) lives in
+`packages/codex/src/compaction-conversion-{source,units}.ts` (source-format
+attribution, coverage identity and complete text work units),
+`packages/runtime/src/compaction-conversion.ts` (pure rebuild and bounded
+chunk/reduction planner), and `packages/db/src/context-compaction-conversion.ts`
+(scoped snapshot, settled-request checkpoints and atomic,
+attempt/history-fenced install or refusal). There are no worker callers
+or summarizer calls yet; remote sessions retain the shipped provider lock.
+Legacy attribution accepts only whole-number contiguous remote-v2 blocks with
+matching event/summary turn and exact transaction timestamp, unchanged retained
+copies, and at most one recognized trailing reasoning configuration. Transformed
+legacy copies, missing events, unattributed forks and ambiguous layouts refuse
+durably. Explicit block metadata is preferred. E2 and activation remain separate.
+
+The planner covers every supported retained row, preserving whole ordered work
+units and complete tool call/result pairs. Indivisible oversized units,
+structured media/unknown content, non-reducing summaries and exhausted budgets
+refuse; no unit is silently trimmed. Opaque fields are excluded only from request
+copies, with explicit omission positions. Full original history and events remain
+unchanged (only history `active` flags change upon installation).
+
+`session_compaction_conversion_chunks` is append-only, tenant/session-scoped and
+FORCE-RLS. Checkpoints bind exact attempt/generation, source/authority snapshot,
+target provider/model/connection, coverage, conversion budget and a settled core
+physical request. JSONB round trips preserve structural identities. Identical
+checkpoint retries return the original result; conflicts and unknown/unmatched
+requests refuse. A successful physical response without a checkpoint blocks
+further planning until that exact result is recovered; absence of a checkpoint
+never grants permission to replay a request. Installation requires a complete
+reduction root, all requests accounted for, and unchanged source under the
+history-write fence. Exact-attempt install replay returns its existing event.
+
+E1 conservatively does not reuse checkpoints across attempts or changed source,
+target, authority or budget. Once an attempt has a physical conversion receipt,
+changing its plan cannot reset its budget or hide that receipt; any unresolved
+conversion request in the session also blocks progress. E2 must bind these primitives to serving revisions,
+recheck eligible target authorization/pins/funding on every physical call, reserve
+the supplied request identity, disable tools and supply the target tokenizer with
+prompt/output overhead reserved. These pure/DB primitives neither authorize a
+target nor perform summarization, dispatch, request settlement or blind retries.
+
 Opengeni freezes a per-session compaction mode at create time
 (`sessions.codex_compaction_mode`):
 
