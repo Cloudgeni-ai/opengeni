@@ -103,6 +103,7 @@ export const SECTION_KEYS = [
   "form-dialog",
   "destructive-confirm",
   "secret-values",
+  "secret-ask-card",
   "cadence-picker",
   // People
   "access-list",
@@ -675,6 +676,14 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./secret-values"),
+  },
+  {
+    key: "secret-ask-card",
+    group: "Forms",
+    title: "Secret ask card",
+    purpose: "Ask for a secret in chat and save it to a vault; show references as chips.",
+    usedOn: "Chat questions, inbox, messages, tool rows and approvals",
+    load: () => import("./secret-ask-card"),
   },
   {
     key: "cadence-picker",
