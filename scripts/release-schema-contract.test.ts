@@ -2700,6 +2700,7 @@ describe("release schema contract", () => {
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
       "0736_notification_webhook_content.sql",
+      "0739_site_auth_protected_fill_removal.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
