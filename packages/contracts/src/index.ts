@@ -16,6 +16,7 @@ export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
+export * from "./model-account-choice";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
@@ -14418,6 +14419,11 @@ export const SessionEventType = z.enum([
   // the in-session "Running on:" indicator's live flip.
   "codex.account.switched",
   "codex.account.selection.changed",
+  // A person chose the account a session runs on (any provider's shared
+  // connection or their own personal one), or returned it to automatic
+  // placement. Payload: provider, connectionId (null for automatic), choice,
+  // appliedTo, turnId and the choosing subject; never credential material.
+  "model_account.selection.changed",
   // credential allocator per-turn selection audit. Payload is metadata only: credential row
   // id, bounded strategy/reason, and pool counts — never token material.
   "codex.credential.selected",
@@ -14714,6 +14720,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "agent.model.usage",
     "codex.account.switched",
     "codex.account.selection.changed",
+    "model_account.selection.changed",
     "codex.credential.selected",
     "codex.capacity.waiting",
     "codex.capacity.resumed",

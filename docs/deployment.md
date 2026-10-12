@@ -5081,6 +5081,36 @@ changes no row. Nothing acts on deploy: only a provider whose own cutover
 receipt exists reaches either routine, so both stay unused until the
 SuperGrok cutover.
 
+### A person's own subscription preferences (0729)
+
+Migration `0729_subscription_person_preferences_owner.sql` is **rolling**.
+Design record:
+[subscription core, M5 explicit choice](design/subscription-core-2026-10-07.md#56-m5-explicit-account-choice-and-personal-preferences).
+It changes no column, value or existing policy. It adds two
+`SECURITY DEFINER` routines that answer only for the caller's own active
+human membership in the caller's organization scope, and three owner
+policies (read, insert, update; no delete) on
+`subscription_person_preferences`, so a person can read and change their own
+personal-fallback opt-in through
+`/v1/organizations/{organizationId}/me/model-account-preferences`. Nobody
+else gains access to the row; placement keeps reading it under the accepted
+turn's capability as before.
+
+Because `organization_memberships` is FORCE row security and the migration
+owner has no `BYPASSRLS` in the documented posture, it also adds one
+SELECT-only policy there, `subscription_own_person_membership_read`. It
+applies only to the migration owner while the transaction-local marker
+`opengeni.organization_tenancy_lifecycle = 'subscription_own_person_membership'`
+is set, and only to the caller's own row (`opengeni.account_id` and
+`opengeni.subject_id`). The membership routine sets the marker for its single
+read and restores the caller's value right after; the runtime role still has
+no privilege on the table.
+
+**Rollback.** Older binaries never call the new routines or routes and run
+unchanged on 0729. An opt-in a person turned on stays in effect after a
+rollback (placement already read it); dropping the four policies and two
+routines removes only the person's own access.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

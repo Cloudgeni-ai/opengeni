@@ -436,6 +436,22 @@ import {
   wakeSubscriptionCoreCapacityWaiters,
   type SubscriptionCoreWakeScope,
 } from "./subscription-core/waiters";
+export {
+  chooseSubscriptionCoreSessionAccount,
+  readSubscriptionCoreSessionAccountChoice,
+  readSubscriptionPersonPreferences,
+  writeSubscriptionPersonPreferences,
+  SUBSCRIPTION_CORE_ACCOUNT_CHOICE_EVENT,
+  type SubscriptionCoreAccountChoiceRefusal,
+  type SubscriptionCoreChoosableConnection,
+  type SubscriptionCoreChoiceProviders,
+  type SubscriptionCoreProviderWake,
+  type SubscriptionCoreSessionAccountChoice,
+  type SubscriptionCoreSessionChoiceOutcome,
+  type SubscriptionCoreSessionChoiceResult,
+  type SubscriptionPersonPreferences,
+} from "./subscription-core/session-choice";
+import type { SubscriptionCoreProviderWake } from "./subscription-core/session-choice";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import type { SubscriptionCoreWake } from "./subscription-core/administration";
 export {
@@ -29268,6 +29284,21 @@ export async function deliverSubscriptionCoreProviderWake(
   wake: { accountId: string; reason: string; workspaceIds?: readonly string[] },
 ): Promise<void> {
   await deliverSubscriptionCoreWake(db, provider, wake);
+}
+
+/**
+ * Deliver the provider wakes of a committed session account choice or
+ * preference change (any registered provider), each through
+ * `deliverSubscriptionCoreWake`. A failed wake never fails the committed
+ * change: every core waiter also has its own bounded recheck.
+ */
+export async function deliverSubscriptionCoreProviderWakes(
+  db: Database,
+  wakes: readonly SubscriptionCoreProviderWake[],
+): Promise<void> {
+  for (const { provider, ...wake } of wakes) {
+    await deliverSubscriptionCoreWake(db, provider, wake);
+  }
 }
 
 export async function recordAuditEvent(

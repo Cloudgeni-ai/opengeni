@@ -5218,6 +5218,71 @@ Fail-closed choices (contract ambiguous; strictest option taken):
 - Writes that could miss a lock under an older snapshot are refused outside
   READ COMMITTED (item 6 above) rather than admitted as dormant overrides.
 
+### 5.6 M5: explicit account choice and personal preferences
+
+Scope: the explicit-choice half of SUB-SEL-02 and SUB-SEL-04, SUB-ELIG-05 and
+SUB-OWN-05 for every provider on the shared core, and a person's own
+personal-fallback opt-in (D-27). The model-picker screen ships in a separate
+UI change, previewed before merge.
+
+**What exists.** Connecting a personal account for any provider, including
+API-key connectors, goes through `connect_subscription_core_personal`, which
+already checks the effective `personalConnectionsAllowed`. The binding guard
+(`guard_subscription_connection_reference`, 0642) already admits a personal
+connection only for its owner, in their private session or Personal
+workspace, while personal connections are allowed. Placement already applies
+D-28 (the owner's personal account participates automatically in their
+Personal workspace, after shared accounts) and D-12 (with fallback on, the
+owner's personal account on the chosen model is tried before another model
+or provider on a shared account). This change does not alter either order.
+
+**What it adds.**
+
+1. `readSubscriptionCoreSessionAccountChoice`: the picker read. It lists the
+   workspace pool's shared accounts and the caller's own personal accounts
+   (never another person's), each with whether it can be chosen for this
+   session and why not (`inactive`, `personal_not_allowed`,
+   `personal_not_owner_work`, and `session_has_no_owner` for an ownerless
+   session, which may use only shared accounts through automatic
+   selection), the session's current binding (the account is
+   hidden when the caller may not see it), and the effective personal
+   settings plus the caller's opt-in. It is provider-neutral and iterates the
+   registered core providers, skipping a provider whose cutover is not
+   enabled for the organization or that the workspace switched off (neither
+   its shared nor its personal accounts are offered).
+2. `chooseSubscriptionCoreSessionAccount`: one neutral entry point that sets
+   an explicit choice or returns the session to automatic selection. It locks
+   the binding, compares and swaps its version (bounded retries against a
+   concurrent placement; the whole transaction is replayed a bounded number
+   of times when it loses a deadlock to a session's first placement, and
+   then reports `conflict`), and leaves the decision to the binding guard: a
+   refusal surfaces as `refused`, never as a silent fallback. The guard
+   records the choosing subject as the binding's initiating
+   subject, as the Codex pin does, so an API key or service may choose a
+   shared account for a session it may see and never matches a personal
+   account's owner. A turn waiting
+   for capacity is woken and re-placed at once; otherwise the choice applies
+   from the next turn. It records `model_account.selection.changed`.
+   Saving a person's personal-fallback opt-in wakes the organization's
+   waiting turns of every enabled provider when the opt-in turns on, so a
+   turn already waiting can fall back at once. Turning it off wakes nothing
+   and moves no running turn (D-27).
+3. Migration 0729 (rolling) lets a person read and change only their own
+   `subscription_person_preferences` row (see `docs/deployment.md`). Its
+   membership routine reads the caller's own membership through an
+   owner-only, marker-gated SELECT policy, so it works under the documented
+   migration owner without `BYPASSRLS`
+   (`packages/db/test/subscription-person-preferences-owner-postgres.test.ts`).
+4. API: `GET`/`PUT /v1/workspaces/{ws}/sessions/{id}/model-account` behind
+   the session authorization middleware, and `GET`/`PATCH
+   /v1/organizations/{org}/me/model-account-preferences` (same-origin
+   browser writes; an agent needs full access). SDK methods match.
+
+**Not in this change.** The existing provider pin routes (Codex, and the
+SuperGrok and Claude pin translations their cutovers add) move onto the
+neutral entry point after those cutovers merge, so the same routes are not
+edited twice. Disconnect stays with each provider's writer until then.
+
 ## 6. Specific behaviours
 
 ### 6.1 Cache coldness (SUB-STICK-04)

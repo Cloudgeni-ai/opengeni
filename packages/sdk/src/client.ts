@@ -277,6 +277,11 @@ import type {
   UpdateOrganizationModelAccountSettingsRequest,
   UpdateWorkspaceModelAccountSettingsRequest,
   WorkspaceModelAccountSettings,
+  ModelAccountPreferences,
+  SessionModelAccountChoiceResponse,
+  SetSessionModelAccountChoiceRequest,
+  SetSessionModelAccountChoiceResponse,
+  UpdateModelAccountPreferencesRequest,
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
   OrganizationPrivacySettings,
@@ -5572,6 +5577,56 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelAccountSettings>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/model-account-settings`,
+      request,
+    );
+  }
+
+  /** The session's model account, the accounts it may switch to, and the personal settings. */
+  async getSessionModelAccount(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionModelAccountChoiceResponse> {
+    return await this.requestJson<SessionModelAccountChoiceResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
+    );
+  }
+
+  /** Choose the session's model account, or `connectionId: null` for automatic selection. */
+  async setSessionModelAccount(
+    workspaceId: string,
+    sessionId: string,
+    request: SetSessionModelAccountChoiceRequest,
+  ): Promise<SetSessionModelAccountChoiceResponse> {
+    return await this.requestJson<SetSessionModelAccountChoiceResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
+      request,
+    );
+  }
+
+  /**
+   * Your own model-account preferences in an organization. For a person (a
+   * signed-in browser, or an agent acting as one); other callers get 404.
+   */
+  async getModelAccountPreferences(organizationId: string): Promise<ModelAccountPreferences> {
+    return await this.requestJson<ModelAccountPreferences>(
+      "GET",
+      `/v1/organizations/${organizationId}/me/model-account-preferences`,
+    );
+  }
+
+  /**
+   * Change your own personal-fallback opt-in in an organization. Only a person
+   * can: a same-origin browser, or an agent acting as one with full access.
+   */
+  async updateModelAccountPreferences(
+    organizationId: string,
+    request: UpdateModelAccountPreferencesRequest,
+  ): Promise<ModelAccountPreferences> {
+    return await this.requestJson<ModelAccountPreferences>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/me/model-account-preferences`,
       request,
     );
   }
