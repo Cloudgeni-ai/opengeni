@@ -416,6 +416,29 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
     }
   });
 
+  test("a Pause/Steer that lands while a prompt goes quiet cancels instead of adopting", async () => {
+    cutPolling = true;
+    const controller = createTurnToolCancellationController(undefined, { cutPolling });
+    const fake = scriptedCommand((now) => {
+      if (now === 1_000) return { output: "Continue? [y/N] " };
+      // Lands during the inter-slice delay, after this read's own cancel check.
+      if (now === 3_000) setTimeout(() => controller.cancel(new Error("steer")), 0);
+      return {};
+    }, 1_000);
+    try {
+      const [exec] = controller.wrapTools(
+        [functionTool("exec_command", async () => running(7))],
+        fake.session,
+      ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+      await expect(
+        exec!.invoke(runContext, JSON.stringify({ cmd: "./install.sh", yield_time_ms: 200_000 })),
+      ).rejects.toThrow("steer");
+      expect(fake.state.adoptions).toBe(0);
+    } finally {
+      fake.restore();
+    }
+  });
+
   test("disabled: a prompt still holds the ordinary window", async () => {
     cutPolling = false;
     const fake = scriptedCommand((now) => (now === 1_000 ? { output: ">>> " } : {}), 1_000);

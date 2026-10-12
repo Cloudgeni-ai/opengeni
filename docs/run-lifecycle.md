@@ -2179,7 +2179,8 @@ produced has been quiet for 5 seconds after the ordinary 30-second window, or
 after 2 seconds when that output ends in an input prompt
 (`looksLikeInputPrompt`). A call that produced no output waits for exit or its
 requested window. `OPENGENI_EXPERIMENT_CUT_POLLING=false` restores the
-30-second cap. Live output still streams to the command card while the call
+30-second cap. Connected Machine (op-stream) commands keep their own 30-second
+background yield and are unaffected. Live output still streams to the command card while the call
 waits, and Pause/Steer cancellation is still checked between slices. The
 model-facing `exec_command` schema is non-strict and requires only `cmd` and
 `max_output_tokens` (settings.experimentOutputCost, on by default;

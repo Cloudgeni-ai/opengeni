@@ -1862,6 +1862,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       input.initialObservationFailure ?? null;
     for (;;) {
       if (observationFailure?.readRetryAllowed === false) break;
+      // Check cancellation before any return-control exit, so a Pause/Steer
+      // that lands between slices never lets the command be adopted below.
+      if (this.cancelled) throw cancellationError(this.reason);
       if (performance.now() - startedAt >= waitMs) break;
       if (quietReturnAfterMs !== undefined && lastOutputAt !== null) {
         const now = performance.now();
@@ -1869,7 +1872,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         if (quietMs >= CUT_POLLING_PROMPT_QUIET_MS && looksLikeInputPrompt(output)) break;
         if (now - startedAt >= quietReturnAfterMs && quietMs >= CUT_POLLING_OUTPUT_QUIET_MS) break;
       }
-      if (this.cancelled) throw cancellationError(this.reason);
       if (
         !state.writeInvoke &&
         !state.processSession?.writeStdinForProcessRead &&
@@ -1956,6 +1958,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }
     if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
+      // A cancelled turn keeps the process on its fence so the drain stops it.
+      if (this.cancelled) throw cancellationError(this.reason);
       await state.processSession.adoptRetainedProcessAsBackgroundCommand(
         state.sessionId,
         state.command,

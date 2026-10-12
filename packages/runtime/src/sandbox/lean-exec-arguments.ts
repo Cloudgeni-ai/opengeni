@@ -77,7 +77,7 @@ export const LEAN_EXEC_COMMAND_PARAMETERS = {
 } as const;
 
 const LEAN_EXEC_COMMAND_DESCRIPTION =
-  "Runs a command in a PTY, returning output or a session ID for ongoing interaction. Pass only `cmd`, `max_output_tokens` and any argument whose value differs from its default.";
+  "Runs a shell command, returning output or a session ID for ongoing interaction. Pass only `cmd`, `max_output_tokens` and any argument whose value differs from its default.";
 
 /**
  * Fill omitted `login`, `tty` and `yield_time_ms` with today's canonical
