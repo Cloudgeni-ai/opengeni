@@ -2354,6 +2354,7 @@ describe("release schema contract", () => {
       "0702_subscription_codex_access_editor.sql",
       "0701_quiescence_receipt_wake_repair.sql",
       "0700_codex_ownerless_person_refresh.sql",
+      "0734_connected_output_reachable_due.sql",
       "0739_native_pty_command_supervision.sql",
       "0740_native_command_qualification.sql",
       "0738_native_command_broker_transport.sql",
