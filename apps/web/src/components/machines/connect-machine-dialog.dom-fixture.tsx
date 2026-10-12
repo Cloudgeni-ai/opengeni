@@ -83,6 +83,7 @@ beforeEach(() => {
 });
 
 type Props = {
+  workspaceId?: string;
   machines?: MachineView[];
   loading?: boolean;
   error?: unknown;
@@ -109,7 +110,7 @@ async function render(initial: Props = {}) {
             open = next;
             void draw();
           }}
-          workspaceId="workspace"
+          workspaceId={props.workspaceId ?? "workspace"}
           origin="https://app.example.test"
           machines={props.machines ?? []}
           machinesLoading={props.loading ?? false}
@@ -406,6 +407,28 @@ describe("Connect a machine dialog", () => {
       await h.update({ machines: [existing, machine("mac", "Studio Mac")] });
       expect(h.text()).toContain("Machine connected");
       expect(h.text()).toContain("Studio Mac");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("switching workspaces starts over: the other workspace's machines never count", async () => {
+    const h = await render({ machines: [machine("a-mac", "Workspace A Mac")] });
+    try {
+      // Browser back or forward can change the workspace while the dialog is open.
+      const otherPc = machine("b-pc", "Workspace B PC", { scope: "workspace" });
+      await h.update({ workspaceId: "workspace-b", machines: [otherPc] });
+      expect(h.text()).not.toContain("Machine connected");
+      expect(h.onConnected).not.toHaveBeenCalled();
+      expect(mintEnrollToken.mock.calls.at(-1)).toEqual([
+        "workspace-b",
+        { scope: "user", allowScreenControl: false },
+      ]);
+      expect(h.command()).toContain("oget_preview2.sig");
+      // A machine that really comes online in the new workspace still finishes.
+      await h.update({ machines: [otherPc, machine("b-mac", "New Mac")] });
+      expect(h.text()).toContain("Machine connected");
+      expect(h.text()).toContain("New Mac");
     } finally {
       await h.close();
     }

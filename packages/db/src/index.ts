@@ -63650,6 +63650,20 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 // enrollment, atomically increments its credential generation, and REUSES its
 // selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
 // before this helper so replaying one already-approved request does not rotate.
+//
+// A personal machine belongs to the workspace it was first connected from, and
+// finalize_scoped_enrollment reuses the owner's enrollment for the same public
+// key wherever that is. Credentials and connection lookups are per workspace,
+// so a personal finalize from any other workspace is refused with
+// PersonalMachineConnectedElsewhereError. The caller's transaction rolls back,
+// so nothing is written and a single-use token is not claimed.
+export class PersonalMachineConnectedElsewhereError extends Error {
+  constructor() {
+    super("this machine was first connected as a personal machine from another workspace");
+    this.name = "PersonalMachineConnectedElsewhereError";
+  }
+}
+
 async function finalizeEnrollmentInScope(
   scopedDb: Database,
   input: {
@@ -63691,6 +63705,14 @@ async function finalizeEnrollmentInScope(
       .from(schema.sandboxes)
       .where(eq(schema.sandboxes.id, created.sandboxId))
       .limit(1);
+    if (
+      input.scope === "user" &&
+      (!enrollmentRow || enrollmentRow.workspaceId !== input.workspaceId)
+    ) {
+      // The owner's existing enrollment for this key lives in another workspace:
+      // this workspace cannot read it, and its credentials would not match.
+      throw new PersonalMachineConnectedElsewhereError();
+    }
     if (!enrollmentRow || !sandboxRow) throw new Error("Scoped enrollment finalize lost rows");
     return {
       enrollment: mapEnrollment(enrollmentRow),
@@ -63780,6 +63802,9 @@ async function finalizeEnrollmentInScope(
 // still active; any other machine, or a machine removed since, gets
 // EnrollTokenAlreadyRedeemedError and nothing is written. Legacy tokens without
 // an id keep their old multi-use behavior until they expire.
+// A personal token for a machine that is already its owner's personal machine
+// from another workspace gets PersonalMachineConnectedElsewhereError, also
+// without writing anything or claiming the token.
 export class EnrollTokenAlreadyRedeemedError extends Error {
   constructor() {
     super("enroll token was already used to connect another machine");

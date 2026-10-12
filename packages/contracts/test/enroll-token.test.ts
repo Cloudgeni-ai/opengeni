@@ -164,6 +164,16 @@ describe("personal (user-owned) enroll tokens", () => {
   test("a personal token requires its owner, and the owner cannot be forged", async () => {
     expect(() => personal({ ownerSubjectId: undefined })).toThrow();
     expect(() => personal({ ownerSubjectId: "" })).toThrow();
+    // Any organization member's subject fits (members allow up to 1024).
+    const longest = `user:${"x".repeat(1019)}`;
+    expect(personal({ ownerSubjectId: longest }).typ).toBe("enroll_user");
+    expect(
+      await verifyEnrollToken(
+        SECRET,
+        await signEnrollToken(SECRET, personal({ ownerSubjectId: longest })),
+      ),
+    ).toMatchObject({ ownerSubjectId: longest });
+    expect(() => personal({ ownerSubjectId: `${longest}x` })).toThrow();
     const token = await signEnrollToken(SECRET, personal());
     const [, signature] = token.slice("oget_".length).split(".");
     const forged = Buffer.from(

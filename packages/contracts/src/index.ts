@@ -3553,7 +3553,8 @@ export const EnrollTokenPayload = z.discriminatedUnion("typ", [
     typ: z.literal("enroll_user"),
     // The minting human's subject. Only the server signs it; the exchange
     // rechecks this person's live organization membership and workspace access.
-    ownerSubjectId: z.string().min(1).max(512),
+    // Same bound as an organization member's subject.
+    ownerSubjectId: z.string().min(1).max(1024),
     ...enrollTokenClaims,
     // Personal tokens were single-use from the start, so the id is required.
     jti: enrollTokenId,
@@ -18343,8 +18344,9 @@ export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyRe
 // enrollments:manage). Mints the short-TTL headless enroll token (the `oget_`
 // token). allowScreenControl bakes the screen-control consent into the token.
 // `scope: "user"` makes the machine the caller's own; it requires a verified
-// person (a signed-in human, or an organization key acting as that person),
-// never a key acting as itself, a service or an agent. Omitted keeps the
+// person: someone signed in, or a credential acting as them (a personal API
+// key, or an organization key or organization MCP client acting as that
+// person). A key, service or agent acting as itself gets 422. Omitted keeps the
 // original workspace-shared token for existing integrations.
 export const MintEnrollTokenRequest = z.object({
   allowScreenControl: z.boolean().default(false),

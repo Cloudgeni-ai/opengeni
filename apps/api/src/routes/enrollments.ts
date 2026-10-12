@@ -47,6 +47,7 @@ import {
   listEnrollments,
   MachineRemovalIdempotencyError,
   MachineRemovalRevisionConflictError,
+  PersonalMachineConnectedElsewhereError,
   removeEnrollment,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -81,6 +82,11 @@ const ENROLLMENT_OUTCOMES = new Set([
   "used",
   "unauthorized",
 ]);
+
+// A personal machine reconnects only from the workspace it was first connected
+// from. The install script and the approval page show this message verbatim.
+const PERSONAL_MACHINE_ELSEWHERE_MESSAGE =
+  "this machine was first connected as a personal machine from another workspace; connect it again from that workspace";
 
 /** Machine enrollment decisions that never surface as an HTTP error status. */
 function recordEnrollment(deps: ApiRouteDeps, flow: string, outcome: string): void {
@@ -291,6 +297,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
             "the person who created this connect command can no longer connect machines to this workspace; create a new command",
         });
       }
+      if (result.reason === "connected_elsewhere") {
+        // Nothing changed and the command was not used up.
+        throw new HTTPException(409, { message: PERSONAL_MACHINE_ELSEWHERE_MESSAGE });
+      }
       if (result.reason === "busy") {
         throw new HTTPException(503, {
           message: "workspace membership is changing; run the connect command again",
@@ -356,7 +366,13 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         approvedBySubjectId: grant.subjectId,
         approvedBySubjectLabel: grant.subjectLabel ?? null,
       },
-    );
+    ).catch((error: unknown) => {
+      if (error instanceof PersonalMachineConnectedElsewhereError) {
+        // Nothing changed; the request stays pending.
+        throw new HTTPException(409, { message: PERSONAL_MACHINE_ELSEWHERE_MESSAGE });
+      }
+      throw error;
+    });
     if (!approved) {
       // An unknown / expired / already-terminal user_code in this workspace.
       throw new HTTPException(404, {
@@ -400,10 +416,11 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Mint a short-TTL headless enroll token. Mirrors approve (enrollments:manage,
   // requireAccessGrant BEFORE the parse). The accountId comes from the grant. No
   // signing secret → 503/disabled (mirror poll). The token is SECRET — never logged.
-  // `scope: "user"` signs the authenticated person as the machine's owner; only a
-  // verified person may ask for it (a signed-in human, or an organization key
-  // acting as that person; never a key acting as itself, a service or an agent),
-  // and the owner is always the caller, never a request field.
+  // `scope: "user"` signs the authenticated person as the machine's owner. Only a
+  // verified person may ask for it: someone signed in, or a credential acting as
+  // them (a personal API key, or an organization key or organization MCP client
+  // acting as that person). A key, service or agent acting as itself gets 422.
+  // The owner is always the caller, never a request field.
   app.post("/v1/workspaces/:workspaceId/enrollments/token", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     // The permission is part of the authorization, so a request that lacks it
@@ -428,7 +445,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (personal && !isPersonalConnectionOwnerPrincipal(authorization)) {
       throw new HTTPException(422, {
         message:
-          "only a signed-in person can connect a machine for themselves; API keys, services and agents can connect workspace machines",
+          "only a person, or a credential acting as that person, can connect a machine for themselves; keys, services and agents acting as themselves can connect workspace machines",
       });
     }
     const minted = await mintEnrollToken(

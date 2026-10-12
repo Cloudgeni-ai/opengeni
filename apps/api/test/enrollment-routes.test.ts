@@ -1465,4 +1465,93 @@ describe("personal connect commands: mint scope user -> exchange -> machine owne
       select count(*)::int as enrollments from enrollments where workspace_id = ${workspaceId}`;
     expect(counts!.enrollments).toBe(0);
   }, 120_000);
+
+  test("a personal machine first connected from another workspace is refused there with 409", async () => {
+    if (!available) throw new Error("personal connect commands require PostgreSQL");
+    const { accountId, workspaceId } = await personalWorkspace();
+    // The same person can also open a second workspace in the organization.
+    const [second] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${accountId}, 'second') returning id`;
+    const otherWorkspaceId = second!.id;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${otherWorkspaceId}, ${accountId})`;
+    await admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+      values (${accountId}, ${otherWorkspaceId}, ${OWNER}, '["enrollments:manage"]'::jsonb)`;
+    const app = appFor();
+    const mint = async (inWorkspace: string) => {
+      const res = await app.request(`/v1/workspaces/${inWorkspace}/enrollments/token`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: await principalBearer(accountId, inWorkspace, "human_session"),
+        },
+        body: JSON.stringify({ scope: "user" }),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { token: string }).token;
+    };
+    const exchange = async (token: string, publicKey: string) =>
+      await app.request("/v1/enrollments/token/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: exchangeBody(token, publicKey),
+      });
+    const roaming = async () =>
+      await admin<{ workspace_id: string; credential_generation: number; generation: number }[]>`
+        select workspace_id, credential_generation, generation from enrollments
+        where pubkey = 'ed25519:ROAMING' order by created_at`;
+
+    expect((await exchange(await mint(workspaceId), "ed25519:ROAMING")).status).toBe(201);
+    const before = await roaming();
+    expect(before).toHaveLength(1);
+    expect(before[0]!.workspace_id).toBe(workspaceId);
+
+    // The same machine runs a personal command created in the second workspace.
+    const elsewhere = await mint(otherWorkspaceId);
+    const refused = await exchange(elsewhere, "ed25519:ROAMING");
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain(
+      "first connected as a personal machine from another workspace",
+    );
+
+    // Pairing with a code approved for Only me in the second workspace says the same.
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: "ed25519:ROAMING",
+          os: "macos",
+          arch: "aarch64",
+          machineName: "my-mac",
+          canOfferDisplay: true,
+          requestsScreenControl: false,
+          workspaceId: otherWorkspaceId,
+        }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
+    const approve = await app.request(
+      `/v1/workspaces/${otherWorkspaceId}/enrollments/device/approve`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: await principalBearer(accountId, otherWorkspaceId, "human_session"),
+        },
+        body: JSON.stringify({ userCode: start.userCode, scope: "user" }),
+      },
+    );
+    expect(approve.status).toBe(409);
+    const poll = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    expect(((await poll.json()) as { state: string }).state).toBe("pending");
+
+    // Nothing changed: no new row, no rotated credentials.
+    expect(await roaming()).toEqual(before);
+    // The refused command was not used up: another machine can still use it.
+    expect((await exchange(elsewhere, "ed25519:OTHER")).status).toBe(201);
+  }, 120_000);
 });

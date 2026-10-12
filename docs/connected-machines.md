@@ -926,9 +926,11 @@ Otherwise it is `status: "pending"` with a `reason`:
   connect dialog with screen control on and the machine's current access
   chosen (**Only me** for a personal machine, otherwise **This workspace**), so
   following the defaults reconnects the same machine without changing who can
-  use it. The command cannot carry organization access, so an organization
-  machine reconnected this way connects as a workspace machine; pair it with a
-  code instead to keep organization access.
+  use it. A personal machine reconnects only from the workspace it was first
+  connected from: elsewhere the command (or a code approved for **Only me**)
+  answers `409` and changes nothing. The command cannot carry organization
+  access, so an organization machine reconnected this way connects as a
+  workspace machine; pair it with a code instead to keep organization access.
 
 The Hello-time path is the same request: when a Hello shows the row allows
 screen control but the credentials do not, the API asks that exact process to
@@ -984,20 +986,26 @@ exchanges.
 
 `scope` chooses who can use the machine: `"workspace"` (the default, shared with
 the workspace) or `"user"` (only the person who minted the token). A personal
-token can be minted only for a verified person: a signed-in human session, or an
-organization key acting `asUser` for that person (the same canonical-actor rule
-as personal connections). An API key acting as itself, a service, an agent
-attempt or a service-initiated grant gets `422`. The owner is always the
-caller's authenticated subject, never a request field, and a personal token
-always carries a `jti`, so it is single-use.
+token can be minted only for a verified person: a signed-in human session, or a
+credential acting as that person (a personal API key, or an organization key or
+organization MCP client acting as them), the same canonical-actor rule as
+personal connections. A key acting as itself, a service, an agent attempt or a
+service-initiated grant gets `422`. The owner is always the caller's
+authenticated subject, never a request field, and a personal token always
+carries a `jti`, so it is single-use.
 It is signed with a distinct `typ` (`enroll_user`) carrying that owner, so an
 API replica that predates personal tokens rejects it instead of creating a
 shared machine during a rolling deploy. The exchange re-checks, under the
 organization membership fence, that the owner is still an active member with
 access to the workspace; otherwise it answers `403` and claims nothing. Fence
-contention answers `503`; run the command again. The response echoes `scope`
-and `allowScreenControl`; clients should compare them with what they asked for,
-since an older server omits `scope` and always mints a workspace token.
+contention answers `503`; run the command again. A personal machine stays in the
+workspace it was first connected from, and its credentials belong to that
+workspace: running a personal command for the same machine (same install key)
+from another workspace answers `409`, writes nothing and leaves the command
+unused, and the machine keeps its existing connection. Reconnect it from that
+workspace. The response echoes `scope` and `allowScreenControl`; clients should
+compare them with what they asked for, since an older server omits `scope` and
+always mints a workspace token.
 
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret**: anyone holding it can connect one machine until it expires.

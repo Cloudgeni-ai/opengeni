@@ -238,8 +238,16 @@ export function ConnectMachineDialog({ open, onOpenChange, ...body }: ConnectMac
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md" data-connect-machine-dialog="">
-        {/* Mounted only while open, so each opening mints a fresh command. */}
-        {open ? <ConnectMachineBody {...body} onClose={() => onOpenChange(false)} /> : null}
+        {/* Mounted only while open, so each opening mints a fresh command. Keyed
+            by workspace: a switch (browser back or forward) starts over, so the
+            other workspace's machines never look newly connected. */}
+        {open ? (
+          <ConnectMachineBody
+            key={body.workspaceId}
+            {...body}
+            onClose={() => onOpenChange(false)}
+          />
+        ) : null}
       </DialogContent>
     </Dialog>
   );

@@ -62,6 +62,7 @@ import {
   getEnrollment,
   getPendingDeviceEnrollmentRequestByUserCode,
   getPendingDeviceEnrollmentRequestByUserCodeGlobal,
+  PersonalMachineConnectedElsewhereError,
   type Database,
   type DeviceEnrollmentRequestRecord,
   type EnrollmentOs,
@@ -413,6 +414,7 @@ export type ExchangeEnrollTokenResult =
   | { ok: false; reason: "invalid" }
   | { ok: false; reason: "used" }
   | { ok: false; reason: "owner_unavailable" }
+  | { ok: false; reason: "connected_elsewhere" }
   | { ok: false; reason: "busy" };
 
 /** EXCHANGE a headless enroll token (design 11 §A2.3) — the UNAUTHENTICATED path
@@ -473,6 +475,11 @@ export async function exchangeEnrollToken(
     }
     if (error instanceof EnrollTokenOwnerUnavailableError) {
       return { ok: false, reason: "owner_unavailable" };
+    }
+    if (error instanceof PersonalMachineConnectedElsewhereError) {
+      // The owner's personal enrollment for this machine lives in another
+      // workspace; nothing was written and the token was not claimed.
+      return { ok: false, reason: "connected_elsewhere" };
     }
     if ((error as { code?: unknown } | null)?.code === "55P03") {
       // The owner's organization membership is changing right now.
