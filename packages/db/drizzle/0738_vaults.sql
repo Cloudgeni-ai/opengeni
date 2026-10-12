@@ -2943,6 +2943,133 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- W5: provider vault links (1Password connections and the embedder host)
+-- ---------------------------------------------------------------------------
+
+-- Link a provider vault as an OpenGeni vault (metadata mirror only; values are
+-- read live). p: {ownerKind, name, description?, source: 'onepassword'|'host',
+-- providerConnectionId? (onepassword), providerVaultRef, mode, availability?,
+-- allowOrganization?}. A personal 1Password connection backs only its owner's
+-- Only-me vaults; one provider vault is linked at most once per account.
+CREATE FUNCTION link_provider_vault(p jsonb, p_principal jsonb DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+  context jsonb;
+  owner_kind text := p ->> 'ownerKind';
+  link_source text := p ->> 'source';
+  link_mode text := coalesce(p ->> 'mode', 'read_only');
+  connection_ref uuid := nullif(p ->> 'providerConnectionId', '')::uuid;
+  vault_ref text := nullif(pg_catalog.btrim(p ->> 'providerVaultRef'), '');
+  connection_row record;
+  existing uuid;
+  vault_row vaults;
+  allowed uuid[];
+  result jsonb;
+BEGIN
+  PERFORM opengeni_private.vault_capability_open('write');
+  context := opengeni_private.vault_context(p_principal);
+  IF context ->> 'kind' = 'site_viewer' THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'Sites cannot link vaults');
+  END IF;
+  IF owner_kind NOT IN ('user', 'workspace', 'organization') OR owner_kind IS NULL THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'vaults are linked for "user", "workspace" or "organization"');
+  END IF;
+  IF owner_kind = 'organization' AND NOT coalesce((p ->> 'allowOrganization')::boolean, false) THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'organization vaults need account:admin');
+  END IF;
+  IF owner_kind = 'user' AND NOT coalesce((context ->> 'includeUser')::boolean, false) THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'this caller cannot own Only-me vaults');
+  END IF;
+  IF link_source NOT IN ('onepassword', 'host') OR link_source IS NULL THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'only 1Password and host vaults are linked');
+  END IF;
+  IF link_mode NOT IN ('read_write', 'read_only') THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'mode is read_write or read_only');
+  END IF;
+  IF vault_ref IS NULL OR pg_catalog.char_length(vault_ref) > 300 THEN
+    PERFORM opengeni_private.vault_raise('vault_not_found', 'a provider vault reference is required');
+  END IF;
+  IF link_source = 'onepassword' THEN
+    SELECT connection.id, connection.subject_id, connection.status INTO connection_row
+    FROM connections connection
+    WHERE connection.id = connection_ref
+      AND connection.account_id = (context ->> 'accountId')::uuid
+      AND connection.workspace_id = (context ->> 'workspaceId')::uuid
+      AND pg_catalog.lower(connection.provider_domain) = '1password.com';
+    IF connection_row.id IS NULL THEN
+      PERFORM opengeni_private.vault_raise('vault_not_found', '1Password connection not found');
+    END IF;
+    IF connection_row.subject_id IS NOT NULL AND (
+      owner_kind <> 'user' OR connection_row.subject_id IS DISTINCT FROM context ->> 'subjectId'
+    ) THEN
+      PERFORM opengeni_private.vault_raise('vault_permission_denied',
+        'a personal 1Password connection backs only its owner''s Only-me vaults');
+    END IF;
+  ELSE
+    connection_ref := NULL;
+  END IF;
+  SELECT vault.id INTO existing FROM vaults vault
+  WHERE vault.account_id = (context ->> 'accountId')::uuid
+    AND vault.source = link_source
+    AND vault.provider_vault_ref = vault_ref
+    AND vault.provider_connection_id IS NOT DISTINCT FROM connection_ref
+  LIMIT 1;
+  IF existing IS NOT NULL THEN
+    PERFORM opengeni_private.vault_raise('vault_name_conflict', 'this provider vault is already linked',
+      pg_catalog.jsonb_build_object('providerVaultRef', vault_ref));
+  END IF;
+  IF pg_catalog.jsonb_typeof(p #> '{availability,allowedWorkspaceIds}') = 'array' THEN
+    allowed := ARRAY(SELECT pg_catalog.jsonb_array_elements_text(p #> '{availability,allowedWorkspaceIds}')::uuid);
+  END IF;
+  vault_row := opengeni_private.vault_insert(context, owner_kind, p ->> 'name', p ->> 'description',
+    allowed, coalesce((p #>> '{availability,allowPersonalWorkspaces}')::boolean, true), false, NULL);
+  UPDATE vaults SET source = link_source, mode = link_mode, provider_connection_id = connection_ref,
+    provider_vault_ref = vault_ref, sync_status = 'syncing', updated_at = pg_catalog.now()
+  WHERE id = vault_row.id RETURNING * INTO vault_row;
+  PERFORM opengeni_private.vault_audit(vault_row.account_id, (context ->> 'workspaceId')::uuid,
+    context ->> 'subjectId', 'vault.provider.linked', 'vault', vault_row.id::text,
+    pg_catalog.jsonb_build_object('vaultId', vault_row.id, 'source', link_source, 'mode', link_mode,
+      'providerConnectionId', connection_ref, 'ownerKind', owner_kind));
+  result := opengeni_private.vault_summary_json(vault_row, context) || pg_catalog.jsonb_build_object(
+    'tier', CASE vault_row.owner_kind WHEN 'user' THEN 1 WHEN 'workspace' THEN 2 ELSE 3 END);
+  PERFORM opengeni_private.vault_capability_close();
+  RETURN result;
+END
+$$;
+
+-- What a sync needs for one reachable provider vault (never values).
+CREATE FUNCTION provider_vault_sync_target(p_vault uuid, p_principal jsonb DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+  context jsonb;
+  vault_row vaults;
+BEGIN
+  PERFORM opengeni_private.vault_capability_open('read');
+  context := opengeni_private.vault_context(p_principal);
+  vault_row := opengeni_private.vault_reachable_row(context, p_vault);
+  IF vault_row.source = 'opengeni' THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'only connected vaults sync');
+  END IF;
+  PERFORM opengeni_private.vault_capability_close();
+  RETURN pg_catalog.jsonb_build_object(
+    'vaultId', vault_row.id,
+    'workspaceId', vault_row.workspace_id,
+    'source', vault_row.source,
+    'mode', vault_row.mode,
+    'providerConnectionId', vault_row.provider_connection_id,
+    'providerVaultRef', vault_row.provider_vault_ref,
+    'providerContentVersion', vault_row.provider_content_version,
+    'rateLimitedUntil', vault_row.rate_limited_until);
+END
+$$;
+
 -- Secret ask-card answers, written inside the human-input accept transaction
 -- (values are encrypted by the caller). p_answers: [{questionId, saveTo?:
 -- "user"|"task"|"workspace", vaultId?, item: vault_write_item input with name,
@@ -3032,7 +3159,8 @@ BEGIN
           'resolve_secret_reference_candidates', 'record_vault_secret_use',
           'set_session_vault_policy', 'session_secrets_view', 'update_passkey_sign_count',
           'lease_vault_passkeys', 'release_vault_passkey_leases', 'upsert_provider_vault_items',
-          'set_vault_sync_status', 'apply_secret_answers'
+          'set_vault_sync_status', 'apply_secret_answers', 'link_provider_vault',
+          'provider_vault_sync_target'
         )
       )
   LOOP
@@ -3078,7 +3206,9 @@ BEGIN
       format('%I.release_vault_passkey_leases(text,jsonb)', target_schema),
       format('%I.upsert_provider_vault_items(uuid,text,jsonb,jsonb)', target_schema),
       format('%I.set_vault_sync_status(uuid,jsonb,jsonb)', target_schema),
-      format('%I.apply_secret_answers(uuid,uuid,jsonb,jsonb)', target_schema)
+      format('%I.apply_secret_answers(uuid,uuid,jsonb,jsonb)', target_schema),
+      format('%I.link_provider_vault(jsonb,jsonb)', target_schema),
+      format('%I.provider_vault_sync_target(uuid,jsonb)', target_schema)
     ]::regprocedure[] LOOP
       EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO opengeni_app', routine);
     END LOOP;
