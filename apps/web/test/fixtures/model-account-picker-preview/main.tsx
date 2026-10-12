@@ -3,7 +3,6 @@ import type {
   ModelAccountChoiceOption,
   SessionModelAccountChoiceResponse,
   SetSessionModelAccountChoiceRequest,
-  UpdateModelAccountPreferencesRequest,
 } from "@opengeni/sdk";
 import { createRoot } from "react-dom/client";
 import { fakeClient, WORKSPACE_ID } from "../../../../../packages/react/test/fake-client";
@@ -12,7 +11,8 @@ import "../../../src/styles.css";
 
 // The real session-header model-account control against a synthetic client.
 // `?session=private` is the person's own private chat (their personal account
-// can be chosen); `?session=shared` is a shared chat (it cannot).
+// can be chosen); `?session=shared` retains the current server refusal for a
+// personal account. This fixture does not change backend eligibility.
 const params = new URLSearchParams(window.location.search);
 document.documentElement.dataset.ogTheme = params.get("theme") === "dark" ? "dark" : "light";
 const privateChat = params.get("session") !== "shared";
@@ -63,6 +63,14 @@ const client = Object.assign(fakeClient({}), {
     request: SetSessionModelAccountChoiceRequest,
   ) => {
     receipts.push({ choose: request.connectionId });
+    if (
+      request.connectionId !== null &&
+      !state.accounts.some(
+        (account) => account.connectionId === request.connectionId && account.choosable,
+      )
+    ) {
+      throw new Error("This account cannot serve this chat");
+    }
     state = {
       ...state,
       binding: {
@@ -79,16 +87,9 @@ const client = Object.assign(fakeClient({}), {
       choice: request.connectionId ? ("explicit" as const) : ("automatic" as const),
     };
   },
-  updateModelAccountPreferences: async (
-    _organizationId: string,
-    request: UpdateModelAccountPreferencesRequest,
-  ) => {
-    receipts.push({ fallback: request.personalFallbackOptIn });
-    state = {
-      ...state,
-      personal: { ...state.personal, fallbackOptIn: request.personalFallbackOptIn },
-    };
-    return { personalFallbackOptIn: request.personalFallbackOptIn, version: 1 };
+  updateModelAccountPreferences: async () => {
+    receipts.push({ unexpectedFallbackAction: true });
+    throw new Error("The account picker must not change fallback preferences");
   },
 });
 

@@ -3,7 +3,8 @@ import { chromium } from "playwright";
 
 // The session-header model-account control, rendered with real components
 // against a synthetic client: a private chat (the person's own account can be
-// chosen, with the personal-fallback toggle) and a shared chat (it cannot).
+// chosen) and the current server refusal in a shared chat. Only Automatic or
+// a specific account can be chosen; fallback preferences are not exposed.
 const base = process.env.OPENGENI_PICKER_PREVIEW_URL ?? "http://127.0.0.1:4196";
 const output = process.env.OPENGENI_PICKER_PREVIEW_OUTPUT ?? "/tmp/opengeni-picker-preview";
 await mkdir(output, { recursive: true });
@@ -32,35 +33,55 @@ try {
       await page.getByText("Use for next turn").waitFor();
     };
     const shot = (name: string) => page.screenshot({ path: `${output}/${name}-${width}.png` });
+    const assertAccountActionsOnly = async () => {
+      assert((await page.getByRole("menuitemcheckbox").count()) === 0, "fallback action offered");
+      assert((await page.getByRole("menuitem").count()) === 4, "unexpected menu action");
+      assert((await page.getByText(/fall\s?back/i).count()) === 0, "fallback copy offered");
+      const menu = await page.getByRole("menu").boundingBox();
+      assert(menu && menu.x >= 0 && menu.x + menu.width <= width, "menu outside viewport");
+    };
+    const receipts = () =>
+      page.evaluate(() => (window as unknown as { pickerReceipts: unknown[] }).pickerReceipts);
 
-    // A private chat: shared accounts, then the person's own, and the fallback toggle.
+    // A private chat: Automatic, shared accounts, then the person's own account.
     await open("private");
-    await page.getByRole("menuitemcheckbox", { name: /Fall back to my account/ }).waitFor();
+    await assertAccountActionsOnly();
     await shot("private-open");
 
     // Choosing their own account; the header switches to the personal mark.
     await page.getByRole("menuitem", { name: /My Claude/ }).click();
     await page.getByText("Saved for the next turn.").waitFor();
-    await page.getByRole("menuitemcheckbox", { name: /Fall back to my account/ }).click();
-    await page.waitForFunction(() =>
-      JSON.stringify((window as unknown as { pickerReceipts: unknown[] }).pickerReceipts).includes(
-        '"fallback":true',
-      ),
-    );
     await page
-      .getByRole("menuitemcheckbox", { name: /Fall back to my account/, checked: true })
+      .getByRole("button", { name: "Model account · My Claude", exact: true, includeHidden: true })
       .waitFor();
+    await assertAccountActionsOnly();
+    assert(
+      JSON.stringify(await receipts()) === '[{"choose":"mine"}]',
+      "unexpected personal action",
+    );
     await shot("private-chosen");
+
+    // Returning to Automatic sends only the null account choice, not fallback preferences.
+    await page.getByRole("menuitem", { name: "Automatic", exact: true }).click();
+    await page.getByText("Chosen account", { exact: true }).waitFor({ state: "hidden" });
+    await assertAccountActionsOnly();
+    assert(
+      JSON.stringify(await receipts()) === '[{"choose":"mine"},{"choose":null}]',
+      "unexpected automatic action",
+    );
+    await page.keyboard.press("Escape");
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    await page.waitForFunction(() =>
+      document.activeElement?.getAttribute("aria-label")?.startsWith("Model account ·"),
+    );
 
     // A shared chat: the person's own account is listed but cannot be chosen.
     await open("shared");
     const mine = page.getByRole("menuitem", { name: /My Claude/ });
     assert((await mine.getAttribute("aria-disabled")) === "true", "personal account choosable");
     await page.getByText("Private chats only").waitFor();
-    assert(
-      (await page.getByRole("menuitemcheckbox", { name: /Fall back to my account/ }).count()) === 0,
-      "fallback offered where no personal account can serve",
-    );
+    await assertAccountActionsOnly();
+    assert(JSON.stringify(await receipts()) === "[]", "unexpected shared-chat action");
     await shot("shared-open");
 
     assert(errors.length === 0, `page errors: ${errors.join("; ")}`);

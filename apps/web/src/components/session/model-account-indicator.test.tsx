@@ -105,11 +105,9 @@ test("offers only the session provider's accounts, with the caller's own account
     );
     await view.open();
     const items = menuItems();
-    expect(items.some((item) => item.includes("Team Claude"))).toBe(true);
-    expect(items.some((item) => item.includes("My Claude"))).toBe(true);
-    expect(items.some((item) => item.includes("Team Codex"))).toBe(false);
+    expect(items).toEqual(["Automatic", "Team Claude", "My Claude"]);
     expect(document.body.textContent).toContain("Your accounts");
-    expect(items.some((item) => item.includes("Fall back to my account"))).toBe(true);
+    expect(document.querySelector('[role="menuitemcheckbox"]')).toBeNull();
   } finally {
     await view.cleanup();
   }
@@ -185,34 +183,68 @@ test("choosing sends the account and shows where it applies; a refused account i
   }
 });
 
-test("the fallback toggle changes only the caller's own opt-in", async () => {
-  const updates: Array<{ organizationId: string; optIn: boolean }> = [];
-  let current = choiceResponse();
-  const client = Object.assign(fakeClient({}), {
-    getSessionModelAccount: async () => current,
-    updateModelAccountPreferences: async (
-      organizationId: string,
-      request: { personalFallbackOptIn: boolean },
-    ) => {
-      updates.push({ organizationId, optIn: request.personalFallbackOptIn });
-      current = {
-        ...current,
-        personal: { ...current.personal, fallbackOptIn: request.personalFallbackOptIn },
-      };
-      return { personalFallbackOptIn: request.personalFallbackOptIn, version: 1 };
-    },
-  });
-  const view = await render(client);
-  try {
-    await view.open();
-    const toggle = document.querySelector<HTMLElement>('[role="menuitemcheckbox"]')!;
-    expect(toggle.getAttribute("aria-checked")).toBe("false");
-    await act(async () => toggle.click());
-    expect(updates).toEqual([{ organizationId: ORG, optIn: true }]);
-  } finally {
-    await view.cleanup();
-  }
-});
+test.each([false, true])(
+  "account selection never changes personal fallback (opt-in %s)",
+  async (fallbackOptIn) => {
+    const calls: Array<string | null> = [];
+    let preferenceCalls = 0;
+    let current = choiceResponse({
+      personal: { connectionsAllowed: true, fallbackAllowed: true, fallbackOptIn },
+    });
+    const client = Object.assign(fakeClient({}), {
+      getSessionModelAccount: async () => current,
+      setSessionModelAccount: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: { connectionId: string | null },
+      ) => {
+        calls.push(request.connectionId);
+        const choice = request.connectionId ? ("explicit" as const) : ("automatic" as const);
+        current = {
+          ...current,
+          binding: { provider: "claude", connectionId: request.connectionId, choice },
+        };
+        return {
+          changed: true,
+          appliedTo: "next_turn" as const,
+          provider: "claude",
+          connectionId: request.connectionId,
+          choice,
+        };
+      },
+      updateModelAccountPreferences: async () => {
+        preferenceCalls += 1;
+        throw new Error("The account picker must not change fallback preferences");
+      },
+    });
+    const view = await render(client);
+    try {
+      await view.open();
+      expect(menuItems()).toEqual(["Automatic", "Team Claude", "My Claude"]);
+      expect(document.querySelector('[role="menuitemcheckbox"]')).toBeNull();
+      const mine = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+        (row) => row.textContent === "My Claude",
+      )!;
+      await act(async () => mine.click());
+      expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Model account · My Claude",
+      );
+      const automatic = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+        (row) => row.textContent === "Automatic",
+      )!;
+      await act(async () => automatic.click());
+      expect(calls).toEqual(["mine-1", null]);
+      expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Model account · Automatic",
+      );
+      expect(menuItems()).toEqual(["Automatic", "Team Claude", "My Claude"]);
+      expect(preferenceCalls).toBe(0);
+      expect(current.personal.fallbackOptIn).toBe(fallbackOptIn);
+    } finally {
+      await view.cleanup();
+    }
+  },
+);
 
 test("hides the fallback toggle where the organization does not allow personal fallback", async () => {
   const client = Object.assign(fakeClient({}), {

@@ -1,7 +1,7 @@
 // Session-header model-account control for every provider on the shared
 // subscription core: shows the account the session uses and lets the person
-// choose a shared account or one of their own personal accounts, and turn
-// their personal fallback on or off. The server decides what may be chosen.
+// choose Automatic, a shared account, or one of their own personal accounts.
+// The server decides what may be chosen.
 import { useSessionModelAccount } from "@opengeni/react";
 import type { ModelAccountChoiceOption, SessionEvent } from "@opengeni/sdk";
 import { ChevronDownIcon, KeyRoundIcon, Loader2Icon, UserRoundIcon } from "lucide-react";
@@ -9,7 +9,6 @@ import { ChevronDownIcon, KeyRoundIcon, Loader2Icon, UserRoundIcon } from "lucid
 import {
   DropdownMenu,
   DropdownMenuCheck,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -68,13 +67,6 @@ export function ModelAccountIndicator({
     : explicit
       ? "Account unavailable"
       : "Automatic";
-  // Fallback can only reach the person's own accounts where they can serve
-  // this chat, so the switch is shown only there.
-  const showFallback =
-    personal.some((each) => each.choosable) &&
-    choice?.personal.connectionsAllowed === true &&
-    choice.personal.fallbackAllowed &&
-    account.canChangeFallback;
   const ariaLabel = `Model account · ${displayName}`;
 
   const row = (each: ModelAccountChoiceOption) => {
@@ -172,20 +164,6 @@ export function ModelAccountIndicator({
             <>
               <DropdownMenuLabel className="pt-2">Your accounts</DropdownMenuLabel>
               {personal.map(row)}
-            </>
-          ) : null}
-          {showFallback ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuCheckboxItem
-                checked={choice?.personal.fallbackOptIn ?? false}
-                disabled={account.choosing}
-                onSelect={(event) => event.preventDefault()}
-                onCheckedChange={(checked) => void account.setFallbackOptIn(checked === true)}
-                className="cursor-pointer"
-              >
-                Fall back to my account
-              </DropdownMenuCheckboxItem>
             </>
           ) : null}
           {account.mutationError ? (
