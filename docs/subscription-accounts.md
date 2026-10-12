@@ -99,7 +99,7 @@ for it until the matching requirement below is implemented:
 - **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe
-  point under SUB-ACCESS-06. Verification: `packages/db/test/subscription-core-codex-conformance-postgres.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  point under SUB-ACCESS-06. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-OWN-06** Widening a personal connection to workspaces or the
   organization turns it into a shared connection and shows a short notice
   that consumer plans may limit use to the account holder.
@@ -164,7 +164,7 @@ for it until the matching requirement below is implemented:
   eligibility. Verification: pending (shared-core).
 - **SUB-ELIG-05** A personal connection serves only its owner's own work in
   their private sessions and Personal workspace. Shared team work is funded by
-  organization connections. Verification: `packages/db/test/subscription-core-codex-conformance-postgres.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`.
+  organization connections. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
   manufactures exhaustion: an account with unknown quota is eligible and
   counts as able to serve. Ordinary primary/spread ordering applies equally
@@ -180,7 +180,7 @@ for it until the matching requirement below is implemented:
   an explicit account choice or permitted, per-person fallback opt-in (off by
   default). Live ownership, organization permission and accepted-turn personal
   authority remain required in every case (D-28).
-  Verification: `packages/db/test/subscription-core-codex-conformance-postgres.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
 - **SUB-SEL-03** Primary first places new work on the primary account while
   it can serve the work (unknown quota counts as able to serve,
   SUB-ELIG-06); when it cannot, failover moves to the next eligible
@@ -189,7 +189,7 @@ for it until the matching requirement below is implemented:
   allowance can replace automatic extra-credit spending.
   Verification: pending (shared-core).
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
-  that account instead of moving. Verification: `packages/db/test/subscription-core-codex-conformance-postgres.test.ts`, `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
+  that account instead of moving. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
 - **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
   reservations cannot oversubscribe the primary account or bypass fairness.
   Verification: pending (verification-suite).
