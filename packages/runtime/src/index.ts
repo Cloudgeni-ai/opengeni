@@ -1,4 +1,4 @@
-import { KNOWLEDGE_GUIDANCE } from "./agent-instructions/modules/knowledge";
+import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
@@ -330,12 +330,14 @@ import { gzipSync } from "node:zlib";
 import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   composeModularAgentInstructions,
   resolveAgentIdentity,
   rigInstructions,
   workspaceEnvironmentInstructions,
+  type AgentPromptExperiments,
   type AgentPromptResources,
   type AgentPromptToolAvailability,
   type RigInstructionsContext,
@@ -354,6 +356,7 @@ export {
   rigInstructions,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
+  type AgentPromptExperiments,
   type AgentPromptResources,
   type AgentPromptToolAvailability,
   type AgentPromptToolAvailabilityInput,
@@ -2393,11 +2396,12 @@ export type PersistentSessionSettings = {
 export function coreInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
+  experiments?: AgentPromptExperiments,
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
     "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
-    ...KNOWLEDGE_GUIDANCE,
+    ...sharedKnowledgeGuidance(experiments?.knowledgeRetrievalGuidance === true),
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2417,8 +2421,9 @@ export function composeAgentInstructions(
   template: string,
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
+  experiments?: AgentPromptExperiments,
 ): string {
-  const core = coreInstructions(workspaceEnvironment, rig).join(" ");
+  const core = coreInstructions(workspaceEnvironment, rig, experiments).join(" ");
   if (template.includes(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER)) {
     return template.split(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER).join(core);
   }
@@ -2516,6 +2521,15 @@ export function agentPromptResourcesFor(
   };
 }
 
+/** Deployment prompt experiments; absent when every experiment is off. */
+export function agentPromptExperimentsFor(settings: Settings): {
+  experiments?: AgentPromptExperiments;
+} {
+  return settings.experimentKnowledgeRetrievalGuidance
+    ? { experiments: { knowledgeRetrievalGuidance: true } }
+    : {};
+}
+
 function inspectModularAgentInstructions(
   settings: Settings,
   config: ResolvedAgentConfig,
@@ -2534,6 +2548,7 @@ function inspectModularAgentInstructions(
     ...(options.agentPromptToolAvailability
       ? { toolAvailability: options.agentPromptToolAvailability }
       : {}),
+    ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
@@ -2545,7 +2560,9 @@ function inspectModularAgentInstructions(
     workspaceGovernance: options.workspaceGovernance,
     workspaceMemory: options.workspaceMemory,
     sessionInstructions: options.sessionInstructions,
+    ...(settings.experimentSystemPromptCacheSplit ? { stablePrefix: true } : {}),
   });
+  recordStableSystemPromptPrefix(composed.stablePrefix);
   return { layers: composed.layers, composed: composed.composed };
 }
 
@@ -2556,11 +2573,24 @@ export function inspectPersistentAgentInstructions(
   if (options.agentConfig) {
     return inspectModularAgentInstructions(settings, options.agentConfig, options);
   }
+  const personaTemplate = options.instructionsTemplate ?? settings.agentInstructionsTemplate;
   const personaAndCore = composeAgentInstructions(
-    options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+    personaTemplate,
     options.workspaceEnvironment,
     options.rig,
+    agentPromptExperimentsFor(settings).experiments,
   );
+  if (settings.experimentSystemPromptCacheSplit) {
+    // The deployment persona with no workspace environment or sandbox
+    // environment is shared by every session; a workspace persona is not.
+    recordStableSystemPromptPrefix(
+      personaTemplate === settings.agentInstructionsTemplate &&
+        !options.workspaceEnvironment &&
+        !options.rig
+        ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
+        : OPENGENI_OPERATIONAL_INSTRUCTIONS,
+    );
+  }
   const layers: PersistentAgentInstructionLayerDraft[] = [
     {
       id: "operational_contract",

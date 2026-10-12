@@ -1,12 +1,14 @@
 import {
   createContext,
   type ReactNode,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useState,
 } from "react";
+import { Linking } from "react-native";
 import type { OpenGeniReactNativeAdapters } from "./adapters";
 import { sha256HexToArrayBuffer } from "./adapters";
 
@@ -211,4 +213,20 @@ export function useOpenGeniReactNativeEnvironment(): NativeEnvironmentContextVal
     throw new Error("Opengeni native hooks require OpenGeniReactNativeProvider");
   }
   return value;
+}
+
+/**
+ * Open a link the person tapped: through the host's link adapter when it has
+ * one (so its own conversations can open in place), else the system browser.
+ * Works outside the provider too, where it always uses the browser.
+ */
+export function useOpenNativeLink(): (url: string) => void {
+  const links = useContext(NativeEnvironmentContext)?.adapters.links;
+  return useCallback(
+    (url: string) => {
+      if (links) links.openUrl(url);
+      else void Linking.openURL(url).catch(() => undefined);
+    },
+    [links],
+  );
 }

@@ -53,6 +53,14 @@ export type AgentPromptContext = {
    * tool-specific clause renders exactly as before.
    */
   toolAvailability?: AgentPromptToolAvailability | undefined;
+  /** Deployment prompt experiments; omitted renders the default prompt byte for byte. */
+  experiments?: AgentPromptExperiments | undefined;
+};
+
+/** Opt-in prompt variants for A/B evaluation, set from deployment settings. */
+export type AgentPromptExperiments = {
+  /** OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE */
+  knowledgeRetrievalGuidance?: boolean | undefined;
 };
 
 /**

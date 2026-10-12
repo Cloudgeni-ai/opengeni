@@ -16,6 +16,7 @@ const siteId = "dc24100a-e408-4713-9c12-ef41e3964f6a";
 const versionId = "11111111-1111-4111-8111-111111111111";
 
 let loadError: unknown = null;
+let withoutContent = false;
 
 const snapshot = {
   detail: {
@@ -65,7 +66,7 @@ mock.module("@/context", () => ({
 mock.module("@opengeni/react/sites", () => ({
   loadSiteSnapshot: async () => {
     if (loadError) throw loadError;
-    return snapshot;
+    return withoutContent ? { ...snapshot, content: null } : snapshot;
   },
 }));
 
@@ -229,5 +230,23 @@ test("Site read refusal explains missing artifact access instead of removal", as
       await act(async () => root.unmount());
       container.remove();
     }
+  }
+});
+
+test("Site without an openable version shows a final state instead of loading forever", async () => {
+  loadError = null;
+  withoutContent = true;
+  const { container, root } = await renderDetail();
+  try {
+    expect(container.textContent).toContain("Café menu");
+    expect(container.textContent).toContain("There's nothing to show for this Site");
+    expect(container.textContent).not.toContain("Loading Site");
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
+    expect(hasAction(container, "Retry")).toBe(true);
+  } finally {
+    withoutContent = false;
+    await act(async () => root.unmount());
+    container.remove();
   }
 });
