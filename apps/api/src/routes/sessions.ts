@@ -451,10 +451,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return null;
     }
   };
-  const withSiteCommandOrigin = <T>(c: Context, workspaceId: string, run: () => Promise<T>) =>
+  const withSiteCommandOrigin = <T>(c: Context, grant: AccessGrant, run: () => Promise<T>) =>
     withOptionalSiteCommandOrigin(
       db,
-      workspaceId,
+      grant,
       c.req.header("x-opengeni-site-id"),
       c.req.header("x-opengeni-site-version"),
       run,
@@ -690,7 +690,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const origin = await measureSessionCreatePhase(deps.observability, "site_origin", () =>
         resolveSiteSessionOrigin(
           db,
-          workspaceId,
+          grant,
           c.req.header("x-opengeni-site-id"),
           c.req.header("x-opengeni-site-version"),
         ),
@@ -3862,7 +3862,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
     try {
-      result = await withSiteCommandOrigin(c, workspaceId, () =>
+      result = await withSiteCommandOrigin(c, grant, () =>
         acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
           text: payload.text,
           annotations: payload.annotations,
@@ -3910,7 +3910,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await withSiteCommandOrigin(c, workspaceId, () =>
+      result = await withSiteCommandOrigin(c, grant, () =>
         submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
           authorization,
         }),
@@ -3953,7 +3953,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (event.type === "user.message") {
       let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
       try {
-        result = await withSiteCommandOrigin(c, workspaceId, () =>
+        result = await withSiteCommandOrigin(c, grant, () =>
           acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
             text: event.payload.text,
             annotations: event.payload.annotations,

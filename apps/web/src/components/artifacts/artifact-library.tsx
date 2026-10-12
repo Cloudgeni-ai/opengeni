@@ -5,6 +5,7 @@ import {
   LayoutGridIcon,
   LinkIcon,
   ListIcon,
+  LockIcon,
   MessageSquareIcon,
   MoreHorizontalIcon,
   PanelsTopLeftIcon,
@@ -33,6 +34,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -85,6 +87,19 @@ function PinnedMarker() {
       <span className="sr-only">Pinned</span>
     </span>
   );
+}
+
+/** A Site only its owner (the viewer) can see, marked like an Only me schedule. */
+function OnlyMeMarker({ bare = false }: { bare?: boolean }) {
+  return (
+    <MetaChip icon={<LockIcon />} {...(bare ? { variant: "text" as const } : {})}>
+      Only me
+    </MetaChip>
+  );
+}
+
+function onlyMe(item: ArtifactCatalogItem): boolean {
+  return item.kind === "site" && item.visibility === "private";
 }
 
 /** Mount retained-image loaders only near the viewport, not merely their img elements. */
@@ -334,7 +349,14 @@ export function ArtifactRow({
         )
       }
       title={item.title}
-      titleAddon={item.pinned ? <PinnedMarker /> : undefined}
+      titleAddon={
+        item.pinned || onlyMe(item) ? (
+          <span className="inline-flex items-center gap-2">
+            {item.pinned ? <PinnedMarker /> : null}
+            {onlyMe(item) ? <OnlyMeMarker /> : null}
+          </span>
+        ) : undefined
+      }
       meta={[
         artifactKindLabel[item.kind],
         item.kind === "file" && item.filename && item.filename !== item.title
@@ -535,10 +557,11 @@ export function ArtifactCard({
       >
         <ArtifactPreview workspaceId={workspaceId} item={item} />
       </div>
-      {archived || item.pinned ? (
+      {archived || item.pinned || onlyMe(item) ? (
         // On the preview, so the meta line keeps its one fact whole.
         <span className="absolute top-2.5 left-2.5 flex items-center gap-2 rounded-full bg-surface px-2 py-1">
           {item.pinned ? <PinnedMarker /> : null}
+          {onlyMe(item) ? <OnlyMeMarker bare /> : null}
           {archived ? (
             <StatusBadge tone="neutral" icon="auto">
               Archived

@@ -26,6 +26,8 @@ const snapshot = {
       title: "Café menu",
       description: "An interactive workspace Site.",
       status: "active" as const,
+      visibility: "private" as const,
+      ownerSubjectId: "user:owner",
       currentVersion: { id: versionId, revision: 1, requestedTools: [] },
     },
     versions: [
@@ -48,8 +50,10 @@ const snapshot = {
 
 const siteClient = {
   tools: { forWorkspace: () => ({}) },
+  getSessionTenancyCreateCapabilities: async () => ({ canCreatePrivate: true }),
 };
 const accessContext = {
+  subjectId: "user:owner",
   workspaceGrants: [{ workspaceId, permissions: ["artifacts:read", "artifacts:publish"] }],
 };
 
@@ -57,6 +61,8 @@ mock.module("@/context", () => ({
   useAppContext: () => ({
     accessContext,
     client: siteClient,
+    workspaces: [{ id: workspaceId, name: "Kitchen", kind: "shared" }],
+    managedSelfContext: null,
     startSession: async () => null,
     busy: false,
     authSession: { user: { name: "Dev" } },
@@ -142,6 +148,9 @@ test("loaded Site keeps Archive and Edit with Opengeni behind permission checks"
     expect(hasArchive(container)).toBe(true);
     expect(hasAction(container, "Edit with Opengeni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
+    // Its owner sees that it is Only me and can share it.
+    expect(container.textContent).toContain("Only me");
+    expect(hasAction(container, "Share with workspace")).toBe(true);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -171,6 +180,7 @@ test("read-only Site hides mutation actions but keeps its preview", async () => 
   try {
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
+    expect(hasAction(container, "Share with workspace")).toBe(false);
     expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;

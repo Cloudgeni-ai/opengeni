@@ -40,8 +40,8 @@ describe("Site version tool authorization", () => {
   type Resolver = NonNullable<Parameters<typeof requireWorkspaceSiteToolAuthorization>[3]>;
   const version = { id: context.siteVersionId, requestedTools: [context.identity] };
   const resolve = (status = "active", requestedTools = version.requestedTools): Resolver =>
-    (async (_db, workspace, artifact, selectedVersion) => {
-      expect([workspace, artifact, selectedVersion]).toEqual([
+    (async (_db, caller, artifact, selectedVersion) => {
+      expect([caller.workspaceId, artifact, selectedVersion]).toEqual([
         workspaceId,
         context.siteArtifactId,
         context.siteVersionId,

@@ -123,6 +123,7 @@ export * from "./domain/agent-config-resolution";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-audience";
+export * from "./domain/site-audience";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";

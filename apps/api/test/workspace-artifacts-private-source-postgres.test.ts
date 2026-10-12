@@ -87,7 +87,12 @@ postgresTest(
       ).toBeNull();
       // The published content does not: its current version is readable.
       const viewerRef = await withSessionRlsActorContext({ subjectId: viewerSubject }, () =>
-        getWorkspaceArtifactContentRef(client!.db, workspaceId, siteId),
+        getWorkspaceArtifactContentRef(
+          client!.db,
+          workspaceId,
+          { subjectId: viewerSubject },
+          siteId,
+        ),
       );
       expect(viewerRef.version.id).toBe(currentVersionId);
       expect(viewerRef.contentKey).toBe("blob-2");
