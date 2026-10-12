@@ -12,7 +12,7 @@ import {
   subscriptionCapacityArmingDiagnostic,
   subscriptionCapacityArmingFailure,
 } from "../src/activities/agent-turn/subscription-capacity-arming";
-import { selectClaudeTurnCapacity } from "../src/activities/agent-turn/xai-capacity";
+import { selectClaudeTurnCapacity } from "../src/activities/agent-turn/scoped-subscription-capacity";
 import type { CapacityPhaseDeps } from "../src/activities/agent-turn/codex-capacity";
 
 const restorers: Array<{ mockRestore(): void }> = [];

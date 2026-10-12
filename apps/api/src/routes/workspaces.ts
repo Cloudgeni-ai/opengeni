@@ -96,7 +96,6 @@ import {
   readCodexCutoverDisposition,
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
-  workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
@@ -630,22 +629,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
         { activeSettings: deps.settings },
       ),
-      // By SuperGrok's provider route: the shared core's projection once it
-      // has cut over, else the legacy readiness.
+      // SuperGrok runs only on the shared core: its projection, or not
+      // ready on any other route.
       loadCoreRoutedXaiCatalogReadiness(deps.db, deps.settings, {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
       }).then(async (core) => ({
         core,
-        active:
-          core?.ready ??
-          (await workspaceXaiSubscriptionActive(
-            deps.db,
-            deps.settings,
-            workspaceId,
-            grant.subjectId,
-          )),
+        active: core?.ready ?? false,
       })),
       // The route read above decides for both Claude readers (read once).
       claudeCore.then(

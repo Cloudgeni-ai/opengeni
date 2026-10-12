@@ -40,8 +40,6 @@ import {
   recordScheduledTaskAdmissionFailure,
   createSession,
   createVariableSet,
-  createXaiSubscriptionCredential,
-  disconnectXaiSubscriptionCredential,
   getScheduledTaskRunAcceptedExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
   getScheduledTask,
@@ -55,7 +53,6 @@ import {
   requireSession,
   setVariableSetVariable,
   setInitialActiveClaudeCredential,
-  setInitialActiveXaiCredential,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
@@ -340,7 +337,7 @@ async function claimedCommonVariableSetRun(
 
 describe("scheduled task personal MCP authority", () => {
   test.each(["organization", "personal"] as const)(
-    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude and SuperGrok %s pool snapshots into the generated turn",
+    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude %s pool snapshot and SuperGrok's default v1 carrier into the generated turn",
     async (scope) => {
       if (!available) return;
       const workspace = await workspaceFixture();
@@ -354,7 +351,9 @@ describe("scheduled task personal MCP authority", () => {
             scope: "user";
             authorityGeneration: number;
           };
-      let xaiSnapshot: typeof claudeSnapshot;
+      // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
+      // workspace default, never computed from live pools, and copied verbatim.
+      const xaiSnapshot = { version: 1, scope: "workspace" } as const;
       if (scope === "personal") {
         await admin`insert into workspace_memberships (
         account_id, workspace_id, subject_id, role, permissions
@@ -383,24 +382,9 @@ describe("scheduled task personal MCP authority", () => {
           authoritySnapshot: claude.authoritySnapshot,
           credentialId: claude.account.id,
         });
-        const xai = await createXaiSubscriptionCredential(client.db, {
-          ...workspace,
-          scope: "user",
-          encryptionKey: new Uint8Array(32).fill(23),
-          secret: { version: 1, accessToken: "scheduled-personal-access" },
-          providerAccountId: `scheduled-personal-${crypto.randomUUID()}`,
-        });
-        await setInitialActiveXaiCredential(client.db, {
-          ...workspace,
-          authoritySnapshot: xai.authoritySnapshot,
-          credentialId: xai.account.id,
-        });
         claudeSnapshot = claude.authoritySnapshot;
-        xaiSnapshot = xai.authoritySnapshot;
-        expect(xaiSnapshot).toEqual(claudeSnapshot);
       } else {
         claudeSnapshot = { version: 1, scope: "organization" };
-        xaiSnapshot = claudeSnapshot;
       }
       const task = await createScheduledTask(client.db, {
         ...workspace,
@@ -418,7 +402,6 @@ describe("scheduled task personal MCP authority", () => {
           tools: [],
           metadata: {},
         },
-        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
         claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
         metadata: {},
       });
@@ -437,7 +420,6 @@ describe("scheduled task personal MCP authority", () => {
       select accepted_execution_snapshot from scheduled_task_runs
       where workspace_id = ${workspace.workspaceId} and session_id = ${dispatched.sessionId}`;
       expect(run?.accepted_execution_snapshot).toMatchObject({
-        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
         claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
       });
       const [session] = await admin<

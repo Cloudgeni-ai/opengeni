@@ -804,7 +804,8 @@ existing environments encryption key, and start only binaries that carry the
 organization is born with an enabled Codex cutover row; turning it off is
 fail-closed maintenance, never the legacy tables. M3 PR 4 removes the runtime
 legacy selector, stores and no-row fallback; a missing gate also fails closed.
-Run `bun run check:no-legacy-codex-runtime` after subscription changes. Keep the
+Run `bun run check:no-legacy-subscription-runtime` after subscription changes
+(one entry per retired provider in `scripts/legacy-subscription-runtime/`). Keep the
 codec-aware migration, schema/posture history, reset-redemption live ledger and
 Temporal names/omitted-provider decoding. Historical fixtures are test-only.
 Source merge is not activation: the PR 4 binary requires drained 0689 receipt

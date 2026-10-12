@@ -1,7 +1,7 @@
 /** TEST ONLY: historical Codex regression fixture, snapshot 8c43a921512078d302f671ae590d43645669f88d. Never import from production. */
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 
-import { requestSessionTurnRecovery, getSessionGoal, armXaiCapacityWait, armClaudeCapacityWait, reconcileClaudeCapacityWait, recordClaudeAccountUsage, resolveClaudeAccountCredential, loadClaudeAccountCredential, ClaudeSubscriptionConnectionChanged, reconcileXaiCapacityWait, recordUsageEvent, getActiveSessionHistoryItemsPaged, readLease, SandboxLeaseSupersededError, isSessionEventPersistenceError, SANDBOX_SETUP_RECOVERY_LIMIT, SubscriptionCoreCodexAccessLostError, SubscriptionCoreCodexLeaseLostError, type CodexLeaseAccountStatus } from "@opengeni/db";
+import { requestSessionTurnRecovery, getSessionGoal, armClaudeCapacityWait, reconcileClaudeCapacityWait, recordClaudeAccountUsage, resolveClaudeAccountCredential, loadClaudeAccountCredential, ClaudeSubscriptionConnectionChanged, recordUsageEvent, getActiveSessionHistoryItemsPaged, readLease, SandboxLeaseSupersededError, isSessionEventPersistenceError, SANDBOX_SETUP_RECOVERY_LIMIT, SubscriptionCoreCodexAccessLostError, SubscriptionCoreCodexLeaseLostError, type CodexLeaseAccountStatus } from "@opengeni/db";
 import { listCodexAccountStatuses, quarantineCodexCredentialForLease, recheckCodexCredentialPlan, settleCodexCredentialLeaseLoss, settleCodexCredentialFailover } from "../../../../../packages/db/test/fixtures/legacy-codex";
 
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -85,7 +85,6 @@ import {
   sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
-  classifyXaiCredentialFailure,
   classifyClaudeCredentialFailure,
   agentRunFailurePayload,
   agentRunRecoveryFailurePayload,
@@ -1554,28 +1553,20 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       }
     }
   }
-  const xaiFailure =
-    billingState.isXaiTurn && providerTurn.effectiveXaiCredentialId
-      ? classifyXaiCredentialFailure(error)
-      : null;
+  // X4: the SuperGrok arm of this historical snapshot was removed with the
+  // legacy SuperGrok runtime; only its Claude arm remains.
   const claudeFailure =
     billingState.isClaudeTurn && providerTurn.effectiveClaudeCredentialId
       ? classifyClaudeCredentialFailure(error)
       : null;
-  const scopedFailure = claudeFailure ?? xaiFailure;
-  const scopedProvider = claudeFailure ? ("claude" as const) : ("xai" as const);
-  const scopedName = claudeFailure ? "Claude" : "SuperGrok";
-  const scopedCredentialId = claudeFailure
-    ? providerTurn.effectiveClaudeCredentialId
-    : providerTurn.effectiveXaiCredentialId;
-  const scopedAuthority = claudeFailure
-    ? providerTurn.claudeAuthoritySnapshot
-    : providerTurn.xaiAuthoritySnapshot;
-  const scopedLease = claudeFailure ? leases.claude : leases.xai;
-  const armScopedWait = claudeFailure ? armClaudeCapacityWait : armXaiCapacityWait;
-  const reconcileScopedWait = claudeFailure
-    ? reconcileClaudeCapacityWait
-    : reconcileXaiCapacityWait;
+  const scopedFailure = claudeFailure;
+  const scopedProvider = "claude" as const;
+  const scopedName = "Claude";
+  const scopedCredentialId = providerTurn.effectiveClaudeCredentialId;
+  const scopedAuthority = providerTurn.claudeAuthoritySnapshot;
+  const scopedLease = leases.claude;
+  const armScopedWait = armClaudeCapacityWait;
+  const reconcileScopedWait = reconcileClaudeCapacityWait;
   if (
     scopedFailure &&
     scopedCredentialId &&
@@ -1840,7 +1831,6 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     }
     if (armed.action === "waiting") {
       scopedLease.held = false;
-      if (!claudeFailure) providerTurn.xaiCredentialQuarantined = true;
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
       const evaluated = await reconcileScopedWait(db, {
         accountId: input.accountId,

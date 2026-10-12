@@ -188,7 +188,7 @@ async function generation(org: Org, provider: string): Promise<number> {
 }
 
 let org: Org | null = null;
-/** The owner's acceptance before the receipt, with the legacy organization pool. */
+/** The owner's acceptance before the receipt, next to a live legacy organization pool. */
 let beforeReceipt: { v2: unknown; xai: unknown } | null = null;
 
 beforeAll(async () => {
@@ -235,8 +235,10 @@ describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () =
     expect(realRegistry.subscriptionCoreProviderIds()).toEqual(["codex", "xai"]);
   });
 
-  test("before the receipt the legacy v1 value came from live state", () => {
-    expect(beforeReceipt!.xai).toEqual({ version: 1, scope: "organization" });
+  test("even before the receipt, acceptance writes xai's v1 default, never live state", () => {
+    // The legacy runtime that derived it from the live organization pool is
+    // deleted (M4 X4); the carrier keeps only its column default.
+    expect(beforeReceipt!.xai).toEqual({ version: 1, scope: "workspace" });
   });
 
   test("a personal connection exists only in the person's own Personal workspace", async () => {

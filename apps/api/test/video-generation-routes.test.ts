@@ -5,7 +5,7 @@ import {
   bootstrapWorkspace,
   createConnection,
   createDb,
-  createXaiSubscriptionCredential,
+  connectSubscriptionCoreXaiConnection,
   deleteWorkspace,
   type DbClient,
 } from "@opengeni/db";
@@ -26,10 +26,7 @@ let client: DbClient;
 let app: Hono;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("video-generation-routes", {
-    // Characterizes the legacy SuperGrok runtime before its drained cutover.
-    withheldMigrations: ["0738_subscription_core_xai_cutover.sql"],
-  });
+  shared = await acquireSharedTestDatabase("video-generation-routes");
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   client = createDb(shared.appUrl, { max: 2 });
   app = new Hono();
@@ -279,16 +276,28 @@ describe("video generation workspace routes", () => {
       }),
     } as ApiRouteDeps);
     try {
-      await createXaiSubscriptionCredential(client.db, {
+      // A shared SuperGrok connection on the core (the only SuperGrok runtime),
+      // connected by an organization owner.
+      const [personal] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${workspace.accountId}, 'Personal') returning id`;
+      await shared!.admin`
+        insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+        values (${workspace.accountId}, ${workspace.subjectId}, 'owner', 'active', ${personal!.id})
+        on conflict do nothing`;
+      const connected = await connectSubscriptionCoreXaiConnection(client.db, {
         accountId: workspace.accountId,
         workspaceId: workspace.workspaceId,
         subjectId: workspace.subjectId,
-        scope: "workspace",
         encryptionKey: Buffer.alloc(32, 9),
-        secret: { version: 1, accessToken: "supergrok-video-test-token" },
-        providerAccountId: `supergrok-video-${crypto.randomUUID()}`,
+        tokens: { accessToken: "supergrok-video-test-token", refreshToken: "refresh" },
+        identitySubject: `supergrok-video-${crypto.randomUUID()}`,
+        accountEmail: null,
         label: "SuperGrok video test",
+        expiresAt: new Date(Date.now() + 86_400_000),
+        connectedBySubjectId: workspace.subjectId,
       });
+      expect(connected.kind).toBe("connected");
 
       const authorization = await bearer(workspace, ["workspace:read", "workspace:admin"]);
       const initial = await supergrokApp.request(settingsUrl(workspace.workspaceId), {
@@ -334,6 +343,12 @@ describe("video generation workspace routes", () => {
         },
       });
     } finally {
+      // Test cleanup only: the shared connection's owner-only scope guard
+      // would refuse the workspace cascade under the application role.
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`delete from subscription_connections where account_id = ${workspace.accountId}`;
+      });
       await deleteWorkspace(client.db, workspace.workspaceId);
     }
   });

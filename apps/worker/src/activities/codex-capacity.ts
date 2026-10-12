@@ -1,15 +1,10 @@
 import {
   getSubscriptionCoreCapacityWaitForSession,
   subscriptionCoreCapacityWaitRef,
-  getXaiCapacityWaitForSession,
   getClaudeCapacityWaitForSession,
-  resolveClaudeWaiterSubject,
   reconcileClaudeCapacityWait as reconcileClaudeCapacityWaitDb,
-  resolveXaiWaiterSubject,
-  reconcileXaiCapacityWait as reconcileXaiCapacityWaitDb,
 } from "@opengeni/db";
 
-import { refreshExhaustedXaiQuota } from "./xai-quota";
 import {
   reconcileCoreCapacityWait,
   reconcileCoreCodexCapacityWait,
@@ -38,18 +33,10 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       input.sessionId,
     );
     if (coreWaiter) return subscriptionCoreCapacityWaitRef(coreWaiter);
-    const xaiWaiter = await getXaiCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    const claudeWaiter = xaiWaiter
-      ? null
-      : await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    const waiter = xaiWaiter ?? claudeWaiter;
+    const waiter = await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
     return waiter
       ? {
-          ...(xaiWaiter
-            ? { provider: "xai" as const }
-            : claudeWaiter
-              ? { provider: "claude" as const }
-              : {}),
+          provider: "claude" as const,
           waiterId: waiter.id,
           generation: waiter.generation,
           // A capacity mutation may have committed while its Temporal signal
@@ -87,28 +74,16 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       );
       if (core) return core;
     }
-    if (input.provider === "xai" || input.provider === "claude") {
-      const claude = input.provider === "claude";
-      const getWaiter = claude ? getClaudeCapacityWaitForSession : getXaiCapacityWaitForSession;
-      const resolveAuthority = claude ? resolveClaudeWaiterSubject : resolveXaiWaiterSubject;
-      const reconcile = claude ? reconcileClaudeCapacityWaitDb : reconcileXaiCapacityWaitDb;
-      const current = await getWaiter(resolved.db, input.workspaceId, input.sessionId);
+    if (input.provider === "claude") {
+      const current = await getClaudeCapacityWaitForSession(
+        resolved.db,
+        input.workspaceId,
+        input.sessionId,
+      );
       if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
         return { action: "stale" };
       }
-      const authority = await resolveAuthority(resolved.db, input.workspaceId, input.sessionId);
-      if (authority && !claude)
-        await refreshExhaustedXaiQuota({
-          db: resolved.db,
-          settings: resolved.settings,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: authority.turnId,
-          subjectId: authority.subjectId,
-          authoritySnapshot: authority.snapshot,
-        });
-      const result = await reconcile(resolved.db, {
+      const result = await reconcileClaudeCapacityWaitDb(resolved.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

@@ -1,10 +1,10 @@
 /**
  * SuperGrok consumers outside chat by the organization's SuperGrok route
  * (design 5.3, X2a): transcription, realtime, the video/transcription
- * availability and the status probe. Without the cutover receipt every
- * consumer keeps its legacy path; after it, only shared connections serve
- * (decision 3), nothing writes the session binding or legacy pin
- * (decision 6), and a maintenance hold fails closed. The core runtime is
+ * availability and the status probe. The legacy SuperGrok path was deleted
+ * (M4 X4): only shared connections serve (decision 3), nothing writes the
+ * session binding or legacy pin (decision 6), and any non-core route (a
+ * maintenance hold, or a database without the receipt) fails closed. The core runtime is
  * scripted here; its SQL authority is the db package's real-PostgreSQL suite.
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test";
@@ -90,21 +90,6 @@ mock.module("@opengeni/db", () => ({
       return probe;
     },
   }),
-  workspaceXaiSubscriptionActive: async () => {
-    calls.push("legacy:active");
-    return true;
-  },
-  getXaiSessionAccountPin: async () => {
-    calls.push("legacy:pin-read");
-    return null;
-  },
-  setXaiSessionAccountPin: async () => {
-    throw new Error("the legacy pin must not be written");
-  },
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance: async () => {
-    calls.push("legacy:authority");
-    throw new Error("legacy path reached");
-  },
   subscriptionCoreOperationConnections: () => ({
     listSubscriptionCoreOperationCandidates: async (
       _db: unknown,
@@ -225,6 +210,29 @@ describe("SuperGrok transcription by route", () => {
     ]);
   });
 
+  test("core: a 403 bad-credentials answer refreshes once through the core seam and retries", async () => {
+    let first = true;
+    upstream = async () => {
+      if (first) {
+        first = false;
+        return Response.json(
+          {
+            error:
+              "The OAuth2 access token could not be validated. [WKE=unauthenticated:bad-credentials]",
+          },
+          { status: 403 },
+        );
+      }
+      return Response.json({ text: "again" });
+    };
+    expect(await transcribe()).toEqual({ text: "again", languages: [] });
+    expect(calls.slice(-3)).toEqual([
+      "fetch:Bearer core-access-1",
+      "refresh:core",
+      "fetch:Bearer core-access-2",
+    ]);
+  });
+
   test("core without a shared candidate and maintenance are final, never a fallback", async () => {
     candidates = [];
     await expect(transcribe()).rejects.toMatchObject({ code: "unavailable", fallbackSafe: false });
@@ -234,11 +242,17 @@ describe("SuperGrok transcription by route", () => {
     expect(calls).toEqual(["route:xai"]);
   });
 
-  test("availability: legacy keeps its check, core needs a shared candidate, maintenance is off", async () => {
+  test("legacy transcription fails closed exactly as maintenance", async () => {
+    route = "legacy";
+    await expect(transcribe()).rejects.toMatchObject({ code: "unavailable", fallbackSafe: false });
+    expect(calls).toEqual(["route:xai"]);
+  });
+
+  test("availability: core needs a shared candidate; legacy and maintenance are off", async () => {
     const input = { accountId: ACCOUNT, workspaceId: WORKSPACE, subjectId: "user:caller" };
     route = "legacy";
-    expect(await workspaceXaiOperationAvailable({} as never, settings, input)).toBe(true);
-    expect(calls).toEqual(["route:xai", "legacy:active"]);
+    expect(await workspaceXaiOperationAvailable({} as never, settings, input)).toBe(false);
+    expect(calls).toEqual(["route:xai"]);
     route = "core";
     candidates = [];
     expect(await workspaceXaiOperationAvailable({} as never, settings, input)).toBe(false);
@@ -261,11 +275,14 @@ describe("SuperGrok realtime by route", () => {
       model: SUPERGROK_REALTIME_MODEL_ID,
     } as never);
 
-  test("maintenance fails closed before any credential read", async () => {
-    route = "maintenance";
-    await expect(create()).rejects.toBeInstanceOf(XaiRealtimeBrokerError);
-    expect(calls.filter((call) => !call.startsWith("route:"))).toEqual([]);
-  });
+  test.each(["maintenance", "legacy"] as const)(
+    "%s fails closed before any credential read",
+    async (closed) => {
+      route = closed;
+      await expect(create()).rejects.toBeInstanceOf(XaiRealtimeBrokerError);
+      expect(calls.filter((call) => !call.startsWith("route:"))).toEqual([]);
+    },
+  );
 
   test("core: the session owner's shared candidates under a realtime lease; no pin or binding", async () => {
     upstream = async () => Response.json({ value: "secret", expires_at: 1 });
@@ -273,7 +290,6 @@ describe("SuperGrok realtime by route", () => {
     expect(secret).toMatchObject({ token: "secret" });
     expect(calls).toContain("candidates:session:user:owner");
     expect(calls).toContain(`lease:realtime:session:${SHARED}`);
-    expect(calls.some((call) => call.startsWith("legacy:"))).toBe(false);
   });
 
   test("core with SuperGrok subscriptions disabled for the deployment reads no credential", async () => {
@@ -310,9 +326,9 @@ describe("SuperGrok status by route", () => {
       },
     );
 
-  test("legacy returns null so the route keeps the legacy status", async () => {
+  test("legacy reports nothing usable, exactly as maintenance", async () => {
     route = "legacy";
-    expect(await read()).toBeNull();
+    expect(await read()).toEqual({ connected: false, valid: false, accountCount: 0 });
   });
 
   test("core validates the effective primary with one live model read", async () => {

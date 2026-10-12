@@ -27,9 +27,7 @@ import {
   createDb,
   createScheduledTask,
   createSession,
-  createXaiSubscriptionCredential,
   disconnectClaudeSubscriptionAccount,
-  disconnectXaiSubscriptionCredential,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
   sendAgentMessageInTransaction,
@@ -41,6 +39,12 @@ import {
   type DbClient,
 } from "../src";
 import { rawRows } from "../src/database";
+// 0717 is applied before the SuperGrok cutover, so its pre-cutover SuperGrok
+// rows are written with the test-only snapshot of the deleted legacy writers.
+import {
+  createXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredential,
+} from "./fixtures/legacy-xai";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { subscriptionAuthorityCompatForCarriersInTransaction } from "../src/subscription-core-acceptance-authority";
@@ -767,6 +771,50 @@ describe.skipIf(!realDb)("0717 subscription authority fences", () => {
           from pg_roles where rolname = current_user`,
     );
     expect(identity).toEqual({ role: "opengeni_app", superuser: false, bypass: false });
+  });
+
+  test("the SuperGrok v1 carriers keep their NOT NULL workspace default and immutability triggers", async () => {
+    // New work writes the v1 default and derived rows copy it verbatim
+    // (design 5.3, v1 columns after a provider's cutover); the fences
+    // compare those copies, so both the default and the triggers must stay.
+    const columns = await database!.admin<
+      { tableName: string; nullable: string; columnDefault: string | null }[]
+    >`
+      select table_name as "tableName", is_nullable as nullable,
+        column_default as "columnDefault"
+      from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = any(array[
+          'session_turns', 'scheduled_tasks', 'session_system_updates',
+          'session_system_update_outbox'
+        ]::text[])
+        and column_name = 'xai_provider_account_authority_snapshot'
+      order by table_name`;
+    expect(columns).toHaveLength(4);
+    for (const column of columns) {
+      expect(column.nullable).toBe("NO");
+      expect(column.columnDefault).toContain('"scope": "workspace"');
+    }
+    const triggers = await database!.admin<{ name: string }[]>`
+      select trigger.tgname::text as name
+      from pg_trigger trigger
+      join pg_class relation on relation.oid = trigger.tgrelid
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      where namespace.nspname = current_schema()
+        and trigger.tgname = any(array[
+          'session_turns_xai_authority_snapshot_immutable_trg',
+          'scheduled_tasks_xai_authority_snapshot_immutable_trg',
+          'session_system_updates_xai_authority_snapshot_immutable_trg',
+          'system_update_outbox_xai_snapshot_immutable_trg'
+        ]::text[])
+        and not trigger.tgisinternal and trigger.tgenabled <> 'D'
+      order by 1`;
+    expect(triggers.map((trigger) => trigger.name)).toEqual([
+      "scheduled_tasks_xai_authority_snapshot_immutable_trg",
+      "session_system_updates_xai_authority_snapshot_immutable_trg",
+      "session_turns_xai_authority_snapshot_immutable_trg",
+      "system_update_outbox_xai_snapshot_immutable_trg",
+    ]);
   });
 
   test("helpers are owner-only, definer fences search pg_temp last, the callers inherit the live check", async () => {

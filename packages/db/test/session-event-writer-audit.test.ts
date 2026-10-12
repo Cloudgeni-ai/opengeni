@@ -142,16 +142,16 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#armXaiCapacityWait": {
+  "packages/db/src/index.ts#armScopedCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#supersedeXaiCapacityWaitInTransaction": {
+  "packages/db/src/index.ts#supersedeScopedCapacityWaitInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#reconcileXaiCapacityWait": {
+  "packages/db/src/index.ts#reconcileScopedCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -395,7 +395,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
     "reconcileSubscriptionCoreCapacityWait",
   ],
-  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
+  supersedeScopedCapacityWaitInTransaction: ["reconcileScopedCapacityWait"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   recordSessionAttemptQuiescenceInTransaction: [
     "commitSessionAttemptQuiescence",
@@ -408,7 +408,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armSubscriptionCoreCapacityWait",
-    "armXaiCapacityWait",
+    "armScopedCapacityWait",
     "cancelSessionSubtreeInTransaction",
     "failSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
@@ -479,7 +479,7 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "failSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait", "armXaiCapacityWait"],
+  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait", "armScopedCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
@@ -905,7 +905,9 @@ function subscriptionWaiterBindings(): Map<string, string[]> {
     visit(sourceFile.program);
   }
   for (const [factory, tables] of factories) {
-    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters", "xai_capacity_waiters"]);
+    // SuperGrok's legacy waiter instance was deleted with its runtime (M4 X4);
+    // its table is read-only after the 0721 receipt.
+    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters"]);
   }
   return factories;
 }
@@ -1296,9 +1298,12 @@ describe("session_events writer inventory", () => {
       };
       visit(sourceFile.program);
     }
-    // The legacy Codex waiter table stays fenced in the database, but the
-    // retired runtime no longer writes it from TypeScript.
-    const retiredTables = new Set<string>([tenancyQuiescenceTables.codexCapacityWaiters]);
+    // The legacy Codex and SuperGrok waiter tables stay fenced in the database,
+    // but the retired runtimes no longer write them from TypeScript.
+    const retiredTables = new Set<string>([
+      tenancyQuiescenceTables.codexCapacityWaiters,
+      tenancyQuiescenceTables.xaiCapacityWaiters,
+    ]);
     expect([...discovered].sort()).toEqual(
       Object.values(tenancyQuiescenceTables)
         .filter((table) => !retiredTables.has(table))

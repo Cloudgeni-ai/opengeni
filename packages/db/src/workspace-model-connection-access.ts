@@ -11,15 +11,9 @@ import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
 } from "@opengeni/config";
-import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { connections } from "./schema";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
-import {
-  listXaiSubscriptionAccountsMetadata,
-  getXaiRotationSettings,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-} from "./xai-subscription";
 import { connectionModelAllowed } from "./model-connection-access";
 
 export type ConnectionModelRestrictions = Record<string, string[] | null>;
@@ -60,7 +54,11 @@ async function listDirectModelConnections(db: Database, workspaceId: string, sub
   );
 }
 
-/** Public model-id restrictions only. Never returns connection or private owner identifiers. */
+/**
+ * Public model-id restrictions only. Never returns connection or private owner
+ * identifiers. `supergrok/` is closed here: SuperGrok runs only on the shared
+ * core, whose readiness projection replaces it (`withCoreRoutedXaiRestriction`).
+ */
 export async function getWorkspaceConnectionModelRestrictions(
   db: Database,
   workspaceId: string,
@@ -70,7 +68,6 @@ export async function getWorkspaceConnectionModelRestrictions(
     allocatorEnabled: boolean;
     allowedModelIds?: string[] | null;
   }>,
-  authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
   /**
    * Claude's restrictions on its core route (design 5.3, C2a): when given,
@@ -78,19 +75,6 @@ export async function getWorkspaceConnectionModelRestrictions(
    */
   claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
 ): Promise<ConnectionModelRestrictions> {
-  const [xai, xaiAuthority] = await Promise.all([
-    listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
-    authoritySnapshot ??
-      resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
-        workspaceId,
-        subjectId,
-      }),
-  ]);
-  const xaiRotation = await getXaiRotationSettings(db, {
-    workspaceId,
-    subjectId,
-    authoritySnapshot: xaiAuthority,
-  });
   const union = (rows: Array<{ allowedModelIds?: string[] | null }>) =>
     rows.some((row) => row.allowedModelIds == null)
       ? null
@@ -134,15 +118,7 @@ export async function getWorkspaceConnectionModelRestrictions(
   }
   const restrictions: ConnectionModelRestrictions = {
     "codex/": union(codex.filter((row) => row.status === "active" && row.allocatorEnabled)),
-    "supergrok/": union(
-      xai.filter(
-        (row) =>
-          row.scope === xaiAuthority.scope &&
-          row.status === "active" &&
-          row.allocatorEnabled &&
-          (xaiRotation?.rotationEnabled || row.id === xaiRotation?.activeCredentialId),
-      ),
-    ),
+    "supergrok/": [],
     "workspace-gateway/": [],
     "workspace-openrouter/": [],
     "workspace-opper/": [],
@@ -208,7 +184,6 @@ export async function assertModelConnectionAllowsTurn(
     subjectId: string;
     modelId: string;
     codexCredentialId?: string | null;
-    xaiCredentialId?: string | null;
     claudeCredentialId?: string | null;
     claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
     workspaceProviderConnectionId?: string;
@@ -246,14 +221,11 @@ export async function assertModelConnectionAllowsTurn(
     query = sql`SELECT c.allowed_model_ids AS models FROM claude_subscription_credentials c
       JOIN revalidate_claude_subscription_authority(${input.workspaceId}::uuid, ${input.subjectId}, ${input.claudeCredentialId}::uuid, ${JSON.stringify(snapshot)}::jsonb) a ON a.id = c.id
       WHERE c.id = ${input.claudeCredentialId}::uuid AND c.status = 'active'`;
-  } else if (model.startsWith("codex/")) {
-    // Codex must already have passed the exact core placement/lease boundary.
-    // Reaching this legacy-provider helper is not authority to dispatch it.
-    throw new Error("Codex model access requires shared-core placement");
-  } else if (model.startsWith("supergrok/")) {
-    const id = input.xaiCredentialId;
-    if (!id) throw new Error("No subscription is available for this model");
-    query = sql`SELECT allowed_model_ids AS models FROM xai_subscription_credentials WHERE id = ${id}::uuid`;
+  } else if (model.startsWith("codex/") || model.startsWith("supergrok/")) {
+    // Codex and SuperGrok must already have passed the exact core
+    // placement/lease boundary. Reaching this legacy-provider helper is not
+    // authority to dispatch them.
+    throw new Error("Codex and SuperGrok model access requires shared-core placement");
   } else if (
     model.startsWith("organization-gateway/") ||
     model.startsWith("organization-openrouter/") ||

@@ -2,7 +2,8 @@
  * Shadow comparison of the shared subscription core at turn placement
  * (docs/design/subscription-core-2026-10-07.md step M1, SUB-COMPAT-03).
  *
- * After the legacy Claude or SuperGrok selection has decided, the
+ * After the legacy Claude selection has decided (SuperGrok's legacy
+ * selection and its shadow were deleted after its cutover, M4 X4), the
  * worker loads a read-only legacy world for the same session and turn, runs
  * the core's placement on it and records only content-free data:
  *

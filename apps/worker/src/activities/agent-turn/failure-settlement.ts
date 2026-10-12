@@ -2,14 +2,12 @@ import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   requestSessionTurnRecovery,
   getSessionGoal,
-  armXaiCapacityWait,
   armClaudeCapacityWait,
   reconcileClaudeCapacityWait,
   recordClaudeAccountUsage,
   resolveClaudeAccountCredential,
   loadClaudeAccountCredential,
   ClaudeSubscriptionConnectionChanged,
-  reconcileXaiCapacityWait,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
   readLease,
@@ -80,7 +78,6 @@ import {
   sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
-  classifyXaiCredentialFailure,
   classifyClaudeCredentialFailure,
   agentRunFailurePayload,
   agentRunRecoveryFailurePayload,
@@ -715,13 +712,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   const xaiLeaseRecoverable =
     billingState.isXaiTurn &&
     leases.xai.lost &&
-    (!coreXai ||
-      (!coreRequestOutcomeUnknown &&
-        eventing.turnStartedPublished &&
-        (await xaiCoreLanesRecoverAfterCheckpoint(coreXai, async () => {
-          await flushRuntimeBatcher();
-          await historySink.reconcileConversationTruth({ requireDurable: true });
-        }))));
+    coreXai !== null &&
+    !coreRequestOutcomeUnknown &&
+    eventing.turnStartedPublished &&
+    (await xaiCoreLanesRecoverAfterCheckpoint(coreXai, async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    }));
   // The same for a core Claude turn.
   const claudeLeaseRecoverable =
     billingState.isClaudeTurn &&
@@ -860,28 +857,20 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     if (settled.result) return settled.result;
     coreClaudeRefusal = settled.failure;
   }
-  const xaiFailure =
-    billingState.isXaiTurn && !coreXai && providerTurn.effectiveXaiCredentialId
-      ? classifyXaiCredentialFailure(error)
-      : null;
   const claudeFailure =
     billingState.isClaudeTurn && !coreClaude && providerTurn.effectiveClaudeCredentialId
       ? classifyClaudeCredentialFailure(error)
       : null;
-  const scopedFailure = claudeFailure ?? xaiFailure;
-  const scopedProvider = claudeFailure ? ("claude" as const) : ("xai" as const);
-  const scopedName = claudeFailure ? "Claude" : "SuperGrok";
-  const scopedCredentialId = claudeFailure
-    ? providerTurn.effectiveClaudeCredentialId
-    : providerTurn.effectiveXaiCredentialId;
-  const scopedAuthority = claudeFailure
-    ? providerTurn.claudeAuthoritySnapshot
-    : providerTurn.xaiAuthoritySnapshot;
-  const scopedLease = claudeFailure ? leases.claude : leases.xai;
-  const armScopedWait = claudeFailure ? armClaudeCapacityWait : armXaiCapacityWait;
-  const reconcileScopedWait = claudeFailure
-    ? reconcileClaudeCapacityWait
-    : reconcileXaiCapacityWait;
+  // Only Claude still settles account refusals through the scoped legacy
+  // capacity wait; SuperGrok refusals settle on the shared core above.
+  const scopedFailure = claudeFailure;
+  const scopedProvider = "claude" as const;
+  const scopedName = "Claude";
+  const scopedCredentialId = providerTurn.effectiveClaudeCredentialId;
+  const scopedAuthority = providerTurn.claudeAuthoritySnapshot;
+  const scopedLease = leases.claude;
+  const armScopedWait = armClaudeCapacityWait;
+  const reconcileScopedWait = reconcileClaudeCapacityWait;
   if (
     scopedFailure &&
     scopedCredentialId &&
@@ -1146,7 +1135,6 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     }
     if (armed.action === "waiting") {
       scopedLease.held = false;
-      if (!claudeFailure) providerTurn.xaiCredentialQuarantined = true;
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
       const evaluated = await reconcileScopedWait(db, {
         accountId: input.accountId,

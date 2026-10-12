@@ -528,7 +528,6 @@ import {
   type ModelConnectionAccess,
   type ModelConnectionTarget,
 } from "./model-connection-access";
-import { withOrganizationXaiCapacityMutation } from "./organization-xai-subscriptions";
 import { withOrganizationClaudeCapacityMutation } from "./claude-subscription-accounts";
 export {
   assertModelConnectionAllowsTurn,
@@ -1162,8 +1161,6 @@ export * from "./video-generation";
 export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 export * from "./connection-authority";
-export * from "./xai-subscription";
-export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -1299,12 +1296,6 @@ import {
   type ConnectionTokenResolverOptions,
 } from "./connection-token-resolver";
 import { resolveAcceptedConnectionUse } from "./connection-authority";
-import {
-  xaiSubscriptionRepository,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
-  xaiCredentialWorkspacePredicate,
-  xaiRotationWorkspacePredicate,
-} from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
   value: unknown,
@@ -22138,10 +22129,6 @@ export async function updateSessionVariableSets(
             when exists (select 1 from subscription_capacity_waiters core_waiter
                 where core_waiter.workspace_id = ${input.workspaceId}::uuid
                   and core_waiter.session_id = ${input.sessionId}::uuid)
-              or exists (select 1 from ${schema.xaiCapacityWaiters} xai_waiter
-                where xai_waiter.workspace_id = ${input.workspaceId}
-                  and xai_waiter.session_id = ${input.sessionId}
-                  and xai_waiter.status = 'waiting')
               or exists (select 1 from ${schema.claudeCapacityWaiters} claude_waiter
                 where claude_waiter.workspace_id = ${input.workspaceId}
                   and claude_waiter.session_id = ${input.sessionId}
@@ -26530,10 +26517,12 @@ export async function wakeSubscriptionCoreProviderCapacityWaiters(
 }
 
 // ---------------------------------------------------------------------------
-// Durable xAI subscription capacity wait / wake state machine.
+// Durable scoped-subscription (legacy Claude) capacity wait / wake state
+// machine. SuperGrok's legacy instance was deleted with its runtime (M4 X4):
+// SuperGrok waits park on the shared core waiter.
 // ---------------------------------------------------------------------------
 
-export type XaiCapacityWait = {
+export type ScopedSubscriptionCapacityWait = {
   id: string;
   accountId: string;
   workspaceId: string;
@@ -26556,7 +26545,7 @@ export type XaiCapacityWait = {
   updatedAt: Date;
 };
 
-export type XaiCredentialLeaseQuarantine =
+export type ScopedSubscriptionCredentialLeaseQuarantine =
   | {
       kind: "status";
       status: "needs_relogin" | "error";
@@ -26564,16 +26553,16 @@ export type XaiCredentialLeaseQuarantine =
     }
   | { kind: "cooldown"; until: Date };
 
-export type ArmXaiCapacityWaitResult =
-  | { action: "waiting"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: XaiCapacityWait | null; events: SessionEvent[] };
+export type ArmScopedSubscriptionCapacityWaitResult =
+  | { action: "waiting"; waiter: ScopedSubscriptionCapacityWait; events: SessionEvent[] }
+  | { action: "stale"; waiter: ScopedSubscriptionCapacityWait | null; events: SessionEvent[] };
 
-export type ReconcileXaiCapacityWaitResult =
-  | { action: "waiting"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "resumed"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "paused"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "superseded"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: XaiCapacityWait | null; events: SessionEvent[] };
+export type ReconcileScopedSubscriptionCapacityWaitResult =
+  | { action: "waiting"; waiter: ScopedSubscriptionCapacityWait; events: SessionEvent[] }
+  | { action: "resumed"; waiter: ScopedSubscriptionCapacityWait; events: SessionEvent[] }
+  | { action: "paused"; waiter: ScopedSubscriptionCapacityWait; events: SessionEvent[] }
+  | { action: "superseded"; waiter: ScopedSubscriptionCapacityWait; events: SessionEvent[] }
+  | { action: "stale"; waiter: ScopedSubscriptionCapacityWait | null; events: SessionEvent[] };
 
 async function withTemporarySubjectRls<T>(
   tx: Database,
@@ -26610,19 +26599,21 @@ async function withTemporarySubjectRls<T>(
 
 /** Shared durable scoped-subscription waiter state machine. */
 function createScopedSubscriptionCapacityWaiters(options: {
-  provider: "xai" | "claude";
+  provider: "claude";
   label: string;
   wireProvider: string;
   workerSubject: string;
-  snapshotColumn: "xaiProviderAccountAuthoritySnapshot" | "claudeProviderAccountAuthoritySnapshot";
-  resolvePoolFunction: "resolve_xai_authority_pool" | "resolve_claude_authority_pool";
+  snapshotColumn: "claudeProviderAccountAuthoritySnapshot";
+  resolvePoolFunction: "resolve_claude_authority_pool";
   tables: import("./subscription-pool-schema").SubscriptionPoolTables;
-  rotationWorkspacePredicate: typeof xaiRotationWorkspacePredicate;
-  credentialWorkspacePredicate: typeof xaiCredentialWorkspacePredicate;
-  selectAvailable: typeof xaiSubscriptionRepository.selectSubscriptionCredentialForUse;
+  rotationWorkspacePredicate: typeof claudeSubscriptionAccountRepository.subscriptionRotationWorkspacePredicate;
+  credentialWorkspacePredicate: typeof claudeSubscriptionAccountRepository.subscriptionCredentialWorkspacePredicate;
+  selectAvailable: typeof claudeSubscriptionAccountRepository.selectSubscriptionCredentialForUse;
 }) {
   const { tables } = options;
-  function mapXaiCapacityWaiter(row: typeof tables.capacityWaiters.$inferSelect): XaiCapacityWait {
+  function mapScopedCapacityWaiter(
+    row: typeof tables.capacityWaiters.$inferSelect,
+  ): ScopedSubscriptionCapacityWait {
     return {
       id: row.id,
       accountId: row.accountId,
@@ -26647,13 +26638,13 @@ function createScopedSubscriptionCapacityWaiters(options: {
     };
   }
 
-  function xaiCapacityNextCheckAt(earliestResetAt: Date | null, now: Date): Date {
+  function scopedCapacityNextCheckAt(earliestResetAt: Date | null, now: Date): Date {
     return earliestResetAt && earliestResetAt.getTime() > now.getTime()
       ? new Date(Math.min(earliestResetAt.getTime(), now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS))
       : new Date(now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS);
   }
 
-  async function resolveXaiWaiterSubject(
+  async function resolveScopedWaiterSubject(
     db: Database,
     workspaceId: string,
     sessionId: string,
@@ -26695,11 +26686,11 @@ function createScopedSubscriptionCapacityWaiters(options: {
     });
   }
 
-  async function getXaiCapacityWaitForSessionInTransaction(
+  async function getScopedCapacityWaitForSessionInTransaction(
     tx: Database,
     workspaceId: string,
     sessionId: string,
-  ): Promise<XaiCapacityWait | null> {
+  ): Promise<ScopedSubscriptionCapacityWait | null> {
     const [turn] = await tx
       .select({
         id: schema.sessionTurns.id,
@@ -26750,13 +26741,13 @@ function createScopedSubscriptionCapacityWaiters(options: {
                 ),
               )
               .limit(1);
-            return row ? mapXaiCapacityWaiter(row) : null;
+            return row ? mapScopedCapacityWaiter(row) : null;
           },
         ),
     );
   }
 
-  async function resolveXaiPoolMembershipInTransaction(
+  async function resolveScopedPoolMembershipInTransaction(
     tx: Database,
     input: {
       accountId: string;
@@ -26779,7 +26770,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
     return rows[0]?.membership_id ?? null;
   }
 
-  function xaiSnapshotMatchesTurn(
+  function scopedSnapshotMatchesTurn(
     turn: typeof schema.sessionTurns.$inferSelect,
     snapshot: XaiProviderAccountAuthoritySnapshotV1,
     subjectId: string,
@@ -26820,7 +26811,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
    * private pools, exact initiating human are revalidated under FORCE RLS before
    * any session/turn projection changes.
    */
-  async function armXaiCapacityWait(
+  async function armScopedCapacityWait(
     db: Database,
     input: {
       accountId: string;
@@ -26836,12 +26827,12 @@ function createScopedSubscriptionCapacityWaiters(options: {
       earliestResetAt: Date | null;
       failurePayload: Record<string, unknown>;
       leaseFence?: { holderId: string; generation: number };
-      credentialQuarantine?: XaiCredentialLeaseQuarantine;
+      credentialQuarantine?: ScopedSubscriptionCredentialLeaseQuarantine;
       expectedCredentialVersion?: number;
       credentialTokenFence?: { encryptionKey: Uint8Array; observedAccessToken: string };
       now?: Date;
     },
-  ): Promise<ArmXaiCapacityWaitResult> {
+  ): Promise<ArmScopedSubscriptionCapacityWaitResult> {
     const now = input.now ?? new Date();
     const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
     const goalId = input.goalId ?? null;
@@ -26873,7 +26864,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
       snapshot,
       async (scopedDb) =>
         await withSessionActivitySavepoint(scopedDb, async (tx) => {
-          const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
+          const ownerOrganizationMembershipId = await resolveScopedPoolMembershipInTransaction(tx, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: input.subjectId,
@@ -26982,7 +26973,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
           if (!exactRowsMatch || !turn) {
             return {
               action: "stale",
-              waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+              waiter: existing ? mapScopedCapacityWaiter(existing) : null,
               events: [],
             } as const;
           }
@@ -26996,7 +26987,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
           ) {
             return {
               action: "waiting",
-              waiter: mapXaiCapacityWaiter(existing),
+              waiter: mapScopedCapacityWaiter(existing),
               events: [],
             } as const;
           }
@@ -27030,11 +27021,11 @@ function createScopedSubscriptionCapacityWaiters(options: {
               (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
             !leaseFenceValid ||
             !(await leaseStillLive()) ||
-            !xaiSnapshotMatchesTurn(turn, snapshot, input.subjectId)
+            !scopedSnapshotMatchesTurn(turn, snapshot, input.subjectId)
           ) {
             return {
               action: "stale",
-              waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+              waiter: existing ? mapScopedCapacityWaiter(existing) : null,
               events: [],
             } as const;
           }
@@ -27056,7 +27047,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
             if (!credential || !(await leaseStillLive()))
               return {
                 action: "stale",
-                waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                waiter: existing ? mapScopedCapacityWaiter(existing) : null,
                 events: [],
               } as const;
             if (options.provider === "claude" && input.credentialTokenFence) {
@@ -27075,7 +27066,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
               )
                 return {
                   action: "stale",
-                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                  waiter: existing ? mapScopedCapacityWaiter(existing) : null,
                   events: [],
                 } as const;
             }
@@ -27110,7 +27101,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
               if (input.leaseFence)
                 return {
                   action: "stale",
-                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                  waiter: existing ? mapScopedCapacityWaiter(existing) : null,
                   events: [],
                 } as const;
               throw new Error(options.label + " credential quarantine lost its credential fence");
@@ -27129,7 +27120,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
           });
           const generation = (existing?.generation ?? 0) + 1;
           const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
-          const nextCheckAt = xaiCapacityNextCheckAt(input.earliestResetAt, now);
+          const nextCheckAt = scopedCapacityNextCheckAt(input.earliestResetAt, now);
           const values = {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -27284,19 +27275,19 @@ function createScopedSubscriptionCapacityWaiters(options: {
           }
           return {
             action: "waiting",
-            waiter: mapXaiCapacityWaiter(waiterRow),
+            waiter: mapScopedCapacityWaiter(waiterRow),
             events: [...closedTools.events, ...inserted.map(mapEvent)],
           } as const;
         }),
     );
   }
 
-  async function getXaiCapacityWaitForSession(
+  async function getScopedCapacityWaitForSession(
     db: Database,
     workspaceId: string,
     sessionId: string,
-  ): Promise<XaiCapacityWait | null> {
-    const authority = await resolveXaiWaiterSubject(db, workspaceId, sessionId);
+  ): Promise<ScopedSubscriptionCapacityWait | null> {
+    const authority = await resolveScopedWaiterSubject(db, workspaceId, sessionId);
     if (!authority) return null;
     return await withSubscriptionPoolSessionAccess(
       db,
@@ -27315,12 +27306,12 @@ function createScopedSubscriptionCapacityWaiters(options: {
               ),
             )
             .limit(1);
-          return row ? mapXaiCapacityWaiter(row) : null;
+          return row ? mapScopedCapacityWaiter(row) : null;
         }),
     );
   }
 
-  async function supersedeXaiCapacityWaitInTransaction(
+  async function supersedeScopedCapacityWaitInTransaction(
     tx: SessionActivityDatabase,
     input: {
       session: typeof schema.sessions.$inferSelect;
@@ -27329,7 +27320,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
       reason: string;
       now: Date;
     },
-  ): Promise<{ waiter: XaiCapacityWait; events: SessionEvent[] }> {
+  ): Promise<{ waiter: ScopedSubscriptionCapacityWait; events: SessionEvent[] }> {
     const [updated] = await tx
       .update(tables.capacityWaiters)
       .set({
@@ -27345,7 +27336,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
         ),
       )
       .returning();
-    if (!updated) return { waiter: mapXaiCapacityWaiter(input.waiter), events: [] };
+    if (!updated) return { waiter: mapScopedCapacityWaiter(input.waiter), events: [] };
     const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
     const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
     if (input.blockedTurn.status === "waiting_capacity") {
@@ -27449,12 +27440,12 @@ function createScopedSubscriptionCapacityWaiters(options: {
     if (!updatedSession)
       throw new Error(options.label + " capacity session changed during supersession");
     return {
-      waiter: mapXaiCapacityWaiter(updated),
+      waiter: mapScopedCapacityWaiter(updated),
       events: inserted.map(mapEvent),
     };
   }
 
-  async function reconcileXaiCapacityWait(
+  async function reconcileScopedCapacityWait(
     db: Database,
     input: {
       accountId: string;
@@ -27464,9 +27455,9 @@ function createScopedSubscriptionCapacityWaiters(options: {
       generation: number;
       now?: Date;
     },
-  ): Promise<ReconcileXaiCapacityWaitResult> {
+  ): Promise<ReconcileScopedSubscriptionCapacityWaitResult> {
     const now = input.now ?? new Date();
-    const authority = await resolveXaiWaiterSubject(db, input.workspaceId, input.sessionId);
+    const authority = await resolveScopedWaiterSubject(db, input.workspaceId, input.sessionId);
     if (!authority) return { action: "stale", waiter: null, events: [] };
     return await withScopedCapacityWaiterRls(
       db,
@@ -27475,7 +27466,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
       authority.snapshot,
       async (scopedDb) =>
         await withSessionActivitySavepoint(scopedDb, async (tx) => {
-          const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
+          const ownerOrganizationMembershipId = await resolveScopedPoolMembershipInTransaction(tx, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: authority.subjectId,
@@ -27522,7 +27513,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
           if (!waiterRead || waiterRead.generation !== input.generation) {
             return {
               action: "stale",
-              waiter: waiterRead ? mapXaiCapacityWaiter(waiterRead) : null,
+              waiter: waiterRead ? mapScopedCapacityWaiter(waiterRead) : null,
               events: [],
             } as const;
           }
@@ -27576,14 +27567,14 @@ function createScopedSubscriptionCapacityWaiters(options: {
           ) {
             return {
               action: "stale",
-              waiter: waiter ? mapXaiCapacityWaiter(waiter) : null,
+              waiter: waiter ? mapScopedCapacityWaiter(waiter) : null,
               events: [],
             } as const;
           }
           if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
             return {
               action: "paused",
-              waiter: mapXaiCapacityWaiter(waiter),
+              waiter: mapScopedCapacityWaiter(waiter),
               events: [],
             } as const;
           }
@@ -27596,7 +27587,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
           ) {
             supersedeReason = "goal_changed";
           } else if (
-            !xaiSnapshotMatchesTurn(blockedTurn, authority.snapshot, authority.subjectId)
+            !scopedSnapshotMatchesTurn(blockedTurn, authority.snapshot, authority.subjectId)
           ) {
             supersedeReason = "provider_authority_changed";
           } else if (
@@ -27616,7 +27607,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
             supersedeReason = "blocked_turn_changed";
           }
           if (supersedeReason) {
-            const superseded = await supersedeXaiCapacityWaitInTransaction(tx, {
+            const superseded = await supersedeScopedCapacityWaitInTransaction(tx, {
               session,
               blockedTurn,
               waiter,
@@ -27674,7 +27665,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
               .update(tables.capacityWaiters)
               .set({
                 earliestResetAt,
-                nextCheckAt: xaiCapacityNextCheckAt(earliestResetAt, now),
+                nextCheckAt: scopedCapacityNextCheckAt(earliestResetAt, now),
                 observedWakeRevision: waiter.wakeRevision,
                 updatedAt: now,
               })
@@ -27689,7 +27680,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
             if (!updated) return { action: "stale", waiter: null, events: [] } as const;
             return {
               action: "waiting",
-              waiter: mapXaiCapacityWaiter(updated),
+              waiter: mapScopedCapacityWaiter(updated),
               events: [],
             } as const;
           }
@@ -27796,7 +27787,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
             throw new Error(options.label + " capacity session changed during resume");
           return {
             action: "resumed",
-            waiter: mapXaiCapacityWaiter(updatedWaiter),
+            waiter: mapScopedCapacityWaiter(updatedWaiter),
             events: inserted.map(mapEvent),
           } as const;
         }),
@@ -27804,31 +27795,13 @@ function createScopedSubscriptionCapacityWaiters(options: {
   }
 
   return {
-    resolveWaiterSubject: resolveXaiWaiterSubject,
-    getWaitForSessionInTransaction: getXaiCapacityWaitForSessionInTransaction,
-    armCapacityWait: armXaiCapacityWait,
-    getWaitForSession: getXaiCapacityWaitForSession,
-    reconcileCapacityWait: reconcileXaiCapacityWait,
+    resolveWaiterSubject: resolveScopedWaiterSubject,
+    getWaitForSessionInTransaction: getScopedCapacityWaitForSessionInTransaction,
+    armCapacityWait: armScopedCapacityWait,
+    getWaitForSession: getScopedCapacityWaitForSession,
+    reconcileCapacityWait: reconcileScopedCapacityWait,
   };
 }
-const xaiCapacityRepository = createScopedSubscriptionCapacityWaiters({
-  provider: "xai",
-  label: "SuperGrok",
-  wireProvider: "supergrok-subscription",
-  workerSubject: subscriptionPoolWorkerSubject("xai"),
-  snapshotColumn: "xaiProviderAccountAuthoritySnapshot",
-  resolvePoolFunction: "resolve_xai_authority_pool",
-  tables: {
-    credentials: schema.xaiSubscriptionCredentials,
-    rotationSettings: schema.xaiRotationSettings,
-    credentialLeases: schema.xaiCredentialLeases,
-    sessionAccountPins: schema.xaiSessionAccountPins,
-    capacityWaiters: schema.xaiCapacityWaiters,
-  },
-  rotationWorkspacePredicate: xaiRotationWorkspacePredicate,
-  credentialWorkspacePredicate: xaiCredentialWorkspacePredicate,
-  selectAvailable: xaiSubscriptionRepository.selectSubscriptionCredentialForUse,
-});
 const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
   provider: "claude",
   label: "Claude",
@@ -27844,25 +27817,17 @@ const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
   selectAvailable: claudeSubscriptionAccountRepository.selectSubscriptionCredentialForUse,
 });
 export const {
-  resolveWaiterSubject: resolveXaiWaiterSubject,
-  armCapacityWait: armXaiCapacityWait,
-  getWaitForSession: getXaiCapacityWaitForSession,
-  reconcileCapacityWait: reconcileXaiCapacityWait,
-} = xaiCapacityRepository;
-export const {
   resolveWaiterSubject: resolveClaudeWaiterSubject,
   armCapacityWait: armClaudeCapacityWait,
   getWaitForSession: getClaudeCapacityWaitForSession,
   reconcileCapacityWait: reconcileClaudeCapacityWait,
 } = claudeCapacityRepository;
-const getXaiCapacityWaitForSessionInTransaction =
-  xaiCapacityRepository.getWaitForSessionInTransaction;
 const getClaudeCapacityWaitForSessionInTransaction =
   claudeCapacityRepository.getWaitForSessionInTransaction;
-export type ClaudeCapacityWait = XaiCapacityWait;
-export type ArmClaudeCapacityWaitResult = ArmXaiCapacityWaitResult;
-export type ReconcileClaudeCapacityWaitResult = ReconcileXaiCapacityWaitResult;
-export type ClaudeCredentialLeaseQuarantine = XaiCredentialLeaseQuarantine;
+export type ClaudeCapacityWait = ScopedSubscriptionCapacityWait;
+export type ArmClaudeCapacityWaitResult = ArmScopedSubscriptionCapacityWaitResult;
+export type ReconcileClaudeCapacityWaitResult = ReconcileScopedSubscriptionCapacityWaitResult;
+export type ClaudeCredentialLeaseQuarantine = ScopedSubscriptionCredentialLeaseQuarantine;
 
 export type CodexCredentialLeaseQuarantine =
   | { kind: "included_usage"; until: Date }
@@ -27927,11 +27892,7 @@ export async function updateModelConnectionAccess(
         updateModelConnectionAccessPolicy(scopedDb, target, policy),
       );
     }
-    if (target.kind === "supergrok") {
-      return await withOrganizationXaiCapacityMutation(tx, actor, (scopedDb) =>
-        updateModelConnectionAccessPolicy(scopedDb, target, policy),
-      );
-    }
+    // Codex and SuperGrok access policies live on the shared core.
     return null;
   });
 }
@@ -27941,7 +27902,6 @@ export async function getWorkspaceConnectionModelRestrictions(
   db: Database,
   workspaceId: string,
   subjectId: string,
-  authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
   claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
 ) {
@@ -27950,7 +27910,6 @@ export async function getWorkspaceConnectionModelRestrictions(
     workspaceId,
     subjectId,
     await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
-    authoritySnapshot,
     claudeAuthoritySnapshot,
     claudeCoreRestrictions,
   );
@@ -32157,22 +32116,22 @@ async function createSessionInTransaction(
   const subjectCreatorId =
     frozenCreator.initiator.kind === "subject" && input.subjectId ? input.subjectId : null;
   const sharedCreatorPool =
-    !subjectCreatorId &&
-    (input.initialXaiProviderAccountAuthoritySnapshot === undefined ||
-      input.initialClaudeProviderAccountAuthoritySnapshot === undefined)
+    !subjectCreatorId && input.initialClaudeProviderAccountAuthoritySnapshot === undefined
       ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(tx, input.workspaceId)
       : null;
-  let initialXaiProviderAccountAuthoritySnapshot =
+  // SuperGrok's v1 value is never computed from live state after its cutover:
+  // new work writes the column default and a child copies its parent's value
+  // (design 5.3, "v1 columns after a provider's cutover").
+  const initialXaiProviderAccountAuthoritySnapshot =
     input.initialXaiProviderAccountAuthoritySnapshot ??
-    sharedCreatorPool?.xai ??
     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (input.initialXaiProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
+  // The creator's subject RLS context, which the SuperGrok acceptance
+  // resolver used to set as a side effect when the caller supplied no
+  // accepted snapshot (a fresh session, not a copy of a parent's). The
+  // session insert below relies on it, so whoever retires this v1 input must
+  // keep setting the context for that same case.
+  if (input.initialXaiProviderAccountAuthoritySnapshot === undefined && subjectCreatorId)
     await setSubjectRlsContext(tx, subjectCreatorId);
-    initialXaiProviderAccountAuthoritySnapshot =
-      await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
-        workspaceId: input.workspaceId,
-      });
-  }
   let initialClaudeProviderAccountAuthoritySnapshot =
     input.initialClaudeProviderAccountAuthoritySnapshot ??
     sharedCreatorPool?.claude ??
@@ -65695,11 +65654,6 @@ export async function getSessionGoalWithContinuation(
         coreCapacityWait.goalVersion === goal.version
           ? { nextCheckAt: coreCapacityWait.nextCheckAt }
           : undefined;
-      const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
-        tx,
-        workspaceId,
-        sessionId,
-      );
       const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
         tx,
         workspaceId,
@@ -65734,7 +65688,6 @@ export async function getSessionGoalWithContinuation(
         observedRevision: goal.continuationObservedRevision,
         nextAttemptAt:
           capacityWait?.nextCheckAt.toISOString() ??
-          xaiCapacityWait?.nextCheckAt.toISOString() ??
           claudeCapacityWait?.nextCheckAt.toISOString() ??
           pendingWorkflowWake?.nextAttemptAt.toISOString() ??
           null,
@@ -65759,12 +65712,7 @@ export async function getSessionGoalWithContinuation(
           reason: "session_cancelled",
           ...base,
         };
-      } else if (
-        capacityWait ||
-        xaiCapacityWait ||
-        claudeCapacityWait ||
-        turn?.status === "waiting_capacity"
-      ) {
+      } else if (capacityWait || claudeCapacityWait || turn?.status === "waiting_capacity") {
         continuation = {
           state: "blocked",
           reason: "provider_backpressure",
@@ -68647,17 +68595,12 @@ export async function materializeGoalContinuation(
             sessionId: input.sessionId,
           },
         );
-        const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
-          tx,
-          input.workspaceId,
-          input.sessionId,
-        );
         const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
           tx,
           input.workspaceId,
           input.sessionId,
         );
-        if (coreCapacityWait || xaiCapacityWait || claudeCapacityWait) {
+        if (coreCapacityWait || claudeCapacityWait) {
           return { action: "none", events: [] } as const;
         }
 
@@ -73022,17 +72965,12 @@ export async function claimSessionWorkForAttempt(
                   sessionId,
                 },
               );
-              const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                sessionId,
-              );
               const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
                 sessionId,
               );
-              if (coreWaiter || xaiWaiter || claudeWaiter) {
+              if (coreWaiter || claudeWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
             }
@@ -76002,32 +75940,11 @@ export async function peekSessionWork(
       };
     }
 
-    const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
-      scopedDb,
-      workspaceId,
-      sessionId,
-    );
     const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
       scopedDb,
       workspaceId,
       sessionId,
     );
-    if (xaiCapacityWait) {
-      return {
-        kind: "capacity-wait",
-        ref: {
-          provider: "xai",
-          waiterId: xaiCapacityWait.id,
-          generation: xaiCapacityWait.generation,
-          nextCheckAt:
-            xaiCapacityWait.wakeRevision > xaiCapacityWait.observedWakeRevision
-              ? new Date(0).toISOString()
-              : xaiCapacityWait.nextCheckAt.toISOString(),
-          wakeRevision: xaiCapacityWait.wakeRevision,
-        },
-      };
-    }
-
     if (claudeCapacityWait) {
       return {
         kind: "capacity-wait",
@@ -76860,17 +76777,12 @@ export async function failSessionWorkBeforeAttemptClaim(
                   sessionId: input.sessionId,
                 },
               );
-              const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                input.sessionId,
-              );
               const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
                 tx as unknown as Database,
                 workspaceId,
                 input.sessionId,
               );
-              if (coreWaiter || xaiWaiter || claudeWaiter) {
+              if (coreWaiter || claudeWaiter) {
                 return { action: "stale", turnId: null, events: [] } as const;
               }
             }

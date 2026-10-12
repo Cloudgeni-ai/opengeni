@@ -24,17 +24,22 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import {
-  armXaiCapacityWait,
   createDb,
   createSession,
-  createXaiSubscriptionCredential,
   peekSessionWork,
   subscriptionPoolWorkerSubject,
   wakeSubscriptionCoreProviderCapacityWaiters,
-  wakeXaiCapacityWaiters,
   withSessionActivityRlsContext,
   type DbClient,
 } from "@opengeni/db";
+// The legacy SuperGrok runtime was deleted (M4 X4): the pre-cutover state is
+// built with the test-only snapshot of its repository, waiter and peek.
+import { armXaiCapacityWait } from "../../packages/db/test/fixtures/legacy-codex";
+import {
+  createXaiSubscriptionCredential,
+  wakeXaiCapacityWaiters,
+} from "../../packages/db/test/fixtures/legacy-xai";
+import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtures/legacy-codex/peek";
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
@@ -278,7 +283,9 @@ describe.skipIf(!realDb)(
 
       // The peek activity completes before the migration; its result is what
       // the workflow history records.
-      const recorded = await activities().getCodexCapacityWait({
+      const recorded = await createHistoricalCodexCapacityPeek(
+        async () => ({ db: client!.db }) as never,
+      ).getCodexCapacityWait({
         accountId,
         workspaceId,
         sessionId,

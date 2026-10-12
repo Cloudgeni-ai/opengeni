@@ -28,7 +28,6 @@ import {
   updateModelConnectionAccess,
   updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
-  getXaiSubscriptionAccountAuthoritySnapshot,
   getClaudeSubscriptionAccountAuthoritySnapshot,
   listOrganizationModelProviderCustomModels,
   getWorkspaceProviderApiKeyConnectionMetadata,
@@ -37,14 +36,9 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import {
-  managedHumanOrAgent,
-  requireOrganizationCodexHuman,
-  requireSameOriginBrowserMutation,
-} from "./codex";
+import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
 import { codexRouteDisposition } from "./codex-core";
-import { requireScopeMutation } from "./supergrok";
-import { subscriptionCoreRoute } from "./subscription-pool-core";
+import { requireSubscriptionCoreRoute, subscriptionCoreRoute } from "./subscription-pool-core";
 import {
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
@@ -83,8 +77,9 @@ async function coreAccessDisposition(
   accountId: string,
 ): Promise<"legacy" | "core"> {
   if (kind === "codex") return await codexRouteDisposition(deps, accountId);
+  // SuperGrok runs only on the core: any other route fails closed.
   if (kind === "supergrok")
-    return await subscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
+    return await requireSubscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
   if (kind === "claude_subscription")
     return await subscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
   return "legacy";
@@ -124,22 +119,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       const sharedCore =
         (kind === "supergrok" || kind === "claude_subscription") &&
         (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
-      if (kind === "supergrok" && !sharedCore) {
-        const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
-          workspaceId: scopeId,
-          subjectId: grant.subjectId,
-          credentialId: connectionId,
-        });
-        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
-        if (snapshot.scope === "user") {
-          const human = await managedHumanOrAgent(c, deps);
-          if (!human || human.subjectId !== grant.subjectId)
-            throw new HTTPException(403, {
-              message: "Subscription owner browser session required",
-            });
-        }
-        if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
-      } else if (kind === "claude_subscription" && !sharedCore) {
+      if (kind === "claude_subscription" && !sharedCore) {
         const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
           workspaceId: scopeId,
           subjectId: grant.subjectId,

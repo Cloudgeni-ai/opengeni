@@ -1,38 +1,34 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { emptyClaudeUsage } from "@opengeni/config";
-import { sql } from "drizzle-orm";
 import { decidePlacement } from "@opengeni/subscriptions";
 import {
   createDb,
   createSession,
-  createXaiSubscriptionCredential,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
-  LegacyPlacementWorldDeadlineError,
   loadLegacySubscriptionPlacementWorld as loadCurrentLegacyWorld,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
-  withRlsContext,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
-import { rawRows } from "../src/database";
 import {
   loadLegacySubscriptionPlacementWorld as loadHistoricalCodexWorld,
   type LegacyPlacementWorldRequest,
 } from "./fixtures/legacy-subscription-world";
 
-// Codex is a historical migration fixture only. Claude/SuperGrok still exercise
-// the current executable shadow adapter, not its historical snapshot.
+// Codex is a historical migration fixture only. Claude still exercises the
+// current executable shadow adapter, not its historical snapshot (SuperGrok left
+// the legacy world with its runtime, M4 X4).
 function loadLegacySubscriptionPlacementWorld(
   db: Parameters<typeof loadCurrentLegacyWorld>[0],
   input: LegacyPlacementWorldRequest,
 ) {
-  return input.provider === "codex"
-    ? loadHistoricalCodexWorld(db, input)
-    : loadCurrentLegacyWorld(db, { ...input, provider: input.provider });
+  return input.provider === "claude"
+    ? loadCurrentLegacyWorld(db, { ...input, provider: input.provider })
+    : loadHistoricalCodexWorld(db, input);
 }
 
 // Real PostgreSQL under the restricted application role, so FORCE RLS applies.
@@ -40,7 +36,6 @@ setDefaultTimeout(120_000);
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
-const encryptionKey = new Uint8Array(32).fill(7);
 
 beforeAll(async () => {
   if (process.env.OPENGENI_REQUIRE_REAL_DB !== "1") return;
@@ -125,20 +120,6 @@ async function session(workspaceId: string, accountId: string, subjectId?: strin
     ? await withSessionRlsActorContext({ subjectId }, create)
     : await create();
   return { sessionId: created.id, turnId: crypto.randomUUID() };
-}
-
-/** Another active organization member who also belongs to `workspaceId`. */
-async function coMember(accountId: string, workspaceId: string): Promise<string> {
-  const subjectId = `user:legacy-world-member-${crypto.randomUUID()}`;
-  const [personal] = await shared!.admin<{ id: string }[]>`
-    insert into workspaces (account_id, name) values (${accountId}, 'Member personal') returning id`;
-  await shared!.admin`
-    insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
-    values (${accountId}, ${subjectId}, 'member', 'active', ${personal!.id})`;
-  await shared!.admin`
-    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-    values (${accountId}, ${workspaceId}, ${subjectId}, 'member', '[]'::jsonb)`;
-  return subjectId;
 }
 
 async function codexCredential(input: {
@@ -420,224 +401,6 @@ describe("legacy subscription world", () => {
         personalFallbackOptIn: true,
       });
       expect(decidePlacement(loaded.input)).toMatchObject({ kind: "run", connectionId: own });
-    },
-  );
-
-  realTest(
-    "reads a user-scope SuperGrok pool under its owner and maps quota, and honours the deadline",
-    async () => {
-      const setup = await fixture();
-      const workspaceId = setup.grantWorkspaceId;
-      const mine = await createXaiSubscriptionCredential(client!.db, {
-        accountId: setup.accountId,
-        workspaceId,
-        subjectId: setup.owner,
-        scope: "user",
-        encryptionKey,
-        secret: { version: 1, accessToken: "test-access-token" },
-        providerAccountId: "personal",
-      });
-      const resetAt = new Date(Date.now() + 30 * 60_000);
-      await shared!.admin`
-        update xai_subscription_credentials
-        set quota_used_percent = 100, quota_reset_at = ${resetAt}, quota_checked_at = now()
-        where id = ${mine.account.id}`;
-      const { sessionId, turnId } = await session(workspaceId, setup.accountId, setup.owner);
-      await transitionSessionVisibility(client!.db, {
-        workspaceId,
-        sessionId,
-        actorSubjectId: setup.owner,
-        targetVisibility: "user_private",
-        expectedAuthorityEpoch: 1,
-        operationKey: `legacy-world-xai-private-${sessionId}`,
-      });
-      const base = { accountId: setup.accountId, workspaceId, sessionId, turnId };
-      const xai = {
-        provider: "xai" as const,
-        productModelId: "supergrok/test-model",
-        authorityScope: "user" as const,
-      };
-      const loaded = await asTurn(setup.owner, () =>
-        loadLegacySubscriptionPlacementWorld(client!.db, request(base, xai)),
-      );
-      if (loaded.status !== "loaded") throw new Error("expected a loaded world: " + loaded.reason);
-      expect(loaded.input.connections).toEqual([
-        expect.objectContaining({
-          id: mine.account.id,
-          provider: "xai",
-          ownership: { kind: "personal", ownerMembershipId: setup.owner },
-        }),
-      ]);
-      expect(loaded.input.connections[0]!.quota?.windows[0]).toMatchObject({
-        status: "exhausted",
-        resetsAt: resetAt.getTime(),
-      });
-      expect(loaded.legacy).toMatchObject({ source: "user", poolOrder: [mine.account.id] });
-      expect(decidePlacement(loaded.input)).toEqual({
-        kind: "wait",
-        reason: "no_eligible_capacity",
-        earliestResetAt: null,
-      });
-      await expect(
-        asTurn(setup.owner, () =>
-          loadLegacySubscriptionPlacementWorld(
-            client!.db,
-            request(base, { ...xai, deadlineAt: Date.now() - 1 }),
-          ),
-        ),
-      ).rejects.toBeInstanceOf(LegacyPlacementWorldDeadlineError);
-    },
-  );
-
-  realTest(
-    "a co-member sees neither another member's private session nor their personal accounts, and unassigned organization accounts stay hidden",
-    async () => {
-      const setup = await fixture();
-      const workspaceId = setup.grantWorkspaceId;
-      const member = await coMember(setup.accountId, workspaceId);
-      const xaiSecret = { version: 1 as const, accessToken: "test-access-token" };
-      const ownerPersonal = await createXaiSubscriptionCredential(client!.db, {
-        accountId: setup.accountId,
-        workspaceId,
-        subjectId: setup.owner,
-        scope: "user",
-        encryptionKey,
-        secret: xaiSecret,
-        providerAccountId: "owner-personal",
-      });
-      const memberPersonal = await createXaiSubscriptionCredential(client!.db, {
-        accountId: setup.accountId,
-        workspaceId,
-        subjectId: member,
-        scope: "user",
-        encryptionKey,
-        secret: xaiSecret,
-        providerAccountId: "member-personal",
-      });
-      const workspaceAccount = await createXaiSubscriptionCredential(client!.db, {
-        accountId: setup.accountId,
-        workspaceId,
-        subjectId: setup.owner,
-        scope: "workspace",
-        encryptionKey,
-        secret: xaiSecret,
-        providerAccountId: "workspace",
-      });
-      // Organization accounts assigned to another workspace only.
-      const [xaiElsewhere] = await shared!.admin<{ id: string }[]>`
-        insert into xai_subscription_credentials
-          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
-        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[setup.otherWorkspaceId]})
-        returning id`;
-      const [claudeElsewhere] = await shared!.admin<{ id: string }[]>`
-        insert into claude_subscription_credentials
-          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
-        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[setup.otherWorkspaceId]})
-        returning id`;
-      // ...and ones assigned here, which must be visible, so the check above is not vacuous.
-      const [xaiHere] = await shared!.admin<{ id: string }[]>`
-        insert into xai_subscription_credentials
-          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
-        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[workspaceId]})
-        returning id`;
-      const [claudeHere] = await shared!.admin<{ id: string }[]>`
-        insert into claude_subscription_credentials
-          (account_id, workspace_id, authority_scope, credential_encrypted, allowed_workspace_ids)
-        values (${setup.accountId}, null, 'organization', 'v1:enc', ${[workspaceId]})
-        returning id`;
-      const [claudeMine] = await shared!.admin<{ id: string }[]>`
-        insert into claude_subscription_credentials (account_id, workspace_id, credential_encrypted)
-        values (${setup.accountId}, ${workspaceId}, 'v1:enc') returning id`;
-
-      const { sessionId, turnId } = await session(workspaceId, setup.accountId, setup.owner);
-      await transitionSessionVisibility(client!.db, {
-        workspaceId,
-        sessionId,
-        actorSubjectId: setup.owner,
-        targetVisibility: "user_private",
-        expectedAuthorityEpoch: 1,
-        operationKey: `legacy-world-member-${sessionId}`,
-      });
-      const base = { accountId: setup.accountId, workspaceId, sessionId, turnId };
-      const xai = (scope: "user" | "workspace" | "organization") =>
-        request(base, {
-          provider: "xai",
-          productModelId: "supergrok/test-model",
-          authorityScope: scope,
-        });
-
-      // A real co-member of the workspace cannot read the owner's private session.
-      expect(
-        await asTurn(member, () => loadLegacySubscriptionPlacementWorld(client!.db, xai("user"))),
-      ).toEqual({ status: "skipped", reason: "session_not_visible" });
-
-      const subjectNow = () =>
-        withRlsContext(client!.db, { accountId: setup.accountId, workspaceId }, async (scoped) => {
-          const [row] = await rawRows<{ subject: string | null }>(
-            scoped,
-            sql`select current_setting('opengeni.subject_id', true) as subject`,
-          );
-          return row?.subject ?? null;
-        });
-      await asTurn(setup.owner, async () => {
-        const before = await subjectNow();
-        // The owner's personal pool: their own row only, never the co-member's.
-        const personal = await loadLegacySubscriptionPlacementWorld(client!.db, xai("user"));
-        if (personal.status !== "loaded") throw new Error("expected a loaded world");
-        const personalIds = personal.input.connections.map((connection) => connection.id);
-        expect(personalIds).toContain(ownerPersonal.account.id);
-        expect(personalIds).toContain(workspaceAccount.account.id);
-        expect(personalIds).not.toContain(memberPersonal.account.id);
-        expect(personalIds).not.toContain(xaiElsewhere!.id);
-        expect(
-          personal.input.connections.find(
-            (connection) => connection.id === ownerPersonal.account.id,
-          )?.ownership,
-        ).toEqual({ kind: "personal", ownerMembershipId: setup.owner });
-        expect(await subjectNow()).toBe(before);
-        // Nested in an outer transaction, the pool's subject switch does not
-        // outlive the load either.
-        await withRlsContext(
-          client!.db,
-          { accountId: setup.accountId, workspaceId },
-          async (outer) => {
-            const subject = async () =>
-              (
-                await rawRows<{ subject: string | null }>(
-                  outer,
-                  sql`select current_setting('opengeni.subject_id', true) as subject`,
-                )
-              )[0]?.subject ?? null;
-            const outerBefore = await subject();
-            const nested = await loadLegacySubscriptionPlacementWorld(outer, xai("user"));
-            expect(nested.status).toBe("loaded");
-            expect(await subject()).toBe(outerBefore);
-          },
-        );
-
-        // A workspace-scope turn reads no personal rows at all.
-        for (const scope of ["workspace", "organization"] as const) {
-          const loaded = await loadLegacySubscriptionPlacementWorld(client!.db, xai(scope));
-          if (loaded.status !== "loaded") throw new Error("expected a loaded world");
-          const ids = loaded.input.connections.map((connection) => connection.id);
-          expect(ids).toEqual([workspaceAccount.account.id, xaiHere!.id]);
-          expect(loaded.input.session.personalAuthority).toEqual([]);
-        }
-
-        const claude = await loadLegacySubscriptionPlacementWorld(
-          client!.db,
-          request(base, {
-            provider: "claude",
-            productModelId: "claude/test-model",
-            upstreamModelId: "claude-test-model",
-            authorityScope: "workspace",
-          }),
-        );
-        if (claude.status !== "loaded") throw new Error("expected a loaded world");
-        const claudeIds = claude.input.connections.map((connection) => connection.id);
-        expect(claudeIds).toEqual([claudeHere!.id, claudeMine!.id]);
-        expect(claudeIds).not.toContain(claudeElsewhere!.id);
-      });
     },
   );
 

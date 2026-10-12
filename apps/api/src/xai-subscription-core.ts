@@ -7,18 +7,16 @@ import {
   subscriptionCoreAdministeredConnections,
   subscriptionCoreOperationConnections,
   subscriptionCorePersonalConnections,
-  workspaceXaiSubscriptionActive,
   type Database,
 } from "@opengeni/db";
 
 /**
  * Whether SuperGrok can serve a workspace-level operation (video funding,
- * realtime catalog, transcription). Before the SuperGrok cutover receipt
- * this is the legacy check for the caller's live pool; after it, "a shared
- * xAI candidate exists for this workspace": organization- or
- * workspace-scoped shared connections only, never the viewer's personal
- * accounts (design 5.3, EP-N11), and nothing while the organization is held
- * for maintenance.
+ * realtime catalog, transcription): "a shared xAI candidate exists for
+ * this workspace" on the shared core, organization- or workspace-scoped
+ * shared connections only, never the viewer's personal accounts (design 5.3,
+ * EP-N11). Any route other than `core` (maintenance, or no receipt, which
+ * this binary's readiness check refuses) serves nothing.
  */
 export async function workspaceXaiOperationAvailable(
   db: Database,
@@ -30,17 +28,14 @@ export async function workspaceXaiOperationAvailable(
     workspaceId: input.workspaceId,
     provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
   });
-  if (route === "legacy") {
-    return await workspaceXaiSubscriptionActive(db, settings, input.workspaceId, input.subjectId);
-  }
-  if (route === "maintenance" || !settings.supergrokSubscriptionEnabled) return false;
+  if (route !== "core" || !settings.supergrokSubscriptionEnabled) return false;
   const candidates = await subscriptionCoreOperationConnections(
     SUBSCRIPTION_CORE_XAI,
   ).listSubscriptionCoreOperationCandidates(db, { kind: "workspace", ...input });
   return candidates.length > 0;
 }
 
-/** The SuperGrok status payload (unchanged shape on both paths). */
+/** The SuperGrok status payload. */
 export type XaiStatusPayload<Model> = {
   connected: boolean;
   valid: boolean;
@@ -57,9 +52,8 @@ export type XaiStatusPayload<Model> = {
 /**
  * The SuperGrok status after the cutover receipt (design 5.3, status
  * probe): the workspace's shared pool and its effective primary, validated
- * by one live model read through the adapter on that connection. Null
- * before the receipt (the caller keeps the legacy status); a maintenance
- * hold reports nothing usable.
+ * by one live model read through the adapter on that connection. Any route
+ * other than the shared core reports nothing usable.
  *
  * The viewer's own personal connections count as connected wherever the
  * owner-only reader shows them. Only in the viewer's own Personal workspace,
@@ -86,7 +80,7 @@ export async function readXaiCoreStatus<Model>(
     ownerVerified: () => Promise<boolean>;
     fetch?: unknown;
   },
-): Promise<XaiStatusPayload<Model> | null> {
+): Promise<XaiStatusPayload<Model>> {
   const scope = {
     kind: "workspace" as const,
     accountId: input.accountId,
@@ -97,8 +91,7 @@ export async function readXaiCoreStatus<Model>(
     ...scope,
     provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
   });
-  if (route === "legacy") return null;
-  if (route === "maintenance") return { connected: false, valid: false, accountCount: 0 };
+  if (route !== "core") return { connected: false, valid: false, accountCount: 0 };
   const connections = subscriptionCoreOperationConnections(SUBSCRIPTION_CORE_XAI);
   const [pool, personal] = await Promise.all([
     connections.readSubscriptionCoreWorkspaceConnections(deps.db, scope),

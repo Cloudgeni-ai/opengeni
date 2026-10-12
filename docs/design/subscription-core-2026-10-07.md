@@ -2147,8 +2147,9 @@ required by claim/adopt/send helpers, not a legacy routing store. Core operation
 leases and accepted funding remain, as does connection-policy PUT 409 until M5.
 Personal-fallback catalog precision and the scope editor are not expanded.
 
-`check:no-legacy-codex-runtime` is also run by `check:subscription-contract`.
-It rejects executable legacy table/schema references and imports of historical
+`check:no-legacy-codex-runtime` (since X4 an alias of the provider-neutral
+`check:no-legacy-subscription-runtime`, below) is also run by
+`check:subscription-contract`. It rejects executable legacy table/schema references and imports of historical
 Codex fixtures. Exceptions are exact declarations: retained schema/FKs,
 declarative deployed-schema posture inventories, and the codec stage of 0689.
 Historical SQL is untouched. Test-only snapshots retain old schema regressions
@@ -4969,6 +4970,122 @@ reviewers:
   merges after X1b. The integration suite covers the moved waiter,
   unchanged wake fences and reset timers, and workflow replay; activation
   also requires the parked Personal-turn quota-recovery path to pass.
+
+#### X4: SuperGrok legacy deletion and the provider-neutral guard
+
+- **Guard shape.** `check:no-legacy-subscription-runtime`
+  (`scripts/check-no-legacy-subscription-runtime.ts`, run by
+  `check:subscription-contract`; `check:no-legacy-codex-runtime` stays as an
+  alias) is the M3 PR4 Codex check generalized. The engine names no
+  provider. Each retired runtime is one entry in
+  `scripts/legacy-subscription-runtime/` (`codex.ts`, `xai.ts`), registered
+  in `index.ts`, with: `identifiers` (factory tables in both spellings and
+  retired routine names), `patterns` (retired call or literal shapes whose
+  identifiers stay shared, such as minting the synthetic
+  `worker:xai-workspace` pool subject; recognizing it stays), optional
+  `deletedModules` and `testFixtures`, and `exceptions` keyed by file with
+  exact top-level declarations and exact string literals. One entry's
+  exception never excuses another entry's identifiers. Claude C4 adds a
+  `claude.ts` entry; the retirement step adds the routines it drops. Neither
+  changes the engine.
+- **SuperGrok entry.** The five factory tables, the six legacy routines
+  (`create_`, `disconnect_`, `resolve_*_authority_pool`, `revalidate_*`,
+  `*_authority_live`, `*_pool_visible`) and the synthetic subject.
+  Exceptions: the schema declarations, the posture inventories
+  (`FORCE_RLS_TABLES`, `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` and the
+  routine-signature constants of the posture contract) and the SuperGrok
+  cutover migration's codec stage, which reads the legacy rows before its
+  scrub; the legacy secret decoder it calls stays for as long as that
+  migration ships.
+- **What X4 deletes.** The xAI selector arm (the legacy branch after the
+  provider's receipt check), the factory repository instance for `xai` and
+  every v1 SuperGrok reader and writer that used it (connect, disconnect,
+  rotation, pins, leases, waiters, quota), xAI use of
+  `ScopedSubscriptionTurnLease`, the legacy video token envelope code and
+  the M1 shadow for `xai`. Shared factory code stays for Claude until C4.
+  The v1 carrier columns are still written with their default and copied
+  verbatim on derived rows (the 0608 and scheduled fences compare them);
+  no reader derives them from live state (the stored values that still
+  decide are listed under "X4 as delivered"). X4 merges only with
+  `packages/db/test/subscription-core-xai-copy-paths-postgres.test.ts` (the
+  `compat:dependent_sources_without_record` copy-path test) green at its
+  head.
+- **X4 as delivered.** Rolling; no migration.
+  - Deleted modules: `packages/db/src/xai-subscription.ts` (the
+    `xaiSubscriptionRepository` factory instance),
+    `packages/db/src/organization-xai-subscriptions.ts`,
+    `apps/worker/src/activities/xai-quota.ts` and
+    `apps/api/src/xai-subscription-auth.ts`. In `packages/db/src/index.ts`
+    the `xaiCapacityRepository` waiters and every `xai` waiter arm (arm,
+    reconcile, supersede in `updateSessionVariableSets` and
+    `createScopedSubscriptionCapacityWaiters`) are gone, as are the `xai`
+    branches of the legacy credential lease heartbeat, failure settlement,
+    finalization, worker capacity peek and reconcile, the legacy video token
+    envelope (`xai-subscription` kind, `encryptVideoGenerationXaiCredential`,
+    its reconciliation and submission paths) and the M1 shadow's `xai`
+    world. `apps/worker/src/activities/agent-turn/xai-capacity.ts` is now
+    `scoped-subscription-capacity.ts` and serves Claude only.
+  - Selector arm: every SuperGrok entry point (worker turn build and video,
+    API status, connect and pool routes, transcription, realtime, model
+    connection access, catalog readiness and default session model) treats
+    any route other than `core` as it treats `maintenance`: it fails
+    closed. The provider-neutral route readers are unchanged; the API routes
+    share `requireSubscriptionCoreRoute`, which resolves the organization
+    (so authorization runs) before its typed maintenance refusal, also
+    without a receipt. Billing funding fails closed as unfunded rather than
+    as maintenance: off `core` a SuperGrok model is never funded without
+    credits, so admission may refuse it for credits or admit it and leave
+    the worker to refuse it with the maintenance error; no SuperGrok work is
+    funded off `core` either way. A typed "provider paused" admission
+    refusal would add a denial code to every admission consumer (goal
+    pause reasons, scheduled refusals, automations) for a per-organization
+    maintenance state; it is left to a later change.
+  - Chat Completions: the stateless single-call API neither lists nor
+    serves SuperGrok subscription models (`model_not_found`), because the
+    core's single-call `completion` kind stays Codex-only (PR 0b's kinds).
+    Before X4 the same call already answered 503 after the cutover, since
+    the deleted legacy path read only scrubbed rows.
+  - Video: a non-terminal SuperGrok video operation whose envelope is not a
+    shared-core connection reference (one the cutover did not convert, or a
+    restored row) is never decoded; like an unavailable connection it waits
+    until its recovery deadline and then ends.
+  - Shared factory: `subscription-account-repository.ts` is parameterized by
+    its provider options and names no `xai` routine; Claude's instance and
+    `ScopedSubscriptionTurnLease` are unchanged.
+  - v1 carriers: SuperGrok's v1 value is written as the column default
+    (`{ version: 1, scope: "workspace" }`) and copied verbatim on derived
+    rows; no reader derives it from live state. Stored v1 values still
+    decide in these places, which retire only with a fence migration that
+    takes SuperGrok's causal subject from the owner and the v2 value: the
+    scheduled dispatch (`scheduled-tasks.ts` reads the task's snapshot,
+    refuses on it and takes the run's causal human from it) and the
+    deployed `admit_scheduled_agent_run_execution` and
+    `record_scheduled_task_revision_authority` routines; the API's 409 on
+    a material edit of a user-scoped SuperGrok task by anyone but its
+    creator (kept, so such an edit cannot leave every later occurrence
+    refused); the goal-continuation check, `subscriptionExecutionAuthorityFromTurn`
+    and the user-to-shared narrowing in `receiverSubscriptionAuthorityInTransaction`;
+    and `createSessionInTransaction`, which sets the creator's subject RLS
+    context when no snapshot is supplied. A cutover database holds only
+    workspace-scoped values for new work, so for it these reduce to the
+    shared case; tasks and turns accepted before the cutover keep theirs.
+  - Kept, with reasons: the legacy secret decoder and the codec stage in
+    `xai-subscription-core-cutover.ts` (the SuperGrok cutover migration
+    still ships); the schema, posture inventory and routine signatures (forensic tables and their
+    grants until the retirement step); `@opengeni/xai-subscription` (the
+    protocol package the core adapter uses); the worker `xai-auth.ts`
+    helper, now core-only; `XaiSubscriptionAccountMetadata` (the public
+    account shape the core routes return). Tests that need pre-cutover rows
+    build them through the test-only `packages/db/test/fixtures/legacy-xai.ts`.
+  - Guard: the SuperGrok entry additionally lists the deleted repository,
+    waiter, quota, authorization and video-envelope names, the deleted
+    module files (`deletedPaths`: relative specifiers are resolved from the
+    importing file, and templates without substitutions count as literals,
+    so `@opengeni/xai-subscription`, the transcription provider and the
+    `*-core*` modules stay importable while any `./` or `../` form of a
+    deleted file is refused) and `legacy-xai` as a test-only fixture. Its
+    exceptions are unchanged: schema declarations, posture inventories and
+    the SuperGrok cutover migration's codec stage.
 
 #### Verification plan
 

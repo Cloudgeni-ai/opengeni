@@ -3,14 +3,11 @@ import {
   listPendingSessionTurns,
   recordClaudeAccountUsage,
   releaseClaudeCredentialLease,
-  releaseXaiCredentialLease,
-  updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
-import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
@@ -501,8 +498,8 @@ async function finalizeTurnAttemptSteps(
       leases.codex.held = false;
     }
     // A core-placed SuperGrok turn moves its binding's cache clock after a
-    // completed model call, then releases its core lease (the legacy release
-    // below needs the legacy subject, which a core lease never has).
+    // completed model call, then releases its core lease (SuperGrok has no
+    // legacy lease after its cutover).
     if (providerTurn.xaiSubscriptionCore && leases.xai.held && attempt.turnId) {
       await waitForTurnFinalizerStep(
         finalizeCoreSubscriptionTurn({
@@ -541,41 +538,7 @@ async function finalizeTurnAttemptSteps(
       );
       leases.claude.held = false;
     }
-    // The per-turn SuperGrok quota call is legacy only: on the core, quota is
-    // observed on refusal and by the out-of-turn probe.
-    if (
-      !providerTurn.xaiSubscriptionCore &&
-      providerTurn.effectiveXaiCredentialId &&
-      leases.xai.subjectId &&
-      providerTurn.xaiRequestContext &&
-      !providerTurn.xaiCredentialQuarantined
-    ) {
-      const quota = await waitForTurnFinalizerStep(
-        fetchXaiSubscriptionQuota({ context: providerTurn.xaiRequestContext }).catch(() => null),
-        finalizerSignal,
-      );
-      if (quota) {
-        await waitForTurnFinalizerStep(
-          updateXaiQuotaMetadata(db, {
-            workspaceId: input.workspaceId,
-            subjectId: leases.xai.subjectId,
-            credentialId: providerTurn.effectiveXaiCredentialId,
-            quotaUsedPercent: quota.usedPercent,
-            quotaResetAt: quota.period?.end ?? null,
-            quotaCheckedAt: quota.checkedAt,
-            exhaustedUntil:
-              quota.usedPercent !== null && quota.usedPercent >= 100
-                ? (quota.period?.end ?? null)
-                : null,
-          }).catch(() => undefined),
-          finalizerSignal,
-        );
-      }
-    }
-    for (const [lease, release] of [
-      [leases.xai, releaseXaiCredentialLease],
-      [leases.claude, releaseClaudeCredentialLease],
-    ] as const) {
+    for (const [lease, release] of [[leases.claude, releaseClaudeCredentialLease]] as const) {
       lease.stopHeartbeat();
       if (
         lease.held &&

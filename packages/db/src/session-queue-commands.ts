@@ -11,6 +11,7 @@ import { SessionArchivedError } from "./session-archive-errors";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
   McpPersonalConnectionDelegations,
@@ -94,7 +95,6 @@ import {
   initiatorFromStorage,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 import {
   copySubscriptionAuthorityCompatInTransaction,
   coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
@@ -2193,10 +2193,10 @@ export async function submitHumanPromptInTransaction(
     ? XaiProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.xaiProviderAccountAuthoritySnapshot,
       )
-    : (nonHumanAuthority?.xai ??
-      (await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
-        workspaceId: input.workspaceId,
-      })));
+    : // SuperGrok's v1 value is never computed from live state after its
+      // cutover: a human's new work writes the column default (design 5.3,
+      // "v1 columns after a provider's cutover").
+      (nonHumanAuthority?.xai ?? WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
   const claudeProviderAccountAuthoritySnapshot = editedSourceTurn
     ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.claudeProviderAccountAuthoritySnapshot,

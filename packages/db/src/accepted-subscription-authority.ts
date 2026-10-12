@@ -1,5 +1,6 @@
 import {
   SubscriptionPersonalAuthorityV2,
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
@@ -11,7 +12,6 @@ import {
   coreSubscriptionAuthorityV2OrEmptyInTransaction,
   EMPTY_SUBSCRIPTION_AUTHORITY_V2,
 } from "./subscription-core-acceptance-authority";
-import { resolveXaiSharedPoolAuthoritySnapshotInTransaction } from "./xai-subscription";
 
 type SubscriptionProvider = "xai" | "claude";
 export type FrozenSubscriptionExecutionAuthority = {
@@ -62,7 +62,10 @@ export async function sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
   claude: XaiProviderAccountAuthoritySnapshotV1;
 }> {
   return {
-    xai: await resolveXaiSharedPoolAuthoritySnapshotInTransaction(db, { workspaceId }),
+    // SuperGrok's v1 value after its cutover is the column default, never
+    // computed from live state (design 5.3, "v1 columns after a provider's
+    // cutover").
+    xai: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
     claude: await resolveClaudeSharedPoolAuthoritySnapshotInTransaction(db, { workspaceId }),
   };
 }

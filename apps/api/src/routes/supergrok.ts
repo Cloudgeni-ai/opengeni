@@ -2,13 +2,12 @@ import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-po
 import {
   coreConnectRefused,
   deliverPoolCoreWake,
-  subscriptionCoreRoute,
+  requireSubscriptionCoreRoute,
   type SubscriptionPoolCore,
 } from "./subscription-pool-core";
 import {
   managedCookieHuman,
   requireSameOriginBrowserMutation,
-  requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
 } from "./subscription-pool-access";
 export { managedCookieHuman } from "./subscription-pool-access";
@@ -17,42 +16,17 @@ import {
   connectSubscriptionCoreXaiConnection,
   getSubscriptionCoreXaiOrganizationProjection,
   getSubscriptionCoreXaiWorkspaceProjection,
-  listOrganizationXaiSubscriptions,
   SUBSCRIPTION_CORE_XAI,
-  upsertOrganizationXaiSubscription,
-  updateOrganizationXaiSubscription,
-  updateOrganizationXaiRotation,
+  encryptEnvironmentValue,
+  decryptEnvironmentValue,
+  type XaiSubscriptionAccountMetadata,
 } from "@opengeni/db";
 import {
   configuredModels,
   environmentsEncryptionKeyBytes,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
-import {
-  SubscriptionConnectPollRequest,
-  SupergrokConnectStartRequest,
-  type XaiProviderAccountAuthoritySnapshotV1,
-} from "@opengeni/contracts";
-import {
-  disconnectXaiSubscriptionCredentialAndRepick,
-  ensureXaiRotationSettings,
-  getXaiRotationSettings,
-  getXaiSubscriptionAccountAuthoritySnapshot,
-  listXaiSubscriptionAccountsMetadata,
-  materializeXaiCredentialForRun,
-  refreshXaiSubscriptionCredentialSerialized,
-  renameXaiSubscriptionAccount,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  setActiveXaiCredential,
-  setInitialActiveXaiCredential,
-  updateXaiAllocatorEligibility,
-  updateXaiRotationSettings,
-  upsertXaiSubscriptionCredential,
-  wakeXaiCapacityWaiters,
-  encryptEnvironmentValue,
-  decryptEnvironmentValue,
-  type XaiSubscriptionAccountMetadata,
-} from "@opengeni/db";
+import { SubscriptionConnectPollRequest, SupergrokConnectStartRequest } from "@opengeni/contracts";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   requireAccessGrant,
@@ -61,16 +35,12 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  XAI_CLIENT_VERSION,
   XaiSubscriptionError,
-  fetchXaiSubscriptionModels,
   pollXaiDeviceCode,
-  refreshXaiToken,
   requestXaiDeviceCode,
   xaiAccessTokenExpiry,
   xaiIdentityFromDeviceTokens,
   type XaiFetch,
-  type XaiProxyAuthContext,
 } from "@opengeni/xai-subscription";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -79,8 +49,6 @@ import { readXaiCoreStatus } from "../xai-subscription-core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 import { databaseUnavailableHttpError } from "../http/api-error";
-
-type XaiAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1;
 
 type SuperGrokConnectState = {
   externalContinuationEncrypted?: string;
@@ -95,14 +63,17 @@ type SuperGrokConnectState = {
 
 const connectStartBody = SupergrokConnectStartRequest;
 
-/** SuperGrok on the shared subscription core (provider id `xai`), once its cutover committed. */
+/**
+ * SuperGrok on the shared subscription core (provider id `xai`), its only
+ * runtime: the legacy pool runtime was deleted after the SuperGrok cutover.
+ */
 const SUPERGROK_CORE: SubscriptionPoolCore = {
   binding: SUBSCRIPTION_CORE_XAI,
   workspaceProjection: getSubscriptionCoreXaiWorkspaceProjection,
   organizationProjection: getSubscriptionCoreXaiOrganizationProjection,
 };
 const supergrokRoute = (deps: ApiRouteDeps, accountId: () => Promise<string>) =>
-  subscriptionCoreRoute(deps, "xai", "SuperGrok", accountId);
+  requireSubscriptionCoreRoute(deps, "xai", "SuperGrok", accountId);
 const connectPollBody = SubscriptionConnectPollRequest;
 
 function requireEnabled(deps: ApiRouteDeps): void {
@@ -113,8 +84,6 @@ function requireEnabled(deps: ApiRouteDeps): void {
   }
 }
 
-const requirePrivateHuman = (c: Context, deps: ApiRouteDeps, workspaceId: string) =>
-  requirePrivateSubscriptionHuman(c, deps, workspaceId, "SuperGrok");
 /**
  * The legacy scope check; on the shared core a private (`user`) account is
  * managed only from its owner's Personal workspace.
@@ -145,33 +114,6 @@ const workspaceRuntime = (c: Context, deps: ApiRouteDeps, workspaceId: string) =
     deps,
     async () => (await requireAccessGrant(c, deps, workspaceId, "workspace:read")).accountId,
   );
-
-async function resolveReadAuthority(
-  c: Context,
-  deps: ApiRouteDeps,
-  workspaceId: string,
-  checkedGrant?: { accountId: string; subjectId: string },
-): Promise<{
-  accountId: string;
-  subjectId: string;
-  snapshot: XaiAuthoritySnapshot;
-}> {
-  const grant = checkedGrant ?? (await requireAccessGrant(c, deps, workspaceId, "workspace:read"));
-  const snapshot = await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(deps.db, {
-    workspaceId,
-    subjectId: grant.subjectId,
-  });
-  if (snapshot.scope !== "user") {
-    return { accountId: grant.accountId, subjectId: grant.subjectId, snapshot };
-  }
-  const human = await requirePrivateHuman(c, deps, workspaceId);
-  if (human.subjectId !== grant.subjectId) {
-    throw new HTTPException(403, {
-      message: "managed browser identity mismatch",
-    });
-  }
-  return { accountId: human.accountId, subjectId: human.subjectId, snapshot };
-}
 
 function xaiHttpError(error: unknown, fallback: string): HTTPException {
   // A connect poll can lose its database connection after provider login or
@@ -215,94 +157,6 @@ function accountJson(row: XaiSubscriptionAccountMetadata, activeCredentialId: st
             subscriptionTier: row.planType,
             checkedAt: row.quotaCheckedAt?.toISOString() ?? null,
           },
-  };
-}
-
-async function materializedAuthContext(
-  deps: ApiRouteDeps,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    credentialId: string;
-    authoritySnapshot: XaiAuthoritySnapshot;
-  },
-): Promise<{
-  context: XaiProxyAuthContext;
-  account: XaiSubscriptionAccountMetadata;
-}> {
-  const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
-  if (!encryptionKey) {
-    throw new HTTPException(500, {
-      message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
-    });
-  }
-  let credential = await materializeXaiCredentialForRun(deps.db, {
-    ...input,
-    encryptionKey,
-  });
-  const tokenSnapshot = () => {
-    if (!credential.secret.accessToken || !credential.providerAccountId) {
-      throw new XaiSubscriptionError(
-        "relogin_required",
-        "The SuperGrok connection is missing an access token or verified identity",
-      );
-    }
-    return {
-      accessToken: credential.secret.accessToken,
-      userId: credential.providerAccountId,
-    };
-  };
-  return {
-    account: credential,
-    context: {
-      clientVersion: XAI_CLIENT_VERSION,
-      getToken: async () => tokenSnapshot(),
-      refresh: async () => {
-        const observedAccessToken = credential.secret.accessToken;
-        const observedRefreshToken = credential.secret.refreshToken;
-        if (!observedRefreshToken) {
-          throw new XaiSubscriptionError(
-            "relogin_required",
-            "The SuperGrok connection cannot be refreshed",
-          );
-        }
-        const result = await refreshXaiSubscriptionCredentialSerialized(deps.db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          credentialId: input.credentialId,
-          authoritySnapshot: input.authoritySnapshot,
-          encryptionKey,
-          observedAccessToken,
-          observedRefreshToken,
-          refresh: async (current) => {
-            const refreshToken = current.secret.refreshToken;
-            if (!refreshToken) {
-              throw new XaiSubscriptionError(
-                "relogin_required",
-                "The SuperGrok connection cannot be refreshed",
-              );
-            }
-            const tokens = await refreshXaiToken(refreshToken, {
-              fetch: (deps.xaiFetch ?? fetch) as XaiFetch,
-            });
-            return {
-              secret: {
-                version: 1,
-                accessToken: tokens.accessToken,
-                refreshToken: tokens.refreshToken,
-              },
-              expiresAt:
-                xaiAccessTokenExpiry(tokens.accessToken) ??
-                new Date(Date.now() + tokens.expiresInSeconds * 1_000),
-            };
-          },
-        });
-        credential = result.credential;
-        return tokenSnapshot();
-      },
-    },
   };
 }
 
@@ -356,23 +210,6 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     enabled: () => deps.settings.supergrokSubscriptionEnabled,
     accountJson,
     core: SUPERGROK_CORE,
-    repository: {
-      listOrganizationSubscriptions: listOrganizationXaiSubscriptions,
-      updateOrganizationSubscription: updateOrganizationXaiSubscription,
-      updateOrganizationSubscriptionRotation: updateOrganizationXaiRotation,
-      listSubscriptionAccountsMetadata: listXaiSubscriptionAccountsMetadata,
-      getSubscriptionRotationSettings: getXaiRotationSettings,
-      ensureSubscriptionRotationSettings: ensureXaiRotationSettings,
-      getSubscriptionAccountAuthoritySnapshot: getXaiSubscriptionAccountAuthoritySnapshot,
-      resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptance:
-        resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-      setActiveSubscriptionCredential: setActiveXaiCredential,
-      updateSubscriptionRotationSettings: updateXaiRotationSettings,
-      updateSubscriptionAllocatorEligibility: updateXaiAllocatorEligibility,
-      renameSubscriptionAccount: renameXaiSubscriptionAccount,
-      disconnectSubscriptionCredentialAndRepick: disconnectXaiSubscriptionCredentialAndRepick,
-      wakeSubscriptionCapacityWaiters: wakeXaiCapacityWaiters,
-    },
   });
   const { db } = deps;
 
@@ -410,7 +247,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
   app.post(`${organizationPath}/connect/poll`, async (c) => {
     const actor = await organizationActor(c, true);
-    const runtime = await supergrokRoute(deps, async () => actor.organizationId);
+    await supergrokRoute(deps, async () => actor.organizationId);
     const parsed = connectPollBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "SuperGrok state is required" });
     const state = readSignedState(parsed.data.state, deps.githubStateSecret) as {
@@ -441,47 +278,23 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
       if (!encryptionKey)
         throw new HTTPException(500, { message: "Connection encryption is not configured" });
-      if (runtime === "core") {
-        const id = await coreSuperGrokConnected(c, deps, {
-          accountId: actor.organizationId,
-          workspaceId: null,
-          subjectId: actor.actorSubjectId,
-          encryptionKey,
-          tokens: poll.tokens,
-          identity,
-        });
-        const { activeCredentialId } = await getSubscriptionCoreXaiOrganizationProjection(db, {
-          organizationId: actor.organizationId,
-          subjectId: actor.actorSubjectId,
-        });
-        return c.json({
-          status: "connected",
-          accountId: id,
-          scope: "organization",
-          isActive: activeCredentialId === id,
-          email: identity.email,
-        });
-      }
-      const connected = await upsertOrganizationXaiSubscription(db, {
-        ...actor,
+      const id = await coreSuperGrokConnected(c, deps, {
+        accountId: actor.organizationId,
+        workspaceId: null,
+        subjectId: actor.actorSubjectId,
         encryptionKey,
-        secret: {
-          version: 1,
-          accessToken: poll.tokens.accessToken,
-          refreshToken: poll.tokens.refreshToken,
-        },
-        providerAccountId: identity.subject,
-        label: identity.name ?? identity.email ?? identity.subject,
-        accountEmail: identity.email,
-        expiresAt:
-          xaiAccessTokenExpiry(poll.tokens.accessToken) ??
-          new Date(Date.now() + poll.tokens.expiresInSeconds * 1000),
+        tokens: poll.tokens,
+        identity,
+      });
+      const { activeCredentialId } = await getSubscriptionCoreXaiOrganizationProjection(db, {
+        organizationId: actor.organizationId,
+        subjectId: actor.actorSubjectId,
       });
       return c.json({
         status: "connected",
-        accountId: connected.account.id,
+        accountId: id,
         scope: "organization",
-        isActive: connected.isActive,
+        isActive: activeCredentialId === id,
         email: identity.email,
       });
     } catch (error) {
@@ -623,74 +436,25 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
         });
       }
-      if (runtime === "core") {
-        const id = await coreSuperGrokConnected(c, deps, {
-          accountId: authority.accountId,
-          workspaceId,
-          subjectId: authority.subjectId,
-          personal: state.scope === "user",
-          encryptionKey,
-          tokens: poll.tokens,
-          identity,
-        });
-        const { activeCredentialId } = await getSubscriptionCoreXaiWorkspaceProjection(deps.db, {
-          accountId: authority.accountId,
-          workspaceId,
-          viewerSubjectId: authority.subjectId,
-        });
-        return c.json({
-          status: "connected" as const,
-          accountId: id,
-          scope: state.scope,
-          isActive: activeCredentialId === id,
-          email: identity.email,
-        });
-      }
-      const upserted = await upsertXaiSubscriptionCredential(deps.db, {
+      const id = await coreSuperGrokConnected(c, deps, {
         accountId: authority.accountId,
         workspaceId,
         subjectId: authority.subjectId,
-        scope: state.scope,
+        personal: state.scope === "user",
         encryptionKey,
-        secret: {
-          version: 1,
-          accessToken: poll.tokens.accessToken,
-          refreshToken: poll.tokens.refreshToken,
-        },
-        providerAccountId: identity.subject,
-        label: identity.name ?? identity.email ?? identity.subject,
-        accountEmail: identity.email,
-        expiresAt:
-          xaiAccessTokenExpiry(poll.tokens.accessToken) ??
-          new Date(Date.now() + poll.tokens.expiresInSeconds * 1_000),
+        tokens: poll.tokens,
+        identity,
       });
-      const rotation = await ensureXaiRotationSettings(deps.db, {
+      const { activeCredentialId } = await getSubscriptionCoreXaiWorkspaceProjection(deps.db, {
         accountId: authority.accountId,
         workspaceId,
-        subjectId: authority.subjectId,
-        authoritySnapshot: upserted.authoritySnapshot,
-      });
-      let isActive = rotation.activeCredentialId === upserted.account.id;
-      if (!isActive && rotation.activeCredentialId === null) {
-        isActive = await setInitialActiveXaiCredential(deps.db, {
-          accountId: authority.accountId,
-          workspaceId,
-          subjectId: authority.subjectId,
-          authoritySnapshot: upserted.authoritySnapshot,
-          credentialId: upserted.account.id,
-        });
-      }
-      await wakeXaiCapacityWaiters(deps.db, {
-        workspaceId,
-        subjectId: authority.subjectId,
-        authoritySnapshot: upserted.authoritySnapshot,
-        reason: "xai_credential_connected",
+        viewerSubjectId: authority.subjectId,
       });
       return c.json({
         status: "connected" as const,
-        accountId: upserted.account.id,
+        accountId: id,
         scope: state.scope,
-        isActive,
+        isActive: activeCredentialId === id,
         email: identity.email,
       });
     } catch (error) {
@@ -730,80 +494,31 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
             model.credentialSource.provider === "xai",
         )
         .map(projectClientModel);
-    const coreStatus = await readXaiCoreStatus(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      models: supergrokModels,
-      // A live read of a personal account, as the Claude core usage route
-      // gates it: the verified owning person, in their Personal workspace.
-      ownerVerified: async () => {
-        try {
-          const owner = await requirePrivateSubscriptionHuman(
-            c,
-            deps,
-            workspaceId,
-            "SuperGrok",
-            "personal_workspace",
-          );
-          return owner.accountId === grant.accountId && owner.subjectId === grant.subjectId;
-        } catch (error) {
-          if (error instanceof HTTPException) return false;
-          throw error;
-        }
-      },
-      ...(deps.xaiFetch ? { fetch: deps.xaiFetch } : {}),
-    });
-    if (coreStatus) return c.json(coreStatus);
-    const authority = await resolveReadAuthority(c, deps, workspaceId, grant);
-    const [accounts, settings] = await Promise.all([
-      listXaiSubscriptionAccountsMetadata(deps.db, {
+    return c.json(
+      await readXaiCoreStatus(deps, {
+        accountId: grant.accountId,
         workspaceId,
-        subjectId: authority.subjectId,
-      }),
-      getXaiRotationSettings(deps.db, {
-        workspaceId,
-        subjectId: authority.subjectId,
-        authoritySnapshot: authority.snapshot,
-      }),
-    ]);
-    const active = accounts.find((account) => account.id === settings?.activeCredentialId) ?? null;
-    if (!active || !settings?.activeCredentialId) {
-      return c.json({
-        connected: accounts.length > 0,
-        valid: false,
-        accountCount: accounts.length,
-      });
-    }
-    let valid = false;
-    try {
-      const auth = await materializedAuthContext(deps, {
-        accountId: authority.accountId,
-        workspaceId,
-        subjectId: authority.subjectId,
-        credentialId: active.id,
-        authoritySnapshot: authority.snapshot,
-      });
-      await fetchXaiSubscriptionModels({
-        context: auth.context,
+        subjectId: grant.subjectId,
+        models: supergrokModels,
+        // Only the verified owner in their Personal workspace may make a
+        // live personal-account usage request; other viewers get stored status.
+        ownerVerified: async () => {
+          try {
+            const owner = await requirePrivateSubscriptionHuman(
+              c,
+              deps,
+              workspaceId,
+              "SuperGrok",
+              "personal_workspace",
+            );
+            return owner.accountId === grant.accountId && owner.subjectId === grant.subjectId;
+          } catch (error) {
+            if (error instanceof HTTPException) return false;
+            throw error;
+          }
+        },
         ...(deps.xaiFetch ? { fetch: deps.xaiFetch } : {}),
-      });
-      valid = true;
-    } catch {
-      valid = false;
-    }
-    const catalog = valid ? await supergrokModels() : [];
-    return c.json({
-      connected: true,
-      valid,
-      accountCount: accounts.length,
-      models: catalog,
-      activeAccount: {
-        id: active.id,
-        label: active.label,
-        subject: active.providerAccountId,
-        scope: active.scope,
-      },
-    });
+      }),
+    );
   });
 }

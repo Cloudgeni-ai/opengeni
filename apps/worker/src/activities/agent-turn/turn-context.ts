@@ -252,17 +252,13 @@ export type ProviderTurnState = {
    */
   claudeSubscriptionCore: SubscriptionCoreTurn | null;
   effectiveXaiCredentialId: string | null;
-  xaiRotationEnabled: boolean;
-  xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   xaiRequestContext: XaiSubscriptionRequestContext | null;
   /**
-   * Set only when this SuperGrok turn was placed by the shared subscription
-   * core (the organization's SuperGrok cutover committed and is enabled).
-   * `effectiveXaiCredentialId` is then a core connection id: legacy SuperGrok
-   * tables must never receive it.
+   * Set when this SuperGrok turn was placed by the shared subscription core,
+   * the only SuperGrok path. `effectiveXaiCredentialId` is then its core
+   * connection id.
    */
   xaiSubscriptionCore: SubscriptionCoreTurn | null;
-  xaiCredentialQuarantined: boolean;
   // The session's Codex credential BEFORE this turn resolved its own — captured
   // before recordSessionActiveCodexCredential overwrites the durable pointer, so
   // a per-call usage log can report whether the serving account CHANGED since the
@@ -398,11 +394,8 @@ export function createTurnContext(input: {
       claudeAuthoritySnapshot: null,
       claudeSubscriptionCore: null,
       effectiveXaiCredentialId: null,
-      xaiRotationEnabled: false,
-      xaiAuthoritySnapshot: null,
       xaiRequestContext: null,
       xaiSubscriptionCore: null,
-      xaiCredentialQuarantined: false,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
       latestClaudeUsage: new Map(),

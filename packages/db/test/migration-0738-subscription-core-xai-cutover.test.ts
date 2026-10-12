@@ -20,7 +20,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "../src/environment-crypto";
 import { rawRows, withRlsContext } from "../src/database";
-import { createXaiSubscriptionCredential } from "../src/xai-subscription";
+import { createXaiSubscriptionCredential } from "./fixtures/legacy-xai";
 import {
   createDb,
   evaluateRuntimeDatabasePosture,

@@ -1,5 +1,23 @@
-import * as schema from "./schema";
-import { createSubscriptionAccountRepository } from "./subscription-account-repository";
+/**
+ * TEST ONLY: the retired SuperGrok (xAI) legacy account repository, used to
+ * construct pre-cutover database states for the SuperGrok cutover tests.
+ * Snapshot source: packages/db/src/xai-subscription.ts as it stood
+ * immediately before the legacy SuperGrok runtime was deleted (M4 X4; the
+ * deletion commit moved that file here). Never import this module from
+ * production: the runtime no-legacy guard enforces that boundary. After the
+ * SuperGrok cutover receipt every write it attempts is refused by the
+ * receipt-gated policies.
+ */
+import * as schema from "../../src/schema";
+import { createSubscriptionAccountRepository } from "../../src/subscription-account-repository";
+
+/** The production factory now types only Claude; SuperGrok used the same code. */
+type RetiredProviderOptions = Parameters<
+  typeof createSubscriptionAccountRepository<
+    XaiCredentialSecretV1,
+    { readonly supergrokSubscriptionEnabled: boolean }
+  >
+>[0];
 
 export type XaiCredentialSecretV1 = {
   version: 1;
@@ -34,9 +52,9 @@ export const xaiSubscriptionRepository = createSubscriptionAccountRepository<
   XaiCredentialSecretV1,
   { readonly supergrokSubscriptionEnabled: boolean }
 >({
-  provider: "xai",
-  label: "xAI",
-  displayName: "SuperGrok",
+  provider: "xai" as unknown as RetiredProviderOptions["provider"],
+  label: "xAI" as unknown as RetiredProviderOptions["label"],
+  displayName: "SuperGrok" as unknown as RetiredProviderOptions["displayName"],
   isEnabled: (settings) => settings.supergrokSubscriptionEnabled,
   tables: {
     credentials: schema.xaiSubscriptionCredentials,
@@ -45,7 +63,7 @@ export const xaiSubscriptionRepository = createSubscriptionAccountRepository<
     sessionAccountPins: schema.xaiSessionAccountPins,
     capacityWaiters: schema.xaiCapacityWaiters,
   },
-  leaseTable: "xai_credential_leases",
+  leaseTable: "xai_credential_leases" as unknown as RetiredProviderOptions["leaseTable"],
   assertSecret,
   parseSecret,
   accessToken: (secret) => secret.accessToken,

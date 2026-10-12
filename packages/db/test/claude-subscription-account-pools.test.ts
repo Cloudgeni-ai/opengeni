@@ -821,7 +821,6 @@ test("model admission uses the exact frozen Claude account and keeps exhausted m
     client.db,
     input.workspaceId,
     input.subjectId,
-    undefined,
     authoritySnapshot,
   );
   expect(restrictions["workspace-claude-subscription/"]).toEqual([sonnet]);
@@ -958,7 +957,6 @@ test("accepted private authority survives disconnect while catalog access closes
     client.db,
     input.workspaceId,
     input.subjectId,
-    undefined,
     connected.authoritySnapshot,
   );
   expect(restrictions["workspace-claude-subscription/"]).toEqual([]);

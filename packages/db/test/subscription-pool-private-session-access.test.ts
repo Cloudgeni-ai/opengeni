@@ -9,22 +9,15 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { emptyClaudeUsage } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {
-  acquireXaiCredentialLease,
   armClaudeCapacityWait,
-  armXaiCapacityWait,
   createDb,
   createSession,
   getClaudeCapacityWaitForSession,
   getOrganizationPrivateSessionSettings,
-  getXaiCapacityWaitForSession,
-  getXaiSessionAccountPin,
   peekSessionWork,
   reconcileClaudeCapacityWait,
-  reconcileXaiCapacityWait,
-  setXaiSessionAccountPin,
   subscriptionPoolWorkerSubject,
   updateOrganizationPrivateSessionSettings,
-  wakeXaiCapacityWaiters,
   withSessionActivityRlsContext,
   withSessionRlsActorContext,
   withSubscriptionPoolSessionAccess,
@@ -50,7 +43,6 @@ import {
   withPoolWakeServiceScopeInTransaction,
   withTemporaryPoolSessionAccessInTransaction,
 } from "../src/subscription-session-access";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
 
 // Characterizes the legacy SuperGrok and Claude runtimes, which run only before
 // their drained subscription-core cutovers: the database withholds those
@@ -229,7 +221,7 @@ async function turn(
       sql`update sessions set status = 'running', temporal_workflow_id = ${workflowId} where id = ${sessionId}`,
     );
     await tx.execute(
-      sql`insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id, status, source, position, prompt, model, reasoning_effort, latency_mode, sandbox_backend, execution_generation, active_attempt_id, metadata, initiating_human_subject_id, claude_provider_account_authority_snapshot, xai_provider_account_authority_snapshot) values (${turnId}, ${input.accountId}, ${input.workspaceId}, ${sessionId}, ${randomUUID()}, ${workflowId}, 'running', 'user', 1, 'Fixture', 'fixture-model', 'high', 'standard', 'none', 1, ${attemptId}, ${JSON.stringify(metadata)}::jsonb, ${initiatingHumanSubjectId}, ${JSON.stringify(input.authoritySnapshot)}::jsonb, ${JSON.stringify(input.authoritySnapshot)}::jsonb)`,
+      sql`insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id, status, source, position, prompt, model, reasoning_effort, latency_mode, sandbox_backend, execution_generation, active_attempt_id, metadata, initiating_human_subject_id, claude_provider_account_authority_snapshot) values (${turnId}, ${input.accountId}, ${input.workspaceId}, ${sessionId}, ${randomUUID()}, ${workflowId}, 'running', 'user', 1, 'Fixture', 'fixture-model', 'high', 'standard', 'none', 1, ${attemptId}, ${JSON.stringify(metadata)}::jsonb, ${initiatingHumanSubjectId}, ${JSON.stringify(input.authoritySnapshot)}::jsonb)`,
     );
     await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     await tx.execute(
@@ -241,11 +233,11 @@ async function turn(
 
 const capacityFailure = { code: "synthetic_capacity_unavailable" };
 
-for (const provider of ["claude", "xai"] as const) {
+for (const provider of ["claude"] as const) {
   test.each(visibilities)(
     `SUB-ACCESS-03: ${provider} capacity arming under the pool worker subject succeeds for %s sessions`,
     async (visibility) => {
-      const arm = provider === "claude" ? armClaudeCapacityWait : armXaiCapacityWait;
+      const arm = armClaudeCapacityWait;
       const input = await fixture();
       const running = await turn(input, visibility);
       const armed = await arm(client.db, {
@@ -312,35 +304,6 @@ test.each(visibilities)(
       { status: string }[]
     >`select status from claude_capacity_waiters where id = ${armed.waiter.id}`;
     expect(stored!.status).toBe("resumed");
-  },
-  60_000,
-);
-
-test.each(visibilities)(
-  "SUB-ACCESS-03: SuperGrok %s capacity waiter stays visible to recovery",
-  async (visibility) => {
-    const input = await fixture(),
-      running = await turn(input, visibility);
-    const armed = await armXaiCapacityWait(client.db, {
-      ...input,
-      ...running,
-      subjectId: subscriptionPoolWorkerSubject("xai"),
-      earliestResetAt: null,
-      failurePayload: capacityFailure,
-    });
-    if (armed.action !== "waiting") throw new Error("Fixture failed to arm");
-    expect(
-      (await getXaiCapacityWaitForSession(client.db, input.workspaceId, running.sessionId))?.id,
-    ).toBe(armed.waiter.id);
-    // No SuperGrok account is connected, so recovery keeps waiting instead of
-    // reporting the waiter as stale.
-    const reconciled = await reconcileXaiCapacityWait(client.db, {
-      ...input,
-      sessionId: running.sessionId,
-      waiterId: armed.waiter.id,
-      generation: armed.waiter.generation,
-    });
-    expect(reconciled.action).toBe("waiting");
   },
   60_000,
 );
@@ -445,7 +408,7 @@ test("SUB-ACCESS-02: non-pool subjects run unchanged", async () => {
 
 async function poolVisibleSessions(
   input: Fixture,
-  provider: "claude" | "xai",
+  provider: "claude",
   sessionIds: string[],
 ): Promise<string[]> {
   return await withWorkspaceSubjectRls(
@@ -515,7 +478,7 @@ test.each([
 test("without an ambient actor the helper restores exactly the pool-worker subject and the turn's human", async () => {
   const input = await fixture();
   const mine = await turn(input, "user_private");
-  const worker = subscriptionPoolWorkerSubject("xai");
+  const worker = subscriptionPoolWorkerSubject("claude");
   const actor = await withSubscriptionPoolSessionAccess(
     client.db,
     { workspaceId: input.workspaceId, subjectId: worker, sessionId: mine.sessionId },
@@ -547,16 +510,14 @@ test("restoring pool session access refuses an open transaction handle", async (
   expect(ran).toBe(false);
 }, 60_000);
 
-for (const provider of ["claude", "xai"] as const) {
+for (const provider of ["claude"] as const) {
   test.each(visibilities)(
     `SUB-ACCESS-03: ${provider} lease acquisition under the pool worker subject succeeds for %s sessions`,
     async (visibility) => {
       const input = await fixture();
-      if (provider === "claude") await pool(input);
+      await pool(input);
       const running = await turn(input, visibility);
-      const acquire =
-        provider === "claude" ? acquireClaudeCredentialLease : acquireXaiCredentialLease;
-      const leased = await acquire(client.db, {
+      const leased = await acquireClaudeCredentialLease(client.db, {
         ...input,
         sessionId: running.sessionId,
         turnId: running.turnId,
@@ -565,8 +526,7 @@ for (const provider of ["claude", "xai"] as const) {
         upstreamModelId: "claude-opus-fixture",
         modelId: "fixture-model",
       });
-      if (provider === "claude") expect(leased.credentialId).not.toBeNull();
-      else expect(leased.credentialId).toBeNull();
+      expect(leased.credentialId).not.toBeNull();
     },
     60_000,
   );
@@ -575,12 +535,12 @@ for (const provider of ["claude", "xai"] as const) {
     `${provider} %s session pin uses the acting turn, not the session's active turn`,
     async (visibility) => {
       const input = await fixture();
-      const credentialId = provider === "claude" ? (await pool(input)).a.account.id : null;
+      const credentialId = (await pool(input)).a.account.id;
       const running = await turn(input, visibility);
       // The acting turn is no longer the session's active turn.
       await shared.admin`update sessions set active_turn_id = null where id = ${running.sessionId}`;
-      const setPin = provider === "claude" ? setClaudeSessionAccountPin : setXaiSessionAccountPin;
-      const getPin = provider === "claude" ? getClaudeSessionAccountPin : getXaiSessionAccountPin;
+      const setPin = setClaudeSessionAccountPin;
+      const getPin = getClaudeSessionAccountPin;
       const worker = {
         ...input,
         sessionId: running.sessionId,
@@ -590,17 +550,15 @@ for (const provider of ["claude", "xai"] as const) {
       const pin = await setPin(client.db, {
         ...worker,
         credentialId,
-        pinSource: credentialId ? "policy" : null,
+        pinSource: "policy",
         expectedVersion: null,
       });
       expect((await getPin(client.db, worker))?.id).toBe(pin.id);
-      if (credentialId) {
-        const recorded = await recordClaudeSessionLastAccount(client.db, {
-          ...worker,
-          credentialId,
-        });
-        expect(recorded.lastCredentialId).toBe(credentialId);
-      }
+      const recorded = await recordClaudeSessionLastAccount(client.db, {
+        ...worker,
+        credentialId,
+      });
+      expect(recorded.lastCredentialId).toBe(credentialId);
       if (visibility === "user_private") {
         // Without the acting turn nothing is restored and the private pin stays hidden.
         expect(await getPin(client.db, { ...worker, turnId: null })).toBeNull();
@@ -632,12 +590,14 @@ test("SUB-ACCESS-04: a turn without an initiating human restores nothing and pri
   // anyone's access. (Shared-pool arm and reconcile do not use the turn's
   // human; they run without a subject, see withScopedCapacityWaiterRls.)
   await expect(
-    acquireXaiCredentialLease(client.db, {
+    acquireClaudeCredentialLease(client.db, {
       ...input,
       sessionId: serviceTurn.sessionId,
       turnId: serviceTurn.turnId,
-      subjectId: subscriptionPoolWorkerSubject("xai"),
+      subjectId: subscriptionPoolWorkerSubject("claude"),
       holderId: "fixture-holder-" + randomUUID(),
+      upstreamModelId: "claude-opus-fixture",
+      modelId: "fixture-model",
     }),
   ).rejects.toThrow();
 }, 60_000);
@@ -650,13 +610,13 @@ test("a turn id from another session restores nothing", async () => {
     client.db,
     {
       workspaceId: input.workspaceId,
-      subjectId: subscriptionPoolWorkerSubject("xai"),
+      subjectId: subscriptionPoolWorkerSubject("claude"),
       sessionId: theirs.sessionId,
       turnId: mine.turnId,
     },
     async () => ({
       actor: currentSessionRlsActorContext(),
-      visible: await poolVisibleSessions(input, "xai", [mine.sessionId]),
+      visible: await poolVisibleSessions(input, "claude", [mine.sessionId]),
     }),
   );
   expect(observed).toEqual({ actor: undefined, visible: [] });
@@ -723,10 +683,10 @@ async function readActorSettings(tx: Parameters<typeof withPoolWakeServiceScopeI
   } satisfies GucSnapshot;
 }
 
-for (const provider of ["claude", "xai"] as const) {
+for (const provider of ["claude"] as const) {
   test(`${provider}: another member's shared-pool change wakes a private waiter of exactly that pool, without granting access to it`, async () => {
-    const arm = provider === "claude" ? armClaudeCapacityWait : armXaiCapacityWait;
-    const wake = provider === "claude" ? wakeClaudeCapacityWaiters : wakeXaiCapacityWaiters;
+    const arm = armClaudeCapacityWait;
+    const wake = wakeClaudeCapacityWaiters;
     const worker = subscriptionPoolWorkerSubject(provider);
     const armWaiter = async (input: Fixture) => {
       const running = await turn(input, "user_private");
