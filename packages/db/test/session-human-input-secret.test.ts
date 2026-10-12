@@ -318,7 +318,7 @@ describe("secret ask-card answers", () => {
         drop function if exists ${trigger}();
       `);
     }
-    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toEqual([]);
+    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toHaveLength(0);
     const [request] = await shared.admin<Array<{ status: string; response: unknown }>>`
       select status, response from session_human_input_requests where id = ${fixture.requestId}`;
     expect(request).toEqual({ status: "pending", response: null });
@@ -333,7 +333,7 @@ describe("secret ask-card answers", () => {
         canonicalHumanSession: false,
       }),
     ).rejects.toMatchObject({ code: "HUMAN_AUTH_REQUIRED" });
-    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toEqual([]);
+    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toHaveLength(0);
   });
 
   test("an agent relays a reference but never a plain value (AC-7)", async () => {
@@ -378,6 +378,6 @@ describe("secret ask-card answers", () => {
         secretAnswers: [prepared("both")],
       }),
     ).rejects.toBeInstanceOf(HumanInputResponseValidationError);
-    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toEqual([]);
+    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toHaveLength(0);
   });
 });
