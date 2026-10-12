@@ -1,8 +1,6 @@
 import type {
   AuthRun,
   AuthRunMutationResponse,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   ReportAuthRunRequest,
   StartAuthRunRequest,
   VerifyAuthRunRequest,
@@ -38,11 +36,6 @@ export type UseAuthRunsResult = {
     authRunId: string,
     request: Omit<ReportAuthRunRequest, "operationId"> & { operationId?: string },
   ) => Promise<AuthRunMutationResponse>;
-  protectedFill: (
-    browserSessionId: string,
-    authRunId: string,
-    request: Omit<ProtectedAuthFillRequest, "operationId"> & { operationId?: string },
-  ) => Promise<ProtectedAuthFillResponse>;
   verify: (
     browserSessionId: string,
     authRunId: string,
@@ -201,25 +194,6 @@ export function useAuthRuns(options: UseAuthRunsOptions = {}): UseAuthRunsResult
     [client, merge, mutate, workspaceId],
   );
 
-  const protectedFill = useCallback(
-    async (
-      scopeBrowserSessionId: string,
-      authRunId: string,
-      request: Omit<ProtectedAuthFillRequest, "operationId"> & { operationId?: string },
-    ): Promise<ProtectedAuthFillResponse> =>
-      await mutate(async () => {
-        const response = await client.protectedBrowserAuthFill(
-          workspaceId,
-          scopeBrowserSessionId,
-          authRunId,
-          { ...request, operationId: request.operationId ?? crypto.randomUUID() },
-        );
-        merge(response.run);
-        return response;
-      }),
-    [client, merge, mutate, workspaceId],
-  );
-
   const verify = useCallback(
     async (
       scopeBrowserSessionId: string,
@@ -248,7 +222,6 @@ export function useAuthRuns(options: UseAuthRunsOptions = {}): UseAuthRunsResult
     refresh,
     start,
     report,
-    protectedFill,
     verify,
   };
 }

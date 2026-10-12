@@ -2379,7 +2379,6 @@ function externalAuthRun(): AuthRun {
     authorityId: "kernel-managed",
     state: "awaiting_external_action",
     choices: [],
-    pendingFields: [],
     externalAction: { kind: "human", label: "Finish sign-in", expiresAt: null },
     interventionId: randomUUID(),
     verifiedUrl: null,

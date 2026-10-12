@@ -5,7 +5,6 @@ import { join } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
@@ -844,7 +843,7 @@ e2e(
       releaseBarrier = resolve;
     });
     let barrierArrivals = 0;
-    let protectedAuthBody = "";
+    let loginBody = "";
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -866,7 +865,7 @@ e2e(
           });
         }
         if (url.pathname === "/logged-in" && request.method === "POST") {
-          protectedAuthBody = await request.text();
+          loginBody = await request.text();
           return new Response("<!doctype html><title>Logged in</title><p>Authenticated</p>", {
             headers: { "content-type": "text/html; charset=utf-8" },
           });
@@ -1211,29 +1210,35 @@ e2e(
           expectedFrameId: authState.frameId!,
         }),
       ).rejects.toMatchObject({ code: "invalid_action" });
-      const protectedResult = await driver.protectedFill(
-        protectedAuthCommand(authPage, parallelOrigin),
-      );
-      expect(protectedResult.status).toBe("submitted");
-      expect(protectedResult.target.url).toBe(`${parallelOrigin}/logged-in`);
-      expect(protectedAuthBody).toContain("username=fixture-user");
-      expect(protectedAuthBody).toContain("password=fixture-password");
-      expect(JSON.stringify(await driver.debug(authPage.target.id))).not.toContain(
-        "fixture-password",
-      );
-      await expect(driver.captureScreenshot(authPage.target.id)).rejects.toMatchObject({
-        code: "permission_denied",
-      });
-      const protectedState = await driver.targetState(authPage.target.id);
-      await expect(
-        driver.readDom(authPage.target.id, {
-          kind: "count",
-          selector: "button",
-          expectedTargetGeneration: protectedState.targetGeneration,
-          expectedDocumentGeneration: protectedState.documentGeneration!,
-          expectedFrameId: protectedState.frameId!,
+      // Logins are ordinary fill and click actions on the page.
+      let loginPage = await driver.dispatch(
+        command(authPage, {
+          type: "fill",
+          locator: { kind: "css", selector: "#username" },
+          value: "fixture-user",
         }),
-      ).rejects.toMatchObject({ code: "permission_denied" });
+      );
+      loginPage = await driver.dispatch(
+        command(loginPage, {
+          type: "fill",
+          locator: { kind: "css", selector: "#password" },
+          value: "fixture-password",
+        }),
+      );
+      loginPage = await driver.dispatch(
+        command(loginPage, { type: "click", locator: { kind: "css", selector: "#login" } }),
+      );
+      // The form post commits after the click receipt; wait for the navigation.
+      const loginDeadline = Date.now() + 10_000;
+      let loginUrl = loginPage.target.url;
+      while (loginUrl !== `${parallelOrigin}/logged-in` && Date.now() < loginDeadline) {
+        await Bun.sleep(50);
+        const targets = await driver.listTargets();
+        loginUrl = targets.find((target) => target.id === loginPage.target.id)?.url ?? loginUrl;
+      }
+      expect(loginUrl).toBe(`${parallelOrigin}/logged-in`);
+      expect(loginBody).toContain("username=fixture-user");
+      expect(loginBody).toContain("password=fixture-password");
 
       const firstParallel = await driver.openTarget("about:blank");
       const secondParallel = await driver.openTarget("about:blank");
@@ -1485,41 +1490,6 @@ function command(
     expectedFrameId: observation.frameId!,
     actor: { kind: "agent", subjectId: "browserd-cdp-e2e" },
     action,
-  };
-}
-
-function protectedAuthCommand(
-  observation: BrowserObservation,
-  origin: string,
-): BrowserProtectedAuthFillCommand {
-  return {
-    protocolVersion: 1,
-    operationId: randomUUID(),
-    browserSessionId: observation.browserSessionId,
-    controllerGeneration: observation.target.controllerGeneration,
-    targetId: observation.target.id,
-    expectedTargetGeneration: observation.target.targetGeneration,
-    expectedDocumentGeneration: observation.target.documentGeneration!,
-    expectedFrameId: observation.frameId!,
-    actor: { kind: "system", subjectId: "protected-auth-e2e" },
-    authorityId: "password-authority",
-    credentialVersion: 1,
-    allowedOrigins: [origin],
-    fields: [
-      {
-        fieldId: "username",
-        locator: { kind: "css", selector: "#username" },
-        purpose: "identifier",
-        value: "fixture-user",
-      },
-      {
-        fieldId: "password",
-        locator: { kind: "css", selector: "#password" },
-        purpose: "password",
-        value: "fixture-password",
-      },
-    ],
-    submit: { type: "click", locator: { kind: "css", selector: "#login" } },
   };
 }
 

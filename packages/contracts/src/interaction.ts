@@ -776,52 +776,7 @@ export const NetworkRouteMutationResponse = z
   .strict();
 export type NetworkRouteMutationResponse = z.infer<typeof NetworkRouteMutationResponse>;
 
-export const SiteAuthFieldPurpose = z.enum(["identifier", "password", "secret", "totp"]);
-export type SiteAuthFieldPurpose = z.infer<typeof SiteAuthFieldPurpose>;
-
 export const SiteAuthAuthority = z.discriminatedUnion("kind", [
-  z
-    .object({
-      id: boundedOpaqueId,
-      kind: z.literal("connection_fields"),
-      label: z.string().trim().min(1).max(200),
-      credential: InteractionCredentialAuthorityRef,
-      fields: z
-        .array(
-          z
-            .object({
-              id: boundedOpaqueId,
-              purpose: SiteAuthFieldPurpose,
-              credentialKey: z.string().trim().min(1).max(256),
-              digits: z.number().int().min(6).max(10).optional(),
-              periodSeconds: z.number().int().min(15).max(300).optional(),
-              algorithm: z.enum(["sha1", "sha256", "sha512"]).optional(),
-            })
-            .strict()
-            .superRefine((field, context) => {
-              const totp = field.purpose === "totp";
-              if (!totp && (field.digits || field.periodSeconds || field.algorithm)) {
-                context.addIssue({
-                  code: "custom",
-                  message: "TOTP parameters require purpose=totp",
-                });
-              }
-            }),
-        )
-        .min(1)
-        .max(32),
-    })
-    .strict(),
-  z
-    .object({
-      id: boundedOpaqueId,
-      kind: z.literal("human"),
-      label: z.string().trim().min(1).max(200),
-      fields: z
-        .array(z.object({ id: boundedOpaqueId, purpose: SiteAuthFieldPurpose }).strict())
-        .max(32),
-    })
-    .strict(),
   z
     .object({
       id: boundedOpaqueId,
@@ -967,17 +922,6 @@ function validateSiteAuthConfiguration(
       });
     }
   }
-  for (const [index, authority] of connection.authorities.entries()) {
-    if (authority.kind === "external_provider") continue;
-    const fieldIds = authority.fields.map((field) => field.id);
-    if (new Set(fieldIds).size !== fieldIds.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["authorities", index, "fields"],
-        message: "authority field ids repeat",
-      });
-    }
-  }
 }
 
 export const SiteAuthConnection = SiteAuthConnectionConfiguration.extend({
@@ -1039,7 +983,6 @@ export type SiteAuthConnectionMutationResponse = z.infer<typeof SiteAuthConnecti
 export const AuthRunState = z.enum([
   "discovering",
   "awaiting_choice",
-  "awaiting_secret",
   "awaiting_external_action",
   "working",
   "verified",
@@ -1056,15 +999,6 @@ export const AuthRunChoice = z
   })
   .strict();
 export type AuthRunChoice = z.infer<typeof AuthRunChoice>;
-
-export const AuthRunPendingField = z
-  .object({
-    id: boundedOpaqueId,
-    label: z.string().trim().min(1).max(200),
-    purpose: SiteAuthFieldPurpose,
-  })
-  .strict();
-export type AuthRunPendingField = z.infer<typeof AuthRunPendingField>;
 
 export const AuthRunExternalAction = z
   .object({
@@ -1091,7 +1025,6 @@ export const AuthRun = z
     authorityId: boundedOpaqueId.nullable(),
     state: AuthRunState,
     choices: z.array(AuthRunChoice).max(64),
-    pendingFields: z.array(AuthRunPendingField).max(64),
     externalAction: AuthRunExternalAction.nullable(),
     interventionId: z.string().uuid().nullable(),
     verifiedUrl: boundedUrl.nullable(),
@@ -1132,13 +1065,6 @@ export const AuthRun = z
         code: "custom",
         path: ["choices"],
         message: "choices require awaiting-choice state",
-      });
-    }
-    if ((run.state === "awaiting_secret") !== run.pendingFields.length > 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["pendingFields"],
-        message: "pending fields require awaiting-secret state",
       });
     }
     if ((run.state === "awaiting_external_action") !== (run.externalAction !== null)) {
@@ -1184,14 +1110,12 @@ export const ReportAuthRunPayload = z
     authorityId: boundedOpaqueId.optional(),
     state: z.enum([
       "awaiting_choice",
-      "awaiting_secret",
       "awaiting_external_action",
       "working",
       "failed",
       "cancelled",
     ]),
     choices: z.array(AuthRunChoice).max(64).optional(),
-    pendingFields: z.array(AuthRunPendingField).max(64).optional(),
     externalAction: AuthRunExternalAction.nullable().optional(),
     failureCode: boundedOpaqueId.nullable().optional(),
   })
@@ -1202,13 +1126,6 @@ export const ReportAuthRunPayload = z
         code: "custom",
         path: ["choices"],
         message: "choices require awaiting-choice state",
-      });
-    }
-    if ((report.state === "awaiting_secret") !== Boolean(report.pendingFields?.length)) {
-      context.addIssue({
-        code: "custom",
-        path: ["pendingFields"],
-        message: "pending fields require awaiting-secret state",
       });
     }
     if ((report.state === "awaiting_external_action") !== Boolean(report.externalAction)) {
@@ -1232,48 +1149,6 @@ export const ReportAuthRunRequest = ReportAuthRunPayload.safeExtend({
   operationId: z.string().uuid(),
 });
 export type ReportAuthRunRequest = z.infer<typeof ReportAuthRunRequest>;
-
-export const ProtectedAuthField = z
-  .object({ fieldId: boundedOpaqueId, locator: z.lazy(() => BrowserLocator) })
-  .strict();
-export type ProtectedAuthField = z.infer<typeof ProtectedAuthField>;
-
-export const ProtectedAuthSubmit = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("none") }).strict(),
-  z.object({ type: z.literal("click"), locator: z.lazy(() => BrowserLocator) }).strict(),
-  z
-    .object({
-      type: z.literal("press"),
-      key: z.string().min(1).max(256),
-      locator: z.lazy(() => BrowserLocator).optional(),
-    })
-    .strict(),
-]);
-export type ProtectedAuthSubmit = z.infer<typeof ProtectedAuthSubmit>;
-
-export const ProtectedAuthFillRequest = z
-  .object({
-    operationId: z.string().uuid(),
-    expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    expectedTargetGeneration: opaqueGeneration,
-    expectedDocumentGeneration: opaqueGeneration.nullable(),
-    expectedFrameId: opaqueGeneration.nullable(),
-    authorityId: boundedOpaqueId,
-    fields: z.array(ProtectedAuthField).min(1).max(32),
-    submit: ProtectedAuthSubmit.default({ type: "none" }),
-  })
-  .strict();
-export type ProtectedAuthFillRequest = z.infer<typeof ProtectedAuthFillRequest>;
-
-export const ProtectedAuthFillResponse = z
-  .object({
-    run: AuthRun,
-    status: z.enum(["submitted", "working", "needs_human", "stale", "failed"]),
-    operationId: z.string().uuid(),
-    replayed: z.boolean(),
-  })
-  .strict();
-export type ProtectedAuthFillResponse = z.infer<typeof ProtectedAuthFillResponse>;
 
 /** Public request for advancing a provider-managed AuthRun. Provider secrets,
  * profile names, browser ids, and hosted-login URLs stay behind browserd. */
@@ -2899,104 +2774,6 @@ export const BrowserActionReceipt = z
     }
   });
 export type BrowserActionReceipt = z.infer<typeof BrowserActionReceipt>;
-
-/** Controller-private protected-fill wire contract. Secret values cross only
- * the credential broker -> exact placement controller boundary; this command
- * is never projected into model MCP, Codemode, public action history, or UI. */
-export const BrowserProtectedAuthFieldValue = ProtectedAuthField.extend({
-  purpose: SiteAuthFieldPurpose,
-  value: z.string().min(1).max(65_536),
-}).strict();
-export type BrowserProtectedAuthFieldValue = z.infer<typeof BrowserProtectedAuthFieldValue>;
-
-export const BrowserProtectedAuthFillCommand = z
-  .object({
-    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-    operationId: z.string().uuid(),
-    browserSessionId: z.string().uuid(),
-    controllerGeneration: opaqueGeneration,
-    targetId: boundedOpaqueId,
-    expectedTargetGeneration: opaqueGeneration,
-    expectedDocumentGeneration: opaqueGeneration,
-    expectedFrameId: opaqueGeneration,
-    actor: InteractionActor,
-    authorityId: boundedOpaqueId,
-    credentialVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    allowedOrigins: z.array(canonicalWebOrigin).min(1).max(64),
-    fields: z.array(BrowserProtectedAuthFieldValue).min(1).max(32),
-    submit: ProtectedAuthSubmit,
-  })
-  .strict()
-  .superRefine((command, context) => {
-    if (new Set(command.allowedOrigins).size !== command.allowedOrigins.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["allowedOrigins"],
-        message: "protected-fill origins repeat",
-      });
-    }
-    const fieldIds = command.fields.map((field) => field.fieldId);
-    if (new Set(fieldIds).size !== fieldIds.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["fields"],
-        message: "protected-fill field ids repeat",
-      });
-    }
-  });
-export type BrowserProtectedAuthFillCommand = z.infer<typeof BrowserProtectedAuthFillCommand>;
-
-export const BrowserProtectedAuthObservation = z
-  .object({
-    target: BrowserTarget,
-    status: z.enum(["submitted", "working"]),
-  })
-  .strict();
-export type BrowserProtectedAuthObservation = z.infer<typeof BrowserProtectedAuthObservation>;
-
-/** Secret-free placement receipt. It can be journaled, replayed, and returned
- * to the broker without retaining any field value or model-visible page tree. */
-export const BrowserProtectedAuthFillReceipt = z
-  .object({
-    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-    operationId: z.string().uuid(),
-    browserSessionId: z.string().uuid(),
-    controllerGeneration: opaqueGeneration,
-    targetId: boundedOpaqueId,
-    state: InteractionOperationState,
-    dispatchedAt: z.string().datetime({ offset: true }).nullable(),
-    settledAt: z.string().datetime({ offset: true }).nullable(),
-    observation: BrowserProtectedAuthObservation.nullable(),
-    error: InteractionError.nullable(),
-  })
-  .strict()
-  .superRefine((receipt, context) => {
-    if (
-      receipt.state === "completed" &&
-      (receipt.error !== null || receipt.observation === null || receipt.settledAt === null)
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "completed protected-fill receipt requires a result and no error",
-      });
-    }
-    if (
-      (receipt.state === "failed" || receipt.state === "outcome_unknown") &&
-      (receipt.error === null || receipt.observation !== null || receipt.settledAt === null)
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "terminal protected-fill error requires error, no result, and time",
-      });
-    }
-    if (receipt.state === "dispatched" && receipt.dispatchedAt === null) {
-      context.addIssue({
-        code: "custom",
-        message: "dispatched protected-fill receipt requires dispatch time",
-      });
-    }
-  });
-export type BrowserProtectedAuthFillReceipt = z.infer<typeof BrowserProtectedAuthFillReceipt>;
 
 export const ComputerSessionCapabilities = z
   .object({

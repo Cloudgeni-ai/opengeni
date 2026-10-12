@@ -666,11 +666,9 @@ describe("API helpers", () => {
       "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics",
     );
     expect(
-      routeLabel(
-        `/v1/workspaces/${workspace}/browser-sessions/browser-1/auth-runs/run-1/protected-fill`,
-      ),
+      routeLabel(`/v1/workspaces/${workspace}/browser-sessions/browser-1/auth-runs/run-1/report`),
     ).toBe(
-      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report",
     );
     expect(
       routeLabel(

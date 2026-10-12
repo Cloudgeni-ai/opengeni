@@ -867,14 +867,6 @@ describe("BrowserSession SDK", () => {
         if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/report`)) {
           return json({ run: { id: AUTH_RUN_ID }, operationId: "auth-report", replayed: false });
         }
-        if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/protected-fill`)) {
-          return json({
-            run: { id: AUTH_RUN_ID },
-            status: "working",
-            operationId: "auth-fill",
-            replayed: false,
-          });
-        }
         if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/external-auth/interactive`)) {
           return json({
             authRunId: AUTH_RUN_ID,
@@ -961,16 +953,6 @@ describe("BrowserSession SDK", () => {
       expectedDocumentGeneration: "document-generation-1",
     });
     await run.report({ operationId: "auth-report", expectedVersion: 1, state: "working" });
-    await run.protectedFill({
-      operationId: "auth-fill",
-      expectedVersion: 2,
-      expectedTargetGeneration: "target-generation-1",
-      expectedDocumentGeneration: "document-generation-1",
-      expectedFrameId: null,
-      authorityId: "password-authority",
-      fields: [{ fieldId: "password", locator: { kind: "ref", ref: "e2" } }],
-      submit: { type: "press", key: "Enter" },
-    });
     await run.advanceExternal({
       operationId: "auth-external",
       expectedVersion: 3,
@@ -1017,7 +999,6 @@ describe("BrowserSession SDK", () => {
       `GET /v1/workspaces/${WORKSPACE_ID}/auth-runs?browserSessionId=${BROWSER_SESSION_ID}&includeSettled=true`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/report`,
-      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/protected-fill`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/external-auth`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/external-auth/interactive`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/verify`,
