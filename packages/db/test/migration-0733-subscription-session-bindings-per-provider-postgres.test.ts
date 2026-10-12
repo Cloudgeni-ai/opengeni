@@ -370,7 +370,18 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       sql`select current_user::text as role`,
     );
     expect(identity!.role).toBe("opengeni_app");
-    expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
+    // This historical fixture applies only 0733, not the later 0735 owned-usage
+    // routines. Current readiness must report exactly those missing routines
+    // both before and after provisioning; no other posture failure is allowed.
+    const missing0735Routines = [
+      "subscription M3 precursor private routine read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid) is missing or unsafe",
+      "subscription M3 precursor private routine begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid) is missing or unsafe",
+      "subscription M3 precursor private routine record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone) is missing or unsafe",
+    ];
+    expect(posture).toEqual({
+      unprovisioned: missing0735Routines,
+      provisioned: missing0735Routines,
+    });
   });
 
   test("every binding the previous binary wrote keeps every value across 0733", async () => {

@@ -2732,6 +2732,105 @@ Shared-core additions, all in the generic precursor:
 | Lifecycle fact `model.connected` captured on core connection insert, keyed by provider. | Today it is emitted only by triggers on the legacy credential tables (0565, 0598, 0602); Codex already lost it in M3. |
 | `subscription_authority_compat` relation, its reader and copy routines (below). | Keyed by provider and carrier; needed by every provider whose v1 snapshot predates its cutover. |
 | Provider-keyed cutover receipts, readiness and parity report (below). | Replaces per-provider receipt functions and report relations. |
+| Administered usage reads (below): a live usage probe for an organization administrator on the organization route and for a personal connection's owner in their own Personal workspace (0735, renumbered at merge). | Legacy read organization and user-scope accounts live for Claude and SuperGrok (D-01), and Codex's organization usage reads live; the workspace connection seam serves neither. |
+
+#### Administered usage reads
+
+The workspace connection seam (`operation-connections`) cannot read a
+connection outside a workspace pool: its target routine
+(`subscription_core_connection_target`, 0707) needs a workspace and, without
+a turn lease, returns shared connections only. Legacy read organization and
+user-scope accounts live (D-01). `subscriptionCoreAdministeredConnections(provider)`
+(`subscription-core/administered-connections.ts`) adds a provider-neutral
+usage probe, `probeSubscriptionCoreAdministeredConnectionUsage`, with the
+workspace probe's staleness refresh, adapter `fetchUsage`/`decodeQuota`
+(including `modelIds`) and generation-fenced quota merge, and the same
+result shape (`SubscriptionCoreUsageProbe`, with `applied` and
+`recovered`). It has two scopes, each re-established in every transaction
+it opens and never borrowed:
+
+- `organization_administrator`, generalized from Codex's organization usage
+  read (an administrator check, then a live read): the organization context
+  with no workspace, the organization membership lifecycle lock taken before
+  the check (waited for at most five seconds; a busier organization refuses
+  the read as not visible), the caller's subject, the `subscription_organization_admin`
+  predicate the connection policies use, and an enabled cutover. Only a
+  shared connection of the provider's registered kind that no workspace
+  manages (`managed_by_workspace_id is null`), not disconnected, is read; a
+  workspace-managed connection stays with its workspace. The credential
+  refresh (under the per-connection refresh lock) and the quota write go
+  through the administrator's row policies.
+- `personal_owner`: the owner's own Personal workspace context and subject.
+  Every read and write goes through three owner-only routines (0735): the
+  credential read, the refresh begin (which takes the per-connection
+  refresh lock and mints the 0707 `connection_refresh_authorized`
+  capability that the unchanged 0707 persist and fail writers consume) and
+  the quota write (fenced on the refresh generation and on the stored quota
+  revision the caller merged from). Each admits only the 0707 writer
+  context (the transaction's account, workspace and `user:` subject, an
+  enabled cutover of a registered provider), the owner's exact active,
+  unrevoked membership whose Personal workspace is the given workspace, a
+  personal connection of the registered kind that this membership owns, not
+  disconnected, and an active, unrevoked authority of that membership at the
+  connection's current authority generation, and the organization's
+  effective personal-connections rule (`personalConnectionsAllowed` from
+  `subscription_effective_settings`, exactly as the 0707 turn target,
+  refresh begin and personal connect apply it, so an override of a locked
+  setting is ignored). The 0707 `connection_owner`
+  capability is held only while a routine runs. A shared workspace, another
+  member, a service actor and an ownerless session (which has no person)
+  never reach the credential. A test pins these predicates to the live 0707
+  routines that state them, so the two cannot drift apart.
+
+Request custody. Each provider request runs in a transaction that holds the
+per-connection refresh lock, rechecks the scope's authority and that the
+credential is still active at the bearer's refresh generation, and buffers
+the bounded response (`redirect: "error"`, 1 MiB) before it ends. The
+deadline, which includes the locks and the recheck, is five seconds on the
+organization route, whose transaction also holds the organization
+membership lock for the request (Codex's organization usage budget), and
+ten seconds for an owner's personal read. Only native fetch, or an injected
+transport that aborts and joins its local work for the request's signal
+(as Codex's organization read requires), is accepted; any other is refused
+before a credential is loaded. A disconnect or refresh waits for the request
+(both take the refresh lock), and so does an organization membership change
+on the organization route. An owner's membership or authority change does
+not wait for a personal request, but no request starts after it, and the
+quota write rechecks both and drops the reading. Credential refresh flights are
+namespaced by scope. Every outcome is reported, never thrown; a refused
+scope is `not_visible` and reads nothing. Nothing here changes allocation,
+policies or assignments.
+
+Quota writes are fenced on the refresh generation they read, not taken
+under the refresh lock (no new lock order): a reconnect that commits between
+that read and the write can let one older reading land, stamped with its own
+generation, the same window as the workspace path. The organization write
+merges under the quota row lock, as the workspace path does; the owner's
+write merges from the owner reader and is fenced on the revision it merged
+from, so a reading that raced another quota write at the same generation
+re-reads and re-merges once before it is dropped.
+
+Stored state without a credential read. A person's own personal
+connections, with their status and stored quota (exhaustion, windows and
+cooldowns), are already readable without a credential through the 0707
+owner reader (`listSubscriptionCorePersonalConnectionRowsInTransaction`):
+exact owner membership, in their Personal workspace or a workspace they are
+a member of. A provider's status route serves personal-only users from that
+reader and refreshes live through `personal_owner`; no further routine is
+needed for the stored re-read.
+
+Known limit (not fail-open). These reads record no workspace operation
+ledger entry: the organization route has no workspace, and the ledger's
+credential check refuses personal connections. A usage read moves no money
+and changes no allocation; its custody is the locked, rechecked transaction
+above, and the quota write is fenced as on the workspace path.
+
+The workspace probe's credential load, rotation and usage-merge steps are
+factored out of `subscription-core/operations.ts` with unchanged behaviour
+(`subscriptionCoreConnectionCredentialLoad`,
+`rotateSubscriptionCoreConnectionCredential` through a
+`SubscriptionCoreCredentialRefreshWriter`, and
+`mergeSubscriptionCoreUsageObservation`), so both probes share them.
 
 #### Accepted authority across the cutover
 

@@ -71,6 +71,8 @@ beforeAll(async () => {
     "0728_subscription_core_personal_connect_format.sql",
     // 0730 derives the personal version reader from 0707's owner reader.
     "0730_subscription_core_personal_connection_versions.sql",
+    // 0735's owner-only usage routines run on 0707's owner internals.
+    "0735_subscription_core_owned_connection_usage.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
