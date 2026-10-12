@@ -10884,10 +10884,27 @@ export async function getCapabilityInstallation(
   });
 }
 
+/** Drizzle expands a bare JS array into a parameter list, never a text[]. */
+function capabilityTextArray(values: readonly string[]) {
+  return values.length === 0
+    ? sql`ARRAY[]::text[]`
+    : sql`ARRAY[${sql.join(
+        values.map((value) => sql`${value}::text`),
+        sql`, `,
+      )}]::text[]`;
+}
+
 export async function listEnabledMcpCapabilityServers(
   db: Database,
   workspaceId: string,
+  /**
+   * Restrict the read to installations of these capabilities plus any catalog
+   * item whose explicit `mcpServerId` mentions one of `serverIds`. Server ids
+   * are computed below, so callers still filter the result by exact id.
+   */
+  only?: { capabilityIds: readonly string[]; serverIds: readonly string[] },
 ): Promise<EnabledMcpCapabilityServer[]> {
+  if (only && only.capabilityIds.length === 0 && only.serverIds.length === 0) return [];
   const rows = await withWorkspaceRls(
     db,
     workspaceId,
@@ -10917,6 +10934,13 @@ export async function listEnabledMcpCapabilityServers(
             eq(schema.capabilityInstallations.kind, "mcp"),
             eq(schema.capabilityInstallations.status, "active"),
             eq(schema.capabilityCatalogItems.stale, false),
+            only
+              ? sql`(${schema.capabilityInstallations.capabilityId} = any(${capabilityTextArray(only.capabilityIds)})
+                  or exists (
+                    select 1 from unnest(${capabilityTextArray(only.serverIds)}) as target(id)
+                    where strpos(coalesce(${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId', ''), target.id) > 0
+                  ))`
+              : undefined,
             sql`(
               ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
               or exists (

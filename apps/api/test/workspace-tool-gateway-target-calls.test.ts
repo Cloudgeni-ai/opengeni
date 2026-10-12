@@ -22,6 +22,9 @@ const dbModule = await import("@opengeni/db");
 const real = {
   resolveWorkspaceCatalogSettings: core.resolveWorkspaceCatalogSettings,
   settingsWithEnabledCapabilityMcpServers: core.settingsWithEnabledCapabilityMcpServers,
+  settingsWithEnabledCapabilityMcpServersForTargets:
+    core.settingsWithEnabledCapabilityMcpServersForTargets,
+  visibleMcpAccountConnectionsByIds: core.visibleMcpAccountConnectionsByIds,
   availableMcpAccountBindings: core.availableMcpAccountBindings,
   siteViewerForGrant: core.siteViewerForGrant,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
@@ -38,6 +41,8 @@ type Fixture = {
   onPhysical?: () => Promise<void>;
   revokedCaller?: boolean;
   callerReads?: number;
+  /** Narrow live route reads made by target fences. */
+  targetReads?: number;
 };
 const fixtures = new Map<Database, Fixture>();
 mock.module("@opengeni/core", () => ({
@@ -56,6 +61,34 @@ mock.module("@opengeni/core", () => ({
     fixtures.has(args[0])
       ? (args[3]?.onResolvedApiIntegrations?.(fixtures.get(args[0])!.integrations), args[2])
       : real.settingsWithEnabledCapabilityMcpServers(...args),
+  // The live target fence reads only the selected rows: the same fixture
+  // inventory restricted to the requested ids.
+  settingsWithEnabledCapabilityMcpServersForTargets: async (
+    ...args: Parameters<typeof real.settingsWithEnabledCapabilityMcpServersForTargets>
+  ) => {
+    const fixture = fixtures.get(args[0]);
+    if (!fixture) return real.settingsWithEnabledCapabilityMcpServersForTargets(...args);
+    fixture.targetReads = (fixture.targetReads ?? 0) + 1;
+    args[3].onResolvedApiIntegrations?.(
+      fixture.integrations.filter((item) => args[3].serverIds.includes(item.serverId)),
+    );
+    return args[2];
+  },
+  visibleMcpAccountConnectionsByIds: async (
+    ...args: Parameters<typeof real.visibleMcpAccountConnectionsByIds>
+  ) => {
+    const fixture = fixtures.get(args[0]);
+    if (!fixture) return real.visibleMcpAccountConnectionsByIds(...args);
+    const [, input] = args;
+    return fixture.connections.filter((connection) =>
+      connection.subjectId === null
+        ? input.workspaceConnectionIds.includes(connection.id)
+        : input.source.kind === "subject" &&
+          connection.subjectId === input.source.subjectId &&
+          connection.status === "active" &&
+          input.personalConnectionIds.includes(connection.id),
+    );
+  },
   availableMcpAccountBindings: async (
     input: Parameters<typeof real.availableMcpAccountBindings>[0],
   ) => {
@@ -65,7 +98,7 @@ mock.module("@opengeni/core", () => ({
       ...input,
       subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
       servers: input.settings.mcpServers,
-      connections: fixture.connections,
+      connections: input.connections ?? fixture.connections,
     });
   },
 }));
@@ -173,6 +206,8 @@ function targetAuthorization(subject = subjectId) {
 }
 function targetOptions(extra: TargetGatewayOptions = {}): TargetGatewayOptions {
   return {
+    // The route's fresh human grant (a person's live caller part).
+    reauthorize: async () => undefined,
     prepare: async (deps, authorization, options = {}) =>
       await prepareWorkspaceToolGateway(deps, authorization, options),
     begin: async () => true,
@@ -292,7 +327,12 @@ function createFixture(
   const unrelated = Array.from({ length: input.unrelatedConnectors ?? 3 }, () =>
     delayedProvider(delayMs),
   );
-  const database = {} as Database;
+  // A fence evaluation runs its parts in one bounded transaction; this inert
+  // handle stands in for that transaction (fixture reads are mocked above).
+  const database = {
+    transaction: async <T>(fn: (tx: Database) => Promise<T>) => await fn(database),
+    execute: async () => [],
+  } as unknown as Database;
   const shared = createConnection("55555555-5555-4555-8555-555555555555", null);
   const personal = createConnection("66666666-6666-4666-8666-666666666666", subjectId);
   const foreign = createConnection("77777777-7777-4777-8777-777777777777", otherSubjectId);
