@@ -876,6 +876,16 @@
         "typescript": "7.0.2",
       },
     },
+    "packages/vaults-onepassword": {
+      "name": "@opengeni/vaults-onepassword",
+      "version": "0.1.0",
+      "dependencies": {
+        "@1password/sdk": "0.5.0",
+      },
+      "devDependencies": {
+        "typescript": "7.0.2",
+      },
+    },
     "packages/xai-subscription": {
       "name": "@opengeni/xai-subscription",
       "version": "1.4.4",
@@ -915,6 +925,10 @@
     "ws": "8.21.1",
   },
   "packages": {
+    "@1password/sdk": ["@1password/sdk@0.5.0", "", { "dependencies": { "@1password/sdk-core": "0.5.0" } }, "sha512-k6kov3pcA7PRg2tev9CgTfEf/3JSyAp11BPQNCEsqAD32QbqM032OXC1rfjyC8Ba0sfH+NHYZxcifUZToyGyYA=="],
+
+    "@1password/sdk-core": ["@1password/sdk-core@0.5.0", "", {}, "sha512-9g7LWOKRKdePZ85evVgE9xEom3DAg3hRIyQdOwLPvpL/F7KpDXmUHMi72rsqJxKaDbWApXmrYjDExMSPqUg7xw=="],
+
     "@alibaba-group/opensandbox": ["@alibaba-group/opensandbox@0.1.11", "", { "dependencies": { "openapi-fetch": "^0.14.1", "undici": "^7.28.0" } }, "sha512-xDJzs+5yYAPrje+z3GKUmXezpVq3kO/NyP8BM9JwzCbfuSr5vQyHJI3/Pu4FBGdb/xQnxMcWFlsKqC4/80OeiQ=="],
 
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
@@ -1720,6 +1734,8 @@
     "@opengeni/tool-gateway": ["@opengeni/tool-gateway@workspace:packages/tool-gateway"],
 
     "@opengeni/vaults": ["@opengeni/vaults@workspace:packages/vaults"],
+
+    "@opengeni/vaults-onepassword": ["@opengeni/vaults-onepassword@workspace:packages/vaults-onepassword"],
 
     "@opengeni/worker-bundle": ["@opengeni/worker-bundle@workspace:apps/worker"],
 

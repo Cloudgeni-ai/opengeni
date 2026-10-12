@@ -1,0 +1,22 @@
+{
+  "name": "@opengeni/vaults-onepassword",
+  "version": "0.1.0",
+  "private": true,
+  "description": "1Password service-account provider for OpenGeni vaults. Loaded only by apps/api and apps/worker through dynamic import.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@1password/sdk": "0.5.0"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}
