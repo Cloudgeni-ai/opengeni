@@ -75,7 +75,7 @@ const subscriptionCoreMigrations = [
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   "0730_subscription_core_personal_connection_versions.sql",
   // Rekeys the session bindings table from withheld 0642.
-  "0732_subscription_session_bindings_per_provider.sql",
+  "0733_subscription_session_bindings_per_provider.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

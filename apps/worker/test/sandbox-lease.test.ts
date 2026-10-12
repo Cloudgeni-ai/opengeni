@@ -6438,41 +6438,6 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).not.toThrow();
   });
 
-  test("(5) the Schedule registration is idempotent — a second create() collides and no-ops (registers exactly once)", async () => {
-    // The registration's idempotency is the ScheduleAlreadyRunning catch in
-    // registerSandboxReaperSchedule. We assert the contract WITHOUT a live
-    // Temporal server by exercising the same create→collide shape through a fake
-    // ScheduleClient: the first create succeeds, the second throws
-    // ScheduleAlreadyRunning, and the helper treats it as a no-op (registered:false)
-    // rather than a failure.
-    const { ScheduleAlreadyRunning } = await import("@temporalio/client");
-    let created = 0;
-    const fakeCreate = async (opts: { scheduleId: string }) => {
-      if (created > 0) {
-        throw new ScheduleAlreadyRunning("already running", opts.scheduleId);
-      }
-      created += 1;
-    };
-
-    // First registration creates the Schedule.
-    await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
-    expect(created).toBe(1);
-
-    // A second worker booting (same scheduleId) collides → caught as a no-op.
-    let collided = false;
-    try {
-      await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
-    } catch (error) {
-      if (error instanceof ScheduleAlreadyRunning) {
-        collided = true; // the helper's catch arm — registered:false, not a throw.
-      } else {
-        throw error;
-      }
-    }
-    expect(collided).toBe(true);
-    expect(created).toBe(1); // still exactly one Schedule.
-  });
-
   test("(5a) a missing exact provider settles stale mutation blockers and drains cold", async () => {
     if (!available) return;
 
