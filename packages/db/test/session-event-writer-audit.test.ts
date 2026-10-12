@@ -365,11 +365,16 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce": {
+    inserts: 1,
+    contract: "canonical",
+  },
 };
 
 const genericControlWriters = new Set([
   // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
   "packages/db/src/index.ts#pinSubscriptionCoreSessionCodexAccount",
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
   "packages/db/src/index.ts#appendSessionEvents",
