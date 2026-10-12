@@ -42,6 +42,7 @@ import {
   sessionSupportsFleetSwitching,
 } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
+import { ModelAccountIndicator } from "@/components/session/model-account-indicator";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -493,6 +494,9 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
+  const credentialSource = selectedRow?.catalog.credentialSource;
+  const subscriptionProvider =
+    credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
   const repliesMute = useSessionRepliesMute(session);
   const adminAccess = useSessionAdminAccess(session);
   const archiveInFlight = useRef(false);
@@ -597,6 +601,17 @@ function SessionRouteHeader({
             sessionId={session.id}
             model={displayModelId}
             modelReady={policyReady}
+            events={events}
+          />
+        ) : policyReady && subscriptionProvider ? (
+          <ModelAccountIndicator
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            organizationId={
+              context.workspaces.find((candidate) => candidate.id === session.workspaceId)
+                ?.accountId ?? null
+            }
+            provider={subscriptionProvider}
             events={events}
           />
         ) : null
