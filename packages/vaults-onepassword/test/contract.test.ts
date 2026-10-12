@@ -21,7 +21,12 @@ runVaultProviderContractSuite("1Password adapter (SDK double)", async () => {
             fields: [
               { id: "username", title: "username", fieldType: "Text", value: "alice" },
               { id: "password", title: "password", fieldType: "Concealed", value: "pw" },
-              { id: "otp", title: "one-time password", fieldType: "Totp", value: "JBSWY3DPEHPK3PXP" },
+              {
+                id: "otp",
+                title: "one-time password",
+                fieldType: "Totp",
+                value: "JBSWY3DPEHPK3PXP",
+              },
             ],
           },
         ],

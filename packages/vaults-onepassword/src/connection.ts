@@ -29,8 +29,18 @@ function fakeLogin(id: string, name: string, website: string, totp = false) {
     type: "login" as const,
     websites: [website],
     fields: [
-      { externalFieldId: "username", name: "username", kind: "text" as const, value: `${id}@example.test` },
-      { externalFieldId: "password", name: "password", kind: "concealed" as const, value: `fake-${id}-password` },
+      {
+        externalFieldId: "username",
+        name: "username",
+        kind: "text" as const,
+        value: `${id}@example.test`,
+      },
+      {
+        externalFieldId: "password",
+        name: "password",
+        kind: "concealed" as const,
+        value: `fake-${id}-password`,
+      },
       ...(totp
         ? [
             {
@@ -65,19 +75,40 @@ function fakeProviderFor(token: OnePasswordFakeToken): VaultProvider {
               externalItemId: "fakeitemstripekey00000001",
               name: "Stripe API key",
               type: "api_key",
-              fields: [{ externalFieldId: "credential", name: "credential", kind: "concealed", value: "sk_test_fake" }],
+              fields: [
+                {
+                  externalFieldId: "credential",
+                  name: "credential",
+                  kind: "concealed",
+                  value: "sk_test_fake",
+                },
+              ],
             },
             {
               externalItemId: "fakeitemsentrydsn00000001",
               name: "Sentry DSN",
               type: "api_key",
-              fields: [{ externalFieldId: "credential", name: "credential", kind: "concealed", value: "https://fake@sentry.example.test/1" }],
+              fields: [
+                {
+                  externalFieldId: "credential",
+                  name: "credential",
+                  kind: "concealed",
+                  value: "https://fake@sentry.example.test/1",
+                },
+              ],
             },
             {
               externalItemId: "fakeitemoncallnote0000001",
               name: "On-call runbook",
               type: "note",
-              fields: [{ externalFieldId: "@notes", name: "note", kind: "concealed", value: "Page the fake on-call." }],
+              fields: [
+                {
+                  externalFieldId: "@notes",
+                  name: "note",
+                  kind: "concealed",
+                  value: "Page the fake on-call.",
+                },
+              ],
             },
           ],
         },
@@ -92,7 +123,11 @@ function fakeProviderFor(token: OnePasswordFakeToken): VaultProvider {
           externalVaultId: ONEPASSWORD_FAKE_VAULT_IDS.shared,
           name: "Shared",
           items: [
-            fakeLogin("fakeitemaws000000000000001", "AWS console", "https://console.aws.amazon.com"),
+            fakeLogin(
+              "fakeitemaws000000000000001",
+              "AWS console",
+              "https://console.aws.amazon.com",
+            ),
             fakeLogin("fakeitemjira00000000000001", "Jira", "https://jira.example.test"),
             fakeLogin("fakeitemwifi00000000000001", "Office Wi-Fi", "https://wifi.example.test"),
           ],

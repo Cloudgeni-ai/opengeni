@@ -33,7 +33,13 @@ function world() {
             id: "login0000000000000000000000",
             title: "Test Login",
             category: "Login",
-            websites: [{ url: "https://example.test", label: "website", autofillBehavior: "AnywhereOnWebsite" }],
+            websites: [
+              {
+                url: "https://example.test",
+                label: "website",
+                autofillBehavior: "AnywhereOnWebsite",
+              },
+            ],
             sections: [{ id: "add more", title: "" }],
             fields: [
               { id: "username", title: "username", fieldType: "Text", value: "alice" },
@@ -73,7 +79,10 @@ function world() {
     sdk: fake.sdk,
     clientCache,
   });
-  const ctx = (): VaultProviderContext => ({ connectionId: crypto.randomUUID(), budget: createAttemptProviderBudget() });
+  const ctx = (): VaultProviderContext => ({
+    connectionId: crypto.randomUUID(),
+    budget: createAttemptProviderBudget(),
+  });
   return { fake, provider, ctx, clientCache };
 }
 
@@ -105,7 +114,10 @@ describe("1Password adapter", () => {
   test("reads live values: text, TOTP params, notes and document bytes", async () => {
     const { provider, ctx } = world();
     const c = ctx();
-    const values = await provider.readFields(c, RW, "login0000000000000000000000", ["password", "TOTP_abc"]);
+    const values = await provider.readFields(c, RW, "login0000000000000000000000", [
+      "password",
+      "TOTP_abc",
+    ]);
     expect(values[0]!.material).toEqual({ type: "text", value: "s3cret" });
     expect(values[1]!.material).toEqual({
       type: "totp",
@@ -126,7 +138,12 @@ describe("1Password adapter", () => {
     ]);
     await provider.readFields(c, RW, "login0000000000000000000000", ["TOTP_abc"]);
     expect(fake.calls.filter((call) => call.op === "items.get")).toHaveLength(1);
-    await provider.readFields({ ...ctx(), connectionId: c.connectionId }, RW, "login0000000000000000000000", ["password"]);
+    await provider.readFields(
+      { ...ctx(), connectionId: c.connectionId },
+      RW,
+      "login0000000000000000000000",
+      ["password"],
+    );
     expect(fake.calls.filter((call) => call.op === "items.get")).toHaveLength(2);
   });
 
@@ -146,11 +163,16 @@ describe("1Password adapter", () => {
 
   test("the attempt budget stops the 51st provider read before any SDK call", async () => {
     const { provider, fake } = world();
-    const c: VaultProviderContext = { connectionId: null, budget: createAttemptProviderBudget({ reads: 2 }) };
+    const c: VaultProviderContext = {
+      connectionId: null,
+      budget: createAttemptProviderBudget({ reads: 2 }),
+    };
     await provider.listVaults(c);
     await provider.readFields(c, RW, "login0000000000000000000000", ["password"]);
     const before = fake.calls.length;
-    await expect(provider.readFields(c, RW, "note00000000000000000000000", ["@notes"])).rejects.toMatchObject({
+    await expect(
+      provider.readFields(c, RW, "note00000000000000000000000", ["@notes"]),
+    ).rejects.toMatchObject({
       code: "provider_rate_limited",
     });
     expect(fake.calls.length).toBe(before);
@@ -159,10 +181,18 @@ describe("1Password adapter", () => {
   test("a 429 maps to provider_rate_limited and fails fast for the connection", async () => {
     const { provider, ctx, fake } = world();
     const c = ctx();
-    fake.failNext("vaults.list", () => new RateLimitExceededError("rate limit exceeded, retry in 5 minutes"));
-    await expect(provider.listVaults(c)).rejects.toMatchObject({ code: "provider_rate_limited", retryAfterMs: 300_000 });
+    fake.failNext(
+      "vaults.list",
+      () => new RateLimitExceededError("rate limit exceeded, retry in 5 minutes"),
+    );
+    await expect(provider.listVaults(c)).rejects.toMatchObject({
+      code: "provider_rate_limited",
+      retryAfterMs: 300_000,
+    });
     const calls = fake.calls.length;
-    await expect(provider.listVaults({ ...ctx(), connectionId: c.connectionId })).rejects.toMatchObject({
+    await expect(
+      provider.listVaults({ ...ctx(), connectionId: c.connectionId }),
+    ).rejects.toMatchObject({
       code: "provider_rate_limited",
     });
     expect(fake.calls.length).toBe(calls);
@@ -214,8 +244,14 @@ describe("1Password adapter", () => {
     });
     const storedKey = fake.vaults.get(RW)!.items.get(key.externalItemId)!;
     expect(storedKey.category).toBe("ApiCredentials");
-    expect(storedKey.fields[0]).toMatchObject({ id: "credential", title: "value", value: "sk_test_x" });
-    expect(key.fields).toEqual([{ externalFieldId: "credential", name: "value", kind: "concealed" }]);
+    expect(storedKey.fields[0]).toMatchObject({
+      id: "credential",
+      title: "value",
+      value: "sk_test_x",
+    });
+    expect(key.fields).toEqual([
+      { externalFieldId: "credential", name: "value", kind: "concealed" },
+    ]);
   });
 
   test("update preserves unknown fields (passkeys), re-applies once on a race, conflicts on stale expected version", async () => {
@@ -237,7 +273,9 @@ describe("1Password adapter", () => {
       name: "Test Login",
       type: "login",
       websites: ["https://example.test"],
-      fields: [{ externalFieldId: "password", name: "password", kind: "concealed", value: "rotated" }],
+      fields: [
+        { externalFieldId: "password", name: "password", kind: "concealed", value: "rotated" },
+      ],
     });
     fake.client.items.get = original;
     const stored = fake.vaults.get(RW)!.items.get(id)!;
@@ -278,7 +316,12 @@ describe("1Password adapter", () => {
   test("writes to a read-only vault surface provider_permission_denied", async () => {
     const { provider, ctx } = world();
     const error = await provider
-      .writeItem(ctx(), RO, { name: "x", type: "note", websites: [], fields: [{ name: "note", kind: "concealed", value: "v" }] })
+      .writeItem(ctx(), RO, {
+        name: "x",
+        type: "note",
+        websites: [],
+        fields: [{ name: "note", kind: "concealed", value: "v" }],
+      })
       .catch((caught) => caught);
     expect(error).toBeInstanceOf(VaultProviderError);
     expect(error.code).toBe("provider_permission_denied");
@@ -298,12 +341,17 @@ describe("1Password adapter", () => {
         fields: [{ externalFieldId: "@document", name: "file", kind: "file", value: "x" }],
       }),
     ).rejects.toMatchObject({ code: "provider_unavailable" });
-    expect(fake.calls.some((call) => call.op === "items.put" || call.op === "items.create")).toBe(false);
+    expect(fake.calls.some((call) => call.op === "items.put" || call.op === "items.create")).toBe(
+      false,
+    );
   });
 
   test("managed vaults: admins access; group grants need Teams or Business", async () => {
     const { provider, ctx, fake } = world();
-    const vault = await provider.createVault!(ctx(), { name: "OpenGeni – Shared", allowAdminsAccess: true });
+    const vault = await provider.createVault!(ctx(), {
+      name: "OpenGeni – Shared",
+      allowAdminsAccess: true,
+    });
     expect(vault.itemCount).toBe(0);
     await expect(
       provider.createVault!(ctx(), { name: "x", allowAdminsAccess: true, groupId: "g1" }),
@@ -316,6 +364,9 @@ describe("1Password adapter", () => {
     });
     expect(teams.capabilities().groupGrants).toBe(true);
     await teams.createVault!(ctx(), { name: "Team vault", allowAdminsAccess: true, groupId: "g1" });
-    expect(fake.calls.slice(-2).map((call) => call.op)).toEqual(["vaults.create", "vaults.grantGroupPermissions"]);
+    expect(fake.calls.slice(-2).map((call) => call.op)).toEqual([
+      "vaults.create",
+      "vaults.grantGroupPermissions",
+    ]);
   });
 });

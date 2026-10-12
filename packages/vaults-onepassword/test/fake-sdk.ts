@@ -24,7 +24,11 @@ export const NO_PERMISSION = "you don't have the right permissions to access thi
 export const STALE_VERSION = "error updating item: incorrect item version";
 export const NOT_AUTHENTICATED = "you are not authenticated";
 
-type FakeVault = SdkVaultOverview & { writable: boolean; items: Map<string, SdkItem>; archived: Set<string> };
+type FakeVault = SdkVaultOverview & {
+  writable: boolean;
+  items: Map<string, SdkItem>;
+  archived: Set<string>;
+};
 
 export type FakeSdkCall = { op: string; vaultId?: string; itemId?: string };
 
@@ -36,7 +40,12 @@ function clone<T>(value: T): T {
 }
 
 export function createFakeOnePasswordSdk(seed: {
-  vaults: Array<{ id?: string; title: string; writable: boolean; items?: Array<Partial<SdkItem> & { title: string; category: string }> }>;
+  vaults: Array<{
+    id?: string;
+    title: string;
+    writable: boolean;
+    items?: Array<Partial<SdkItem> & { title: string; category: string }>;
+  }>;
 }) {
   const vaults = new Map<string, FakeVault>();
   for (const vault of seed.vaults) {
@@ -202,7 +211,11 @@ export function createFakeOnePasswordSdk(seed: {
         const current = activeItem(vault, item.id);
         if (!vault.writable) throw new Error(NO_PERMISSION);
         if (current.version !== item.version) throw new Error(STALE_VERSION);
-        const saved: SdkItem = { ...clone(item), version: current.version + 1, updatedAt: new Date() };
+        const saved: SdkItem = {
+          ...clone(item),
+          version: current.version + 1,
+          updatedAt: new Date(),
+        };
         vault.items.set(item.id, saved);
         bump(vault);
         return clone(saved);
@@ -237,7 +250,9 @@ export function createFakeOnePasswordSdk(seed: {
     async createClient(config) {
       signIns += 1;
       if (!config.auth.startsWith("ops_")) {
-        throw new Error("invalid service account token, please make sure you provide a valid service account token as parameter");
+        throw new Error(
+          "invalid service account token, please make sure you provide a valid service account token as parameter",
+        );
       }
       return client;
     },
@@ -274,7 +289,14 @@ export function fakeServiceAccountToken(signInAddress = "https://my.1password.co
     userAuth: { method: "SRPg-4096", alg: "PBES2g-HS256", iterations: 650000, salt: "x" },
     email: "test@example.invalid",
     srpX: "00",
-    muk: { alg: "A256GCM", ext: true, k: "x", key_ops: ["encrypt", "decrypt"], kty: "oct", kid: "mp" },
+    muk: {
+      alg: "A256GCM",
+      ext: true,
+      k: "x",
+      key_ops: ["encrypt", "decrypt"],
+      kty: "oct",
+      kid: "mp",
+    },
     secretKey: "A3-XXXXXX",
     throttleSecret: { seed: "00", uuid: "x" },
     deviceUuid: "x",

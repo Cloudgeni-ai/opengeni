@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import { VaultProviderError } from "../src/contract";
-import { classifyOnePasswordMessage, mapOnePasswordError, onePasswordRetryAfterMs } from "../src/errors";
+import {
+  classifyOnePasswordMessage,
+  mapOnePasswordError,
+  onePasswordRetryAfterMs,
+} from "../src/errors";
 import { AuthExpiredError, RateLimitExceededError } from "./fake-sdk";
 
 // Messages as produced by @1password/sdk-core 0.5.0 (read from core_bg.wasm) and
@@ -13,18 +17,30 @@ const TABLE: Array<[string, VaultProviderError["code"]]> = [
     "invalid service account token, please make sure you provide a valid service account token as parameter:  service account",
     "provider_auth_invalid",
   ],
-  ["service account token had invalid format, please create another token: x", "provider_auth_invalid"],
-  ["service account token base64 decoding failed, please create another token", "provider_auth_invalid"],
+  [
+    "service account token had invalid format, please create another token: x",
+    "provider_auth_invalid",
+  ],
+  [
+    "service account token base64 decoding failed, please create another token",
+    "provider_auth_invalid",
+  ],
   ["service account deserialization failed, please create another token", "provider_auth_invalid"],
   ["bad service account token, please rotate it: revoked", "provider_auth_invalid"],
-  ["service account token's throttle token is invalid. please create a new service account token: x", "provider_auth_invalid"],
+  [
+    "service account token's throttle token is invalid. please create a new service account token: x",
+    "provider_auth_invalid",
+  ],
   ["prefix 'ops_' was expected but not found", "provider_auth_invalid"],
   ["account couldn't be found", "provider_auth_invalid"],
   ["failed to authenticate", "provider_auth_invalid"],
   ["you are not authenticated", "provider_auth_expired"],
   ["session expired", "provider_auth_expired"],
   ["error updating item: incorrect item version", "provider_conflict"],
-  ["a conflict occurred on the server. this usually happens due to a race condition in requests", "provider_conflict"],
+  [
+    "a conflict occurred on the server. this usually happens due to a race condition in requests",
+    "provider_conflict",
+  ],
   ["data conflict occurred on the server: x", "provider_conflict"],
   ["you don't have the right permissions to access this resource", "provider_permission_denied"],
   ["you don't have the right permissions to execute this request", "provider_permission_denied"],
@@ -53,12 +69,16 @@ describe("1Password error mapping", () => {
 
   test("typed SDK errors win over message text", () => {
     const limited = mapOnePasswordError(
-      new RateLimitExceededError("rate limit exceeded for this 1Password account, retry in 7 minutes"),
+      new RateLimitExceededError(
+        "rate limit exceeded for this 1Password account, retry in 7 minutes",
+      ),
       { RateLimitExceededError },
     );
     expect(limited.code).toBe("provider_rate_limited");
     expect(limited.retryAfterMs).toBe(7 * 60_000);
-    const expired = mapOnePasswordError(new AuthExpiredError("token expired"), { AuthExpiredError });
+    const expired = mapOnePasswordError(new AuthExpiredError("token expired"), {
+      AuthExpiredError,
+    });
     expect(expired.code).toBe("provider_auth_expired");
   });
 

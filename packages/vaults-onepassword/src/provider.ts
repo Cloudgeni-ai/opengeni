@@ -3,7 +3,6 @@ import {
   type ProviderFieldValue,
   type ProviderItemMeta,
   type ProviderVault,
-  type ProviderWriteItem,
   type SecretMaterial,
   type VaultProvider,
   type VaultProviderCapabilities,
@@ -72,7 +71,11 @@ export type OnePasswordVaultProvider = VaultProvider & {
   /** Deletes a vault this service account created (managed-vault cleanup, live tests). */
   deleteVault(ctx: VaultProviderContext, externalVaultId: string): Promise<void>;
   /** Permanently deletes an item (live-test cleanup only; product paths archive). */
-  deleteItem(ctx: VaultProviderContext, externalVaultId: string, externalItemId: string): Promise<void>;
+  deleteItem(
+    ctx: VaultProviderContext,
+    externalVaultId: string,
+    externalItemId: string,
+  ): Promise<void>;
 };
 
 type CachedItem = { at: number; item: Promise<SdkItem> };
@@ -288,7 +291,9 @@ export function createOnePasswordVaultProvider(
       assertOnePasswordIds(externalVaultId, write.externalItemId);
       if (!write.externalItemId) {
         const params = buildCreateParams(externalVaultId, write);
-        const created = await call(ctx, "write", "itemsCreate", (client) => client.items.create(params));
+        const created = await call(ctx, "write", "itemsCreate", (client) =>
+          client.items.create(params),
+        );
         return toProviderItemMeta(created);
       }
       const itemId = write.externalItemId;
@@ -328,7 +333,9 @@ export function createOnePasswordVaultProvider(
 
     async archiveItem(ctx, externalVaultId, externalItemId) {
       assertOnePasswordIds(externalVaultId, externalItemId);
-      await call(ctx, "write", "itemsArchive", (client) => client.items.archive(externalVaultId, externalItemId));
+      await call(ctx, "write", "itemsArchive", (client) =>
+        client.items.archive(externalVaultId, externalItemId),
+      );
       forgetItem(ctx, externalVaultId, externalItemId);
     },
 
@@ -369,7 +376,9 @@ export function createOnePasswordVaultProvider(
 
     async deleteItem(ctx, externalVaultId, externalItemId) {
       assertOnePasswordIds(externalVaultId, externalItemId);
-      await call(ctx, "write", "itemsDelete", (client) => client.items.delete(externalVaultId, externalItemId));
+      await call(ctx, "write", "itemsDelete", (client) =>
+        client.items.delete(externalVaultId, externalItemId),
+      );
       forgetItem(ctx, externalVaultId, externalItemId);
     },
   };

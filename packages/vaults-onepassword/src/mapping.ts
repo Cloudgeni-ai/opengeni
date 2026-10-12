@@ -122,7 +122,9 @@ export type MappedField =
     });
 
 function fieldExternalId(field: SdkItemField, duplicateIds: Set<string>): string {
-  return duplicateIds.has(field.id) && field.sectionId ? `${field.sectionId}.${field.id}` : field.id;
+  return duplicateIds.has(field.id) && field.sectionId
+    ? `${field.sectionId}.${field.id}`
+    : field.id;
 }
 
 /** Deterministic projection of an item's fields; values are never copied out. */
@@ -220,7 +222,8 @@ function builtInFieldFor(
   if (category === "Login" && key === "password") return { id: "password", fieldType: "Concealed" };
   if (category === "ApiCredentials" && (key === "value" || key === "credential"))
     return { id: "credential", fieldType: "Concealed" };
-  if (category === "ApiCredentials" && key === "username") return { id: "username", fieldType: "Text" };
+  if (category === "ApiCredentials" && key === "username")
+    return { id: "username", fieldType: "Text" };
   return null;
 }
 
@@ -231,7 +234,10 @@ function isNotesField(category: string, field: WriteField): boolean {
 }
 
 function customFieldId(name: string, item: { fields: SdkItemField[] }): string {
-  const slug = nameKey(name).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "field";
+  const slug =
+    nameKey(name)
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "field";
   const ids = new Set(item.fields.map((field) => field.id));
   let id = `opengeni_${slug}`.slice(0, 64);
   for (let n = 2; ids.has(id); n += 1) id = `opengeni_${slug}`.slice(0, 60) + `_${n}`;
@@ -248,7 +254,11 @@ function requireValue(field: WriteField): string {
   return field.value;
 }
 
-function addField(target: SdkItem | SdkItemCreateParams & { fields: SdkItemField[] }, category: string, field: WriteField) {
+function addField(
+  target: SdkItem | (SdkItemCreateParams & { fields: SdkItemField[] }),
+  category: string,
+  field: WriteField,
+) {
   const value = requireValue(field);
   const builtIn = builtInFieldFor(category, field);
   if (builtIn && !target.fields.some((existing) => existing.id === builtIn.id)) {
@@ -273,7 +283,10 @@ export function buildCreateParams(
   write: ProviderWriteItem,
 ): SdkItemCreateParams {
   const category = categoryForItemType(write.type);
-  const params: SdkItemCreateParams & { fields: SdkItemField[]; sections: Array<{ id: string; title: string }> } = {
+  const params: SdkItemCreateParams & {
+    fields: SdkItemField[];
+    sections: Array<{ id: string; title: string }>;
+  } = {
     category,
     vaultId: externalVaultId,
     title: write.name,

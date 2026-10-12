@@ -15,7 +15,10 @@ describe("offline service-account token check", () => {
   test.each([
     ["missing prefix", "abc"],
     ["not base64 json", "ops_%%%%"],
-    ["json without key material", `ops_${Buffer.from(JSON.stringify({ signInAddress: "x" })).toString("base64")}`],
+    [
+      "json without key material",
+      `ops_${Buffer.from(JSON.stringify({ signInAddress: "x" })).toString("base64")}`,
+    ],
   ])("rejects %s without echoing the token", (_label, token) => {
     try {
       describeOnePasswordToken(token);

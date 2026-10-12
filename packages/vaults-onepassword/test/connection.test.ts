@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createProviderCallBudget } from "@opengeni/vaults";
 
-import { ONEPASSWORD_FAKE_VAULT_IDS, vaultProviderForOnePasswordConnection } from "../src/connection";
+import {
+  ONEPASSWORD_FAKE_VAULT_IDS,
+  vaultProviderForOnePasswordConnection,
+} from "../src/connection";
 import { VaultProviderError } from "../src/contract";
 import { fakeServiceAccountToken } from "./fake-sdk";
 
@@ -33,7 +36,12 @@ describe("provider for a stored 1Password connection", () => {
     const items = await provider.listItems(ctx(), ONEPASSWORD_FAKE_VAULT_IDS.engineering);
     expect(items).toHaveLength(6);
     const github = items.find((item) => item.name === "GitHub")!;
-    const [otp] = await provider.readFields(ctx(), ONEPASSWORD_FAKE_VAULT_IDS.engineering, github.externalItemId, ["otp"]);
+    const [otp] = await provider.readFields(
+      ctx(),
+      ONEPASSWORD_FAKE_VAULT_IDS.engineering,
+      github.externalItemId,
+      ["otp"],
+    );
     expect(otp!.material.type).toBe("totp");
   });
 
@@ -43,7 +51,9 @@ describe("provider for a stored 1Password connection", () => {
       allowFakeTokens: true,
     });
     expect(await provider.listVaults(ctx())).toHaveLength(1);
-    await expect(provider.listItems(ctx(), ONEPASSWORD_FAKE_VAULT_IDS.shared)).rejects.toMatchObject({
+    await expect(
+      provider.listItems(ctx(), ONEPASSWORD_FAKE_VAULT_IDS.shared),
+    ).rejects.toMatchObject({
       code: "provider_unavailable",
     });
   });

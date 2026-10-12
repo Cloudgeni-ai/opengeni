@@ -171,7 +171,10 @@ export function createFakeVaultProvider(
   function writableVault(id: string): FakeVault {
     const vault = vaultById(id);
     if (vault.readOnly)
-      throw new VaultProviderError("provider_permission_denied", "vault is read-only for this credential");
+      throw new VaultProviderError(
+        "provider_permission_denied",
+        "vault is read-only for this credential",
+      );
     return vault;
   }
   function itemById(vault: FakeVault, id: string): FakeItem {

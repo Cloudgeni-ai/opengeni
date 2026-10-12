@@ -155,10 +155,7 @@ export function loadOnePasswordSdk(): Promise<OnePasswordSdk> {
 export class OnePasswordClientCache {
   private readonly clients = new Map<string, Promise<OnePasswordSdkClient>>();
 
-  get(
-    key: string,
-    create: () => Promise<OnePasswordSdkClient>,
-  ): Promise<OnePasswordSdkClient> {
+  get(key: string, create: () => Promise<OnePasswordSdkClient>): Promise<OnePasswordSdkClient> {
     let client = this.clients.get(key);
     if (!client) {
       client = create();

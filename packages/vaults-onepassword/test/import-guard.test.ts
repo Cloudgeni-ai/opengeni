@@ -25,8 +25,13 @@ function sourceFiles(): string[] {
 
 type Import = { file: string; specifier: string; dynamic: boolean; typeOnly: boolean };
 
+/** Drops block and whole-line comments so prose that mentions a module is not an import. */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
 function importsOf(file: string): Import[] {
-  const text = readFileSync(join(REPO, file), "utf8");
+  const text = withoutComments(readFileSync(join(REPO, file), "utf8"));
   if (!text.includes(SDK) && !text.includes(PACKAGE)) return [];
   const found: Import[] = [];
   for (const match of text.matchAll(SPECIFIER)) {
@@ -58,7 +63,9 @@ describe("OP-5 import guard", () => {
 
   test(`${SDK} is loaded lazily even inside the package`, () => {
     const eager = imports
-      .filter((entry) => entry.specifier.startsWith(SDK) && entry.file.startsWith(`${PACKAGE_DIR}src/`))
+      .filter(
+        (entry) => entry.specifier.startsWith(SDK) && entry.file.startsWith(`${PACKAGE_DIR}src/`),
+      )
       .filter((entry) => !entry.dynamic && !entry.typeOnly)
       .map((entry) => `${entry.file}: ${entry.specifier}`);
     expect(eager).toEqual([]);
@@ -68,9 +75,10 @@ describe("OP-5 import guard", () => {
     const offenders = imports
       .filter((entry) => entry.specifier.startsWith(PACKAGE))
       .filter((entry) => !entry.file.startsWith(PACKAGE_DIR))
-      .filter(
-        (entry) =>
-          entry.typeOnly ? false : !(entry.dynamic && LOADERS.some((dir) => entry.file.startsWith(dir))),
+      .filter((entry) =>
+        entry.typeOnly
+          ? false
+          : !(entry.dynamic && LOADERS.some((dir) => entry.file.startsWith(dir))),
       )
       .map((entry) => `${entry.file}: ${entry.specifier}${entry.dynamic ? " (dynamic)" : ""}`);
     expect(offenders).toEqual([]);
@@ -81,16 +89,25 @@ describe("OP-5 import guard", () => {
     const offenders: string[] = [];
     for (const path of glob.scanSync({ cwd: REPO, onlyFiles: true })) {
       if (path.startsWith(PACKAGE_DIR)) continue;
-      const manifest = JSON.parse(readFileSync(join(REPO, path), "utf8")) as Record<string, unknown>;
+      const manifest = JSON.parse(readFileSync(join(REPO, path), "utf8")) as Record<
+        string,
+        unknown
+      >;
       const deps = {
         ...(manifest.dependencies as object),
         ...(manifest.peerDependencies as object),
         ...(manifest.optionalDependencies as object),
       } as Record<string, string>;
       const loader = LOADERS.some((dir) => path.startsWith(dir));
-      if (SDK in deps || (!loader && PACKAGE in deps)) offenders.push(relative(REPO, join(REPO, path)));
+      if (SDK in deps || (!loader && PACKAGE in deps))
+        offenders.push(relative(REPO, join(REPO, path)));
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("comments that mention a module are not imports", () => {
+    const sample = `/** bind to import("${PACKAGE}") */\n// import("${SDK}")\nexport {};`;
+    expect([...withoutComments(sample).matchAll(SPECIFIER)]).toHaveLength(0);
   });
 
   test("the scanner recognises static, dynamic and type-only forms", () => {
