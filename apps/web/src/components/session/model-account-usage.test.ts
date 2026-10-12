@@ -50,6 +50,8 @@ test("past resets remain historical; future resets do not make snapshots live", 
   const before = modelAccountUsage(value, Date.parse("2026-10-12T11:00:00Z"));
   const after = modelAccountUsage(value, Date.parse("2026-10-12T13:00:00Z"));
   expect(before.windows?.[0]?.detail).toContain("Resets");
+  // The neutral primary/secondary IDs do not supply a window duration.
+  expect(before.windows?.[0]?.label).toBe("Primary");
   expect(after.windows?.[0]?.detail).toContain("Reset time passed; current usage unknown");
   expect(after.windows?.[0]?.usedPercent).toBe(100);
   expect(after.windows?.[0]?.detail).toContain("Observed exhausted");

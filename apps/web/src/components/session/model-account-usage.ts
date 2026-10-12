@@ -4,8 +4,8 @@ import type { SubscriptionAccountUsageWindow } from "./subscription-account-menu
 // Presentation labels only. Preserve every supplied window; never combine
 // family-specific, overage or partial windows into an account capacity score.
 const WINDOW_LABEL: Record<string, string> = {
-  primary: "5h",
-  secondary: "Week",
+  primary: "Primary",
+  secondary: "Secondary",
   five_hour: "5h",
   seven_day: "Week",
   seven_day_opus: "Week · Opus",
