@@ -571,8 +571,10 @@ const wokenObservationChains = new WeakMap<SubscriptionCoreTurn, Promise<boolean
 /**
  * Finalization of a core Claude turn before its lease is released: the
  * turn's usage-header observations are joined first
- * (`joinCoreClaudeObservations`), then the shared step moves the binding's
- * cache clock. Best effort.
+ * (`joinCoreClaudeObservations`), then the shared finalization step runs.
+ * Claude declares an exact cache lifetime, so that step leaves the binding's
+ * cache clock alone: the clock moves when each request is reserved, never at
+ * finalization. Best effort.
  */
 export async function finalizeCoreClaudeTurn(
   input: CoreCodexWakeServices & {
