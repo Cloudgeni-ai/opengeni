@@ -287,14 +287,14 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
   getToken: () => Promise<CodexCredentialTokenSnapshot>;
   refresh: () => Promise<CodexCredentialTokenSnapshot>;
 } {
-  const core = coreResolver(deps);
-  const resolver = core.connections.buildSubscriptionCoreConnectionTokenResolver(
+  const bound = coreResolver(deps);
+  const resolver = bound.connections.buildSubscriptionCoreConnectionTokenResolver(
     db,
     settings,
     scope,
     connectionId,
     ref,
-    core.deps,
+    bound.deps,
   );
   return {
     getToken: async () => codexTokenSnapshot(await resolver.getToken()),
@@ -351,8 +351,8 @@ export async function fetchSubscriptionCoreCodexUsage(
   fetchImpl: CodexFetch = fetch,
   deps: SubscriptionCoreCodexConnectionResolverDeps = {},
 ): Promise<{ usage: CodexUsagePayload; recovered: boolean }> {
-  const core = coreResolver(deps);
-  const probe = await core.connections.probeSubscriptionCoreConnectionUsage(
+  const bound = coreResolver(deps);
+  const probe = await bound.connections.probeSubscriptionCoreConnectionUsage(
     db,
     settings,
     scope,
@@ -365,7 +365,7 @@ export async function fetchSubscriptionCoreCodexUsage(
         connectionId,
         fetchImpl,
       ),
-      resolver: core.deps,
+      resolver: bound.deps,
     },
   );
   switch (probe.kind) {
