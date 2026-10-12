@@ -16,10 +16,12 @@ export {
 export {
   createAttemptProviderBudget,
   ONEPASSWORD_PLAN_LIMITS,
+  ONEPASSWORD_REQUEST_COST,
   OnePasswordQuota,
   onePasswordQuotaFor,
   PROVIDER_READS_PER_ATTEMPT,
   resetOnePasswordQuotasForTests,
+  type OnePasswordOperation,
   type OnePasswordPlanTier,
 } from "./budget";
 export {

@@ -174,6 +174,11 @@ export class OnePasswordClientCache {
     this.clients.delete(key);
   }
 
+  /** True when a signed-in (or signing-in) client exists for `key`. */
+  has(key: string): boolean {
+    return this.clients.has(key);
+  }
+
   clear() {
     this.clients.clear();
   }

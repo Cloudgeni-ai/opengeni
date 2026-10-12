@@ -4,6 +4,28 @@ export type OnePasswordPlanTier = "family" | "teams" | "business";
 export type ProviderCallOp = Parameters<ProviderCallBudget["take"]>[0];
 
 /**
+ * HTTP requests each SDK operation makes against 1Password, measured live with
+ * @1password/sdk 0.5.0 (evidence/w5/README.md). The daily account quota counts
+ * requests, not SDK calls, so the connection quota is charged these weights.
+ */
+export const ONEPASSWORD_REQUEST_COST = {
+  signIn: 4,
+  vaultsList: 1,
+  itemsList: 1,
+  itemsGetAll: 1,
+  itemsGet: 1,
+  filesRead: 1,
+  itemsCreate: 2,
+  itemsPut: 4,
+  itemsArchive: 3,
+  itemsDelete: 3,
+  vaultsCreate: 9,
+  grantGroupPermissions: 2,
+  vaultsDelete: 2,
+} as const;
+export type OnePasswordOperation = keyof typeof ONEPASSWORD_REQUEST_COST;
+
+/**
  * Service-account limits by plan (developer.1password.com/docs/service-accounts/rate-limits):
  * the daily request cap is shared by every service account in the 1Password
  * account; the hourly read/write caps apply per token.

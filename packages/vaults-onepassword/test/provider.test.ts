@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { createAttemptProviderBudget, resetOnePasswordQuotasForTests } from "../src/budget";
+import {
+  ONEPASSWORD_REQUEST_COST,
+  createAttemptProviderBudget,
+  onePasswordQuotaFor,
+  resetOnePasswordQuotasForTests,
+} from "../src/budget";
 import { type VaultProviderContext, VaultProviderError } from "../src/contract";
 import { OPENGENI_SECTION_ID } from "../src/mapping";
 import { createOnePasswordVaultProvider } from "../src/provider";
@@ -123,6 +128,20 @@ describe("1Password adapter", () => {
     expect(fake.calls.filter((call) => call.op === "items.get")).toHaveLength(1);
     await provider.readFields({ ...ctx(), connectionId: c.connectionId }, RW, "login0000000000000000000000", ["password"]);
     expect(fake.calls.filter((call) => call.op === "items.get")).toHaveLength(2);
+  });
+
+  test("the connection quota is charged measured HTTP requests, including the first sign-in", async () => {
+    const { provider, ctx } = world();
+    const c = ctx();
+    const quota = onePasswordQuotaFor(c.connectionId!, "family");
+    const start = quota.remainingDaily;
+    await provider.listVaults(c);
+    expect(start - quota.remainingDaily).toBe(
+      ONEPASSWORD_REQUEST_COST.signIn + ONEPASSWORD_REQUEST_COST.vaultsList,
+    );
+    const afterList = quota.remainingDaily;
+    await provider.readFields(c, RW, "login0000000000000000000000", ["password"]);
+    expect(afterList - quota.remainingDaily).toBe(ONEPASSWORD_REQUEST_COST.itemsGet);
   });
 
   test("the attempt budget stops the 51st provider read before any SDK call", async () => {

@@ -11,7 +11,13 @@ import {
   VaultProviderError,
   parseTotpInput,
 } from "./contract";
-import { type OnePasswordPlanTier, type ProviderCallOp, onePasswordQuotaFor } from "./budget";
+import {
+  ONEPASSWORD_REQUEST_COST,
+  type OnePasswordOperation,
+  type OnePasswordPlanTier,
+  type ProviderCallOp,
+  onePasswordQuotaFor,
+} from "./budget";
 import { isOnePasswordSessionError, mapOnePasswordError } from "./errors";
 import { applyWrite, buildCreateParams, mapItemFields, toProviderItemMeta } from "./mapping";
 import {
@@ -97,13 +103,18 @@ export function createOnePasswordVaultProvider(
   async function call<T>(
     ctx: VaultProviderContext,
     op: ProviderCallOp,
+    operation: OnePasswordOperation,
     fn: (client: OnePasswordSdkClient) => Promise<T>,
   ): Promise<T> {
     ctx.signal?.throwIfAborted();
     const key = await keys(ctx);
     const quota = onePasswordQuotaFor(key.quota, planTier, now);
     ctx.budget.take(op);
-    quota.take(op);
+    // A cold client signs in first; charge that before spending anything.
+    const cost =
+      ONEPASSWORD_REQUEST_COST[operation] +
+      (clients.has(key.client) ? 0 : ONEPASSWORD_REQUEST_COST.signIn);
+    quota.take(op, cost);
     const sdk = await loadSdk();
     const classes = {
       ...(sdk.RateLimitExceededError ? { RateLimitExceededError: sdk.RateLimitExceededError } : {}),
@@ -148,7 +159,7 @@ export function createOnePasswordVaultProvider(
     const cacheKey = `${vaultId}/${itemId}`;
     const cached = cache.get(cacheKey);
     if (cached && now() - cached.at < valueCacheMs) return cached.item;
-    const item = call(ctx, "read", (client) => client.items.get(vaultId, itemId));
+    const item = call(ctx, "read", "itemsGet", (client) => client.items.get(vaultId, itemId));
     cache.set(cacheKey, { at: now(), item });
     item.catch(() => {
       if (cache.get(cacheKey)?.item === item) cache.delete(cacheKey);
@@ -176,7 +187,7 @@ export function createOnePasswordVaultProvider(
     }
     if (field.source === "notes") return { type: "text", value: item.notes };
     if (field.source === "file") {
-      const bytes = await call(ctx, "read", (client) =>
+      const bytes = await call(ctx, "read", "filesRead", (client) =>
         client.items.files.read(item.vaultId, item.id, field.file),
       );
       return { type: "bytes", value: bytes };
@@ -218,7 +229,7 @@ export function createOnePasswordVaultProvider(
     },
 
     async listVaults(ctx): Promise<ProviderVault[]> {
-      const vaults = await call(ctx, "list", (client) => client.vaults.list());
+      const vaults = await call(ctx, "list", "vaultsList", (client) => client.vaults.list());
       return vaults.map((vault) => ({
         externalVaultId: vault.id,
         name: vault.title,
@@ -228,7 +239,7 @@ export function createOnePasswordVaultProvider(
     },
 
     async listItems(ctx, externalVaultId): Promise<ProviderItemMeta[]> {
-      const overviews = await call(ctx, "list", (client) =>
+      const overviews = await call(ctx, "list", "itemsList", (client) =>
         client.items.list(externalVaultId, {
           type: "ByState",
           content: { active: true, archived: false },
@@ -237,7 +248,7 @@ export function createOnePasswordVaultProvider(
       const items: ProviderItemMeta[] = [];
       for (let start = 0; start < overviews.length; start += ONEPASSWORD_GET_ALL_BATCH) {
         const ids = overviews.slice(start, start + ONEPASSWORD_GET_ALL_BATCH).map((o) => o.id);
-        const batch = await call(ctx, "read", (client) =>
+        const batch = await call(ctx, "read", "itemsGetAll", (client) =>
           client.items.getAll(externalVaultId, ids),
         );
         for (const response of batch.individualResponses) {
@@ -260,13 +271,13 @@ export function createOnePasswordVaultProvider(
     async writeItem(ctx, externalVaultId, write) {
       if (!write.externalItemId) {
         const params = buildCreateParams(externalVaultId, write);
-        const created = await call(ctx, "write", (client) => client.items.create(params));
+        const created = await call(ctx, "write", "itemsCreate", (client) => client.items.create(params));
         return toProviderItemMeta(created);
       }
       const itemId = write.externalItemId;
       forgetItem(ctx, externalVaultId, itemId);
       for (let attempt = 0; ; attempt += 1) {
-        const current = await call(ctx, "read", (client) =>
+        const current = await call(ctx, "read", "itemsGet", (client) =>
           client.items.get(externalVaultId, itemId),
         );
         if (
@@ -281,7 +292,7 @@ export function createOnePasswordVaultProvider(
         }
         const next = applyWrite(current, write);
         try {
-          const saved = await call(ctx, "write", (client) => client.items.put(next));
+          const saved = await call(ctx, "write", "itemsPut", (client) => client.items.put(next));
           return toProviderItemMeta(saved);
         } catch (error) {
           // Without an explicit expected version, a concurrent edit is re-read and
@@ -299,7 +310,7 @@ export function createOnePasswordVaultProvider(
     },
 
     async archiveItem(ctx, externalVaultId, externalItemId) {
-      await call(ctx, "write", (client) => client.items.archive(externalVaultId, externalItemId));
+      await call(ctx, "write", "itemsArchive", (client) => client.items.archive(externalVaultId, externalItemId));
       forgetItem(ctx, externalVaultId, externalItemId);
     },
 
@@ -310,7 +321,7 @@ export function createOnePasswordVaultProvider(
           "1Password Families accounts have no groups; share the vault in 1Password instead",
         );
       }
-      const vault = await call(ctx, "admin", (client) =>
+      const vault = await call(ctx, "admin", "vaultsCreate", (client) =>
         client.vaults.create({
           title: input.name,
           ...(input.description ? { description: input.description } : {}),
@@ -319,7 +330,7 @@ export function createOnePasswordVaultProvider(
       );
       if (input.groupId) {
         const groupId = input.groupId;
-        await call(ctx, "admin", (client) =>
+        await call(ctx, "admin", "grantGroupPermissions", (client) =>
           client.vaults.grantGroupPermissions(vault.id, [
             { groupId, permissions: ONEPASSWORD_MANAGED_GROUP_PERMISSIONS },
           ]),
@@ -334,11 +345,11 @@ export function createOnePasswordVaultProvider(
     },
 
     async deleteVault(ctx, externalVaultId) {
-      await call(ctx, "admin", (client) => client.vaults.delete(externalVaultId));
+      await call(ctx, "admin", "vaultsDelete", (client) => client.vaults.delete(externalVaultId));
     },
 
     async deleteItem(ctx, externalVaultId, externalItemId) {
-      await call(ctx, "write", (client) => client.items.delete(externalVaultId, externalItemId));
+      await call(ctx, "write", "itemsDelete", (client) => client.items.delete(externalVaultId, externalItemId));
       forgetItem(ctx, externalVaultId, externalItemId);
     },
   };
