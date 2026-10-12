@@ -1601,11 +1601,10 @@ fn verify_key_intent(
         };
         // Text glyphs match any keysym that types them, including temporary
         // spare-keycode bindings bound before this snapshot.
-        let mut text = request.key.chars();
-        let chord = if request.is_text {
-            Vec::new()
+        let (mut text, chord) = if request.is_text {
+            (request.key.chars(), Vec::new())
         } else {
-            super::parse_named_key_chord(&request.key)?
+            ("".chars(), super::parse_named_key_chord(&request.key)?)
         };
         let mut expected = chord.iter();
         let mut held = BTreeSet::new();

@@ -28,7 +28,7 @@ mod live {
     use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use opengeni_agent_platform::{DesktopBackend as _, LinuxDesktop, LinuxWindow};
+    use opengeni_agent_platform::{DesktopBackend as _, LinuxDesktop, LinuxWindow, PlatformError};
     use opengeni_agent_proto::v1;
     use x11rb::connection::Connection as _;
     use x11rb::protocol::xproto::ConnectionExt as _;
@@ -150,15 +150,19 @@ Gtk.main()
         String::from_utf16(&units).expect("UTF-16 text")
     }
 
-    fn text_input(text: &str) -> v1::DesktopInput {
+    fn key_input(key: &str, is_text: bool) -> v1::DesktopInput {
         v1::DesktopInput {
             channel_id: String::new(),
             event: Some(v1::desktop_input::Event::Key(v1::KeyEvent {
-                key: text.into(),
-                is_text: true,
+                key: key.into(),
+                is_text,
                 action: v1::KeyAction::Press.into(),
             })),
         }
+    }
+
+    fn text_input(text: &str) -> v1::DesktopInput {
+        key_input(text, true)
     }
 
     fn core_keymap(display: &str) -> (u8, Vec<u32>) {
@@ -218,6 +222,33 @@ Gtk.main()
         assert_eq!(fixture.text_eventually(PASSWORD), PASSWORD);
         assert_eq!(core_keymap(&display), keymap_before, "keymap restored");
         eprintln!("exact-window path typed {PASSWORD:?}");
+
+        // Named chords keep their exact-window route proof: select all, then
+        // replace the selection with text that needs spare keycodes again.
+        for input in [key_input("Control+a", false), text_input(TEXT)] {
+            let activation = desktop
+                .current_window_activation(window.clone())
+                .await
+                .expect("read window activation");
+            desktop
+                .inject_activated_window(activation, vec![input])
+                .await
+                .map_err(|failure| failure.error)
+                .expect("deliver into the exact window");
+        }
+        assert_eq!(fixture.text_eventually(TEXT), TEXT);
+
+        // More distinct glyphs than spare keycodes: refused before any key,
+        // with the keymap and the entry untouched (the browserd driver then
+        // pastes the text).
+        let glyphs: String = (0x4e00..0x4f00).filter_map(char::from_u32).collect();
+        let refusal = desktop.inject(&text_input(&glyphs)).await;
+        assert!(
+            matches!(&refusal, Err(PlatformError::Unsupported(message)) if message.ends_with("; use clipboard paste")),
+            "{refusal:?}"
+        );
+        assert_eq!(fixture.command("dump"), TEXT);
+        assert_eq!(core_keymap(&display), keymap_before, "keymap untouched");
 
         // Leave the acceptance text visible for the screenshot.
         assert_eq!(fixture.command("clear"), "");
