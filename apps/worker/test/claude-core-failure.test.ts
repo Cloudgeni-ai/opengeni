@@ -7,7 +7,7 @@ import * as parentWake from "../src/activities/parent-wake";
 import * as coreRequests from "../src/activities/agent-turn/subscription-core-requests";
 import * as coreSettlementSteps from "../src/activities/agent-turn/subscription-core-settlement";
 import * as coreWaits from "../src/activities/subscription-core-codex-waits";
-import * as quiescence from "../src/activities/agent-turn/quiescence";
+import { TURN_FINALIZER_STEP_TIMEOUT_MS } from "../src/activities/agent-turn/quiescence";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import {
   finalizeTurnAttempt,
@@ -422,58 +422,60 @@ describe("Claude turn finalization by route", () => {
     "mid-cancellation",
     "housekeeping-timeout",
   ] as const) {
-    test(`production finalization joins queued quota writes before release: ${mode}`, async () => {
-      const { deps } = finalizationDeps(true);
-      const observations = Promise.withResolvers<boolean>();
-      const joining = Promise.withResolvers<void>();
-      const order: string[] = [];
-      const cancellation = new AbortController();
-      deps.cancellationSignal = cancellation.signal;
-      if (mode === "already-cancelled") {
-        deps.control.activityStatus = "cancelled";
-        cancellation.abort();
-      }
-      if (mode === "housekeeping-timeout") {
-        // Exercise the actual detachable housekeeping race on a short clock.
-        // It must not wrap the mandatory quota-write join.
-        const wait = quiescence.waitForTurnFinalizerStep;
-        spy(quiescence, "waitForTurnFinalizerStep").mockImplementation(
-          (operation: Promise<unknown>, signal: AbortSignal | undefined) =>
-            wait(operation, signal, 5),
+    test(
+      `production finalization joins queued quota writes before release: ${mode}`,
+      async () => {
+        const { deps } = finalizationDeps(true);
+        const observations = Promise.withResolvers<boolean>();
+        const joining = Promise.withResolvers<void>();
+        const order: string[] = [];
+        const cancellation = new AbortController();
+        deps.cancellationSignal = cancellation.signal;
+        if (mode === "already-cancelled") {
+          deps.control.activityStatus = "cancelled";
+          cancellation.abort();
+        }
+        const cancelled = mode === "already-cancelled" || mode === "mid-cancellation";
+        const wake = spy(coreWaits, "wakeSubscriptionCoreWaitersAndDeliver").mockImplementation(
+          () => new Promise<never>(() => {}),
         );
-      }
-      const cancelled = mode === "already-cancelled" || mode === "mid-cancellation";
-      const wake = spy(coreWaits, "wakeSubscriptionCoreWaitersAndDeliver").mockImplementation(
-        () => new Promise<never>(() => {}),
-      );
-      deps.providerTurn.claudeSubscriptionCore!.quota = {
-        settled() {
-          joining.resolve();
-          return observations.promise;
-        },
-      };
-      deps.leases.claude.releaseCurrent = async () => {
-        order.push("release");
-        return true;
-      };
-      const finished = finalizeTurnAttempt(deps).then(() => {
-        order.push("returned");
-      });
-      try {
-        await joining.promise;
-        if (mode === "mid-cancellation") cancellation.abort();
-        await Bun.sleep(20);
-        expect(order).toEqual([]);
-        expect(deps.leases.claude.held).toBe(true);
-      } finally {
-        order.push("observations-finished");
-        // Cancellation must detach the stuck wake, but only AFTER the writes.
-        observations.resolve(cancelled);
-        await finished;
-      }
-      expect(order).toEqual(["observations-finished", "release", "returned"]);
-      expect(wake).toHaveBeenCalledTimes(cancelled ? 1 : 0);
-      expect(deps.leases.claude.held).toBe(false);
-    }, 2_000);
+        deps.providerTurn.claudeSubscriptionCore!.quota = {
+          settled() {
+            joining.resolve();
+            return observations.promise;
+          },
+        };
+        const stopHeartbeat = mock(() => undefined);
+        deps.leases.claude.stopHeartbeat = stopHeartbeat;
+        deps.leases.claude.releaseCurrent = async () => {
+          expect(stopHeartbeat).toHaveBeenCalled();
+          order.push("release");
+          return true;
+        };
+        const finished = finalizeTurnAttempt(deps).then(() => {
+          order.push("returned");
+        });
+        try {
+          await joining.promise;
+          if (mode === "mid-cancellation") cancellation.abort();
+          // Keep writes queued beyond the real, unmocked housekeeping deadline.
+          await Bun.sleep(
+            mode === "housekeeping-timeout" ? TURN_FINALIZER_STEP_TIMEOUT_MS + 100 : 20,
+          );
+          expect(order).toEqual([]);
+          expect(stopHeartbeat).not.toHaveBeenCalled();
+          expect(deps.leases.claude.held).toBe(true);
+        } finally {
+          order.push("observations-finished");
+          // Cancellation must detach the stuck wake, but only AFTER the writes.
+          observations.resolve(cancelled);
+          await finished;
+        }
+        expect(order).toEqual(["observations-finished", "release", "returned"]);
+        expect(wake).toHaveBeenCalledTimes(cancelled ? 1 : 0);
+        expect(deps.leases.claude.held).toBe(false);
+      },
+      TURN_FINALIZER_STEP_TIMEOUT_MS + 10_000,
+    );
   }
 });
