@@ -53,6 +53,12 @@ const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
+const MAINTENANCE_MIGRATIONS = ["0731_subscription_core_xai_cutover.sql"];
+// A binary that knows 0731 reports only the missing SuperGrok receipt until
+// the maintenance step runs.
+const BEFORE_XAI_CUTOVER = [
+  "database is missing the xai subscription-core cutover receipt (0731_subscription_core_xai_cutover.sql); apply the pending migrations first",
+];
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -423,7 +429,7 @@ beforeAll(async () => {
     await owner`insert into schema_migrations(name) values (${REACH_MIGRATION}), (${API_KEY_CONNECTIONS}),
       (${PERSONAL_CONNECT_FORMAT}),
       (${PERSONAL_CONNECTION_VERSIONS})`;
-    for (const later of LATER_MIGRATIONS)
+    for (const later of [...LATER_MIGRATIONS, ...MAINTENANCE_MIGRATIONS])
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
@@ -524,6 +530,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       // 0715, and 0728 and 0730 (built on it), are still held back here, so
       // this binary also reports the routines 0728 and 0730 add as missing.
       expect(staged!.unprovisionedPosture).toEqual([
+        ...BEFORE_XAI_CUTOVER,
         "subscription M3 precursor private routine connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text) is missing or unsafe",
         "subscription M3 precursor private routine subscription_core_personal_connection_versions(text, uuid, uuid, text) is missing or unsafe",
         "subscription M3 precursor private routine subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint) is missing or unsafe",
@@ -562,7 +569,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         },
       ]);
       const posture = await inspectRuntimeDatabasePosture(client!.db, POSTURE_OPTIONS);
-      expect(evaluateRuntimeDatabasePosture(posture, POSTURE_OPTIONS)).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(posture, POSTURE_OPTIONS)).toEqual(BEFORE_XAI_CUTOVER);
       // Provisioning again leaves those grants exactly as the migration set
       // them.
       const provisionedAcl = [
@@ -957,11 +964,12 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         select provider, shared_workspaces as shared
         from opengeni_private.subscription_codex_auto_assignments where connection_id = ${id}::uuid`;
       expect(row).toEqual({ provider: "codex", shared: true });
-      // A provider the shared core has no binding for is refused before any read.
+      // A provider the shared core has no binding for (Claude until its
+      // cutover) is refused before any read.
       for (const work of [
-        () => getSubscriptionCoreModelConnectionAccess(client!.db, "xai", target),
+        () => getSubscriptionCoreModelConnectionAccess(client!.db, "claude", target),
         () =>
-          updateSubscriptionCoreModelConnectionAccess(client!.db, "xai", target, {
+          updateSubscriptionCoreModelConnectionAccess(client!.db, "claude", target, {
             ...saved!,
             version: 2,
           }),
@@ -1059,7 +1067,7 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       await expect(
         wakeSubscriptionCoreCapacityWaiters(
           client!.db,
-          "xai",
+          "claude",
           { accountId: org.accountId, reason: "quota_observed_available" },
           enqueue,
         ),
@@ -1381,10 +1389,11 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         ),
       ).toMatchObject({ code: "23503" });
 
-      // The TypeScript registry still has no binding for it, so the shared
-      // core's TypeScript entry points refuse it.
+      // The TypeScript registry has no binding for a provider before its
+      // cutover (Claude; SuperGrok has one since X3), so the shared core's
+      // TypeScript entry points refuse it.
       await expect(
-        getSubscriptionCoreModelConnectionAccess(client!.db, "xai", {
+        getSubscriptionCoreModelConnectionAccess(client!.db, "claude", {
           connectionId: xai,
           accountId: org.accountId,
           workspaceId: null,

@@ -5111,6 +5111,270 @@ unchanged on 0729. An opt-in a person turned on stays in effect after a
 rollback (placement already read it); dropping the four policies and two
 routines removes only the person's own access.
 
+### SuperGrok on the shared subscription core (0731)
+
+Migration `0731_subscription_core_xai_cutover.sql` is a one-way maintenance
+cutover, the SuperGrok counterpart of 0689. It moves every organization's
+SuperGrok (`xai`) subscription state onto the shared subscription core,
+records the `xai` receipt and registry row, and enables the SuperGrok cutover
+row for every organization, in one transaction. Design record:
+[subscription core, X3](design/subscription-core-2026-10-07.md#x3-the-drained-supergrok-cutover).
+It requires 0712 through 0717; 0717 adds the core acceptance reads that give
+work accepted after the cutover its owner's personal SuperGrok generation.
+The release that carries it must also carry the dormant SuperGrok core
+runtime (chat, refresh, media, routes and capacity waits); after the receipt
+the runtime serves SuperGrok only through the core.
+
+What it moves, per organization: credentials (shared workspace accounts
+become organization-owned connections assigned to their workspace, as for
+any account connected in a workspace; organization accounts keep their
+allowlist and Personal-workspace reach; a Personal workspace's accounts and
+every `user`-scoped account become their owner's personal connections), one
+secret copy each with its health, quota and allocator counters, rotation and
+primaries, the workspace inference source, session pins as bindings, live
+leases with their exact fences, waiting capacity waiters with their ids,
+generations, wake revisions and pending wakes, an accepted-authority
+compatibility record for every live carrier, one fresh personal authority
+generation per owner, and in-flight video operations (their token envelope
+is replaced by a reference to the canonical connection). Legacy rows stay
+for forensics. The five legacy SuperGrok tables become read-only: the
+runtime role keeps only `SELECT`, and restrictive policies that apply once
+the receipt exists refuse every insert or update of them, also by the legacy
+connect and rotation routines that run as the schema owner; the legacy
+disconnect refuses (accounts are disconnected on the core); and no role can
+add a legacy SuperGrok personal authority.
+
+Other providers' rows are not changed, with these SuperGrok-owned
+exceptions. A session whose current model is SuperGrok gets its SuperGrok
+binding in place of another provider's binding; a session on another model
+keeps its binding, and its SuperGrok pin is recorded as the
+`pin_other_provider_binding_kept` disposition. Shared settings rows gain
+only their `xai` keys and the SuperGrok primary, and a Personal workspace
+with moved accounts gets the provider-neutral `personal_fallback_allowed`
+override. The owner of accounts connected in their Personal workspace is
+opted in to personal fallback; that preference is per person, so it also
+covers the owner's personal connections of other providers. Owners whose
+SuperGrok accounts were only `user`-scoped get no opt-in.
+
+**1. Inventory (before the window).** As a superuser or `BYPASSRLS` role,
+record the source counts the migration compares. The schema owner is subject
+to row security on these tables and would count zero rows, so the block
+refuses any other role:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN TRANSACTION READ ONLY;
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the SuperGrok inventory as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+SELECT account_id, authority_scope, count(*) FROM xai_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, authority_scope, count(*) FROM xai_rotation_settings GROUP BY 1, 2;
+SELECT account_id, count(*) FROM xai_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM xai_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM xai_session_account_pins
+  WHERE pinned_credential_id IS NOT NULL OR last_credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+  GROUP BY 1;
+SELECT account_id, count(*) FROM video_generation_operations
+  WHERE funding_source = 'supergrok_subscription' AND terminal_at IS NULL GROUP BY 1;
+SELECT account_id, count(*) FROM image_generation_operations
+  WHERE provider_id = 'supergrok-subscription' AND status IN ('prepared', 'provider_started')
+  GROUP BY 1;
+COMMIT;
+```
+
+With the same role, confirm the core holds no SuperGrok state yet. Each query
+must return no rows; the migration aborts otherwise.
+Rows left over from before 0712 are removed as described in
+[Shared subscription core generic precursor (0712)](#shared-subscription-core-generic-precursor-0712).
+
+```sql
+SELECT account_id, id, ownership FROM subscription_connections WHERE provider = 'xai';
+SELECT account_id, alias_connection_id FROM subscription_connection_aliases WHERE provider = 'xai';
+SELECT account_id, session_id FROM subscription_session_bindings WHERE provider = 'xai';
+SELECT account_id, turn_id FROM subscription_leases WHERE provider = 'xai';
+SELECT account_id, session_id FROM subscription_capacity_waiters WHERE provider = 'xai';
+SELECT account_id FROM subscription_operation_leases WHERE provider = 'xai';
+SELECT account_id, enabled FROM subscription_provider_cutovers WHERE provider = 'xai';
+SELECT account_id, carrier_kind FROM opengeni_private.subscription_authority_compat
+  WHERE provider = 'xai';
+SELECT account_id, workspace_id FROM subscription_settings
+  WHERE xai_primary_connection_id IS NOT NULL;
+```
+
+Before the window, with the same role, list the workspaces whose SuperGrok
+setting will follow a locked organization value instead of the workspace's
+legacy one. A workspace with its own SuperGrok accounts is normally frozen on its own
+accounts (`inferenceSource: workspace`) with its local rotation and primary;
+where the organization locks `providers` or `rotation`, the cutover leaves
+that key to the organization and records the workspace in the report. Decide
+with the organization whether to unlock first; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM xai_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+  AND NOT EXISTS (SELECT 1 FROM organization_memberships owner
+    WHERE owner.account_id = workspace.account_id
+      AND owner.personal_workspace_id = workspace.id);
+```
+
+**2. Stop and drain.** Stop every API, control worker and turn worker of the
+old and the new release, including idle pooled connections. Drain processes,
+not work: queued, waiting, checkpointed and scheduled work stays in the
+database and is moved. Do not cancel turns or video operations.
+
+**3. Back up.** Take a consistent backup (or snapshot) after the drain and
+before migrating. It is the only recovery point before the one-way commit.
+
+**4. Migrate.** Run the normal TypeScript migrator as the schema owner (plain
+`psql` cannot run the codec stage and is refused) with:
+
+- `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`: the complete list of old
+  and new runtime logins (for example `["opengeni_app"]`). Any live session
+  for a listed login, or for any other non-superuser login that can write a
+  relation the cutover moves, aborts with SQLSTATE `55000` before anything
+  changes;
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`: the existing key. Each credential
+  is decrypted, canonicalized to the core format, re-encrypted and read back
+  before the legacy copy is blanked; each in-flight video envelope is
+  replaced by an encrypted connection reference and read back. An
+  installation without legacy SuperGrok credentials or in-flight SuperGrok
+  videos needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drain-check
+failure; a transaction isolation other than READ COMMITTED (the runner's
+default: do not set `default_transaction_isolation` for the migrating role or
+database); an undecodable credential (fixed message, no material); identity or
+ownership ambiguity, named by content-free classes such as
+`provider_identity_mismatch` (the stored account id differs from the token's),
+`personal_workspace_owner_ambiguous`, `personal_owner_missing`,
+`unrepresentable_status`, `unrepresentable_scope`, `session_owner_ambiguous`,
+`personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
+session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
+waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
+pre-existing core SuperGrok state; or any parity mismatch (`0731 parity
+mismatch (<metrics>)`). A database error while writing the core surfaces only
+as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
+statement parameter, token, label or email leaves the migration. Fix the named
+legacy rows (for example disconnect a duplicate account) and run the migrator
+again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles`, which now grants
+the runtime role only `SELECT` on the five legacy SuperGrok tables, then start
+only binaries of this release. Runtime readiness refuses a database without
+the `xai` receipt
+(`opengeni_private.subscription_provider_cutover_committed('xai')`), so a new
+binary cannot run before the migration, and an older binary must never be
+restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The parity report has no mismatch, as the migration owner:
+
+  ```sql
+  SELECT metric, account_id, legacy_count, core_count
+  FROM opengeni_private.subscription_cutover_report
+  WHERE provider = 'xai' AND legacy_count <> core_count
+    AND metric NOT LIKE 'disposition:%' AND metric NOT LIKE 'readiness:%'
+    AND metric <> 'compat:carriers_that_will_wait';
+  ```
+
+  returns no rows. `compat:dependent_sources_without_record` is zero.
+  `disposition:*` rows record accepted non-parity outcomes: expired leases,
+  dropped Personal-pool and `user` rotation rows and fairness cursors, pins
+  whose target has no connection the session may use, collapsed duplicate
+  waiters, in-flight videos whose credential no longer existed (their
+  reference names no connection, so they are never polled again and end at
+  their recovery deadline), owners whose organization disallows personal
+  connections, locked-off personal fallback, one
+  `disposition:local_pool_freeze_locked:<workspace>` or
+  `disposition:local_rotation_locked:<workspace>` row per workspace whose
+  frozen source or local rotation and primary the organization's lock kept
+  (the workspace follows the organization; `locked_workspace_keys_untouched`
+  proves the workspace row kept those keys), logins of unknown or
+  contradictory identity kept separate, merged duplicate pool policies and
+  organization reach kept by auto-assignment.
+  `compat:carriers_that_will_wait` counts accepted work whose recorded
+  account cannot serve it now; it waits for capacity rather than failing.
+  `readiness:owners_with_multiple_current_personal_generations` is zero for
+  `xai`.
+- Every organization has `subscription_provider_cutovers (provider = 'xai',
+  enabled = true)`.
+- Spot-check a workspace's SuperGrok accounts, source and rotation in the web
+  UI; legacy account ids still resolve through aliases.
+- Waiting SuperGrok turns keep their waiter (same id, generation and wake
+  revisions; a wake they had not observed is in the core wake outbox) and
+  resume through the core when capacity returns; no workflow reset is
+  needed.
+
+**Release notes (behaviour users can see).**
+
+- Transcription and realtime voice use only organization and workspace
+  SuperGrok accounts, never a personal one.
+- An account a person connected for themselves (`user` scope) becomes their
+  personal connection, usable in their own private sessions in any workspace
+  that allows personal connections, not only the workspace it was connected
+  in. Accounts connected in a Personal workspace become the owner's personal
+  connection; personal fallback is switched on in that Personal workspace
+  unless the organization locked it off, and the owner is opted in to
+  personal fallback (a per-person preference that covers every provider).
+- A workspace that had its own SuperGrok accounts keeps using only them: its
+  inference source is frozen on `workspace` with organization accounts off,
+  as before. An administrator can change that afterwards. Where the
+  organization locks the provider settings or rotation, the workspace
+  follows the organization's locked value instead (listed in the report).
+- Work accepted before the cutover keeps exactly the accounts it was
+  accepted with. Personal access is re-issued at one new generation per
+  owner, so a later disconnect-all revokes it as for Codex.
+
+**Containment.** An organization administrator (or an operator acting for one)
+may set that organization's SuperGrok cutover row `enabled = false`. That is
+fail-closed maintenance: SuperGrok turns fail with typed copy
+(`subscription_core_cutover_disabled`) or stay parked, SuperGrok routes and
+media refuse, and nothing reads a legacy SuperGrok table. The row cannot be deleted by the
+application role nor moved to another provider or organization.
+
+**Fix forward.** After commit there is no down migration. Restoring the
+pre-migration backup discards every change made since; use it only if the
+migration itself is wrong and no traffic has been served. Otherwise ship a
+fix-forward binary and, if data needs repair, a narrowly scoped, idempotent,
+alias-aware, parity-checked forward migration, keeping affected
+organizations switched off meanwhile. Never copy rows back to the legacy
+tables, drop aliases, reset refresh generations or clear waiters.
+
+**With the Claude cutover.** The SuperGrok and Claude cutovers touch disjoint
+legacy tables and only their own provider's keys in shared relations, and
+each commits in its own transaction with its own parity. Either order of
+releases works:
+
+- Separately: deploy the release that carries 0731, run steps 1 to 6 in one
+  window, and run the Claude cutover's window with its later release.
+- In one window: deploy a release that carries both. Drain and back up once,
+  take both inventories, and run the migrator once with the same roles and
+  key; it applies 0731 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0731 stays committed: fix the named Claude rows and
+  run the migrator again (it resumes at the Claude cutover). Start binaries
+  only after both receipts exist; readiness refuses a database missing
+  either. Validate each provider's report rows separately. While only 0731
+  is committed no binary can start: this release needs both receipts and
+  the old release must not run after 0731. If the Claude rows cannot be
+  fixed within the window, restore the step 3 backup and use the separate
+  path, or deploy a release that carries 0731 but not the Claude cutover.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

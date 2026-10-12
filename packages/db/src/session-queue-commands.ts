@@ -795,7 +795,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     })
     .where(eq(schema.sessionTurns.id, current.id));
   if (current.status === "waiting_capacity") {
-    for (const waiters of [schema.xaiCapacityWaiters, schema.claudeCapacityWaiters]) {
+    // SuperGrok's legacy waiters are read-only after its cutover receipt,
+    // which this binary requires: none can be waiting (the cutover moved or
+    // superseded every one), and its core waiters go below.
+    for (const waiters of [schema.claudeCapacityWaiters]) {
       await db
         .update(waiters)
         .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
