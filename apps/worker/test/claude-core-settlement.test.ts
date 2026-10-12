@@ -787,6 +787,28 @@ describe("Claude refusal settlement on the core", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
+  test("an already-cancelled join still awaits the queued writes in full", async () => {
+    const order: string[] = [];
+    spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockImplementation(
+      (() => new Promise(() => undefined)) as never,
+    );
+    const cancelled = new AbortController();
+    cancelled.abort();
+    const chain = new Promise<boolean>((resolve) =>
+      setTimeout(() => {
+        order.push("observation");
+        resolve(true);
+      }, 50),
+    );
+    await joinCoreClaudeObservations(
+      { db: {} as db.Database },
+      core({ quota: { settled: () => chain } }),
+      { signal: cancelled.signal },
+    );
+    order.push("joined");
+    expect(order).toEqual(["observation", "joined"]);
+  });
+
   test("a 429 without the accepted model is not settled: it never widens to the whole connection", async () => {
     const binding = claudeCoreRefusal(undefined);
     expect(binding.classify(anthropic(429, "rate_limit_error"))).toBeNull();
