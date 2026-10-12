@@ -204,6 +204,8 @@ type CommandCancellationSession = {
     scope: string,
     files: ReadonlyArray<{ path: string; content: Uint8Array }>,
   ): Promise<void>;
+  /** Remove this attempt's secret files (attempt end; SEC-4). */
+  clearSecretFilesForAttempt?(scope?: string): Promise<void>;
 };
 
 function secretFilesWriter(session?: CommandCancellationSession): SecretFilesWriter | null {
@@ -307,6 +309,12 @@ export type TurnToolCancellationFence = {
     session: ChannelASession,
     args: ChannelAExecArgs,
   ): Promise<SynchronousCommandResult>;
+  /**
+   * Remove every attempt-scoped secret file the wrapped sessions wrote
+   * (`secretfile` paths, leftover env files). Called at attempt end after the
+   * writers drain; rejects with the first failure after trying every session.
+   */
+  clearSecretFiles?(): Promise<void>;
 };
 
 export type TurnToolCancellationController = TurnToolCancellationFence & {
@@ -961,6 +969,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
   private readonly cutPolling: boolean;
   private readonly secretResolver: SecretResolver | null;
+  private readonly secretFileSessions = new Set<CommandCancellationSession>();
 
   constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
@@ -986,6 +995,18 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   async waitForQuiescence(): Promise<void> {
     this.cancel(this.reason);
     await this.ensureDrain();
+  }
+
+  async clearSecretFiles(): Promise<void> {
+    let failure: unknown = null;
+    for (const session of this.secretFileSessions) {
+      try {
+        await session.clearSecretFilesForAttempt!();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== null) throw failure;
   }
 
   runSandboxCommand(
@@ -1414,6 +1435,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   wrapTools<T>(tools: T[], session?: CommandCancellationSession): T[] {
+    if (this.secretResolver?.enabled && session?.clearSecretFilesForAttempt) {
+      this.secretFileSessions.add(session);
+    }
     const structuralTools = tools as unknown as Array<Record<string, unknown>>;
     for (const tool of structuralTools) {
       if (tool.type !== "function") continue;

@@ -274,7 +274,9 @@ describe("secret exec delivery on the local backend", () => {
     expect(path?.startsWith(`${h.scopeDir}/`)).toBe(true);
     expect(readFileSync(path!, "utf8")).toBe(CANARY);
     expectNoCanary(h.provider.commands);
-    await h.routing.clearSecretFilesForAttempt();
+    // Attempt end: worker finalization calls the controller after the drain.
+    await h.controller.waitForQuiescence();
+    await h.controller.clearSecretFiles!();
     expect(existsSync(path!)).toBe(false);
     expect(existsSync(h.scopeDir)).toBe(false);
   }, 60_000);
