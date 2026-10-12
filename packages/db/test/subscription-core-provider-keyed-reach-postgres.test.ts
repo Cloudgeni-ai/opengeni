@@ -37,6 +37,7 @@ import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 // The provider-parameterized entry points are internal to the package.
 import {
   getSubscriptionCoreModelConnectionAccess,
@@ -441,6 +442,8 @@ beforeAll(async () => {
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+    // A deployment before the retirement runs under that release's grants.
+    await restorePreRetirementGrants(database.adminUrl);
   } finally {
     await owner.end();
   }
@@ -498,6 +501,7 @@ beforeAll(async () => {
     await later.end();
   }
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+  await restorePreRetirementGrants(database.adminUrl);
   staged = {
     catalogBefore,
     catalogAfter,

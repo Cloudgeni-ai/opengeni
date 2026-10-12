@@ -34,6 +34,7 @@ import {
 } from "@opengeni/db";
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
+import { restorePreRetirementGrants } from "../../packages/db/test/fixtures/pre-retirement-grants";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
 // The legacy Claude runtime is deleted (design 5.3, C4). The pre-cutover world
 // is staged with the retired account writers (now only a test fixture), the
@@ -162,6 +163,9 @@ describe.skipIf(!realDb)(
         appRole: "opengeni_app",
         appPassword: owned.appPassword,
       });
+      // Both windows this seam models run before the retirement, under that
+      // release's grants.
+      await restorePreRetirementGrants(owned.adminUrl);
       client = createDb(appUrl(), { max: 4 });
     }, 180_000);
 
@@ -319,6 +323,7 @@ describe.skipIf(!realDb)(
         appRole: "opengeni_app",
         appPassword: owned.appPassword,
       });
+      await restorePreRetirementGrants(owned.adminUrl);
       client = createDb(appUrl(), { max: 4 });
 
       // The core waiter is the recorded one: same id, generation and wake

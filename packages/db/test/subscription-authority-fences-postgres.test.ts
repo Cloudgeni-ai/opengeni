@@ -50,6 +50,7 @@ import {
 import { rawRows } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { subscriptionAuthorityCompatForCarriersInTransaction } from "../src/subscription-core-acceptance-authority";
 
 setDefaultTimeout(180_000);
@@ -713,6 +714,8 @@ beforeAll(async () => {
     await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+    // The legacy pools run before the retirement, under that release's grants.
+    await restorePreRetirementGrants(database.adminUrl);
   } finally {
     await owner.end();
   }
@@ -759,6 +762,7 @@ beforeAll(async () => {
   };
   const unprovisioned = await evaluate();
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+  await restorePreRetirementGrants(database.adminUrl);
   posture = { unprovisioned, provisioned: await evaluate() };
   client = createDb(appUrl, { max: 4 });
   app = client.db;

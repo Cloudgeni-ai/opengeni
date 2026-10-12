@@ -14,6 +14,7 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -376,6 +377,8 @@ test("cloned capacity waiters retain the enabled xAI tenancy fence and reject un
   expect(posture.every((row) => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
 
   await provisionRoles(owned.adminUrl, { appRole: "opengeni_app", appPassword: owned.appPassword });
+  // The pools run before the retirement, under that release's grants.
+  await restorePreRetirementGrants(owned.adminUrl);
   const url = new URL(owned.adminUrl);
   url.username = "opengeni_app";
   url.password = owned.appPassword;

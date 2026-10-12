@@ -63,6 +63,7 @@ import {
 } from "../src/canonical-human-identities";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 
 // Replaying the full migration ledger is slow and grows with every migration.
 setDefaultTimeout(180_000);
@@ -215,6 +216,8 @@ beforeAll(async () => {
   }
   await migrate(owned.ownerUrl);
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
+  // The legacy connect paths run before the retirement, under that release's grants.
+  await restorePreRetirementGrants(owned.adminUrl);
   const appUrl = new URL(owned.ownerUrl);
   appUrl.username = "opengeni_app";
   appUrl.password = owned.appPassword;

@@ -18,6 +18,7 @@ import {
   type DbClient,
 } from "../src";
 import { rawRows } from "../src/database";
+import { SUBSCRIPTION_RETIREMENT_MIGRATION } from "../src/runtime-posture";
 import {
   loadLegacySubscriptionPlacementWorld as loadHistoricalCodexWorld,
   type LegacyPlacementWorldRequest,
@@ -44,7 +45,12 @@ const encryptionKey = new Uint8Array(32).fill(7);
 
 beforeAll(async () => {
   if (process.env.OPENGENI_REQUIRE_REAL_DB !== "1") return;
-  shared = await acquireSharedTestDatabase("legacy-subscription-world");
+  // The SuperGrok shadow world reads the legacy pool routines, which the
+  // drained retirement migration drops; it is withheld until that shadow
+  // adapter is removed with the legacy SuperGrok runtime.
+  shared = await acquireSharedTestDatabase("legacy-subscription-world", {
+    withheldMigrations: [SUBSCRIPTION_RETIREMENT_MIGRATION],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);

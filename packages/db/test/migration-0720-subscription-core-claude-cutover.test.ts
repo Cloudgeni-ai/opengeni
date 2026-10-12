@@ -22,6 +22,7 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "../src/environment-crypto";
 import { rawRows, withRlsContext } from "../src/database";
 import {
@@ -987,6 +988,8 @@ describe.skipIf(!realDb)(
         appRole: "opengeni_app",
         appPassword: owned.appPassword,
       });
+      // The window before the retirement runs under that release's grants.
+      await restorePreRetirementGrants(owned.adminUrl);
       const app = postgres(url.toString(), { max: 1 });
       try {
         await app`SELECT 1`;
@@ -1148,6 +1151,7 @@ describe.skipIf(!realDb)(
           appRole: "opengeni_app",
           appPassword: owned.appPassword,
         });
+        await restorePreRetirementGrants(owned.adminUrl);
         const url = new URL(owned.ownerUrl);
         url.username = "opengeni_app";
         url.password = owned.appPassword;
