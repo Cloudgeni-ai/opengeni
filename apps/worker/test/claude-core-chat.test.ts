@@ -5,6 +5,7 @@ import { testSettings } from "@opengeni/testing";
 import { withClaudeUsageObserver } from "../../../packages/runtime/src/claude-subscription-usage";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
+import { anthropicSearchAccountScope } from "../../../packages/runtime/src/anthropic-web-search";
 import {
   parseModelProvidersJson,
   withClaudeConnectionCatalog,
@@ -22,6 +23,7 @@ import {
   CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
   claudeCoreModelScope,
   claudeCoreSettingsCredential,
+  claudeCoreSettingsPlaceholderToken,
   claudeCoreRequestOutcomeUnknown,
   claudeCoreRequestPreparer,
   claudeResponseInspector,
@@ -791,12 +793,14 @@ describe("Claude custody edge paths on the core", () => {
       } as unknown as db.SubscriptionCoreClaudeTokenSnapshot["credential"],
       credentialVersion: 7,
     } as db.SubscriptionCoreClaudeTokenSnapshot;
-    const serialized = claudeCoreSettingsCredential(live);
+    const connectionId = "20000000-0000-4000-8000-000000000002";
+    const serialized = claudeCoreSettingsCredential(live, connectionId);
     expect(JSON.parse(serialized)).toEqual({
       version: 1,
-      token: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+      token: claudeCoreSettingsPlaceholderToken(connectionId, 7),
       identity: accountIdentity,
     });
+    expect(JSON.parse(serialized).token).toStartWith(CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN);
     expect(serialized).not.toContain("live-secret");
     expect(serialized).not.toContain("refresh-secret");
     const settings = withClaudeConnectionCredential(
@@ -808,21 +812,63 @@ describe("Claude custody edge paths on the core", () => {
       "claude_subscription",
       serialized,
       "organization",
-      { connectionId: "20000000-0000-4000-8000-000000000002", credentialVersion: 7 },
+      { connectionId, credentialVersion: 7 },
     );
     // The settings accept it as a strict Claude subscription credential and
     // map only the placeholder bearer and the account identity.
     const parsed = parseModelProvidersJson(settings.modelProvidersJson);
     const mapped = parsed.find((provider) => provider.id === "organization-claude-subscription");
-    expect(mapped?.apiKey).toBe(CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN);
+    expect(mapped?.apiKey).toBe(claudeCoreSettingsPlaceholderToken(connectionId, 7));
     expect(mapped?.anthropic?.identity).toEqual(accountIdentity);
     expect(mapped?.anthropic?.credentialBinding).toEqual({
-      connectionId: "20000000-0000-4000-8000-000000000002",
+      connectionId,
       credentialVersion: 7,
     });
     const providers = JSON.stringify(parsed);
     expect(providers).not.toContain("live-secret");
     expect(providers).not.toContain("refresh-secret");
+  });
+
+  test("connections without an account UUID keep separate web-search scopes on the core", () => {
+    // A setup-token account has no UUID, so a stored hosted search is scoped
+    // by the settings' key: one shared placeholder would replay one
+    // account's encrypted results to another, which Anthropic rejects.
+    const scopeOf = (connectionId: string, credentialVersion: number) => {
+      const snapshot = {
+        credential: {
+          version: 1,
+          token: "sk-ant-oat01-live-secret",
+          identity: { accountUuid: "", deviceId: "b".repeat(64) },
+        },
+        credentialVersion,
+      } as unknown as db.SubscriptionCoreClaudeTokenSnapshot;
+      const settings = withClaudeConnectionCredential(
+        withClaudeConnectionCatalog(
+          testSettings({ claudeSubscriptionEnabled: true }),
+          { claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] } },
+          "organization",
+        ),
+        "claude_subscription",
+        claudeCoreSettingsCredential(snapshot, connectionId),
+        "organization",
+        { connectionId, credentialVersion },
+      );
+      const mapped = parseModelProvidersJson(settings.modelProvidersJson).find(
+        (provider) => provider.id === "organization-claude-subscription",
+      )!;
+      return anthropicSearchAccountScope(mapped);
+    };
+    const a = "20000000-0000-4000-8000-00000000000a";
+    const b = "20000000-0000-4000-8000-00000000000b";
+    expect(scopeOf(a, 3)).toStartWith("credential:");
+    // Different connections never share a scope, so a search from one reaches
+    // the other as readable facts (the runtime's cross-account replay).
+    expect(scopeOf(a, 3)).not.toBe(scopeOf(b, 3));
+    // The same connection at the same version replays natively.
+    expect(scopeOf(a, 3)).toBe(scopeOf(a, 3));
+    // A refresh, like a rotated live token on the legacy path, only costs a
+    // readable replay.
+    expect(scopeOf(a, 4)).not.toBe(scopeOf(a, 3));
   });
 
   const claudeProvider: ResolvedModelProvider = {
@@ -882,7 +928,7 @@ describe("Claude custody edge paths on the core", () => {
   // placeholder bearer (`claudeCoreSettingsCredential`).
   const oauthProvider: ResolvedModelProvider = {
     ...claudeProvider,
-    apiKey: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+    apiKey: claudeCoreSettingsPlaceholderToken("20000000-0000-4000-8000-000000000002", 4),
     anthropic: {
       auth: "oauth",
       identity: { accountUuid: "10000000-0000-4000-8000-000000000001", deviceId: "a".repeat(64) },

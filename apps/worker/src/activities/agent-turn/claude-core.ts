@@ -207,22 +207,40 @@ export function buildClaudeCoreRequestAuthorization(input: {
 }
 
 /**
- * The bearer a core-placed Claude turn's capability settings carry instead of
- * the live one: each core request's custody sets the real bearer, so a
- * request that bypasses custody is refused upstream rather than spending the
- * account unreserved.
+ * The prefix of the bearer a core-placed Claude turn's capability settings
+ * carry instead of the live one: each core request's custody sets the real
+ * bearer, so a request that bypasses custody is refused upstream rather than
+ * spending the account unreserved.
  */
 export const CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN = "sk-ant-oat01-opengeni-core-custody-only";
 
 /**
- * The Claude credential a core-placed turn's capability settings carry: the
- * account identity with the placeholder bearer, never the live token or any
- * refresh material.
+ * The placeholder bearer of one connection at one credential version. It is
+ * unique per connection and version because the settings' key also scopes
+ * stored hosted web searches when the account has no UUID (a setup token):
+ * one shared placeholder would replay one account's encrypted search results
+ * to another, which Anthropic rejects. A refresh moves the version, which,
+ * like a rotated live token on the legacy path, only costs a readable replay.
  */
-export function claudeCoreSettingsCredential(token: SubscriptionCoreClaudeTokenSnapshot): string {
+export function claudeCoreSettingsPlaceholderToken(
+  connectionId: string,
+  credentialVersion: number,
+): string {
+  return `${CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN}-${connectionId}-${credentialVersion}`;
+}
+
+/**
+ * The Claude credential a core-placed turn's capability settings carry: the
+ * account identity with the connection's placeholder bearer, never the live
+ * token or any refresh material.
+ */
+export function claudeCoreSettingsCredential(
+  token: SubscriptionCoreClaudeTokenSnapshot,
+  connectionId: string,
+): string {
   return JSON.stringify({
     version: token.credential.version,
-    token: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+    token: claudeCoreSettingsPlaceholderToken(connectionId, token.credentialVersion),
     identity: token.credential.identity,
   });
 }

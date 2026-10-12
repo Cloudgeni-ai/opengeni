@@ -678,7 +678,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             selectedCapabilitySettings = withClaudeConnectionCredential(
               capabilitySettings,
               "claude_subscription",
-              claudeCoreSettingsCredential(token),
+              claudeCoreSettingsCredential(token, claudeCore.connectionId),
               claudeCoreModelScope(turnExecutionPolicy.productModelId),
               { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
             );

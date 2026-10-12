@@ -4993,6 +4993,11 @@ unregistered until then.
   refreshed or retried in place; that it never rotates accounts is C1b's
   settlement. The capability settings carry the account identity with a
   placeholder bearer, so a request outside custody fails closed upstream.
+  The placeholder is unique per connection and credential version: for an
+  account without a UUID (a setup token) the settings' key also scopes
+  stored hosted web searches (#4143), and one shared placeholder would
+  replay one account's encrypted results to another, which Anthropic
+  rejects (review finding on #4132).
   Session titles use their own lane under
   the same fence; only an admitted main-lane request moves the generation
   the refusal settlement fences on (`core.credentialVersion`), so a title
