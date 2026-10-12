@@ -21,6 +21,7 @@ import {
   AttachedBrowserDevice,
   AttachedBrowserDeviceListResponse,
   BrowserActionCommand,
+  browserActionSecretTexts,
   BrowserActionRequest,
   BrowserDiagnosticKind,
   BrowserDownload,
@@ -240,6 +241,12 @@ import {
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import {
+  releaseBrowserPasskeys,
+  resolveInteractionSecretValues,
+  syncBrowserPasskeys,
+  type InteractionSecretsPort,
+} from "../interaction-secrets";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
@@ -256,7 +263,12 @@ type BrowserPlacement = {
   transport: PlacementBrowserTransport;
 };
 
-export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
+export function registerBrowserSessionRoutes(
+  app: Hono,
+  deps: ApiRouteDeps,
+  options: { interactionSecrets?: InteractionSecretsPort | null } = {},
+): void {
+  const interactionSecrets = options.interactionSecrets ?? null;
   const channelServices = {
     db: deps.db,
     settings: deps.settings,
@@ -1116,7 +1128,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "session.control",
         "browser.action",
         async ({ sessionClient, binding, record, sourceAuthorization }) => {
-          const command = BrowserActionCommand.parse({
+          const commandFields = {
             protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
             operationId: request.operationId,
             browserSessionId,
@@ -1128,7 +1140,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             actor: interactionActorForGrant(grant),
             observationMode: request.observationMode,
             action: request.action,
-          });
+          };
+          // Validate the public command before resolving any reference.
+          BrowserActionCommand.parse(commandFields);
           if (workspaceFileIds.length > 0) {
             let alreadyAdmitted = false;
             try {
@@ -1177,7 +1191,37 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               });
             }
           }
-          return await sessionClient.action(command);
+          const passkeySync = () =>
+            syncBrowserPasskeys({
+              port: interactionSecrets,
+              grant,
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              client: sessionClient,
+              log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
+            });
+          await passkeySync();
+          // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
+          const secretValues = await resolveInteractionSecretValues({
+            port: interactionSecrets,
+            grant,
+            texts: browserActionSecretTexts(request.action),
+            use: {
+              surface: "browser",
+              toolName: "browser_act",
+              operationId: request.operationId,
+            },
+          });
+          try {
+            return await sessionClient.action(
+              BrowserActionCommand.parse({
+                ...commandFields,
+                ...(secretValues === undefined ? {} : { secretValues }),
+              }),
+            );
+          } finally {
+            await passkeySync();
+          }
         },
       );
       observeBrowserActionResult(deps.observability, startedAtMs, request, result);
@@ -2713,6 +2757,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               browserSessionId,
               before.controllerHostSandboxGroupId,
             ).catch(() => undefined);
+            await releaseBrowserPasskeys(interactionSecrets, browserSessionId);
           }
           const parsed = BrowserSessionMutationResponse.parse(prepared);
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
@@ -2748,6 +2793,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             browserSessionId,
             record.controllerHostSandboxGroupId,
           ).catch(() => undefined);
+          await releaseBrowserPasskeys(interactionSecrets, browserSessionId);
           const parsed = BrowserSessionMutationResponse.parse(completed);
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
           return context.json(parsed, 200);
@@ -2811,6 +2857,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               browserSessionId,
               placement.controllerHostSandboxGroupId,
             ).catch(() => undefined);
+            await releaseBrowserPasskeys(interactionSecrets, browserSessionId);
             return completed;
           },
         );

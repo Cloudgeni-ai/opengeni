@@ -1029,9 +1029,37 @@ describe("BrowserSession route discipline", () => {
       route.indexOf("sessionClient.stageWorkspaceFiles"),
     );
     expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
-      route.indexOf("sessionClient.action(command)"),
+      route.indexOf("sessionClient.action("),
     );
     expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
+  test("resolves agent secret references last, right before the canonical action", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      start,
+    );
+    const route = source.slice(start, end);
+    // The public command is validated before any reference is resolved.
+    expect(route.indexOf("BrowserActionCommand.parse(commandFields)")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("resolveInteractionSecretValues")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
+    expect(route).toContain("texts: browserActionSecretTexts(request.action)");
+    expect(route).toContain('surface: "browser"');
+    // Passkeys sync before and after the action, never instead of it.
+    expect(route.match(/await passkeySync\(\)/g)?.length).toBe(2);
+    // The response is the controller receipt; the side map is never echoed.
+    expect(route).not.toContain("secretValues: request");
   });
 
   test("binds agent uploads to the frozen initiating human, not the worker subject", () => {

@@ -34,6 +34,8 @@ import {
   BrowserTargetState,
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
+  BrowserPasskeySyncRequest,
+  BrowserPasskeySyncResponse,
   ComputerActionCommand,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -65,6 +67,8 @@ import {
   type BrowserTargetState as BrowserTargetStateValue,
   type BrowserWorkspaceFileStageRequest as BrowserWorkspaceFileStageRequestValue,
   type BrowserWorkspaceFileStageResponse as BrowserWorkspaceFileStageResponseValue,
+  type BrowserPasskeySyncRequest as BrowserPasskeySyncRequestValue,
+  type BrowserPasskeySyncResponse as BrowserPasskeySyncResponseValue,
   type ComputerActionCommand as ComputerActionCommandValue,
   type ComputerActionReceipt as ComputerActionReceiptValue,
   type ComputerClipboard as ComputerClipboardValue,
@@ -1874,6 +1878,27 @@ export class BrowserControlSessionClient {
         method: "GET",
         path: this.path(`operations/${requireUuid(operationId, "operation id")}`),
         token: this.viewToken,
+      }),
+    );
+  }
+
+  /** Controller-private passkey exchange (dossier §10B.4): load the
+   * principal's passkeys into every authenticator and pull registration and
+   * assertion events. Controllers that predate it answer 404. */
+  async passkeySync(request: BrowserPasskeySyncRequestValue): Promise<BrowserPasskeySyncResponseValue> {
+    const parsed = BrowserPasskeySyncRequest.parse(request);
+    if (
+      parsed.browserSessionId !== this.reference.browserSessionId ||
+      parsed.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError("passkey sync targets another controller binding");
+    }
+    return BrowserPasskeySyncResponse.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("passkeys/sync"),
+        token: this.controlToken,
+        body: parsed,
       }),
     );
   }
