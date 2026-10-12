@@ -631,7 +631,17 @@ describe("intent-preserving failed-session retry", () => {
     const history = await getActiveSessionHistoryItems(client.db, f.workspaceId, f.session.id);
     expect(
       history.flatMap(({ item }) => (item.callId === f.toolCallId ? [item] : [])),
-    ).toMatchObject([{ type: "function_call" }, { type: "function_call_result" }]);
+    ).toMatchObject([
+      { type: "function_call" },
+      {
+        type: "function_call_result",
+        callId: f.toolCallId,
+        output: {
+          type: "text",
+          text: "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run it again.",
+        },
+      },
+    ]);
     expect((await f.retry()).outcome).toBe("accepted");
   });
 
