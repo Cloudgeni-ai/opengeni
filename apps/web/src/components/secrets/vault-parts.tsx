@@ -5,9 +5,9 @@ import {
   FingerprintIcon,
   KeyRoundIcon,
   LockKeyholeIcon,
+  NotepadTextIcon,
   RotateCcwIcon,
   ServerIcon,
-  StickyNoteIcon,
   UserIcon,
   UsersIcon,
 } from "lucide-react";
@@ -203,7 +203,7 @@ export function VaultSyncNotice({
 const ITEM_TYPE_ICON: Record<VaultItemSummary["type"], ReactNode> = {
   login: <KeyRoundIcon />,
   api_key: <BracesIcon />,
-  note: <StickyNoteIcon />,
+  note: <NotepadTextIcon />,
   file: <FileIcon />,
   passkey: <FingerprintIcon />,
 };
