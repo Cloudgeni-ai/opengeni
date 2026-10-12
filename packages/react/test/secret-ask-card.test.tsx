@@ -7,12 +7,14 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { act, type ReactNode } from "react";
+import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
 
 // Radix picks its layout-effect implementation at import time: load after the DOM exists.
 const { HumanInputForm, MessageTimeline, SecretsUiProvider } = await import("../src");
+const { SessionConversation } = await import("../src/components/session-conversation");
 const {
   resolveSecretSaveTo,
   secretAnswerFromReading,
@@ -703,5 +705,97 @@ describe("secret ask card: answered history", () => {
     );
     await flush();
     expect(mounted.container.querySelector("[data-og-secret-answer]")).toBeNull();
+  });
+});
+
+describe("secret ask card in SessionConversation", () => {
+  test("secretAnswers reach the client unchanged; a failed send keeps the value", async () => {
+    const sent: SubmitHumanInputResponseRequest[] = [];
+    let failNext = true;
+    const client = fakeClient({
+      getSession: async () => ({ id: SESSION_ID, status: "running" }) as never,
+      getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+      listEvents: async () => [],
+      streamEvents: async function* () {},
+      listHumanInputRequests: async () => [
+        {
+          id: "request-live",
+          workspaceId: WORKSPACE_ID,
+          sessionId: SESSION_ID,
+          turnId: "turn-1",
+          turnGeneration: 1,
+          creationAttemptId: "attempt-1",
+          toolCallId: "call-1",
+          status: "pending",
+          questions: [secretQuestion({ item: "GitHub", saveTo: "task" })],
+          allowSkip: false,
+          response: null,
+          respondedBy: null,
+          respondedAt: null,
+          expiresAt: null,
+          createdAt: "2026-10-12T10:00:00.000Z",
+          updatedAt: "2026-10-12T10:00:00.000Z",
+        },
+      ],
+      submitHumanInputResponse: async (_workspace, _session, _request, response) => {
+        sent.push(response);
+        if (failNext) {
+          failNext = false;
+          throw new Error("Network down");
+        }
+        return {
+          id: "response-event",
+          workspaceId: WORKSPACE_ID,
+          sessionId: SESSION_ID,
+          sequence: 9,
+          type: "user.humanInputResponse",
+          payload: {},
+          occurredAt: "2026-10-12T10:00:01.000Z",
+          turnId: "turn-1",
+        } as SessionEvent;
+      },
+    });
+    mounted = await renderComponent(
+      <SessionConversation
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        modelPicker={false}
+      />,
+    );
+    const deadline = Date.now() + 3_000;
+    while (!mounted.container.querySelector('input[name^="secret-"]')) {
+      if (Date.now() > deadline) throw new Error("secret card did not render");
+      await flush(10);
+    }
+    const input = secretInput(mounted.container);
+    await typeSecret(input, SECRET);
+    const form = input.form!;
+    const send = async () => {
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      await flush(20);
+    };
+
+    await send();
+    expect(sent).toHaveLength(1);
+    // The failed send kept the typed value for a retry.
+    expect(input.value).toBe(SECRET);
+
+    await send();
+    expect(sent).toEqual([
+      {
+        outcome: "answered",
+        answers: [{ questionId: "github", values: [] }],
+        secretAnswers: [{ questionId: "github", value: SECRET, saveTo: "task" }],
+      },
+      {
+        outcome: "answered",
+        answers: [{ questionId: "github", values: [] }],
+        secretAnswers: [{ questionId: "github", value: SECRET, saveTo: "task" }],
+      },
+    ]);
+    expect(input.value).toBe("");
   });
 });

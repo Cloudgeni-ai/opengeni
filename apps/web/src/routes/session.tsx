@@ -3214,11 +3214,13 @@ function SessionChatPane(props: {
                                   requests={props.humanInput.requests}
                                   respondingRequestId={props.humanInput.respondingRequestId}
                                   error={props.humanInput.mutationError?.message}
-                                  onSubmit={(requestId, response) =>
-                                    props.humanInput
-                                      .respond(requestId, response)
-                                      .then(() => undefined)
-                                  }
+                                  onSubmit={async (requestId, response) => {
+                                    // A failed send resolves null. Reject so the card
+                                    // keeps what was typed (including a secret) to retry.
+                                    if (!(await props.humanInput.respond(requestId, response))) {
+                                      throw new Error("Your answer wasn't sent. Try again.");
+                                    }
+                                  }}
                                 />
                               </Suspense>
                             </div>
