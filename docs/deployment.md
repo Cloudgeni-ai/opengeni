@@ -4998,6 +4998,67 @@ triggers, the policy `subscription_settings_lock_guard_read`, the four
 routines and the two CHECKs; the stored locks stay and the resolver keeps
 ignoring locked workspace overrides.
 
+### Personal Codex acceptance under row security (0726)
+
+Migration `0726_subscription_personal_acceptance_reads.sql` is **rolling**
+and grants nothing. Design record:
+[subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
+It acts on deploy for Codex, on databases whose migration owner is neither a
+superuser nor `BYPASSRLS` (the documented posture):
+
+- Before it, the routines that freeze a turn's or scheduled task's v2
+  accepted authority could not see the owner's personal connections, so they
+  froze the empty value: an owner's personal Codex account was never used,
+  even in their private session or Personal workspace (the work used shared
+  capacity or waited for it).
+- After it, a new acceptance by an owner whose personal Codex connections
+  carry exactly one current generation freezes the owner's personal entry,
+  as it already did where the owner bypasses row security. The rules are
+  unchanged; only the read is fixed.
+- Values frozen earlier are not rewritten: the next turn accepted in a
+  private session uses the personal account, but a scheduled task keeps the
+  value frozen when it was created, so tasks created before 0726 keep using
+  shared capacity until they are recreated.
+- Health recovery had the same blind spot: a personal Codex account
+  quarantined after a refused request (a time-bound `error` status with a
+  retry time) was never returned to service. After 0726 the owner's own turn
+  whose frozen entry names the account recovers it once the retry time
+  passes, as shared accounts already were. Sign-in failures still need a new
+  sign-in.
+
+To see whether a database is affected, and which owners' new acceptances
+0726 will freeze the personal entry for, run as a role that bypasses row
+security. Placement still applies the effective `personalConnectionsAllowed`
+of the session's workspace (the workspace's own value unless the organization
+has locked the setting, otherwise the organization's), so where it is off
+these owners' work keeps using shared capacity:
+
+```sql
+SELECT rolname, rolsuper, rolbypassrls
+FROM pg_roles
+WHERE oid = (SELECT proowner FROM pg_proc
+  WHERE oid = 'opengeni_private.subscription_core_acceptance_authority_v2(text,uuid,uuid,uuid,text)'::regprocedure);
+-- Nothing changes when rolsuper or rolbypassrls is true.
+
+SELECT connection.account_id, connection.owner_organization_membership_id
+FROM subscription_connections connection
+JOIN organization_memberships membership
+  ON membership.id = connection.owner_organization_membership_id
+  AND membership.account_id = connection.account_id
+  AND membership.subject_id = connection.owner_subject_id
+  AND membership.status = 'active' AND membership.revoked_at IS NULL
+JOIN organization_user_resource_authorities authority
+  ON authority.id = connection.authority_id AND authority.account_id = connection.account_id
+  AND authority.resource_kind = 'subscription_connection' AND authority.resource_id = connection.id
+  AND authority.organization_membership_id = connection.owner_organization_membership_id
+  AND authority.generation = connection.authority_generation
+  AND authority.status = 'active' AND authority.revoked_at IS NULL
+WHERE connection.provider = 'codex' AND connection.kind = 'subscription'
+  AND connection.ownership = 'personal' AND connection.status IN ('active', 'error')
+GROUP BY 1, 2
+HAVING count(DISTINCT authority.generation) = 1;
+```
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

@@ -83,6 +83,8 @@ const withheldMigrations = [
   // Redefines a push routine from withheld 0664 and reads the inbox settings
   // columns withheld 0663 and 0665 add.
   "0718_inbox_time_sensitive_needs_you.sql",
+  // Patches the acceptance writers withheld 0688 and 0707 define.
+  "0726_subscription_personal_acceptance_reads.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

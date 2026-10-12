@@ -46,6 +46,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const compat = "0716_subscription_authority_compat.sql";
   // 0717 requires 0716's routines; it follows 0716.
   const fences = "0717_subscription_authority_fences.sql";
+  // 0726 patches the acceptance writers 0688 and 0707 define; it follows them.
+  const acceptanceReads = "0726_subscription_personal_acceptance_reads.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
@@ -55,7 +57,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     // the genuine pre-writer fixture, then replay them in ledger order below.
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
-      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${compat}), (${fences})`;
+      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${compat}), (${fences}),
+      (${acceptanceReads})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -109,7 +112,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${compat}, ${fences})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${compat}, ${fences}, ${acceptanceReads})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());
