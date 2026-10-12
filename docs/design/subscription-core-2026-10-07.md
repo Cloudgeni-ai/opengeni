@@ -2728,7 +2728,7 @@ Shared-core additions, all in the generic precursor:
 | Lifecycle fact `model.connected` captured on core connection insert, keyed by provider. | Today it is emitted only by triggers on the legacy credential tables (0565, 0598, 0602); Codex already lost it in M3. |
 | `subscription_authority_compat` relation, its reader and copy routines (below). | Keyed by provider and carrier; needed by every provider whose v1 snapshot predates its cutover. |
 | Provider-keyed cutover receipts, readiness and parity report (below). | Replaces per-provider receipt functions and report relations. |
-| Administered usage reads (below): a live usage probe for an organization administrator on the organization route and for a personal connection's owner in their own Personal workspace (0729, renumbered at merge). | Legacy read organization and user-scope accounts live for Claude and SuperGrok (D-01), and Codex's organization usage reads live; the workspace connection seam serves neither. |
+| Administered usage reads (below): a live usage probe for an organization administrator on the organization route and for a personal connection's owner in their own Personal workspace (0730, renumbered at merge). | Legacy read organization and user-scope accounts live for Claude and SuperGrok (D-01), and Codex's organization usage reads live; the workspace connection seam serves neither. |
 
 #### Administered usage reads
 
@@ -2757,7 +2757,7 @@ it opens and never borrowed:
   refresh (under the per-connection refresh lock) and the quota write go
   through the administrator's row policies.
 - `personal_owner`: the owner's own Personal workspace context and subject.
-  Every read and write goes through three owner-only routines (0729): the
+  Every read and write goes through three owner-only routines (0730): the
   credential read, the refresh begin (which takes the per-connection
   refresh lock and mints the 0707 `connection_refresh_authorized`
   capability that the unchanged 0707 persist and fail writers consume) and

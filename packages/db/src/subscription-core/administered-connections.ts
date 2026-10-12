@@ -21,7 +21,7 @@
  *   budget as that inspection.
  * - `personal_owner`: the owner's own Personal workspace context and subject;
  *   every read and write goes through the owner-only routines of migration
- *   0729 (exact owner membership whose Personal workspace this is, current
+ *   0730 (exact owner membership whose Personal workspace this is, current
  *   authority generation, the organization's effective personal-connections
  *   rule, writer context and enabled cutover), and a refresh persists through
  *   the 0707 refresh writers on the capability that routine mints. A shared
