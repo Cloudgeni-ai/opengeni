@@ -2961,23 +2961,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.clickNode(state, node.backendDOMNodeId, "left", 1);
         return;
       }
-      case "scroll":
+      case "scroll": {
+        // A located scroll moves the nearest box that can scroll that way, as a
+        // wheel over the element would; a page scroll moves the viewport. When
+        // nothing moves, no scroll event fired, so the refusal is definite.
+        const effectsBeforeScroll = state.actionEffectCount;
+        let moved: unknown;
         if (action.locator) {
           const node = await this.resolveActionLocator(state, action.locator);
-          await this.callOnNode(
+          moved = await this.callOnNode(
             state,
             node.backendDOMNodeId,
             SCROLL_FUNCTION,
             [{ value: action.deltaX }, { value: action.deltaY }],
-            { potentialEffect: true },
+            { isolatedFrameId: node.frameId ?? state.frame.id, potentialEffect: true },
           );
         } else {
-          await this.evaluateAction(
+          moved = await this.evaluateAction(
             state,
-            `window.scrollBy(${json(action.deltaX)}, ${json(action.deltaY)})`,
+            `(${PAGE_SCROLL_FUNCTION})(${json(action.deltaX)}, ${json(action.deltaY)})`,
+          );
+        }
+        if (moved !== true && (action.deltaX !== 0 || action.deltaY !== 0)) {
+          state.actionEffectCount = effectsBeforeScroll;
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            action.locator
+              ? "nothing at this element can scroll further in that direction"
+              : "the page cannot scroll further in that direction; to scroll an inner panel, pass its locator",
           );
         }
         return;
+      }
       case "drag": {
         const from = await this.resolveActionLocator(state, action.from);
         const to = await this.resolveActionLocator(state, action.to);
@@ -5001,9 +5016,55 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
   return true;
 }`;
 
+/** Scroll the nearest box around the element that can move in each requested
+ * direction, crossing shadow roots and slots like a wheel event would. Only
+ * boxes a user can scroll count: overflow auto, scroll or overlay, or the
+ * viewport unless it hides overflow. Returns whether anything moved. */
 const SCROLL_FUNCTION = `function(deltaX, deltaY) {
-  this.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
-  return true;
+  const start = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!start || !start.isConnected) return false;
+  const doc = start.ownerDocument;
+  const view = doc.defaultView;
+  const root = doc.scrollingElement || doc.documentElement;
+  const parentOf = (element) =>
+    element.assignedSlot ||
+    element.parentElement ||
+    (element.parentNode && element.parentNode.nodeType === 11 ? element.parentNode.host : null);
+  const overflow = (element, axis) =>
+    view.getComputedStyle(element)[axis === "x" ? "overflowX" : "overflowY"];
+  const scrollable = (element, axis) => {
+    if (element !== root) return ["auto", "scroll", "overlay"].includes(overflow(element, axis));
+    const html = overflow(doc.documentElement, axis);
+    const viewport = html === "visible" && doc.body ? overflow(doc.body, axis) : html;
+    return viewport !== "hidden" && viewport !== "clip";
+  };
+  const scrollAxis = (axis, delta) => {
+    if (!delta) return false;
+    const read = (element) => (axis === "x" ? element.scrollLeft : element.scrollTop);
+    const candidates = [];
+    for (let element = start; element; element = element === root ? null : parentOf(element))
+      candidates.push(element);
+    if (!candidates.includes(root)) candidates.push(root);
+    for (const element of candidates) {
+      if (!scrollable(element, axis)) continue;
+      const before = read(element);
+      element.scrollBy(
+        axis === "x" ? { left: delta, behavior: "instant" } : { top: delta, behavior: "instant" },
+      );
+      if (read(element) !== before) return true;
+    }
+    return false;
+  };
+  const movedX = scrollAxis("x", deltaX);
+  const movedY = scrollAxis("y", deltaY);
+  return movedX || movedY;
+}`;
+
+const PAGE_SCROLL_FUNCTION = `function(deltaX, deltaY) {
+  const root = document.scrollingElement || document.documentElement;
+  const before = [root.scrollLeft, root.scrollTop];
+  window.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
+  return root.scrollLeft !== before[0] || root.scrollTop !== before[1];
 }`;
 
 /** Fixed browser-side projection. Every field shares one character budget, so
