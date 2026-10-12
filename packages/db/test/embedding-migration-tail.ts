@@ -222,4 +222,6 @@ export const embeddingMigrationTail = [
   // Reads the Knowledge claim installed by withheld 0461 (and the title/site
   // claims in historical lifecycle fixtures); preserve its full-name identity.
   "0730_maintenance_work_probes.sql",
+  // Reads browser/outbox claim routines withheld by historical lifecycle fixtures.
+  "0732_sandbox_maintenance_work_probes.sql",
 ];
