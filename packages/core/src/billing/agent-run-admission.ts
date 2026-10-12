@@ -4,7 +4,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import type { EntitlementsPort } from "@opengeni/contracts";
-import { modelFundingForAdmission } from "./limits";
+import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "./limits";
 import {
   checkWorkspaceAllowance,
   getSpendableCreditBalance,
@@ -45,6 +45,13 @@ export async function agentRunAdmissionDenial(
     services.settings,
     input.model,
     codexBilled,
+    await coreRoutedSubscriptionFunding(services.db, services.settings, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      model: input.model,
+      subjectId: input.initiatingHumanSubjectId ?? null,
+      ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
+    }),
   ).fundedWithoutCredits;
   if (
     !externallyBilled &&

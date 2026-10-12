@@ -25,10 +25,14 @@ import {
 } from "../src/activities/agent-turn/codex-core-claim";
 import {
   SubscriptionCoreCodexTurnError,
+  subscriptionCoreAccountRefusedFailure,
   subscriptionCoreCapacityFailure,
+  subscriptionCoreCutoverDisabledFailure,
+  subscriptionCoreFailoverExhaustedFailure,
   subscriptionCoreLeaseBusyChain,
   subscriptionCoreLeaseBusyDelayMs,
   subscriptionCoreLeaseBusyFailure,
+  subscriptionCoreUnsupportedFailure,
   SUBSCRIPTION_CORE_LEASE_BUSY_JITTER_MS,
   SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS,
 } from "../src/activities/agent-turn/codex-core-errors";
@@ -2002,7 +2006,52 @@ describe("core Codex failure settlement", () => {
       retryable: false,
       recovery: "user_message",
     });
+    expect(String(settled.events[0]!.payload.error)).toContain("holding its Codex account");
     expect(parent).toHaveBeenCalledTimes(1);
+  });
+
+  test("an exhausted lease-busy chain keeps the provider named by the placement error", async () => {
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const { deps, settle } = failureDeps(
+      subscriptionCoreLeaseBusyFailure(null, undefined, "SuperGrok"),
+      null,
+    );
+    Object.assign(deps.attempt, {
+      subscriptionLeaseBusy: {
+        startedAt: Date.now() - SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS - 1_000,
+        executionGeneration: 2,
+      },
+    });
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "idle" });
+    const settled = settle.mock.calls[0]![0] as {
+      events: Array<{ payload: Record<string, unknown> }>;
+    };
+    expect(settled.events[0]!.payload).toMatchObject({
+      code: "subscription_lease_busy",
+      retryable: false,
+    });
+    expect(String(settled.events[0]!.payload.error)).toBe(
+      "A previous attempt of this turn kept holding its SuperGrok account, so the turn stopped. Send a new message to try again.",
+    );
+  });
+
+  test("every failure-copy builder carries the provider it names; the default stays Codex", () => {
+    const named = (displayName?: string) => [
+      subscriptionCoreFailoverExhaustedFailure(4, 4, displayName),
+      subscriptionCoreCapacityFailure("no_eligible_capacity", null, displayName),
+      subscriptionCoreAccountRefusedFailure("forbidden", displayName),
+      subscriptionCoreUnsupportedFailure("Image generation", displayName),
+      subscriptionCoreCutoverDisabledFailure(displayName),
+      subscriptionCoreLeaseBusyFailure(null, undefined, displayName),
+      subscriptionCoreLeaseBusyFailure(null, "binding_conflict", displayName),
+    ];
+    for (const error of named("SuperGrok")) expect(error.displayName).toBe("SuperGrok");
+    for (const error of named()) expect(error.displayName).toBe("Codex");
+    expect(
+      subscriptionCoreLeaseBusyFailure(null, "binding_conflict", "SuperGrok").payload.error,
+    ).toBe(
+      "The session's SuperGrok account changed while this turn was starting. The turn will retry.",
+    );
   });
 
   test("a database failure while recovering from lease busy keeps the turn recoverable", async () => {

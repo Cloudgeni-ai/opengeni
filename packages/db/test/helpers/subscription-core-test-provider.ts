@@ -103,7 +103,8 @@ export function testSubscriptionCoreProviderModules(
 
 /**
  * Admit a test provider on one test database, as its owner: the registry row
- * and the provider lists a real provider's migration widens. Returns the
+ * and the provider lists a real provider's migration widens (left unchanged
+ * for a provider they already list). Returns the
  * names of every constraint and routine it widened, so a test can assert the
  * list a real connector's migration must cover.
  */
@@ -127,6 +128,8 @@ export async function admitTestSubscriptionCoreProvider(
     // Only provider lists (`= ANY (ARRAY[..., 'xai'::text])`) gain the id;
     // a constraint about one named provider is left alone.
     for (const check of checks) {
+      // A provider every migration already lists (SuperGrok, Claude) keeps its lists.
+      if (check.definition.includes(`'${provider}'::text`)) continue;
       const definition = check.definition.replaceAll(
         `${listed}::text]`,
         `${listed}::text, '${provider}'::text]`,
@@ -148,6 +151,7 @@ export async function admitTestSubscriptionCoreProvider(
     ] as const) {
       const [row] = await tx<{ definition: string }[]>`
         select pg_get_functiondef(${routine}::regprocedure) as definition`;
+      if (row!.definition.includes(`'${provider}'`)) continue;
       const anchor = `${listed})`;
       const occurrences = row!.definition.split(anchor).length - 1;
       if (occurrences === 0 && !required) continue;

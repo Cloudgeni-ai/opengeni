@@ -394,6 +394,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     }
 
     if (resolvedModel?.provider.kind === "xai-subscription") {
+      // A SuperGrok turn placed by the shared core offers no image tool until
+      // its media consumers move onto core operation leases (X2a): the legacy
+      // image path dispatches without the per-request fence and reservation.
+      if (providerTurn.xaiSubscriptionCore) return {};
       const imageAuthority = connectedSubscriptionImageGenerationAuthority(
         providerTurn.xaiRequestContext,
         providerTurn.effectiveXaiCredentialId,
@@ -487,7 +491,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ...workspaceCredential,
         };
       }
-    } else if (videoGenerationPolicy.fundingSource === "supergrok_subscription") {
+    } else if (
+      videoGenerationPolicy.fundingSource === "supergrok_subscription" &&
+      // A core-placed SuperGrok turn never reaches the legacy credential tables,
+      // the subject's current v1 authority or the legacy session pin: no video
+      // tool until X2a moves video onto core operation leases.
+      !providerTurn.xaiSubscriptionCore
+    ) {
       const encryptionKey = environmentsEncryptionKeyBytes(eventing.modelRunSettings);
       const subjectId = leases.xai.subjectId ?? turn.initiatingHumanSubjectId;
       if (encryptionKey && subjectId) {

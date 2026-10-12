@@ -497,6 +497,16 @@ async function finalizeTurnAttemptSteps(
       );
       leases.codex.held = false;
     }
+    // A core-placed SuperGrok turn releases its core lease (the legacy
+    // release below needs the legacy subject, which a core lease never has).
+    if (providerTurn.xaiSubscriptionCore && leases.xai.held && attempt.turnId) {
+      leases.xai.stopHeartbeat();
+      await waitForTurnFinalizerStep(
+        leases.xai.releaseCurrent().catch(() => false),
+        finalizerSignal,
+      );
+      leases.xai.held = false;
+    }
     if (
       providerTurn.effectiveXaiCredentialId &&
       leases.xai.subjectId &&
