@@ -202,4 +202,8 @@ export const embeddingMigrationTail = [
   // Redefines enqueue_native_push_v2 from withheld 0664 and extends the inbox
   // settings 0663 and 0665 grow; replay after them.
   "0718_inbox_time_sensitive_needs_you.sql",
+  // Adds a trigger on the session bindings table from withheld 0642.
+  "0723_subscription_binding_cache_clock.sql",
+  // Adds checks and triggers on the settings table from withheld 0642.
+  "0724_subscription_settings_locks.sql",
 ];
