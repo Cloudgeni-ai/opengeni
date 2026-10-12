@@ -533,7 +533,7 @@ describe("SuperGrok request custody on the core", () => {
     expect(await xaiCoreLanesRecoverAfterCheckpoint(unknown.core, async () => {})).toBe(false);
   });
 
-  test("an unknown title-lane outcome is terminal for the turn", async () => {
+  test("an unknown title-lane outcome does not fence the turn", async () => {
     const { core, authorization } = placedCore();
     const title = sessionTitleXaiRequestContext(
       {
@@ -561,10 +561,10 @@ describe("SuperGrok request custody on the core", () => {
       .catch(() => undefined);
     expect(core.requests!.hasUnknownOutcome()).toBe(false);
     expect(core.titleRequests!.hasUnknownOutcome()).toBe(true);
-    expect(xaiCoreRequestOutcomeUnknown(new Error("plain"), core)).toMatchObject({
-      code: "subscription_core_request_outcome_unknown",
-    });
-    expect(await xaiCoreLanesRecoverAfterCheckpoint(core, async () => {})).toBe(false);
+    // The tool-less title response never enters history, so its unknown
+    // outcome cannot make a replay of the turn unsafe.
+    expect(xaiCoreRequestOutcomeUnknown(new Error("plain"), core)).toBeNull();
+    expect(await xaiCoreLanesRecoverAfterCheckpoint(core, async () => {})).toBe(true);
   });
 });
 
