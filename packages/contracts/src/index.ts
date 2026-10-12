@@ -83,7 +83,7 @@ export const HostMcpCreateSelections = z
   });
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
-import { VaultFieldName, VaultName } from "./vaults";
+import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
 import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
@@ -10726,6 +10726,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   // resolved PER FIRE (at dispatch), so a task always runs the rig's current
   // version rather than one frozen at task-create time. Null ⇒ rig-less runs.
   rigId: z.string().uuid().nullable().default(null),
+  /** Vaults every run may resolve secret references from (the task vault is always included). */
+  vaultPolicy: VaultPolicy.default({ mode: "all" }),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -11233,6 +11235,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     agentConfig: ScheduledTaskAgentConfigInput,
     status: ScheduledTaskStatus.default("active"),
     variableSetId: z.string().uuid().nullable().optional(),
+    /** Vault narrowing for every run; omission adds none. */
+    vaultPolicy: VaultPolicy.optional(),
     environmentId: z.string().uuid().nullable().optional(),
     // The Sandbox Environment each run binds to; its active version is resolved
     // per fire. Omitted resolves once at create, like session create: the
@@ -11367,6 +11371,8 @@ export const UpdateScheduledTaskRequest =
       overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
       action: ScheduledTaskAction.optional(),
       targetSessionId: z.string().uuid().nullable().optional(),
+      /** Vault narrowing for every run. */
+      vaultPolicy: VaultPolicy.optional(),
       /** Change who can see it. Only the owner can, and a schedule posting into an Only me chat stays Only me. */
       visibility: SessionVisibility.optional(),
       connectionAuthorities: z.never().optional(),
@@ -17199,6 +17205,11 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // renderer. Omission keeps today's behavior (or inherits a configured
       // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
+      // Which vaults this session's agent may resolve secret references from.
+      // Intersected with `agent.vaultPolicy`; a child is further narrowed by
+      // its ancestors' policies whenever it resolves. The task vault is always
+      // included. Omission adds no narrowing.
+      vaultPolicy: VaultPolicy.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
       // policies, connection refs, and encrypted credentials. Explicit arrays,

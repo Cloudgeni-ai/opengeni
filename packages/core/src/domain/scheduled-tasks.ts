@@ -19,6 +19,7 @@ import {
   type FirstPartyMcpToolPolicySettings,
   type Settings,
 } from "@opengeni/config";
+import type { VaultPolicy } from "@opengeni/contracts";
 import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
   isRetiredNativeAtlassianSource,
@@ -154,6 +155,14 @@ import {
  * (enabled capability MCP servers)", an explicit list (even empty) is taken
  * verbatim.
  */
+
+/** Vault IDs are compared as lowercase text in SQL. */
+function scheduledVaultPolicy(policy: VaultPolicy): VaultPolicy {
+  return policy.mode === "all"
+    ? { mode: "all" }
+    : { mode: "selected", vaultIds: [...new Set(policy.vaultIds.map((id) => id.toLowerCase()))] };
+}
+
 export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
   if (!rawPayload || typeof rawPayload !== "object") {
     return false;
@@ -629,6 +638,9 @@ export async function createValidatedScheduledTask(input: {
         creatorPolicy,
         targetSessionId: target?.id ?? null,
         variableSetId: input.payload.variableSetId ?? null,
+        ...("vaultPolicy" in input.payload && input.payload.vaultPolicy
+          ? { vaultPolicy: scheduledVaultPolicy(input.payload.vaultPolicy) }
+          : {}),
         rigId,
         metadata: input.payload.metadata,
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
@@ -1623,6 +1635,9 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   }
   if (input.payload.metadata !== undefined) {
     update.metadata = input.payload.metadata;
+  }
+  if (input.payload.vaultPolicy !== undefined) {
+    update.vaultPolicy = scheduledVaultPolicy(input.payload.vaultPolicy);
   }
   if (input.payload.variableSetId !== undefined) {
     const nextVariableSetId = input.payload.variableSetId;

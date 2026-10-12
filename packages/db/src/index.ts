@@ -1172,6 +1172,7 @@ export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
 } from "./environment-crypto";
+export * from "./vaults";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
 export * from "./capability-integrations";
@@ -6621,6 +6622,8 @@ export type ScheduledTaskCreatorPolicy = {
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
+  /** Vault narrowing for every run (0738); omission is `{ mode: "all" }`. */
+  vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   workspaceId: string;
   name: string;
   status: ScheduledTaskStatus;
@@ -6652,6 +6655,7 @@ export type CreateScheduledTaskInput = {
 
 export type UpdateScheduledTaskInput = Partial<{
   name: string;
+  vaultPolicy: import("@opengeni/contracts").VaultPolicy;
   status: ScheduledTaskStatus;
   visibility: "user_private" | "workspace_shared";
   schedule: ScheduledTaskScheduleSpec;
@@ -18321,6 +18325,7 @@ export async function createScheduledTask(
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           variableSetId: input.variableSetId ?? null,
+          vaultPolicy: input.vaultPolicy ?? { mode: "all" },
           rigId: input.rigId ?? null,
           metadata: input.metadata,
         })
@@ -18582,6 +18587,7 @@ export async function updateScheduledTask(
             : {}),
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
+        ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
         ...(input.creatorFirstPartyPolicy
           ? {
@@ -31477,6 +31483,8 @@ export type SessionCreateInput = {
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
+  /** Vault narrowing for this session (0738); omission is `{ mode: "all" }`. */
+  vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   policyRole?: string | null;
   /** Agent-to-agent reach (migration 0427); omitted means the workspace default. */
   agentAccess?: SessionAgentAccess;
@@ -32359,6 +32367,7 @@ async function createSessionInTransaction(
             initialXaiProviderAccountAuthoritySnapshot,
             initialClaudeProviderAccountAuthoritySnapshot,
             instructions: input.instructions ?? null,
+            vaultPolicy: input.vaultPolicy ?? { mode: "all" },
             policyRole: input.policyRole ?? null,
             agentAccess: input.agentAccess ?? "workspace",
             scopeSubjectId:
@@ -86582,6 +86591,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
     rigId: row.rigId ?? null,
+    vaultPolicy: row.vaultPolicy ?? { mode: "all" },
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

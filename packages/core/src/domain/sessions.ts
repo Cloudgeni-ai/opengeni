@@ -60,11 +60,14 @@ import {
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import {
   agentConfigAddedFirstPartyMcpTools,
+  intersectVaultPolicies,
   resolveAgentConfigUpdate,
+  VAULT_POLICY_ALL,
   type AgentConfigCreator,
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
   type UpdateSessionAgentRequest,
+  type VaultPolicy,
 } from "@opengeni/contracts";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -909,6 +912,13 @@ function automaticTitleForAgentChildCreate(
   return null;
 }
 
+/** Vault IDs are compared as lowercase text in SQL. */
+function lowercaseVaultPolicy(policy: VaultPolicy): VaultPolicy {
+  return policy.mode === "all"
+    ? { mode: "all" }
+    : { mode: "selected", vaultIds: [...new Set(policy.vaultIds.map((id) => id.toLowerCase()))] };
+}
+
 export async function createAndStartSessionWithOutcome(input: {
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   requestedSessionId?: string;
@@ -1005,6 +1015,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // Frozen agent configuration (migration 0559), already resolved and written
   // through to tools/firstPartyMcpTools by the caller. Omitted/null = legacy.
   agentConfig?: ResolvedAgentConfig | null;
+  // Vault narrowing for this session (0738), already intersected with the
+  // agent configuration's policy. Omitted = no narrowing.
+  vaultPolicy?: VaultPolicy;
   // Agent-access scope, opaque end-user label, and typed Memory selector
   // (migration 0427), already resolved against the parent by the caller.
   // Omitted keeps the workspace defaults for internal lifecycle callers.
@@ -1251,6 +1264,7 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
+          ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
           policyRole: input.policyRole ?? null,
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
           ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
@@ -1362,6 +1376,7 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
+        ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
         policyRole: input.policyRole ?? null,
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
         ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
@@ -3929,6 +3944,12 @@ async function createSessionForRequestInFileScope(
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
+      // Session and agent-config vault narrowing, intersected (AX-2). Ancestor
+      // policies apply again whenever this session resolves a reference.
+      vaultPolicy: intersectVaultPolicies(
+        lowercaseVaultPolicy(payload.vaultPolicy ?? VAULT_POLICY_ALL),
+        lowercaseVaultPolicy(payload.agent?.vaultPolicy ?? VAULT_POLICY_ALL),
+      ),
       policyRole: payload.policyRole ?? null,
       agentAccess: sessionScope.agentAccess,
       scopeSubjectId: sessionScope.scopeSubjectId,
