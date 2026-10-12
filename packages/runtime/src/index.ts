@@ -162,6 +162,8 @@ import {
   firstPartyToolFamily,
   integrationToolFamily,
   type ToolFamily,
+  isSecretReferenceError,
+  type SecretResolver,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
@@ -2376,6 +2378,13 @@ export type BuildAgentOptions = {
    * attempt-quiesced receipt.
    */
   onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
+  /**
+   * The attempt's secret resolver (W1 delivery). Sandbox commands, stdin,
+   * patches and image paths holding `{{secret:…}}` / `{{secretfile:…}}`
+   * references are resolved at the physical exec boundary; everything
+   * recorded keeps the references. Omitted: references pass through literally.
+   */
+  secretResolver?: SecretResolver | null;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -3212,6 +3221,7 @@ export function buildOpenGeniAgent(
       ...(options.onToolCancellationFence
         ? { onToolCancellationFence: options.onToolCancellationFence }
         : {}),
+      ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
@@ -4155,6 +4165,7 @@ export function buildAgentCapabilities(
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
+    secretResolver?: SecretResolver | null;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
   return buildAgentCapabilitiesFromComposition(
@@ -4183,12 +4194,16 @@ function buildAgentCapabilitiesFromComposition(
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
+    secretResolver?: SecretResolver | null;
   },
 ): ReturnType<typeof Capabilities.default> {
+  // A secret resolver needs the controller's wrappers even without a turn
+  // signal: they are where references are resolved below every recorder.
   const toolCancellation =
-    options.turnCancellationSignal || options.onToolCancellationFence
+    options.turnCancellationSignal || options.onToolCancellationFence || options.secretResolver
       ? createTurnToolCancellationController(options.turnCancellationSignal, {
           cutPolling: settings.experimentCutPolling,
+          ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
         })
       : null;
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
@@ -4227,6 +4242,9 @@ function buildAgentCapabilitiesFromComposition(
       // Preserve that behavior except for client-side, pre-dispatch Modal
       // readiness proof, which reaches bounded same-turn recovery.
       execCommandErrorFunction: (_context, error) => {
+        // A delivery-time refusal (unsupported shell, binary value) happened
+        // before dispatch: give the model the structured, value-free error.
+        if (isSecretReferenceError(error)) return error.toModelOutput();
         if (isProviderCommandObservationUnavailableError(error)) {
           return "Managed sandbox command observation unavailable. Outcome unknown. Do not replay the command or resend stdin; observe the existing invocation.";
         }

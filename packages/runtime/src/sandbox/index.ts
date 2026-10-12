@@ -380,6 +380,25 @@ export {
   type MaterializeRunCredentialsOptions,
 } from "./run-credentials";
 
+// Secret references delivered at the physical exec boundary (W1). Values ride
+// an in-memory carry to the provider call; recorders keep references.
+export {
+  SECRET_ENV_TOTAL_MAX_BYTES,
+  SECRET_ENV_VALUE_MAX_BYTES,
+  SECRET_FILE_ROOT,
+  clearSecretFilesCommand,
+  prepareSecretExec,
+  prepareSecretStdin,
+  resolveSecretImagePath,
+  resolveSecretPatchText,
+  runWithSecretCarry,
+  secretExecCarryFor,
+  secretScopeFor,
+  type SecretCarry,
+  type SecretExecCarry,
+  type SecretStdinCarry,
+} from "./secret-delivery";
+
 // Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
 // hashed token file off-manifest.
