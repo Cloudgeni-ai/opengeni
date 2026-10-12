@@ -2,8 +2,8 @@
  * DL-2 / CM-2: the hostile-value splice matrix, executed on real shells.
  *
  * Every case is spliced by `spliceShellCommand`, then run by a real shell with
- * the bindings delivered as environment variables (literal fallbacks replaced
- * at "dispatch", as the delivery adapter does). The shell's stdout must equal
+ * the bindings delivered as environment variables, as the delivery adapter
+ * does. No value ever appears in spliced text. The shell's stdout must equal
  * the expected bytes exactly. bash and dash run on the host; zsh and pwsh run
  * in a throwaway container (`sv-w1-shells`, built from
  * mcr.microsoft.com/powershell + zsh) or the stock PowerShell image when
@@ -80,14 +80,29 @@ const POSIX_CASES: Case[] = [
     expected: `x ${VALUES.J} y\n`,
   },
   {
-    name: "quoted heredoc (literal fallback)",
+    name: "quoted heredoc (rewritten unquoted)",
     cmd: "cat <<'EOF'\n{{secret:H}}\nEOF",
     expected: `${VALUES.H}\n`,
   },
   {
-    name: "double-quoted heredoc delimiter (literal fallback)",
+    name: "double-quoted heredoc delimiter (rewritten unquoted)",
     cmd: 'cat <<"EOF"\n$x {{secret:J}}\nEOF',
     expected: `$x ${VALUES.J}\n`,
+  },
+  {
+    name: "quoted heredoc keeps $, backquotes and backslashes literal",
+    cmd: "cat <<'EOF'\n$HOME `id` $(id) \\ \\$ a\\\n{{secret:S}} ${x}\nEOF\nprintf end",
+    expected: `$HOME \`id\` $(id) \\ \\$ a\\\n${VALUES.S} \${x}\nend`,
+  },
+  {
+    name: "quoted tab-stripped heredoc with escaped delimiter",
+    cmd: "cat <<-\\EOF\n\t'{{secret:J}}' $y\n\tEOF",
+    expected: `'${VALUES.J}' $y\n`,
+  },
+  {
+    name: "quoted heredoc after an unquoted one on the same line",
+    cmd: "cat <<A; cat <<'LONGER_DELIM'\n{{secret:J}} $a\nA\n$b {{secret:H}}\nLONGER_DELIM",
+    expected: `${VALUES.J} \n$b ${VALUES.H}\n`,
   },
   {
     name: "tab-stripped heredoc",
@@ -213,9 +228,14 @@ const POWERSHELL_CASES: Case[] = [
     expected: `line ${VALUES.H} end`,
   },
   {
-    name: "literal here-string (literal fallback)",
+    name: "literal here-string (rewritten expandable)",
     cmd: "$s = @'\n$x {{secret:J}}\n'@\n[Console]::Out.Write($s)",
     expected: `$x ${VALUES.J}`,
+  },
+  {
+    name: "literal here-string keeps backticks, $() and line-initial quotes",
+    cmd: "$s = @'\n\"@ `n $(Get-Date) ${env:PATH} {{secret:H}}\n'@\n[Console]::Out.Write($s)",
+    expected: `"@ \`n $(Get-Date) \${env:PATH} ${VALUES.H}`,
   },
   {
     name: "subexpression",
@@ -268,14 +288,12 @@ function valueFor(key: string): string {
 }
 
 function deliver(result: ShellSpliceResult): { text: string; env: Record<string, string> } {
-  let text = result.text;
   const env: Record<string, string> = {};
   for (const binding of result.bindings) {
-    const value = valueFor(binding.key);
-    if (binding.literal) text = text.replaceAll(binding.sentinel!, () => value);
-    else env[binding.envName] = value;
+    expect(binding.literal).toBe(false);
+    env[binding.envName] = valueFor(binding.key);
   }
-  return { text, env };
+  return { text: result.text, env };
 }
 
 function splice(cmd: string, dialect: ShellDialect): ShellSpliceResult {
@@ -454,22 +472,27 @@ describe("splice text", () => {
     expect(splice("$true # {{secret:A}}", "powershell").bindings).toEqual([]);
   });
 
-  test("quoted heredocs use a per-call sentinel and never the value", () => {
-    const result = spliceShellCommand(
-      "cat <<'E'\n{{secret:A}}\nE",
-      "posix",
-      tokenizeSecretText("cat <<'E'\n{{secret:A}}\nE"),
-      { sentinelNonce: "n0" },
+  test("quoted heredocs and literal here-strings become expansions", () => {
+    expect(splice("cat <<'E'\n$a {{secret:A}}\nE", "posix").text).toBe(
+      "cat <<E\n\\$a ${OPENGENI_SECRET_0}\nE",
     );
-    expect(result.text).toBe("cat <<'E'\n@@OGSECRET_n0_0@@\nE");
-    expect(result.bindings).toEqual([
+    expect(splice("cat <<'E'\n$a\nE", "posix").text).toBe("cat <<'E'\n$a\nE");
+    expect(splice("$s = @'\n$a {{secret:A}}\n'@", "powershell").text).toBe(
+      '$s = @"\n`$a ${env:OPENGENI_SECRET_0}\n"@',
+    );
+    expect(splice("cat <<'E'\n{{secret:A}}\nE", "posix").bindings).toEqual([
       {
         envName: "OPENGENI_SECRET_0",
         key: referenceKey(parseSecretReference("{{secret:A}}")),
-        literal: true,
-        sentinel: "@@OGSECRET_n0_0@@",
+        literal: false,
+        sentinel: null,
       },
     ]);
+  });
+
+  test("a quoted heredoc with a non-word delimiter refuses references", () => {
+    expect(() => splice("cat <<'E F'\n{{secret:A}}\nE F", "posix")).toThrow(/unsupported_shell/);
+    expect(splice("cat <<'E F'\nplain\nE F", "posix").bindings).toEqual([]);
   });
 
   test.each(["cmd", "fish", "unknown"] as const)("%s refuses references", (dialect) => {

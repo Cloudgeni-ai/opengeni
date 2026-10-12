@@ -2,8 +2,9 @@
  * Shell splice contract (dossier §10B.1.4). F1 owns the signatures; W1
  * implements the dialect-aware bodies. Each reference in a command becomes a
  * per-command environment variable (`${OPENGENI_SECRET_<n>}` on POSIX,
- * `$env:OPENGENI_SECRET_<n>` on PowerShell); a literal fallback is used where
- * splicing cannot be safe (quoted heredocs, here-strings).
+ * `${env:OPENGENI_SECRET_<n>}` on PowerShell). Literal bodies (quoted heredocs,
+ * `@'…'@` here-strings) are rewritten into their expanding form with the body
+ * escaped, so no value is ever placed in command text.
  */
 import { SecretReferenceError, type SecretTextToken } from "@opengeni/contracts";
 import { PosixSplicer } from "./posix";
@@ -16,9 +17,9 @@ export interface SecretExecBinding {
   envName: string;
   /** `referenceKey(ref)` of the bound reference. */
   key: string;
-  /** True when the value is substituted literally into the command text (fallback). */
+  /** Always false: every context is spliced as an expansion (no literal fallback). */
   literal: boolean;
-  /** Placeholder text replaced by the value at dispatch when `literal`; null otherwise. */
+  /** Always null (kept for the F1 contract shape). */
   sentinel: string | null;
 }
 export interface ShellSpliceResult {
@@ -35,14 +36,12 @@ export const SECRET_EXEC_ENV_PREFIX = "OPENGENI_SECRET_";
  * `SecretReferenceError(unsupported_shell)` for cmd, fish and unknown shells
  * when the command holds a reference. Escapes are already removed by the
  * tokenizer, so the result is rebuilt from `tokens` and `_text` is unused.
- * Pure: no values are involved; literal fallbacks emit per-call sentinels
- * that the delivery adapter replaces at dispatch.
+ * Pure: no values are involved.
  */
 export function spliceShellCommand(
   _text: string,
   dialect: ShellDialect,
   tokens: readonly SecretTextToken[],
-  options: { sentinelNonce?: string } = {},
 ): ShellSpliceResult {
   const references = tokens.filter((token) => token.type === "reference");
   const items = streamFromTokens(tokens);
@@ -62,7 +61,7 @@ export function spliceShellCommand(
       null,
     );
   }
-  const table = new BindingTable(SECRET_EXEC_ENV_PREFIX, options.sentinelNonce);
+  const table = new BindingTable(SECRET_EXEC_ENV_PREFIX);
   const text =
     dialect === "posix"
       ? new PosixSplicer(items, table).run()

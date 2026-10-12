@@ -10,7 +10,7 @@
  * | single quotes               | `'"${V}"'` (close, splice, reopen) |
  * | ANSI-C `$'…'`               | `'"${V}"$'`                      |
  * | unquoted heredoc body       | `${V}`                           |
- * | quoted heredoc body         | literal sentinel (value inline)  |
+ * | quoted heredoc body         | made unquoted, body escaped, `${V}` |
  * | `$( )`, backticks           | recurse with the same rules      |
  * | comment                     | reference text kept as written   |
  *
@@ -20,7 +20,7 @@
  * '… "$V" …'`, `printf %s {{secret:X}} | ssh host 'read -r V; …'`); the
  * variables are exported, so inner shells inherit them.
  */
-import type { SecretReference } from "@opengeni/contracts";
+import { SecretReferenceError, type SecretReference } from "@opengeni/contracts";
 import { BindingTable, isReference, type StreamItem } from "./stream";
 
 const WORD_BREAK = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">"]);
@@ -29,7 +29,14 @@ interface PendingHeredoc {
   delimiter: string;
   quoted: boolean;
   stripTabs: boolean;
+  /** Offsets of the delimiter word as copied into `out`, so a quoted
+   * delimiter can be rewritten unquoted once its body is known. */
+  wordStart: number;
+  wordEnd: number;
 }
+
+/** Delimiters that are a single plain word once unquoted. */
+const PLAIN_DELIMITER = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
 type Closer = ")" | "`" | null;
 
@@ -263,6 +270,7 @@ export class PosixSplicer {
       this.copyCurrent();
     }
     while (this.peek() === " " || this.peek() === "\t") this.copyCurrent();
+    const wordStart = this.out.length;
     let delimiter = "";
     let quoted = false;
     while (this.index < this.items.length) {
@@ -295,7 +303,9 @@ export class PosixSplicer {
       delimiter += item;
       this.copyCurrent();
     }
-    if (delimiter.length > 0) this.pending.push({ delimiter, quoted, stripTabs });
+    if (delimiter.length > 0) {
+      this.pending.push({ delimiter, quoted, stripTabs, wordStart, wordEnd: this.out.length });
+    }
   }
 
   /** Called right after a newline: consume every queued heredoc body in order. */
@@ -320,7 +330,57 @@ export class PosixSplicer {
     return candidate === heredoc.delimiter ? cursor : null;
   }
 
+  /** True when a reference occurs before the body's delimiter line. */
+  private bodyHasReference(heredoc: PendingHeredoc): boolean {
+    const saved = this.index;
+    try {
+      while (this.index < this.items.length) {
+        const end = this.lineMatchesDelimiter(heredoc);
+        if (end !== null) return false;
+        while (this.index < this.items.length) {
+          const item = this.items[this.index]!;
+          this.index += 1;
+          if (isReference(item)) return true;
+          if (item === "\n") break;
+        }
+      }
+      return false;
+    } finally {
+      this.index = saved;
+    }
+  }
+
+  /**
+   * A quoted heredoc keeps its body literal, so a value cannot be expanded
+   * there. When the body holds a reference, rewrite the delimiter unquoted and
+   * escape the body's `\`, `$` and backquote, which yields the same literal
+   * text plus a `${V}` expansion that is never re-parsed.
+   */
+  private unquoteDelimiter(heredoc: PendingHeredoc): void {
+    if (!PLAIN_DELIMITER.test(heredoc.delimiter)) {
+      throw new SecretReferenceError([
+        {
+          raw: "",
+          code: "unsupported_shell",
+          message: `secret references cannot be used inside a quoted heredoc whose delimiter is not a plain word (${JSON.stringify(heredoc.delimiter)}); use a plain delimiter such as <<'EOF', an unquoted heredoc, or {{secretfile:…}}`,
+        },
+      ]);
+    }
+    const delta = heredoc.delimiter.length - (heredoc.wordEnd - heredoc.wordStart);
+    this.out =
+      this.out.slice(0, heredoc.wordStart) + heredoc.delimiter + this.out.slice(heredoc.wordEnd);
+    for (const later of this.pending) {
+      later.wordStart += delta;
+      later.wordEnd += delta;
+    }
+  }
+
   private heredocBody(heredoc: PendingHeredoc): void {
+    let escapeBody = false;
+    if (heredoc.quoted && this.bodyHasReference(heredoc)) {
+      this.unquoteDelimiter(heredoc);
+      escapeBody = true;
+    }
     while (this.index < this.items.length) {
       const end = this.lineMatchesDelimiter(heredoc);
       if (end !== null) {
@@ -328,7 +388,22 @@ export class PosixSplicer {
         if (this.peek() === "\n") this.copyCurrent();
         return;
       }
-      this.heredocLine(heredoc.quoted);
+      if (escapeBody) this.escapedHeredocLine();
+      else this.heredocLine(heredoc.quoted);
+    }
+  }
+
+  /** A former quoted-heredoc line: literal text escaped, references expanded. */
+  private escapedHeredocLine(): void {
+    while (this.index < this.items.length) {
+      const item = this.peek()!;
+      this.index += 1;
+      if (isReference(item)) {
+        this.out += `\${${this.env(item)}}`;
+        continue;
+      }
+      this.out += item === "\\" || item === "$" || item === "`" ? `\\${item}` : item;
+      if (item === "\n") return;
     }
   }
 
@@ -337,7 +412,9 @@ export class PosixSplicer {
     while (this.index < this.items.length) {
       const item = this.peek()!;
       if (isReference(item)) {
-        this.out += quoted ? this.table.sentinel(item) : `\${${this.env(item)}}`;
+        // A quoted body with references was rewritten by heredocBody; here
+        // only an unquoted body can hold one.
+        this.out += `\${${this.env(item)}}`;
         this.index += 1;
         continue;
       }

@@ -9,7 +9,7 @@
  * | `"…"` (and curly “ ” „)           | `${env:V}`                                |
  * | `'…'` (and curly ‘ ’ ‚ ‛)         | whole string rewritten as `"…"` with `` ` ``, `$` and double quotes escaped |
  * | `@"…"@` here-string               | `${env:V}`                                 |
- * | `@'…'@` here-string               | literal sentinel (value inline)            |
+ * | `@'…'@` here-string               | rewritten as `@"…"@` with `` ` `` and `$` escaped, then `${env:V}` |
  * | `$( … )`                          | recurse                                    |
  * | `#` and `<# … #>` comments        | reference text kept as written             |
  */
@@ -133,15 +133,31 @@ export class PowerShellSplicer {
     return this.items[cursor] === "\n";
   }
 
+  /** True when a reference occurs before the here-string's terminator line. */
+  private hereStringHasReference(quote: string): boolean {
+    let lineStart = false;
+    for (let cursor = this.index + 2; cursor < this.items.length; cursor += 1) {
+      const item = this.items[cursor];
+      if (isReference(item)) return true;
+      if (lineStart && item === quote && this.items[cursor + 1] === "@") return false;
+      lineStart = item === "\n";
+    }
+    return false;
+  }
+
   private hereString(expandable: boolean): void {
     const quote = expandable ? '"' : "'";
+    if (!expandable && this.hereStringHasReference(quote)) {
+      this.literalHereStringAsExpandable();
+      return;
+    }
     this.copyCurrent();
     this.copyCurrent();
     let lineStart = false;
     while (this.index < this.items.length) {
       const item = this.peek()!;
       if (isReference(item)) {
-        this.out += expandable ? this.expansion(item) : this.table.sentinel(item);
+        this.out += this.expansion(item);
         this.index += 1;
         lineStart = false;
         continue;
@@ -166,6 +182,36 @@ export class PowerShellSplicer {
         continue;
       }
       this.copyCurrent();
+      lineStart = item === "\n";
+    }
+  }
+
+  /**
+   * `@'…'@` keeps its body literal. When it holds a reference, emit it as
+   * `@"…"@` with every backtick and `$` escaped (and a line-initial `"`, which
+   * could otherwise close the string), so the text is unchanged and the
+   * reference becomes an expansion that is never re-parsed.
+   */
+  private literalHereStringAsExpandable(): void {
+    this.index += 2;
+    this.out += '@"';
+    let lineStart = false;
+    while (this.index < this.items.length) {
+      const item = this.peek()!;
+      this.index += 1;
+      if (isReference(item)) {
+        this.out += this.expansion(item);
+        lineStart = false;
+        continue;
+      }
+      if (lineStart && item === "'" && this.peek() === "@") {
+        this.index += 1;
+        this.out += '"@';
+        return;
+      }
+      if (item === "`" || item === "$") this.out += `\`${item}`;
+      else if (lineStart && item === '"') this.out += '`"';
+      else this.out += item;
       lineStart = item === "\n";
     }
   }

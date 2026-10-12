@@ -33,41 +33,29 @@ export interface SpliceBinding {
   sentinel: string | null;
 }
 
-/** Allocates one env binding per distinct reference and one sentinel per literal use. */
+/**
+ * Allocates one env binding per distinct reference (deduplicated by
+ * `referenceKey`). Every context is spliced as an expansion, so bindings are
+ * never literal; `literal`/`sentinel` remain in the contract for adapters.
+ */
 export class BindingTable {
   readonly bindings: SpliceBinding[] = [];
   private readonly byKey = new Map<string, SpliceBinding>();
-  private readonly nonce: string;
 
-  constructor(
-    private readonly envPrefix: string,
-    nonce?: string,
-  ) {
-    this.nonce = nonce ?? crypto.randomUUID().replaceAll("-", "").slice(0, 16);
-  }
-
-  private allocate(reference: SecretReference, literal: boolean): SpliceBinding {
-    const key = referenceKey(reference);
-    const tableKey = `${literal ? "L" : "E"}|${key}`;
-    const existing = this.byKey.get(tableKey);
-    if (existing) return existing;
-    const index = this.bindings.length;
-    const binding: SpliceBinding = {
-      envName: `${this.envPrefix}${index}`,
-      key,
-      literal,
-      sentinel: literal ? `@@OGSECRET_${this.nonce}_${index}@@` : null,
-    };
-    this.byKey.set(tableKey, binding);
-    this.bindings.push(binding);
-    return binding;
-  }
+  constructor(private readonly envPrefix: string) {}
 
   env(reference: SecretReference): string {
-    return this.allocate(reference, false).envName;
-  }
-
-  sentinel(reference: SecretReference): string {
-    return this.allocate(reference, true).sentinel!;
+    const key = referenceKey(reference);
+    const existing = this.byKey.get(key);
+    if (existing) return existing.envName;
+    const binding: SpliceBinding = {
+      envName: `${this.envPrefix}${this.bindings.length}`,
+      key,
+      literal: false,
+      sentinel: null,
+    };
+    this.byKey.set(key, binding);
+    this.bindings.push(binding);
+    return binding.envName;
   }
 }
