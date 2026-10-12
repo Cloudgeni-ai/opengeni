@@ -276,6 +276,58 @@ describe("internal maintenance jobs", () => {
     }
   });
 
+  test("knowledge indexing has no work and reads nothing without an embedding credential", async () => {
+    const embedder = (available: boolean | undefined) => ({
+      model: "index-test-model",
+      dimensions: 3,
+      ...(available === undefined ? {} : { available }),
+      embedMany: async () => [],
+      embedQuery: async () => [],
+    });
+    const warnings: Array<{ message: string; fields: unknown }> = [];
+    const obs = Object.assign(observability(), {
+      warn: (message: string, fields?: unknown) => {
+        warnings.push({ message, fields });
+      },
+    });
+    const [blocked] = await internalMaintenanceCadences({
+      settings,
+      observability: obs,
+      // Never read: queued jobs cannot be embedded by this process.
+      db: fakeDb,
+      jobs: ["knowledge-indexing"],
+      documentServices: { embedder: embedder(false) } as never,
+      workflow: {} as never,
+    });
+    for (let tick = 0; tick < 3; tick += 1) expect(await blocked!.hasWork()).toBe(false);
+    expect(warnings).toEqual([
+      {
+        message: "Knowledge indexing is idle: no document embedding credential is configured",
+        fields: { job: "knowledge-indexing", model: "index-test-model" },
+      },
+    ]);
+
+    // An available embedder (explicitly, or by omission) keeps the queue check.
+    for (const available of [true, undefined]) {
+      const reads: unknown[] = [];
+      const [ready] = await internalMaintenanceCadences({
+        settings,
+        observability: observability(),
+        db: {
+          execute: async (query: unknown) => {
+            reads.push(query);
+            return [{ due: true }];
+          },
+        } as never,
+        jobs: ["knowledge-indexing"],
+        documentServices: { embedder: embedder(available) } as never,
+        workflow: {} as never,
+      });
+      expect(await ready!.hasWork()).toBe(true);
+      expect(reads).toHaveLength(1);
+    }
+  });
+
   test("the Modal orphan sweep has work only while the provider app runs a box", async () => {
     const unused = async () => {
       throw new Error("Modal must not be called");
