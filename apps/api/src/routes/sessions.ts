@@ -5389,8 +5389,8 @@ export function sessionAuthorizationOperationForHttp(
     return "session.model_account.write";
   }
   // The provider-neutral account choice (any provider) and the older
-  // per-provider pin share one account-choice operation. Its older name
-  // `session.codex_account.write` is a deprecated alias that is no longer sent.
+  // per-provider pin share one internal operation. Core adapts its name at the
+  // host boundary according to the authorization port's explicit capability.
   if (suffix === "/model-account") {
     if (verb === "GET") return "session.read";
     if (verb === "PUT") return "session.model_account.write";

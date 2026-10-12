@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
@@ -42,12 +43,13 @@ let app: Hono | null = null;
 /** Signed-in browser sessions by cookie, as Better Auth would verify them. */
 const signedIn = new Map<string, { authSessionId: string; userId: string; email: string }>();
 
-function fullApp(): Hono {
+function fullApp(sessionAuthorization?: SessionAuthorizationPort): Hono {
   const noop = async () => undefined;
   return createApp({
     db: client!.db,
     bus: new MemoryEventBus(),
     settings,
+    ...(sessionAuthorization ? { sessionAuthorization } : {}),
     workflowClient: {
       signalUserMessage: noop,
       wakeSessionWorkflow: noop,
@@ -167,12 +169,13 @@ async function colleagueOf(owner: Human): Promise<Human> {
 
 async function call(
   who: Human | null,
-  method: "GET" | "PUT" | "PATCH",
+  method: "GET" | "PUT" | "PATCH" | "POST",
   path: string,
   body?: unknown,
   origin: string = ORIGIN,
+  requestApp: Hono = app!,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
-  const response = await app!.request(`${ORIGIN}${path}`, {
+  const response = await requestApp.request(`${ORIGIN}${path}`, {
     method,
     headers: {
       ...(who ? { cookie: who.cookie } : {}),
@@ -231,6 +234,63 @@ afterAll(async () => {
 }, 60_000);
 
 describe.skipIf(!realDb)("model-account choice routes", () => {
+  for (const route of [
+    { method: "PUT", suffix: "model-account", body: { connectionId: null } },
+    { method: "POST", suffix: "codex-account", body: { target: "auto" } },
+  ] as const) {
+    for (const host of [
+      { name: "legacy", capabilities: undefined, operation: "session.codex_account.write" },
+      {
+        name: "explicit legacy",
+        capabilities: { modelAccountOperation: false },
+        operation: "session.codex_account.write",
+      },
+      {
+        name: "opted-in neutral",
+        capabilities: { modelAccountOperation: true },
+        operation: "session.model_account.write",
+      },
+    ] as const) {
+      for (const allowed of [false, true]) {
+        test(`${route.method} ${route.suffix}: ${host.name} host ${allowed ? "allow-only" : "deny with otherwise-allow"} receives exactly one decision`, async () => {
+          const operations: SessionAuthorizationOperation[] = [];
+          const port: SessionAuthorizationPort = {
+            ...(host.capabilities ? { capabilities: host.capabilities } : {}),
+            authorizeSession: async ({ operation }) => {
+              operations.push(operation);
+              // These exact-literal policies catch both silent widening of an
+              // old denial and breakage of an old allowlist during a rollout.
+              return (operation === host.operation) === allowed
+                ? { allowed: true }
+                : { allowed: false, reason: "forbidden" };
+            },
+            resolveListScope: async () => ({ kind: "all" }),
+          };
+          const result = await call(
+            owner,
+            route.method,
+            `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sessionId}/${route.suffix}`,
+            route.body,
+            ORIGIN,
+            fullApp(port),
+          );
+          expect(result.status).toBe(allowed ? 200 : 404);
+          expect(operations).toEqual([host.operation]);
+        });
+      }
+    }
+
+    test(`${route.method} ${route.suffix}: standalone authorization without a host is unchanged`, async () => {
+      const result = await call(
+        owner,
+        route.method,
+        `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sessionId}/${route.suffix}`,
+        route.body,
+      );
+      expect(result.status).toBe(200);
+    });
+  }
+
   test("SUB-SEL-02: the owner reads the picker for their session; others cannot", async () => {
     const path = `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sessionId}/model-account`;
     const read = await call(owner, "GET", path);

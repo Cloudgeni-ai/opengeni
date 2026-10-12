@@ -498,6 +498,7 @@ revocation by binding `AppDependencies.sessionAuthorization`:
 
 ```ts
 type SessionAuthorizationPort = {
+  capabilities?: { modelAccountOperation?: boolean };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
   resolveListScope(
     input: ResolveSessionAuthorizationListScopeInput,
@@ -517,11 +518,19 @@ further and cannot grant those sessions. Cross-session agent access keeps
 exact-target projection even when the host returns `relatedSessionAccess: "root"`.
 
 Choosing a session's model account (any provider) is
-`session.model_account.write`. Its older name, `session.codex_account.write`,
-remains a valid `SessionAuthorizationOperation` value so existing hosts keep
-compiling, but Opengeni no longer sends it. A host that matched the older name
-should match the new one, or normalize every operation with
-`canonicalSessionAuthorizationOperation` from `@opengeni/contracts`.
+`session.model_account.write` internally. By default the host receives its older
+name, `session.codex_account.write`, on both the neutral PUT `/model-account`
+and legacy POST `/codex-account` routes, preserving existing allow/deny policies.
+After migrating policy keys to `session.model_account.write`, a host sets
+`capabilities: { modelAccountOperation: true }` to receive the neutral name on
+both routes. Omitted or false keeps legacy delivery. There is exactly one host
+decision: a denial is never retried under another alias or combined with an
+alternate allow. Standalone authorization without a host port is unchanged.
+
+Both names remain valid `SessionAuthorizationOperation` values.
+`canonicalSessionAuthorizationOperation` from `@opengeni/contracts` helps resolve
+old names, but normalizing incoming operations alone is insufficient: comparisons
+and policy keys must also migrate to the canonical name before opting in.
 
 An allowed decision may set `relatedSessionAccess: "root"` when the principal
 may see the target's full tree. The fail-closed default is `"target"`: detail,

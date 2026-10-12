@@ -147,7 +147,7 @@ describe("session HTTP authorization classification", () => {
     expect(sessionAuthorizationOperationForHttp("DELETE", `${root}/events`, sessionId)).toBe(null);
   });
 
-  test("the account-choice operation has a neutral name; the older name stays a valid alias that is never sent", () => {
+  test("internal account-choice classification is neutral; the older host name stays a valid alias", () => {
     // Hosts written against the older name still parse and can normalize it.
     expect(SessionAuthorizationOperation.parse("session.codex_account.write")).toBe(
       "session.codex_account.write",
@@ -159,7 +159,7 @@ describe("session HTTP authorization classification", () => {
       "session.model_account.write",
     );
     expect(canonicalSessionAuthorizationOperation("session.read")).toBe("session.read");
-    // Opengeni sends only the canonical name.
+    // Internal classification stays canonical, independent of host capabilities.
     for (const [method, suffix] of cases) {
       expect(sessionAuthorizationOperationForHttp(method, `${root}${suffix}`, sessionId)).not.toBe(
         "session.codex_account.write",

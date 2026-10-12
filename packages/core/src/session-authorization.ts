@@ -1,4 +1,5 @@
 import {
+  canonicalSessionAuthorizationOperation,
   SessionAuthorizationActor,
   SessionAuthorizationDecision,
   SessionAuthorizationListScope,
@@ -382,12 +383,18 @@ export async function requireSessionAuthorization(
 
   let rawDecision: unknown;
   try {
+    // Adapt once, before the host decision. Never retry a denial under an alias.
+    const operation = canonicalSessionAuthorizationOperation(input.operation);
     rawDecision = await port.authorizeSession({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       actor,
       target,
-      operation: input.operation,
+      operation:
+        operation === "session.model_account.write" &&
+        port.capabilities?.modelAccountOperation !== true
+          ? "session.codex_account.write"
+          : operation,
       surface: input.surface,
     });
   } catch (error) {
