@@ -89,6 +89,8 @@ const withheldMigrations = [
   "0728_subscription_core_personal_connect_format.sql",
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   "0730_subscription_core_personal_connection_versions.sql",
+  // Rewrites the visibility transition installed by withheld 0501; it follows 0501.
+  "0738_private_sessions_share_sandboxes.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 
