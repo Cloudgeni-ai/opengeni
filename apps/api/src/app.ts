@@ -51,6 +51,7 @@ import {
   agentConfigDeploymentPolicy,
   canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
+  environmentsEncryptionKeyBytes,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -299,6 +300,7 @@ import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
 import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
+import { createVaultInteractionSecretsPort } from "./interaction-secrets-vault";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerPersonalGitHubRoutes } from "./routes/personal-github";
 import {
@@ -2153,8 +2155,12 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
-  registerBrowserSessionRoutes(app, routeDeps);
-  registerComputerSessionRoutes(app, routeDeps);
+  const interactionSecrets = createVaultInteractionSecretsPort({
+    db: routeDeps.db,
+    encryptionKey: environmentsEncryptionKeyBytes(routeDeps.settings) ?? null,
+  });
+  registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
+  registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
   registerDocumentRoutes(app, routeDeps);
   registerKnowledgeRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);

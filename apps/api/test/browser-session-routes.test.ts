@@ -859,7 +859,7 @@ describe("BrowserSession route discipline", () => {
       expect(source).toContain(route);
     }
     expect(await readFile(appUrl, "utf8")).toContain(
-      "registerBrowserSessionRoutes(app, routeDeps)",
+      "registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets })",
     );
   });
 
