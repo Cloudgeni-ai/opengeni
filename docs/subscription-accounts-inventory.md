@@ -18,10 +18,10 @@
 > exports remain as thin bindings. Module map:
 > [design §5.1.3](design/subscription-core-2026-10-07.md#513-m4-shared-typescript-core-and-the-adapter-interface).
 >
-> M4 X4: SuperGrok runs only on the shared core after the 0721 cutover. The
-> legacy SuperGrok entry points cited below (`packages/db/src/xai-subscription.ts`,
+> M4 X4: SuperGrok runs only on the shared core after its cutover. The
+> legacy SuperGrok entry points cited below (`packages/db/src` `xai-subscription.ts`,
 > `organization-xai-subscriptions.ts`, `xai-quota.ts`,
-> `apps/api/src/xai-subscription-auth.ts`, the `xai` waiters, leases, pins,
+> `xai-subscription-auth.ts`, the `xai` waiters, leases, pins,
 > quota refresh and the video token envelope) are deleted; `xai-capacity.ts`
 > is now `scoped-subscription-capacity.ts` and serves Claude only. Their
 > references are historical. See
@@ -88,7 +88,7 @@ These run inside or around the worker's `runAgentTurn` activity and the session 
 - Refs: `xai-capacity.ts:22` `selectScopedSubscriptionTurnCapacity` (wrappers `:297-300`); generic lease `packages/db/src/subscription-account-repository.ts:1359` `acquireSubscriptionCredentialLease`; selection `packages/config/src/subscription-account-selection.ts:18` `selectSubscriptionAccount`.
 - Authority/pool: the turn's frozen snapshot (`xai-capacity.ts:52-55`).
 - DB subject: initiating human for `user` scope, else the synthetic `worker:claude-workspace` / `worker:xai-workspace` (`xai-capacity.ts:57-60`). Private access is preserved on this path only because the call runs inside the ambient actor from `run.ts:506`, which sets `opengeni.initiating_human_subject_id` (`packages/db/src/database.ts:442-451` `setRlsContext`).
-- Selection: reads the session pin (`:64`); SuperGrok refreshes exhausted quota first (`:71`, `apps/worker/src/activities/xai-quota.ts:6`); manual pin is binding even when unavailable; rotation off uses the active pointer only, with no failover; rotation on keeps the policy pin, else an FNV hash of the session id over eligible accounts; never moves the active pointer (`subscription-account-selection.ts:13-35`). Codex passes `advanceActivePointer: true`, but every reachable branch of its selector returns `false`, so neither stack moves the pointer automatically (Codex audit CA-10).
+- Selection: reads the session pin (`:64`); SuperGrok refreshes exhausted quota first (`:71`, `xai-quota.ts:6`); manual pin is binding even when unavailable; rotation off uses the active pointer only, with no failover; rotation on keeps the policy pin, else an FNV hash of the session id over eligible accounts; never moves the active pointer (`subscription-account-selection.ts:13-35`). Codex passes `advanceActivePointer: true`, but every reachable branch of its selector returns `false`, so neither stack moves the pointer automatically (Codex audit CA-10).
 - Pin writes: policy pin set when rotation is on (`:242-264`), cleared when rotation is off (`:265-283`); last account recorded (`:284`).
 - No account: every account model-disabled → plain `Error` (`:126`); zero accounts → `Error` with code `<provider>_not_connected` (`:129-134`), a terminal failure, not a reconnect state; compaction cancelled (`:135-162`); otherwise `armClaudeCapacityWait` / `armXaiCapacityWait` with code `<provider>_capacity_unavailable` or `<provider>_allocator_disabled` and one generic detail string (`:178-198`). A manual pin to an unavailable account produces the same generic code (Codex has `codex_manual_pin_unavailable`). If arming does not return `waiting`, the turn fails with `<provider>_capacity_wait_stale` and `recovery: "user_message"` (`:216-239`).
 - Reset time: Claude uses `leased.nextCheckAt`; SuperGrok uses the earliest `exhaustedUntil` (`:169-173`).
@@ -178,7 +178,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 #### Shared building blocks referenced below
 
 - **xAI/Claude pool resolution (live)**: `packages/db/src/subscription-account-repository.ts:754` `resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptance` → `:775` `...InTransaction`. Order: the caller's personal (`user`) pool if it has an active pointer to an active credential; else `workspace` if any workspace-scoped credential row exists; else `organization` if the org rotation row has an active credential; else `workspace`. A personal pool therefore wins automatically (conflicts with the target model).
-- **xAI/Claude selection without a lease**: `subscription-account-repository.ts:1634` `selectSubscriptionCredentialForUse` (exported for xAI as `selectXaiCredentialForUse`, `packages/db/src/xai-subscription.ts:75`). Reads rotation settings + capacity, applies pin/active/shard, returns a credential id. Takes no lease, writes no pin, has no wait.
+- **xAI/Claude selection without a lease**: `subscription-account-repository.ts:1634` `selectSubscriptionCredentialForUse` (exported for xAI as `selectXaiCredentialForUse`, `xai-subscription.ts:75`). Reads rotation settings + capacity, applies pin/active/shard, returns a credential id. Takes no lease, writes no pin, has no wait.
 - **xAI/Claude lease**: `subscription-account-repository.ts:1359` `acquireSubscriptionCredentialLease` (5-minute TTL `:100`). Used only by the chat-turn path; no non-chat consumer below calls it.
 - **xAI/Claude materialize + refresh**: `:1074` `materializeSubscriptionCredentialForRun` (revalidates authority via SQL `revalidate_<provider>_subscription_authority`, `:1021` `withAuthorizedSubscriptionCredential`), `:1187` `refreshSubscriptionCredentialSerialized`. The serialized refresh writes `status: "active"` on success only; it never stamps `needs_relogin` on failure (`:1187-1330`).
 - **Session pins (xAI/Claude)**: `:2153` `setSubscriptionSessionAccountPin` / `:2227` `getSubscriptionSessionAccountPin`, keyed by (session, authority scope, owner membership).
@@ -211,7 +211,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Gaps: an exhausted active account is still used; personal/org preference rules are not applied. **Bypasses shared selection** (own active-pointer path).
 
 ##### EP-N03 — SuperGrok transcription provider
-- Refs: `apps/api/src/transcription/providers/xai-subscription.ts:29` `available` (→ `workspaceXaiSubscriptionActive`, `packages/db/src/xai-subscription.ts:60`); `:40` `transcribe`; `:52` `buildXaiSubscriptionAuthorization` (`apps/api/src/xai-subscription-auth.ts:26`); `:105` refresh on 401 or 403 with `[WKE=unauthenticated:bad-credentials]` (`:125` `isXaiInvalidCredentialResponse`); URL `api.x.ai/v1/stt`.
+- Refs: `apps/api/src/transcription/providers/xai-subscription.ts:29` `available` (→ `workspaceXaiSubscriptionActive`, `xai-subscription.ts:60`); `:40` `transcribe`; `:52` `buildXaiSubscriptionAuthorization` (`xai-subscription-auth.ts:26`); `:105` refresh on 401 or 403 with `[WKE=unauthenticated:bad-credentials]` (`:125` `isXaiInvalidCredentialResponse`); URL `api.x.ai/v1/stt`.
 - Authority/pool: **live** acceptance snapshot for the calling subject (`xai-subscription-auth.ts:43-48`) → personal pool wins.
 - Selection: shared `selectXaiCredentialForUse` with `shardKey = requestId` (client correlation id or random UUID; attempt id for recordings). No pin read or written, no lease.
 - DB subject: caller's `subjectId` (subject RLS). Not session-bound.
@@ -336,7 +336,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Gap: whether a workspace reader can trigger refresh of another member's `user`-scope Codex account depends on RLS for `codex_subscription_credentials` under `withWorkspaceRls` — **uncertain** (not verified in SQL policies).
 
 ##### EP-N22 — SuperGrok exhausted-quota refresh
-- Refs: `apps/worker/src/activities/xai-quota.ts:6` `refreshExhaustedXaiQuota`, called from `apps/worker/src/activities/codex-capacity.ts:324` (capacity-wait reconciliation) and `agent-turn/xai-capacity.ts`.
+- Refs: `xai-quota.ts:6` `refreshExhaustedXaiQuota`, called from `apps/worker/src/activities/codex-capacity.ts:324` (capacity-wait reconciliation) and `agent-turn/xai-capacity.ts`.
 - Behaviour: lists every RLS-visible xAI account (`listXaiSubscriptionAccountsMetadata`, not filtered to the frozen pool), skips non-exhausted/recently checked (30 s), materializes with the given authority (accounts in other pools fail and are silently skipped), calls the billing endpoint, CAS-updates quota metadata. Never runs inference; errors swallowed ("durable timer retries").
 
 ##### EP-N23 — SuperGrok status probe
@@ -747,7 +747,7 @@ Provider-specific:
 | EP-N15–EP-N17 | Codex Apps: designation instead of selection, but token load gated by the model pool condition | `packages/runtime/src/index.ts:7311-7347` |
 | EP-N18 | Reset-credit redemption: explicit account and own ledger (by design) | `apps/api/src/routes/codex.ts:1954`, `:2068` |
 | EP-N19 | Funding predicate: live check for Codex, static overlay for others | `packages/core/src/billing/limits.ts:65` |
-| EP-N23, EP-T04 | Several copies of SuperGrok auth-context building | `apps/api/src/xai-subscription-auth.ts:26`, `apps/api/src/routes/supergrok.ts:168`, `apps/worker/src/activities/xai-auth.ts:24`, `video-generation-reconciliation.ts:630` |
+| EP-N23, EP-T04 | Several copies of SuperGrok auth-context building | `xai-subscription-auth.ts:26`, `apps/api/src/routes/supergrok.ts:168`, `apps/worker/src/activities/xai-auth.ts:24`, `video-generation-reconciliation.ts:630` |
 | EP-S25 | Workspace model catalog route re-implements selection inputs inline | `apps/api/src/routes/workspaces.ts:566-630` |
 | EP-S01–EP-S08 | Entire Codex route stack is separate from the shared pool routes | `apps/api/src/routes/codex.ts` vs `apps/api/src/routes/subscription-account-pools.ts:53` |
 
@@ -1123,7 +1123,7 @@ In short, Codex avoids the bug by running with tenant-only RLS (empty subject = 
 #### (b) Is the Claude/xAI branch still inside `reconcileCodexCapacityWait`, and does it now preserve the initiating human?
 
 - Yes, it is still there on `0d7075e`: `cap.ts:313-360` (`input.provider === "xai" || "claude"` → `getXaiCapacityWaitForSession` / `getClaudeCapacityWaitForSession`, `resolveXaiWaiterSubject` / `resolveClaudeWaiterSubject`, `refreshExhaustedXaiQuota` for xAI, then `reconcileXaiCapacityWaitDb` / `reconcileClaudeCapacityWaitDb`). The workflow routes to it through `current.provider` (`session.ts:621`).
-- Not fixed. The branch does not call `withSessionRlsActorContext`. `git log -S withSessionRlsActorContext -- apps/worker/src/activities/codex-capacity.ts apps/worker/src/activities/agent-turn/codex-capacity.ts apps/worker/src/activities/xai-quota.ts` returns no commits, and `git log -S withWorkspaceSubjectSessionActivityRls -- apps/worker/src/activities/codex-capacity.ts` is empty too. The latest commits touching `cap.ts` are `8ce490f` (Claude pools, 2026-10-03) and `bb52f56`. The initiating human survives only as the RLS subject for `user`-scope snapshots (`db:28197-28198`); workspace-scope waiters use a fixed worker subject with no initiating-human GUC.
+- Not fixed. The branch does not call `withSessionRlsActorContext`. `git log -S withSessionRlsActorContext -- apps/worker/src/activities/codex-capacity.ts apps/worker/src/activities/agent-turn/codex-capacity.ts xai-quota.ts` returns no commits, and `git log -S withWorkspaceSubjectSessionActivityRls -- apps/worker/src/activities/codex-capacity.ts` is empty too. The latest commits touching `cap.ts` are `8ce490f` (Claude pools, 2026-10-03) and `bb52f56`. The initiating human survives only as the RLS subject for `user`-scope snapshots (`db:28197-28198`); workspace-scope waiters use a fixed worker subject with no initiating-human GUC.
 
 #### (c) Adaptive-fleet shadow and deterministic replay
 
@@ -1295,7 +1295,7 @@ Source: `:23914` `getWorkspaceCodexSubscriptionSource`, `:24070` `setWorkspaceCo
 - **`xai_capacity_waiters`** (`:267`): per (workspace, session, scope, owner); `goal_id`, `goal_version`, `blocked_turn_id`, `blocked_turn_generation`, `workflow_id`, `status`, `generation`, `earliest_reset_at`, `next_check_at`, `wake_revision`, `observed_wake_revision`, `last_wake_reason`. No `reset_kind`, `policy_hash`, `refresh_attempt`, `resumed_update_id` (Codex-only).
 - **`opengeni_private.xai_subscription_runtime_capabilities`** (0234): transaction-bound capability rows (`backend_pid`, `transaction_id`, `capability_kind` lifecycle/resolve) that let the DEFINER routines read `organization_memberships` / `organization_user_resource_authorities`. No app-role grants.
 - **Snapshot columns** (0234): `session_turns.xai_provider_account_authority_snapshot` (`schema.ts:7159`), `sessions.initial_xai_provider_account_authority_snapshot` (`:4780`), `scheduled_tasks.xai_…` (`:11621`), `session_system_updates.xai_…` (`:8614`), `session_system_update_outbox.xai_…` (`:8721`). Values: `{version:1, scope:"workspace"}` | `{version:1, scope:"organization"}` (0423) | `{version:1, scope:"user", authorityGeneration:n}`. The user-scope **subject** is not in the snapshot: turns use `initiating_human_subject_id` (or `initiator_subject_id` when kind=subject) (`accepted-subscription-authority.ts:13` `subscriptionExecutionAuthorityFromTurn`); system updates use `lineage.xaiAuthoritySubjectId` (`index.ts:70972` `frozenSubscriptionExecutionAuthority`); scheduled runs use `accepted_execution_snapshot.xaiAuthoritySubjectId` (checked by DB trigger fns in 0275/0478).
-- **Realtime** (0238): `session_realtime_modes.model` admits `supergrok/grok-voice-think-fast-2.0` (`schema.ts:5229`). No credential/pool column on the realtime row; the API selects per request (`apps/api/src/xai-subscription-auth.ts:26` `buildXaiSubscriptionAuthorization` → `selectXaiCredentialForUse`, no lease; resolves acceptance snapshot live if none passed).
+- **Realtime** (0238): `session_realtime_modes.model` admits `supergrok/grok-voice-think-fast-2.0` (`schema.ts:5229`). No credential/pool column on the realtime row; the API selects per request (`xai-subscription-auth.ts:26` `buildXaiSubscriptionAuthorization` → `selectXaiCredentialForUse`, no lease; resolves acceptance snapshot live if none passed).
 - **Video** (0239): `workspace_video_generation_policies.funding_source` and `video_generation_operations.funding_source` admit `supergrok_subscription` with `connection_id` NULL, zero price (`schema.ts:6190`, `:6261`). The account is frozen in `video_generation_operations.credential_encrypted` as `{kind:"xai-subscription", accessToken, refreshToken, userId, credentialId, subjectId, authoritySnapshot}` (`apps/worker/src/activities/video-generation-credential.ts:4`); reconciliation keeps using it after disconnect (`video-generation-reconciliation.ts:630` `durableXaiVideoAuth`).
 
 ##### SQL functions
