@@ -15,14 +15,18 @@
  *   connection (not one a workspace manages) of the provider's registered
  *   kind, not disconnected, is read; credential, refresh and quota writes go
  *   through the administrator's row policies, as the organization usage
- *   inspection of the first core provider does.
+ *   inspection of the first core provider does. The membership lock is
+ *   waited for at most five seconds (a longer wait refuses the read as not
+ *   visible), and a provider request holding it has the same five-second
+ *   budget as that inspection.
  * - `personal_owner`: the owner's own Personal workspace context and subject;
  *   every read and write goes through the owner-only routines of migration
  *   0729 (exact owner membership whose Personal workspace this is, current
- *   authority generation, writer context and enabled cutover), and a refresh
- *   persists through the 0707 refresh writers on the capability that
- *   routine mints. A shared workspace, another member and an ownerless
- *   caller never reach the credential.
+ *   authority generation, the organization's effective personal-connections
+ *   rule, writer context and enabled cutover), and a refresh persists through
+ *   the 0707 refresh writers on the capability that routine mints. A shared
+ *   workspace, another member and an ownerless caller never reach the
+ *   credential.
  *
  * Request custody: these reads have no workspace operation ledger (the
  * organization route has no workspace; the ledger's credential check refuses
@@ -30,8 +34,19 @@
  * that holds the per-connection refresh lock and rechecks the caller's
  * authority and the bearer's refresh generation first, with a fixed
  * deadline, `redirect: "error"` and a bounded body; the transaction ends
- * only after the response is buffered. A disconnect, refresh or authority
- * change waits for the request, and a request never starts after one.
+ * only after the response is buffered, or after an injected transport has
+ * joined its aborted work (only native fetch, or a transport that can abort
+ * and join, is accepted). A disconnect or refresh waits for the request (both
+ * take the refresh lock), and so does an organization membership change on
+ * the organization route (its transaction holds the membership lock). An
+ * owner's membership or authority change does not wait for a personal
+ * request, but no request starts after it, and the quota write rechecks both
+ * and drops the reading.
+ *
+ * Quota writes are fenced on the refresh generation they read, not taken
+ * under the refresh lock: a reconnect that commits between that read and the
+ * write can let one older reading land, stamped with its own generation, as
+ * on the workspace path.
  *
  * Every probe outcome is reported, never thrown, in the workspace seam's
  * shape (`SubscriptionCoreUsageProbe`). Nothing here changes allocation,
@@ -41,6 +56,7 @@ import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
 import type { SubscriptionCoreConnectionRead, SubscriptionQuota } from "@opengeni/subscriptions";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
+import { nestedPostgresSqlState } from "../persistence-errors";
 import {
   buildSubscriptionCoreCredentialResolver,
   subscriptionCoreRefreshPolicy,
@@ -84,16 +100,51 @@ export type SubscriptionCoreAdministeredScope =
     };
 
 export type SubscriptionCoreAdministeredProbeDeps = {
-  /** The physical transport (default: global fetch). */
-  fetchImpl?: SubscriptionCoreFetch;
+  /**
+   * The physical transport (default: global fetch). Anything other than
+   * native fetch must abort and join its local work for a signal
+   * (`SubscriptionCoreAdministeredJoinedFetch`); any other transport is
+   * refused before a credential is loaded.
+   */
+  fetchImpl?: SubscriptionCoreFetch | SubscriptionCoreAdministeredJoinedFetch;
   /** As for the workspace probe: the product models the connection can serve. */
   modelIds?: readonly string[];
   refresh?: SubscriptionCoreConnectionRefreshDeps;
 };
 
-/** The request deadline, including the lock and recheck before it. */
-export const SUBSCRIPTION_CORE_ADMINISTERED_READ_TIMEOUT_MS = 10_000;
+/**
+ * An injected transport must cancel and join its local work for this exact
+ * signal before the returned promise resolves, as for the organization usage
+ * inspection of the first core provider: the custody transaction awaits it,
+ * so no request outlives the transaction that rechecked its authority.
+ */
+export type SubscriptionCoreAdministeredJoinedFetch = SubscriptionCoreFetch & {
+  abortAndJoin: (signal: AbortSignal) => Promise<void>;
+};
+
+/**
+ * The request deadline, including the locks and recheck before it: on the
+ * organization route (which holds the organization membership lock for the
+ * request) the five seconds of the first core provider's organization
+ * inspection, and ten seconds for an owner's personal read.
+ */
+export const SUBSCRIPTION_CORE_ADMINISTERED_READ_TIMEOUT_MS = {
+  organization_administrator: 5_000,
+  personal_owner: 10_000,
+} as const;
+/** The longest wait for the organization membership lock before refusing. */
+const ORGANIZATION_MEMBERSHIP_LOCK_TIMEOUT = "5s";
 const ADMINISTERED_READ_MAX_BYTES = 1024 * 1024;
+const nativeFetch: SubscriptionCoreFetch = fetch;
+
+/** The join of an injected transport; null for native fetch; throws for any other. */
+function joinedTransport(fetchImpl: SubscriptionCoreFetch) {
+  if (fetchImpl === nativeFetch) return null;
+  const candidate = fetchImpl as Partial<SubscriptionCoreAdministeredJoinedFetch>;
+  if (typeof candidate.abortAndJoin !== "function")
+    throw new Error("An administered usage read requires an abort-and-join transport");
+  return candidate.abortAndJoin.bind(fetchImpl);
+}
 
 class NotVisible extends Error {}
 class Relogin extends Error {}
@@ -146,10 +197,19 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
               async (tx) => {
                 // The organization membership lifecycle key, before the
                 // administrator check, so a demotion cannot commit while
-                // this transaction acts on its result.
+                // this transaction acts on its result. A bounded wait: a
+                // busy organization refuses the read rather than queueing.
                 await tx.execute(
-                  sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`}, 0))`,
+                  sql`select set_config('lock_timeout', ${ORGANIZATION_MEMBERSHIP_LOCK_TIMEOUT}, true)`,
                 );
+                try {
+                  await tx.execute(
+                    sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`}, 0))`,
+                  );
+                } catch (error) {
+                  if (nestedPostgresSqlState(error) === "55P03") throw new NotVisible();
+                  throw error;
+                }
                 await setSubjectRlsContext(tx, scope.subjectId);
                 const [admin] = await rawRows<{ admin: boolean }>(
                   tx,
@@ -326,28 +386,35 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
           },
         },
         async record(tx, observation) {
-          const row = await ownedRow(tx);
-          if (!row) return { applied: false, recovered: false };
-          const refreshGeneration = Number(row.refresh_generation);
-          const write = operations().mergeSubscriptionCoreUsageObservation(
-            row,
-            refreshGeneration,
-            observation,
-          );
-          if (!write) return { applied: false, recovered: false };
-          // Fenced on the generation and on the revision merged from.
-          const [recorded] = await rawRows<{ recorded: boolean }>(
-            tx,
-            sql`select opengeni_private.record_subscription_core_owned_connection_quota(${owner},
-              ${refreshGeneration}::bigint,
-              ${row.quota_revision === null ? null : Number(row.quota_revision)}::bigint,
-              ${JSON.stringify(write.stored)}::jsonb,
-              ${new Date(write.observedAt).toISOString()}::timestamptz
-            ) as recorded`,
-          );
-          return recorded?.recorded === true
-            ? { applied: true, recovered: write.recovered }
-            : { applied: false, recovered: false };
+          // Fenced on the generation and on the revision merged from. The
+          // other paths merge under the quota row lock; this one merges from
+          // the owner reader, so a reading that raced another quota write
+          // (at the same generation) re-reads and re-merges once.
+          let generation: number | null = null;
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const row = await ownedRow(tx);
+            if (!row) break;
+            const refreshGeneration = Number(row.refresh_generation);
+            if (generation !== null && refreshGeneration !== generation) break;
+            generation = refreshGeneration;
+            const write = operations().mergeSubscriptionCoreUsageObservation(
+              row,
+              refreshGeneration,
+              observation,
+            );
+            if (!write) break;
+            const [recorded] = await rawRows<{ recorded: boolean }>(
+              tx,
+              sql`select opengeni_private.record_subscription_core_owned_connection_quota(${owner},
+                ${refreshGeneration}::bigint,
+                ${row.quota_revision === null ? null : Number(row.quota_revision)}::bigint,
+                ${JSON.stringify(write.stored)}::jsonb,
+                ${new Date(write.observedAt).toISOString()}::timestamptz
+              ) as recorded`,
+            );
+            if (recorded?.recorded === true) return { applied: true, recovered: write.recovered };
+          }
+          return { applied: false, recovered: false };
         },
       };
     }
@@ -371,6 +438,8 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
       connectionId: string,
       bearerGeneration: () => number,
       fetchImpl: SubscriptionCoreFetch,
+      abortAndJoin: ((signal: AbortSignal) => Promise<void>) | null,
+      deadlineMs: number,
     ): SubscriptionCoreFetch {
       return async (url, init) => {
         const callerSignal = init?.signal ?? undefined;
@@ -384,7 +453,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
             controller.abort(
               new Error(`${provider.adapter.displayName} read exceeded its deadline`),
             ),
-          SUBSCRIPTION_CORE_ADMINISTERED_READ_TIMEOUT_MS,
+          deadlineMs,
         );
         try {
           const result = await scoped.scoped(db, async (tx) => {
@@ -402,17 +471,29 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
             )
               throw new Error("The connection changed before its provider read");
             controller.signal.throwIfAborted();
-            const response = await fetchImpl(url, {
-              ...init,
-              redirect: "error",
-              signal: controller.signal,
-            });
-            const body = await readBounded(response, controller.signal);
-            return new Response(body, {
-              status: response.status,
-              statusText: response.statusText,
-              headers: response.headers,
-            });
+            let complete = false;
+            try {
+              const response = await fetchImpl(url, {
+                ...init,
+                redirect: "error",
+                signal: controller.signal,
+              });
+              const body = await readBounded(response, controller.signal);
+              complete = true;
+              return new Response(body, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+              });
+            } finally {
+              if (!complete) {
+                if (!controller.signal.aborted)
+                  controller.abort(new Error("The provider read did not complete"));
+                // The transaction ends only after an injected transport has
+                // joined its local work for this request.
+                await abortAndJoin?.(controller.signal).catch(() => undefined);
+              }
+            }
           });
           if (!result) throw new Error("The connection is no longer readable here");
           return result.value;
@@ -477,6 +558,14 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
     ): Promise<SubscriptionCoreUsageProbe> {
       const { fetchUsage, decodeQuota } = provider.adapter;
       if (!fetchUsage || !decodeQuota) return { kind: "unsupported" };
+      const fetchImpl = deps.fetchImpl ?? nativeFetch;
+      let abortAndJoin: ((signal: AbortSignal) => Promise<void>) | null;
+      try {
+        // Before any credential is loaded.
+        abortAndJoin = joinedTransport(fetchImpl);
+      } catch (error) {
+        return { kind: "fetch_error", error };
+      }
       const scoped = access(scope, connectionId);
       const snapshot = (
         loaded: SubscriptionCoreConnectionCredential,
@@ -548,7 +637,9 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
           scoped,
           connectionId,
           () => token.credentialVersion,
-          deps.fetchImpl ?? fetch,
+          fetchImpl,
+          abortAndJoin,
+          SUBSCRIPTION_CORE_ADMINISTERED_READ_TIMEOUT_MS[scope.kind],
         ),
       };
       let response: unknown;

@@ -68,7 +68,11 @@ DECLARE
         AND membership.subject_id = p_subject_id
         AND membership.personal_workspace_id = p_workspace_id
         AND membership.status = 'active' AND membership.revoked_at IS NULL;
-      owned := FOUND;
+      -- The organization's effective personal-connections rule, exactly as
+      -- the 0707 turn target, refresh begin and personal connect apply it
+      -- (an override of a locked setting is already ignored there).
+      owned := FOUND AND coalesce((subscription_effective_settings(p_account_id, p_workspace_id)
+        #>> '{values,personalConnectionsAllowed}')::boolean, false);
 $owned$;
   writer_context constant text := $context$
       IF p_workspace_id IS NULL OR p_connection_id IS NULL

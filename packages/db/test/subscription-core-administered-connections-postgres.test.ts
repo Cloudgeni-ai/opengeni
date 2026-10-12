@@ -90,7 +90,7 @@ const { createDb, ensureManagedAccessForUser, subscriptionCoreAdministeredConnec
   await import("../src");
 const { listSubscriptionCorePersonalConnectionRowsInTransaction } =
   await import("../src/subscription-core/administration");
-const { rawRows, withRlsContext } = await import("../src/database");
+const { rawRows, setSubjectRlsContext, withRlsContext } = await import("../src/database");
 type DbClient = Awaited<ReturnType<typeof createDb>>;
 
 const key = Buffer.alloc(32, 71);
@@ -241,23 +241,88 @@ async function storedQuota(connectionId: string) {
   return row?.quota ?? null;
 }
 
-/** The scripted usage endpoint: records each bearer and answers `respond()`. */
-function scriptedUsage(respond: (bearer: string) => Response | Promise<Response>) {
+/**
+ * The scripted usage endpoint: records each bearer and the redirect mode it
+ * was asked with, and answers `respond()`. An injected transport aborts and
+ * joins its work for a signal (`abortAndJoin`), as the custody requires.
+ */
+function scriptedUsage(
+  respond: (bearer: string, init: RequestInit | undefined) => Response | Promise<Response>,
+) {
   const calls: string[] = [];
-  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
-    const bearer = new Headers(init?.headers).get("authorization") ?? "";
-    calls.push(bearer);
-    return await respond(bearer);
-  }) as typeof fetch;
-  return { calls, fetchImpl };
+  const redirects: Array<RequestRedirect | undefined> = [];
+  const joined: AbortSignal[] = [];
+  const fetchImpl = Object.assign(
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
+      const bearer = new Headers(init?.headers).get("authorization") ?? "";
+      calls.push(bearer);
+      redirects.push(init?.redirect);
+      return await respond(bearer, init);
+    },
+    {
+      abortAndJoin: async (signal: AbortSignal) => {
+        joined.push(signal);
+      },
+    },
+  ) as unknown as typeof fetch;
+  return { calls, redirects, joined, fetchImpl };
 }
 
 const spent = (spentCents: number, resetsAt: number | null = Date.now() + 3_600_000) =>
   scriptedUsage(() => Response.json({ data: { spentCents, limitCents: 10_000, resetsAt } }));
 
 const administered = () => subscriptionCoreAdministeredConnections(USAGE_PROVIDER);
+
+const orgProbe = (accountId: string, subjectId: string, id: string, fetchImpl: typeof fetch) =>
+  administered().probeSubscriptionCoreAdministeredConnectionUsage(
+    client.db,
+    settings,
+    { kind: "organization_administrator", accountId, subjectId },
+    id,
+    { fetchImpl },
+  );
+
+const ownerProbe = (
+  accountId: string,
+  workspaceId: string,
+  subjectId: string,
+  id: string,
+  fetchImpl: typeof fetch,
+) =>
+  administered().probeSubscriptionCoreAdministeredConnectionUsage(
+    client.db,
+    settings,
+    { kind: "personal_owner", accountId, workspaceId, subjectId },
+    id,
+    { fetchImpl },
+  );
+
+async function connectionState(id: string) {
+  const [row] = await shared.admin<{ status: string; version: number }[]>`
+    select status, version::int as version from subscription_connections where id = ${id}::uuid`;
+  return row!;
+}
+
+async function quotaRevision(id: string) {
+  const [row] = await shared.admin<{ revision: number }[]>`
+    select revision::int as revision from subscription_connection_quota
+    where connection_id = ${id}::uuid`;
+  return row?.revision ?? null;
+}
+
+/** A usage endpoint that never answers until the request is aborted. */
+const stalled = () =>
+  scriptedUsage(
+    (_bearer, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return;
+        if (signal.aborted) reject(signal.reason);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+  );
 
 describe("the test registration", () => {
   test("production registers no test provider", () => {
@@ -270,6 +335,91 @@ describe("the test registration", () => {
       sql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
     );
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
+  });
+
+  test("the application role owns none of the tables these reads touch, and row security is forced on the connection and quota tables", async () => {
+    const rows = await rawRows<{ relname: string; owned: boolean; forced: boolean }>(
+      client.db,
+      sql`select class.relname::text as relname,
+          pg_get_userbyid(class.relowner) = current_user as owned,
+          class.relforcerowsecurity as forced
+        from pg_class class
+        where class.relkind = 'r'
+          and class.relnamespace = (select oid from pg_namespace where nspname = current_schema())
+          and class.relname in ('subscription_connections', 'subscription_connection_quota',
+            'organization_memberships', 'organization_user_resource_authorities')
+        order by class.relname`,
+    );
+    expect(rows.map((row) => [row.relname, row.owned])).toEqual([
+      ["organization_memberships", false],
+      ["organization_user_resource_authorities", false],
+      ["subscription_connection_quota", false],
+      ["subscription_connections", false],
+    ]);
+    expect(
+      rows
+        .filter((row) => row.relname.startsWith("subscription_connection"))
+        .map((row) => row.forced),
+    ).toEqual([true, true]);
+  });
+});
+
+describe("the owner-only routines' predicates (0729)", () => {
+  test("state the live 0707 owner, authority and personal-connections predicates, so the two cannot drift apart", async () => {
+    const rows = await shared.admin<{ name: string; definition: string }[]>`
+      select proc.proname as name, pg_get_functiondef(proc.oid) as definition
+      from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+      where namespace.nspname in ('opengeni_private', 'opengeni_subscription_internal')
+        and proc.proname like '%subscription_core%'`;
+    const bodies = new Map(rows.map((row) => [row.name, row.definition.replace(/\s+/g, "")]));
+    const compact = (fragment: string) => fragment.replace(/\s+/g, "");
+    // Each predicate, and the live routines that state it.
+    const predicates: Array<[string, string[]]> = [
+      [
+        `coalesce((subscription_effective_settings(p_account_id, p_workspace_id)
+          #>> '{values,personalConnectionsAllowed}')::boolean, false)`,
+        [
+          "subscription_core_connection_target",
+          "begin_subscription_core_refresh",
+          "connect_subscription_core_personal",
+        ],
+      ],
+      [
+        "membership.status = 'active' AND membership.revoked_at IS NULL",
+        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
+      ],
+      [
+        "membership.personal_workspace_id = p_workspace_id",
+        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
+      ],
+      [
+        "authority.status = 'active' AND authority.revoked_at IS NULL",
+        ["subscription_core_acceptance_authority_v2"],
+      ],
+      [
+        "authority.resource_kind = 'subscription_connection'",
+        ["subscription_core_acceptance_authority_v2"],
+      ],
+      [
+        "opengeni_subscription_internal.subscription_core_writer_context(",
+        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
+      ],
+      [
+        "opengeni_private.subscription_core_connection_kind(p_provider)",
+        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
+      ],
+    ];
+    const owned = [
+      "read_subscription_core_owned_connection_credential",
+      "begin_subscription_core_owned_connection_refresh",
+      "record_subscription_core_owned_connection_quota",
+    ];
+    const missing: string[] = [];
+    for (const [fragment, live] of predicates)
+      for (const name of [...live, ...owned])
+        if (!bodies.get(name)?.includes(compact(fragment)))
+          missing.push(`${name}: ${fragment.replace(/\s+/g, " ")}`);
+    expect(missing).toEqual([]);
   });
 });
 
@@ -469,5 +619,480 @@ describe("a personal connection's owner (own Personal workspace)", () => {
       applied: true,
       recovered: true,
     });
+  });
+});
+
+describe("the organization's personal-connections rule (owner scope)", () => {
+  async function setOrganization(org: Org, allowed: boolean, locked: boolean) {
+    await shared.admin`
+      insert into subscription_settings (account_id, workspace_id, rotation, providers,
+        cross_provider_failover, fallback_order, personal_connections_allowed,
+        personal_fallback_allowed, locked_settings)
+      values (${org.accountId}::uuid, null, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb,
+        ${allowed}, false, ${locked ? "{personalConnectionsAllowed}" : "{}"}::text[])
+      on conflict (account_id, workspace_id) do update
+        set personal_connections_allowed = excluded.personal_connections_allowed,
+            locked_settings = excluded.locked_settings`;
+  }
+  /** The Personal-workspace override; `bypassLock` plants one the lock guard would refuse. */
+  async function setOverride(org: Org, allowed: boolean | null, bypassLock = false) {
+    await shared.admin.begin(async (tx) => {
+      if (bypassLock) await tx`set local session_replication_role = replica`;
+      await tx`
+        insert into subscription_settings (account_id, workspace_id, personal_connections_allowed)
+        values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${allowed})
+        on conflict (account_id, workspace_id) do update
+          set personal_connections_allowed = excluded.personal_connections_allowed`;
+    });
+  }
+  async function effective(org: Org) {
+    const [row] = await shared.admin<{ allowed: string | null }[]>`
+      select subscription_effective_settings(${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid)
+        #>> '{values,personalConnectionsAllowed}' as allowed`;
+    return row?.allowed ?? null;
+  }
+
+  test("off refuses; off and locked ignores a Personal-workspace override; off and unlocked follows it", async () => {
+    const org = await organization();
+    const personal = await personalConnection(org, "own-setting");
+    const upstream = spent(1_500);
+    const probe = () =>
+      ownerProbe(
+        org.accountId,
+        org.personalWorkspaceId,
+        org.ownerSubjectId,
+        personal,
+        upstream.fetchImpl,
+      );
+
+    await setOrganization(org, false, false);
+    expect(await effective(org)).toBe("false");
+    expect(await probe()).toEqual({ kind: "not_visible" });
+
+    await setOrganization(org, false, true);
+    await setOverride(org, true, true);
+    expect(await effective(org)).toBe("false");
+    expect(await probe()).toEqual({ kind: "not_visible" });
+    expect(upstream.calls).toEqual([]);
+    expect(await storedQuota(personal)).toBeNull();
+
+    await setOverride(org, null, true);
+    await setOrganization(org, false, false);
+    await setOverride(org, true);
+    expect(await effective(org)).toBe("true");
+    expect(await probe()).toMatchObject({ kind: "read", applied: true });
+    expect(upstream.calls).toEqual(["Bearer sk-own-setting"]);
+  });
+
+  test("the owner-only routines refuse every other context, leave the app role no row, and fence the quota write", async () => {
+    const org = await organization();
+    const personal = await personalConnection(org, "own-direct");
+    const other = await member(org);
+    const otherOrg = await organization();
+    const owner = {
+      accountId: org.accountId,
+      workspaceId: org.personalWorkspaceId,
+      subjectId: org.ownerSubjectId as string | null,
+    };
+    type Call = {
+      context?: Partial<typeof owner>;
+      provider?: string;
+      accountId?: string;
+      workspaceId?: string;
+      subjectId?: string;
+      generation?: number;
+      expected?: number | null;
+    };
+    const observation = {
+      windows: [],
+      modelCooldowns: {},
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      revision: 0,
+      observedAt: Date.now(),
+      observedRefreshGeneration: 1,
+      source: "usage_endpoint",
+    };
+    const call = (input: Call = {}) => {
+      const context = { ...owner, ...input.context };
+      return withRlsContext(
+        client.db,
+        { accountId: context.accountId, workspaceId: context.workspaceId },
+        async (tx) => {
+          if (context.subjectId) await setSubjectRlsContext(tx, context.subjectId);
+          const args = sql`${input.provider ?? FAKE_API_KEY_PROVIDER},
+            ${input.accountId ?? context.accountId}::uuid,
+            ${input.workspaceId ?? context.workspaceId}::uuid,
+            ${input.subjectId ?? context.subjectId}, ${personal}::uuid`;
+          const read = await rawRows<{ credential_encrypted: string | null }>(
+            tx,
+            sql`select credential_encrypted
+              from opengeni_private.read_subscription_core_owned_connection_credential(${args})`,
+          );
+          const begin = await rawRows(
+            tx,
+            sql`select refresh_generation
+              from opengeni_private.begin_subscription_core_owned_connection_refresh(${args})`,
+          );
+          const [record] = await rawRows<{ recorded: boolean }>(
+            tx,
+            sql`select opengeni_private.record_subscription_core_owned_connection_quota(${args},
+              ${input.generation ?? 1}::bigint, ${input.expected ?? null}::bigint,
+              ${JSON.stringify(observation)}::jsonb, now()) as recorded`,
+          );
+          // What the application role itself reaches afterwards, in the
+          // same transaction (no capability outlives a routine).
+          const reached = [
+            ...(await rawRows(
+              tx,
+              sql`select id from subscription_connections where id = ${personal}::uuid`,
+            )),
+            ...(await rawRows(
+              tx,
+              sql`update subscription_connections set label = label
+                where id = ${personal}::uuid returning id`,
+            )),
+            ...(await rawRows(
+              tx,
+              sql`select connection_id from subscription_connection_quota
+                where connection_id = ${personal}::uuid`,
+            )),
+          ];
+          return {
+            read: read.length,
+            credential: read.some((row) => row.credential_encrypted !== null),
+            begin: begin.length,
+            recorded: record?.recorded === true,
+            reached: reached.length,
+          };
+        },
+      );
+    };
+    const refused = { read: 0, credential: false, begin: 0, recorded: false, reached: 0 };
+    const cases: Array<[string, Call]> = [
+      ["a shared workspace", { context: { workspaceId: org.sharedWorkspaceId } }],
+      ["a shared workspace argument", { workspaceId: org.sharedWorkspaceId }],
+      [
+        "another member in their Personal workspace",
+        { context: { workspaceId: other.personalWorkspaceId, subjectId: other.subjectId } },
+      ],
+      ["another member in the owner's", { context: { subjectId: other.subjectId } }],
+      ["another subject argument", { subjectId: other.subjectId }],
+      ["no subject", { context: { subjectId: null } }],
+      ["a service subject", { context: { subjectId: "service:subscription-core" } }],
+      [
+        "another organization",
+        {
+          context: {
+            accountId: otherOrg.accountId,
+            workspaceId: otherOrg.personalWorkspaceId,
+            subjectId: otherOrg.ownerSubjectId,
+          },
+        },
+      ],
+      ["another organization argument", { accountId: otherOrg.accountId }],
+      ["another provider", { provider: "another_provider" }],
+    ];
+    for (const [label, input] of cases)
+      expect({ label, result: await call(input) }).toEqual({ label, result: refused });
+
+    // Suspended, then revoked: the owner's own membership no longer admits.
+    const suspended = await member(org);
+    const theirs = await personalConnection(org, "own-suspended", suspended);
+    const theirCall = () =>
+      withRlsContext(
+        client.db,
+        { accountId: org.accountId, workspaceId: suspended.personalWorkspaceId },
+        async (tx) => {
+          await setSubjectRlsContext(tx, suspended.subjectId);
+          return (
+            await rawRows(
+              tx,
+              sql`select 1 from opengeni_private.read_subscription_core_owned_connection_credential(
+                ${FAKE_API_KEY_PROVIDER}, ${org.accountId}::uuid,
+                ${suspended.personalWorkspaceId}::uuid, ${suspended.subjectId}, ${theirs}::uuid)`,
+            )
+          ).length;
+        },
+      );
+    expect(await theirCall()).toBe(1);
+    await shared.admin`update organization_memberships set status = 'suspended'
+      where id = ${suspended.membershipId}::uuid`;
+    expect(await theirCall()).toBe(0);
+    await shared.admin`update organization_memberships set status = 'revoked', revoked_at = now()
+      where id = ${suspended.membershipId}::uuid`;
+    expect(await theirCall()).toBe(0);
+
+    // The owner: all three admit; the app role still reaches nothing.
+    expect(await call()).toEqual({
+      read: 1,
+      credential: true,
+      begin: 1,
+      recorded: true,
+      reached: 0,
+    });
+    expect(await quotaRevision(personal)).toBe(1);
+    // Record fences: another generation, a stale or absent expected
+    // revision; then the current one applies.
+    expect((await call({ generation: 2, expected: 1 })).recorded).toBe(false);
+    expect((await call({ expected: null })).recorded).toBe(false);
+    expect((await call({ expected: 1 })).recorded).toBe(true);
+    expect((await call({ expected: 1 })).recorded).toBe(false);
+    expect(await quotaRevision(personal)).toBe(2);
+
+    // The organization switches personal connections off: all three refuse.
+    await setOrganization(org, false, false);
+    expect(await call({ expected: 2 })).toEqual(refused);
+    expect(await quotaRevision(personal)).toBe(2);
+  });
+});
+
+describe("refresh writers and request custody of both scopes", () => {
+  test("an expired credential is marked for sign-in by its own scope only", async () => {
+    const org = await organization();
+    const sharedId = await sharedConnection(org, "org-expired");
+    const personal = await personalConnection(org, "own-expired");
+    const plain = await member(org);
+    await shared.admin`update subscription_connections
+      set expires_at = now() - interval '1 minute'
+      where id in (${sharedId}::uuid, ${personal}::uuid)`;
+    const upstream = spent(1_000);
+    const before = {
+      shared: await connectionState(sharedId),
+      personal: await connectionState(personal),
+    };
+    expect(before.shared.status).toBe("active");
+    expect(before.personal.status).toBe("active");
+    // Callers of the other scope, or without authority: nothing is marked.
+    for (const result of [
+      await orgProbe(org.accountId, plain.subjectId, sharedId, upstream.fetchImpl),
+      await orgProbe(org.accountId, org.ownerSubjectId, personal, upstream.fetchImpl),
+      await ownerProbe(
+        org.accountId,
+        org.personalWorkspaceId,
+        org.ownerSubjectId,
+        sharedId,
+        upstream.fetchImpl,
+      ),
+      await ownerProbe(
+        org.accountId,
+        plain.personalWorkspaceId,
+        plain.subjectId,
+        personal,
+        upstream.fetchImpl,
+      ),
+    ])
+      expect(result).toEqual({ kind: "not_visible" });
+    expect(await connectionState(sharedId)).toEqual(before.shared);
+    expect(await connectionState(personal)).toEqual(before.personal);
+    // Each connection's own scope: a relogin, recorded on the connection.
+    expect(await orgProbe(org.accountId, org.ownerSubjectId, sharedId, upstream.fetchImpl)).toEqual(
+      { kind: "relogin" },
+    );
+    expect(
+      await ownerProbe(
+        org.accountId,
+        org.personalWorkspaceId,
+        org.ownerSubjectId,
+        personal,
+        upstream.fetchImpl,
+      ),
+    ).toEqual({ kind: "relogin" });
+    for (const [id, previous] of [
+      [sharedId, before.shared],
+      [personal, before.personal],
+    ] as const) {
+      const after = await connectionState(id);
+      expect(after.status).toBe("needs_relogin");
+      expect(after.version).toBeGreaterThan(previous.version);
+    }
+    expect(upstream.calls).toEqual([]);
+  });
+
+  test("an undecodable credential is a token error, and a transport that cannot join is refused before any credential is loaded", async () => {
+    const org = await organization();
+    const sharedId = await sharedConnection(org, "org-undecodable");
+    const personal = await personalConnection(org, "own-undecodable");
+    const corrupt = encryptEnvironmentValue(key, "not a credential");
+    await shared.admin`update subscription_connections set credential_encrypted = ${corrupt}
+      where id in (${sharedId}::uuid, ${personal}::uuid)`;
+    const upstream = spent(1_000);
+    const orgRun = () => orgProbe(org.accountId, org.ownerSubjectId, sharedId, upstream.fetchImpl);
+    const own = () =>
+      ownerProbe(
+        org.accountId,
+        org.personalWorkspaceId,
+        org.ownerSubjectId,
+        personal,
+        upstream.fetchImpl,
+      );
+    expect((await orgRun()).kind).toBe("token_error");
+    expect((await own()).kind).toBe("token_error");
+    // A plain callback (no abort-and-join) fails before the load would.
+    const plainFetch = (async () => Response.json({})) as unknown as typeof fetch;
+    for (const result of [
+      await orgProbe(org.accountId, org.ownerSubjectId, sharedId, plainFetch),
+      await ownerProbe(
+        org.accountId,
+        org.personalWorkspaceId,
+        org.ownerSubjectId,
+        personal,
+        plainFetch,
+      ),
+    ]) {
+      expect(result.kind).toBe("fetch_error");
+      expect(String((result as { error: unknown }).error)).toContain("abort-and-join");
+    }
+    expect(upstream.calls).toEqual([]);
+  });
+
+  test("requests refuse redirects, cap the body at 1 MiB and stop at the scope's deadline; nothing is stored", async () => {
+    const org = await organization();
+    const sharedId = await sharedConnection(org, "org-bounded");
+    const personal = await personalConnection(org, "own-bounded");
+    const both = (fetchImpl: typeof fetch) => [
+      () => orgProbe(org.accountId, org.ownerSubjectId, sharedId, fetchImpl),
+      () =>
+        ownerProbe(org.accountId, org.personalWorkspaceId, org.ownerSubjectId, personal, fetchImpl),
+    ];
+    // A redirect: the transport is asked to refuse it, and the refusal is a fetch error.
+    const redirecting = scriptedUsage((_bearer, init) => {
+      if (init?.redirect === "error") throw new TypeError("redirect mode is set to error");
+      return Response.redirect("https://elsewhere.test/usage", 302);
+    });
+    for (const run of both(redirecting.fetchImpl)) expect((await run()).kind).toBe("fetch_error");
+    expect(redirecting.redirects).toEqual(["error", "error"]);
+    // An oversized body.
+    const oversized = scriptedUsage(
+      () => new Response(new Uint8Array(1024 * 1024 + 1), { status: 200 }),
+    );
+    for (const run of both(oversized.fetchImpl)) {
+      const result = await run();
+      expect(result.kind).toBe("fetch_error");
+      expect(String((result as { error: unknown }).error)).toContain("byte limit");
+    }
+    expect(oversized.joined).toHaveLength(2);
+    // A stalled endpoint: five seconds on the organization route, ten for the owner.
+    const stall = stalled();
+    const [organizationRun, ownerRun] = both(stall.fetchImpl);
+    for (const [run, deadline] of [
+      [organizationRun!, 5_000],
+      [ownerRun!, 10_000],
+    ] as const) {
+      const started = performance.now();
+      const result = await run();
+      const elapsed = performance.now() - started;
+      expect(result.kind).toBe("fetch_error");
+      expect(String((result as { error: unknown }).error)).toContain("deadline");
+      expect(elapsed).toBeGreaterThanOrEqual(deadline - 100);
+      expect(elapsed).toBeLessThan(deadline + 3_000);
+    }
+    expect(stall.joined).toHaveLength(2);
+    expect(stall.joined.every((signal) => signal.aborted)).toBe(true);
+    expect(await storedQuota(sharedId)).toBeNull();
+    expect(await storedQuota(personal)).toBeNull();
+  });
+
+  test("an owner's request whose generation moves or whose authority is revoked mid-request is not applied", async () => {
+    const org = await organization();
+    const moved = await personalConnection(org, "own-moved");
+    const revoked = await personalConnection(org, "own-revoked");
+    const reading = () =>
+      Response.json({ data: { spentCents: 100, limitCents: 10_000, resetsAt: null } });
+    const moving = scriptedUsage(async () => {
+      await shared.admin`update subscription_connections
+        set refresh_generation = refresh_generation + 1 where id = ${moved}::uuid`;
+      return reading();
+    });
+    const revoking = scriptedUsage(async () => {
+      await shared.admin`update organization_user_resource_authorities
+        set status = 'revoked', revoked_at = now() where resource_id = ${revoked}::uuid`;
+      return reading();
+    });
+    for (const [id, upstream] of [
+      [moved, moving],
+      [revoked, revoking],
+    ] as const) {
+      expect(
+        await ownerProbe(
+          org.accountId,
+          org.personalWorkspaceId,
+          org.ownerSubjectId,
+          id,
+          upstream.fetchImpl,
+        ),
+      ).toMatchObject({ kind: "read", applied: false, recovered: false });
+      expect(upstream.calls).toHaveLength(1);
+      expect(await storedQuota(id)).toBeNull();
+    }
+  });
+
+  test("an owner's reading that raced another quota write re-merges once and applies", async () => {
+    const org = await organization();
+    const personal = await personalConnection(org, "own-raced");
+    const probe = (fetchImpl: typeof fetch) =>
+      ownerProbe(org.accountId, org.personalWorkspaceId, org.ownerSubjectId, personal, fetchImpl);
+    expect(await probe(spent(1_000).fetchImpl)).toMatchObject({ kind: "read", applied: true });
+    expect(await quotaRevision(personal)).toBe(1);
+    // Another writer holds the quota row with a newer revision while the
+    // owner's write (merged from revision 1) waits for it.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    const writer = shared.admin.begin(async (tx) => {
+      await tx`update subscription_connection_quota set revision = revision + 1
+        where connection_id = ${personal}::uuid`;
+      holding();
+      await gate;
+    });
+    await held;
+    const result = probe(spent(2_000).fetchImpl);
+    let waited = false;
+    for (let attempt = 0; attempt < 400 && !waited; attempt += 1) {
+      const [row] = await shared.admin<{ waiting: number }[]>`
+        select count(*)::int as waiting from pg_locks where not granted`;
+      waited = row!.waiting > 0;
+      if (!waited) await Bun.sleep(25);
+    }
+    expect(waited).toBe(true);
+    release();
+    await writer;
+    expect(await result).toMatchObject({ kind: "read", applied: true });
+    expect(await quotaRevision(personal)).toBe(3);
+    expect((await storedQuota(personal))!.windows).toMatchObject([
+      { id: "spend_budget", usedPercent: 20 },
+    ]);
+  });
+
+  test("the organization route waits at most five seconds for the membership lock, then reads nothing", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "org-locked");
+    const upstream = spent(1_000);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    const lifecycle = shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${org.accountId}`}, 0))`;
+      holding();
+      await gate;
+    });
+    await held;
+    const started = performance.now();
+    const result = await orgProbe(
+      org.accountId,
+      org.ownerSubjectId,
+      connectionId,
+      upstream.fetchImpl,
+    );
+    const elapsed = performance.now() - started;
+    release();
+    await lifecycle;
+    expect(result).toEqual({ kind: "not_visible" });
+    expect(elapsed).toBeGreaterThanOrEqual(4_900);
+    expect(elapsed).toBeLessThan(9_000);
+    expect(upstream.calls).toEqual([]);
+    expect(await storedQuota(connectionId)).toBeNull();
   });
 });

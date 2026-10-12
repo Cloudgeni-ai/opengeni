@@ -403,6 +403,8 @@ export * from "./subscription-core-claude-compat";
 // and a personal connection owner's (design 5.3).
 export {
   subscriptionCoreAdministeredConnections,
+  SUBSCRIPTION_CORE_ADMINISTERED_READ_TIMEOUT_MS,
+  type SubscriptionCoreAdministeredJoinedFetch,
   type SubscriptionCoreAdministeredProbeDeps,
   type SubscriptionCoreAdministeredScope,
 } from "./subscription-core/administered-connections";

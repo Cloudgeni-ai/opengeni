@@ -2748,13 +2748,14 @@ it opens and never borrowed:
 - `organization_administrator`, generalized from Codex's organization usage
   read (an administrator check, then a live read): the organization context
   with no workspace, the organization membership lifecycle lock taken before
-  the check, the caller's subject, the `subscription_organization_admin`
+  the check (waited for at most five seconds; a busier organization refuses
+  the read as not visible), the caller's subject, the `subscription_organization_admin`
   predicate the connection policies use, and an enabled cutover. Only a
   shared connection of the provider's registered kind that no workspace
   manages (`managed_by_workspace_id is null`), not disconnected, is read; a
   workspace-managed connection stays with its workspace. The credential
-  refresh and the quota write go through the administrator's row policies
-  under the per-connection refresh lock.
+  refresh (under the per-connection refresh lock) and the quota write go
+  through the administrator's row policies.
 - `personal_owner`: the owner's own Personal workspace context and subject.
   Every read and write goes through three owner-only routines (0729): the
   credential read, the refresh begin (which takes the per-connection
@@ -2767,20 +2768,43 @@ it opens and never borrowed:
   unrevoked membership whose Personal workspace is the given workspace, a
   personal connection of the registered kind that this membership owns, not
   disconnected, and an active, unrevoked authority of that membership at the
-  connection's current authority generation. The 0707 `connection_owner`
+  connection's current authority generation, and the organization's
+  effective personal-connections rule (`personalConnectionsAllowed` from
+  `subscription_effective_settings`, exactly as the 0707 turn target,
+  refresh begin and personal connect apply it, so an override of a locked
+  setting is ignored). The 0707 `connection_owner`
   capability is held only while a routine runs. A shared workspace, another
   member, a service actor and an ownerless session (which has no person)
-  never reach the credential.
+  never reach the credential. A test pins these predicates to the live 0707
+  routines that state them, so the two cannot drift apart.
 
 Request custody. Each provider request runs in a transaction that holds the
 per-connection refresh lock, rechecks the scope's authority and that the
 credential is still active at the bearer's refresh generation, and buffers
-the bounded response (ten-second deadline, `redirect: "error"`, 1 MiB)
-before it ends: a disconnect, refresh or authority change waits for the
-request, and no request starts after one. Credential refresh flights are
+the bounded response (`redirect: "error"`, 1 MiB) before it ends. The
+deadline, which includes the locks and the recheck, is five seconds on the
+organization route, whose transaction also holds the organization
+membership lock for the request (Codex's organization usage budget), and
+ten seconds for an owner's personal read. Only native fetch, or an injected
+transport that aborts and joins its local work for the request's signal
+(as Codex's organization read requires), is accepted; any other is refused
+before a credential is loaded. A disconnect or refresh waits for the request
+(both take the refresh lock), and so does an organization membership change
+on the organization route. An owner's membership or authority change does
+not wait for a personal request, but no request starts after it, and the
+quota write rechecks both and drops the reading. Credential refresh flights are
 namespaced by scope. Every outcome is reported, never thrown; a refused
 scope is `not_visible` and reads nothing. Nothing here changes allocation,
 policies or assignments.
+
+Quota writes are fenced on the refresh generation they read, not taken
+under the refresh lock (no new lock order): a reconnect that commits between
+that read and the write can let one older reading land, stamped with its own
+generation, the same window as the workspace path. The organization write
+merges under the quota row lock, as the workspace path does; the owner's
+write merges from the owner reader and is fenced on the revision it merged
+from, so a reading that raced another quota write at the same generation
+re-reads and re-merges once before it is dropped.
 
 Stored state without a credential read. A person's own personal
 connections, with their status and stored quota (exhaustion, windows and
