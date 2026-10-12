@@ -1090,7 +1090,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null> {
     const command = BrowserActionCommand.parse(commandInput);
+    // Input counts as sent once an effectful command left browserd, so a later
+    // unresponsive-tab deadline must keep the action's outcome uncertain.
+    let effects: { state: TargetState; before: number } | undefined;
     const observation = await this.withTarget(command.targetId, async (state, info) => {
+      effects = { state, before: state.actionEffectCount };
       if (!state.dialog) await this.refreshFrame(state);
       this.assertExpectedGenerations(command, state);
       const actions = command.action.type === "batch" ? command.action.actions : [command.action];
@@ -1215,6 +1219,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
     }).catch((error: unknown) => {
+      if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
+        throw effects && effects.state.actionEffectCount !== effects.before
+          ? new InteractionOutcomeUnknownDriverError(
+              "tab_not_responding",
+              `${TAB_NOT_RESPONDING_MESSAGE} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
+            )
+          : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
+      }
       if (error instanceof CdpSessionDetachedError) {
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
@@ -1615,6 +1627,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // A renderer that died mid-command ends that command through the detach
       // below; report the crash itself rather than the transport symptom.
       if (this.crashedTargets.has(targetId)) throw tabCrashedError();
+      if (error instanceof CdpCommandTimeoutError && error.sessionId)
+        throw tabNotRespondingError(error);
       throw error;
     }
   }
@@ -1692,6 +1706,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await connection
         .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 500 })
         .catch(() => undefined);
+      if (error instanceof CdpCommandTimeoutError && error.sessionId)
+        throw tabNotRespondingError(error);
       throw error;
     } finally {
       stopCrashWatch();
@@ -2309,10 +2325,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         !(error instanceof CdpProtocolError && error.code === -32_000)
       )
         throw error;
-      const timeout = error instanceof CdpCommandTimeoutError;
+      if (error instanceof CdpCommandTimeoutError) throw tabNotRespondingError(error);
       const failure = new InteractionControllerError(
-        timeout ? "timeout" : "resource_unavailable",
-        `browser frame inspection ${timeout ? "timed out" : "unavailable"} during Page.getFrameTree`,
+        "resource_unavailable",
+        "browser frame inspection unavailable during Page.getFrameTree",
         true,
       );
       failure.cause = error;
@@ -4733,6 +4749,18 @@ function tabCrashedError(): InteractionDefiniteDriverError {
     "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
     false,
   );
+}
+
+const TAB_NOT_RESPONDING_MESSAGE =
+  "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";
+
+/** A page-scoped command deadline means this tab stopped answering, not that
+ * the browser or its transport was lost. Waiting again cannot help until the
+ * tab is reloaded or replaced, so the diagnosis is definite and not retryable. */
+function tabNotRespondingError(cause: CdpCommandTimeoutError): InteractionControllerError {
+  const failure = new InteractionControllerError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
+  failure.cause = cause;
+  return failure;
 }
 
 function frameStreamDiagnostic(event: string, fields: Readonly<Record<string, unknown>>): void {

@@ -1653,6 +1653,11 @@ opaque request references at the model boundary. The MCP error renderer retains
 `outcomeUnknown` and discourages automatic action retries; uncertain execution
 still throws from the interaction executor and never becomes a successful result.
 
+Page-command deadlines preserve a definite `tab_not_responding` diagnosis through
+browserd and the API with reload/close guidance, without replacing a live browser.
+Pre-input failures are definite; already-sent input retains uncertain effects and
+must not replay. Other tabs keep their independent authority and queues.
+
 An attached tab's debugger disconnect invalidates only its cached target,
 document, frame and element authority. Read-only recovery can attach the same
 surviving tab with fresh fences; explicit cancellation and uncertain effects

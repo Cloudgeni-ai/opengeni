@@ -4564,6 +4564,22 @@ export function parseBrowserScreenshotOptions(
   };
 }
 
+/** Preserve the controller's definite tab diagnosis through the public API.
+ * This only handles typed read/pre-dispatch failures. Dispatched action
+ * uncertainty stays in the action receipt, never relabeled as a safe retry. */
+export function browserTabNotRespondingError(error: unknown): unknown {
+  if (!(error instanceof BrowserControlRequestError) || error.error.code !== "tab_not_responding")
+    return error;
+  const failure = new ApiHttpError(409, {
+    code: "tab_not_responding",
+    message: error.error.message,
+    retryable: false,
+    outcomeUnknown: false,
+  });
+  failure.cause = error;
+  return failure;
+}
+
 /** Keep a definite read timeout useful without publishing driver diagnostics. */
 export function browserScreenshotError(error: unknown): unknown {
   if (error instanceof BrowserControlRequestError && error.error.code === "timeout") {
@@ -5165,6 +5181,8 @@ function recordAttachedBrowserUnavailable(
 }
 
 function browserRouteError(error: unknown): HTTPException {
+  const unresponsiveTab = browserTabNotRespondingError(error);
+  if (unresponsiveTab instanceof ApiHttpError) return unresponsiveTab;
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;

@@ -771,6 +771,7 @@ export const ErrorCode = z.enum([
   "codex_compaction_v2_provider_locked",
   "provider_verification_failed",
   "upstream_unavailable",
+  "tab_not_responding",
   "internal_error",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;

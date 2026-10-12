@@ -983,6 +983,7 @@ export type InteractionError = {
     | "outcome_unknown"
     | "invalid_action"
     | "timeout"
+    | "tab_not_responding"
     | "controller_lost"
     | "driver_failed";
   message: string;

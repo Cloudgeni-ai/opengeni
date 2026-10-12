@@ -37,6 +37,60 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test.each(["browser_read", "browser_act"] as const)(
+    "%s preserves the definite tab diagnosis at the model boundary",
+    async (tool) => {
+      const message = "This tab is not responding. Reload or close it.";
+      const failure = new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            code: "tab_not_responding",
+            message,
+            retryable: false,
+            outcomeUnknown: false,
+          },
+        }),
+      );
+      const definitions = createInteractionAttemptToolDefinitions({
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+        transport: partialTransport({
+          observeBrowserTarget: async () => {
+            throw failure;
+          },
+          getBrowserTargetState: async () => {
+            throw failure;
+          },
+        }),
+      });
+      const result = await definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: "hung-tab",
+          ...(tool === "browser_act"
+            ? { action: { type: "click", locator: { kind: "css", selector: "button" } } }
+            : {}),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: "tab_not_responding",
+            message: expect.stringContaining(message),
+            retryable: false,
+          },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain("network_error");
+      expect(JSON.stringify(result)).not.toContain("outcome_unknown");
+    },
+  );
+
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,
