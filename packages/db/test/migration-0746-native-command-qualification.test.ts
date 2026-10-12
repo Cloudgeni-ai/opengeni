@@ -29,6 +29,7 @@ import { nativeCommandQualificationTriggerBindings } from "../src/native-command
 import {
   disableNativeCommandEnrollment,
   inspectNativeCommandProviderQualification,
+  selectNativeCommandProviderProtocol,
   loadNativeCommandBirthQualification,
   loadNativeBrokerBootstrapAdmission,
   publishNativeCommandQualification,
@@ -1355,6 +1356,57 @@ test("broker qualifications retain exact pins and do not inherit router or pre-e
     status: "blocked",
     reason: "protocol_unqualified",
   });
+  const routerScope = scopeFor(ws, routerBorn.id);
+  await warming(routerScope);
+  const routerCreate = createInput(routerScope, 0);
+  await beginModalProviderCreate(app.db, routerCreate);
+  const routerPhysical = await warm(routerScope, routerCreate);
+  for (const [requested, selected] of [
+    ["native-subreaper-v1", "native-subreaper-broker-channel-v1"],
+    ["native-subreaper-pty-v1", "native-subreaper-broker-channel-pty-v1"],
+  ] as const) {
+    expect(
+      await selectNativeCommandProviderProtocol(app.db, {
+        ...routerScope,
+        ...routerPhysical,
+        protocol: requested,
+        sourceSha: SOURCE,
+      }),
+    ).toMatchObject({ status: "enrolled", protocol: requested, qualification: { id: router.id } });
+    expect(
+      await selectNativeCommandProviderProtocol(app.db, {
+        ...scope,
+        ...physical,
+        protocol: requested,
+        sourceSha: SOURCE,
+      }),
+    ).toMatchObject({ status: "enrolled", protocol: selected, qualification: { id: q.id } });
+    expect(
+      await selectNativeCommandProviderProtocol(app.db, {
+        ...scope,
+        ...physical,
+        protocol: requested,
+        sourceSha: "f".repeat(40),
+      }),
+    ).toMatchObject({ status: "blocked", reason: "source_identity_unqualified" });
+    expect(
+      await selectNativeCommandProviderProtocol(app.db, {
+        ...scope,
+        ...physical,
+        providerInstanceId: "sb-foreign",
+        protocol: requested,
+        sourceSha: SOURCE,
+      }),
+    ).toMatchObject({ status: "blocked" });
+    expect(
+      await selectNativeCommandProviderProtocol(app.db, {
+        ...scopeFor(ws, legacy.id),
+        ...physical,
+        protocol: requested,
+        sourceSha: SOURCE,
+      }),
+    ).toEqual({ status: "legacy" });
+  }
 });
 
 test("broker create admission rejects missing, changed and unqualified plans without recording a dispatch", async () => {

@@ -23,7 +23,7 @@ import {
 } from "@opengeni/db/retained-provider-commands";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
-  inspectNativeCommandProviderQualification,
+  selectNativeCommandProviderProtocol,
   adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
   retainedProviderCommandPersistence,
@@ -1159,7 +1159,7 @@ export function wrapTurnBoxWithRouting(
     requiredProviderSupervisionReady: (protocol) => supervisedCommandProtocolReady(db, protocol),
     qualifiedProviderSupervision: async (backend, protocol) => {
       if (!ids.homeLease || backend.sandboxId !== null) return { status: "legacy" };
-      return inspectNativeCommandProviderQualification(db, {
+      return selectNativeCommandProviderProtocol(db, {
         accountId: ids.homeLease.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.homeLease.sandboxGroupId,
@@ -1441,7 +1441,7 @@ export function wrapLazyTurnBoxWithRouting(
     qualifiedProviderSupervision: async (backend, protocol) => {
       const home = ids.homeLease ?? args.homeLeaseIdentity;
       if (!home || backend.sandboxId !== null) return { status: "legacy" };
-      return inspectNativeCommandProviderQualification(db, {
+      return selectNativeCommandProviderProtocol(db, {
         accountId: home.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: home.sandboxGroupId,

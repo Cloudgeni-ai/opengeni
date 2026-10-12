@@ -4,7 +4,7 @@ import {
   canonicalModalCheckpointProviderBinding,
   NativeBrokerArtifactPin,
   NativeBrokerCreatePlan,
-  type CommandSupervisionProtocol,
+  CommandSupervisionProtocol,
   type NativeBrokerCommandProtocol,
 } from "@opengeni/contracts";
 import { withRlsContext, isTransactionHandle, type Database } from "./database";
@@ -65,6 +65,9 @@ export type NativeCommandProviderQualification =
   | { status: "legacy" }
   | { status: "enrolled"; qualification: NativeCommandBirthQualification }
   | { status: "blocked"; reason: string; qualification?: NativeCommandBirthQualification };
+type LoadedNativeCommandProviderDecision =
+  | Exclude<NativeCommandProviderQualification, { status: "blocked" }>
+  | { status: "blocked"; reason: string; qualification: NativeCommandBirthQualification };
 
 const BootstrapAdmissionInput = z
   .object({
@@ -228,15 +231,14 @@ export async function loadNativeCommandBirthQualification(
 /** Scope is derived by the trusted original route/lease admission. Never
  * accept sourceSha from request metadata or deployment telemetry: it must be
  * the immutable built candidate source identity tested by the operator. */
-export async function inspectNativeCommandProviderQualification(
+async function loadNativeCommandProviderDecision(
   db: Database,
   input: NativeCommandQualificationScope & {
     providerInstanceId: string;
     leaseEpoch: number;
-    protocol: CommandSupervisionProtocol | NativeBrokerCommandProtocol;
     sourceSha: string;
   },
-): Promise<NativeCommandProviderQualification> {
+): Promise<LoadedNativeCommandProviderDecision> {
   return withRlsContext(db, input, async (tx) => {
     await assertNativeCommandQualificationReady(tx);
     const [row] = await tx.execute<{
@@ -262,12 +264,62 @@ export async function inspectNativeCommandProviderQualification(
         reason: "source_identity_unqualified",
         qualification: decision.qualification,
       };
-    if (!decision.qualification.protocols.some((protocol) => protocol === input.protocol))
-      return {
-        status: "blocked",
-        reason: "protocol_unqualified",
-        qualification: decision.qualification,
-      };
     return decision;
   });
+}
+
+/** Exact-protocol inspection is deliberately distinct from selecting a
+ * transport for a command shape. Retained callers may not reinterpret their
+ * original protocol merely because a newer artifact is available. */
+export async function inspectNativeCommandProviderQualification(
+  db: Database,
+  input: NativeCommandQualificationScope & {
+    providerInstanceId: string;
+    leaseEpoch: number;
+    protocol: CommandSupervisionProtocol | NativeBrokerCommandProtocol;
+    sourceSha: string;
+  },
+): Promise<NativeCommandProviderQualification> {
+  const decision = await loadNativeCommandProviderDecision(db, input);
+  if (
+    decision.status === "legacy" ||
+    (decision.status === "blocked" && decision.reason === "source_identity_unqualified")
+  )
+    return decision;
+  if (!decision.qualification.protocols.some((protocol) => protocol === input.protocol))
+    return {
+      status: "blocked",
+      reason: "protocol_unqualified",
+      qualification: decision.qualification,
+    };
+  return decision;
+}
+
+/** Select from the original frozen birth and exact live physical enrollment,
+ * not adapter capabilities, current deployment defaults or error fallback.
+ * The requested legacy name expresses pipe/PTY shape only; it grants no new
+ * qualification and cannot change an existing retained command's protocol. */
+export async function selectNativeCommandProviderProtocol(
+  db: Database,
+  input: NativeCommandQualificationScope & {
+    providerInstanceId: string;
+    leaseEpoch: number;
+    protocol: CommandSupervisionProtocol;
+    sourceSha: string;
+  },
+): Promise<
+  | Exclude<NativeCommandProviderQualification, { status: "enrolled" }>
+  | {
+      status: "enrolled";
+      qualification: NativeCommandBirthQualification;
+      protocol: CommandSupervisionProtocol | NativeBrokerCommandProtocol;
+    }
+> {
+  const requested = CommandSupervisionProtocol.parse(input.protocol);
+  const decision = await loadNativeCommandProviderDecision(db, input);
+  if (decision.status !== "enrolled") return decision;
+  return {
+    ...decision,
+    protocol: decision.qualification.protocols[requested === "native-subreaper-pty-v1" ? 1 : 0],
+  };
 }

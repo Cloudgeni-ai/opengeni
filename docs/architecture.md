@@ -103,6 +103,11 @@ the task-router adapter explicitly refuses that separate locator.
 `NativeBrokerRetainedCommand` joins protected persistence to bounded committed
 output and exact control requests. A request-keyed immutable control-reply index
 distinguishes positive pre-dispatch rejection from unknown control outcomes.
+New worker/API command routing selects its pipe/PTY protocol from the frozen
+birth and exact physical qualification, never from provider capability fallback.
+`selectNativeCommandProviderProtocol` is distinct from exact-protocol inspection
+of an already retained command. Broker session creation/setup installation is
+still incomplete, so protocol selection alone is not activation.
 The retained-input transaction locks an existing stdin admission and commits
 its command byte offset with the encrypted request. Larger writes retain one
 complete encrypted payload plan and storage pages (`0753`) before dispatch;

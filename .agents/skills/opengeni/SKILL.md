@@ -114,6 +114,11 @@ Then open the smallest source files that answer the question:
   that observation gate, not the canonical input state machine. Last release
   aborts and joins the read; closing a sibling does not terminate another owner.
   Application installation and physical provider qualification remain open.
+  Worker/API new-command routing uses `selectNativeCommandProviderProtocol` in
+  `packages/db/src/native-command-qualification.ts` to select the original
+  frozen tuple's pipe/PTY protocol. Retained exact-protocol inspection remains
+  separate; neither adapter capability nor launch failure permits a fallback.
+  The selector does not install broker creation or its setup-command ownership.
   `native-command-broker-coordinator.ts` shares one demand-driven output reader,
   serializes input through native acceptance and never silently replays uncertain
   dispatch. Explicit global output ACK retires only the committed transport

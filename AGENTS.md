@@ -594,6 +594,11 @@ depend on that query succeeding. Retain definite faults before refusal, never
 turn timeout into fault or exit proof, and abort/join the final owner's actual
 read before replacement. The adapter remains uninstalled in application routing.
 
+New command routing must select its pipe/PTY protocol from the original frozen
+qualification before admission. Keep exact-protocol retained inspection separate;
+never infer broker selection from adapter presence or retry a rejected broker
+launch through the router. Worker and API-direct starts use the same selector.
+
 Broker stdin framing preserves one canonical child admission for the full
 write. Retain the complete payload and byte range before chunk dispatch; frame
 UUIDs are transport identities, not new authority. Require exact native

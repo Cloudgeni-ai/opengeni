@@ -18,7 +18,7 @@ import {
   createProviderCommandRetainer,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
-import { inspectNativeCommandProviderQualification } from "@opengeni/db";
+import { selectNativeCommandProviderProtocol } from "@opengeni/db";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   retainedProviderCommandPersistence,
@@ -594,7 +594,7 @@ export function wrapChannelABoxWithRouting(
     requiredProviderSupervisionReady: (protocol) => supervisedCommandProtocolReady(db, protocol),
     qualifiedProviderSupervision: async (backend, protocol) => {
       if (!homeLease || backend.sandboxId !== null) return { status: "legacy" };
-      return inspectNativeCommandProviderQualification(db, {
+      return selectNativeCommandProviderProtocol(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: homeLease.sandboxGroupId,

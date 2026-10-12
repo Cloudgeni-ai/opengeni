@@ -613,13 +613,15 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
         resolveActiveBackend: async () => backend,
         requiredProviderSupervisionReady: async () => true,
-        qualifiedProviderSupervision: async () => {
+        qualifiedProviderSupervision: async (_backend, protocol) => {
           if (mode === "cohort_selection") {
             enterCapability();
             await capabilityPending;
             return { status: "blocked", reason: "physical_binding_unqualified" };
           }
-          return mode === "cohort_capability" ? { status: "enrolled" } : { status: "legacy" };
+          return mode === "cohort_capability"
+            ? { status: "enrolled", protocol }
+            : { status: "legacy" };
         },
         beforeMutation: async () => {
           helperAdmissions++;

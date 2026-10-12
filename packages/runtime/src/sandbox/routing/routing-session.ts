@@ -57,6 +57,7 @@ import {
   type ProviderCommandSession,
   type ProviderCommandOutput,
   type ProviderCommandInputAdmission,
+  type AdmittedCommandSupervisionProtocol,
 } from "../provider-command-session";
 import type { SandboxProviderCommand, CommandSupervisionProtocol } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
@@ -233,12 +234,16 @@ export interface RoutingSandboxSessionDeps {
   providerCommandHandle?: (admission: unknown) => number | undefined;
   providerSupervisionReady?: () => Promise<boolean>;
   /** Mandatory turn-owned launches do not activate adopted background launches. */
-  requiredProviderSupervisionReady?: (protocol: CommandSupervisionProtocol) => Promise<boolean>;
+  requiredProviderSupervisionReady?: (
+    protocol: AdmittedCommandSupervisionProtocol,
+  ) => Promise<boolean>;
   qualifiedProviderSupervision?: (
     backend: ResolvedActiveBackend,
     protocol: CommandSupervisionProtocol,
   ) => Promise<
-    { status: "legacy" } | { status: "enrolled" } | { status: "blocked"; reason: string }
+    | { status: "legacy" }
+    | { status: "enrolled"; protocol: AdmittedCommandSupervisionProtocol }
+    | { status: "blocked"; reason: string }
   >;
   providerCommandPersistence?: (process: RoutingRetainedProcess) => ProviderCommandPersistence;
   /**
@@ -377,16 +382,19 @@ export interface RoutingSandboxSessionDeps {
   }) => Promise<DefaultBackendLossResult | null>;
 }
 
-function eligibleForSupervision(args: unknown): boolean {
+type CommandSupervisionShape = { protocol: CommandSupervisionProtocol; supported: boolean };
+function commandSupervisionShape(args: unknown): CommandSupervisionShape | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const input = args as { tty?: unknown; runAs?: unknown };
+  const protocol = input.tty === true ? "native-subreaper-pty-v1" : "native-subreaper-v1";
   const required = requiredCommandSupervisionProtocol() ?? turnCommandSupervisionProtocol();
-  return Boolean(
-    args &&
-    typeof args === "object" &&
-    (required === "native-subreaper-pty-v1"
-      ? (args as { tty?: boolean }).tty === true
-      : !(args as { tty?: boolean }).tty) &&
-    !(args as { runAs?: string }).runAs,
-  );
+  return {
+    protocol,
+    supported:
+      !input.runAs &&
+      (input.tty === undefined || typeof input.tty === "boolean") &&
+      (!required || required === protocol),
+  };
 }
 
 export type RoutingSandboxOperationObservation = {
@@ -1855,7 +1863,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     op: string,
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
-    supervisionEligible = false,
+    supervisionShape?: CommandSupervisionShape,
     onMutationAdmissionRefused?: (error: unknown) => void,
     pinnedBackend?: ResolvedActiveBackend,
     retainedProcessPurpose?: RetainedProcessPurpose,
@@ -1867,7 +1875,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         mutatesWorkspace,
         fn,
         undefined,
-        supervisionEligible,
+        supervisionShape,
         onMutationAdmissionRefused,
         pinnedBackend,
         retainedProcessPurpose,
@@ -1883,7 +1891,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         mutatesWorkspace,
         fn,
         timing,
-        supervisionEligible,
+        supervisionShape,
         onMutationAdmissionRefused,
         pinnedBackend,
         retainedProcessPurpose,
@@ -1934,7 +1942,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     firstOperationTiming?: RoutingSandboxFirstOperationTiming,
-    supervisionEligible = false,
+    supervisionShape?: CommandSupervisionShape,
     onMutationAdmissionRefused?: (error: unknown) => void,
     pinnedBackend?: ResolvedActiveBackend,
     retainedProcessPurpose?: RetainedProcessPurpose,
@@ -1968,17 +1976,30 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       const prepare = async () => {
         const turnProtocol =
           backend.kind === "modal" ? turnCommandSupervisionProtocol() : undefined;
-        const qualification = turnProtocol
-          ? ((await this.deps.qualifiedProviderSupervision?.(backend, turnProtocol)) ?? {
-              status: "legacy" as const,
-            })
-          : { status: "legacy" as const };
+        const requestedProtocol =
+          turnProtocol ?? (commandStart ? supervisionShape?.protocol : undefined);
+        const supervisionEligible = supervisionShape?.supported === true;
+        const qualification =
+          backend.kind === "modal" && requestedProtocol
+            ? ((await this.deps.qualifiedProviderSupervision?.(backend, requestedProtocol)) ?? {
+                status: "legacy" as const,
+              })
+            : { status: "legacy" as const };
         if (qualification.status === "blocked")
           throw new Error(`Qualified Modal command launch blocked: ${qualification.reason}`);
+        if (
+          qualification.status === "enrolled" &&
+          qualification.protocol !== requestedProtocol &&
+          qualification.protocol !==
+            (requestedProtocol === "native-subreaper-pty-v1"
+              ? "native-subreaper-broker-channel-pty-v1"
+              : "native-subreaper-broker-channel-v1")
+        )
+          throw new Error("Qualified Modal command protocol changed its requested pipe/PTY shape");
         const requiredProtocol =
           backend.kind === "modal"
             ? qualification.status === "enrolled"
-              ? turnProtocol
+              ? qualification.protocol
               : requiredCommandSupervisionProtocol()
             : undefined;
         if (requiredProtocol && !supervisionEligible)
@@ -1988,7 +2009,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           supervisionEligible &&
           (requiredProtocol
             ? ((await this.deps.requiredProviderSupervisionReady?.(requiredProtocol)) ?? false)
-            : turnProtocol !== "native-subreaper-pty-v1" &&
+            : requestedProtocol !== "native-subreaper-pty-v1" &&
               ((await this.deps.providerSupervisionReady?.()) ?? false));
         if (requiredProtocol && !supervisionReady)
           throw new Error(
@@ -2613,7 +2634,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         }
         throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
       },
-      eligibleForSupervision(args),
+      commandSupervisionShape(args),
     );
   }
 
@@ -2671,7 +2692,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             snapshot(provider, result);
             return result;
           },
-          eligibleForSupervision(input),
+          commandSupervisionShape(input),
           undefined,
           backend,
           "synchronous_filesystem",
@@ -2762,7 +2783,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           }
           throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
         },
-        eligibleForSupervision(args),
+        commandSupervisionShape(args),
         options?.onMutationAdmissionRefused,
       );
     } catch (error) {

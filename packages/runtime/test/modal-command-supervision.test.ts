@@ -282,7 +282,7 @@ test.each(["native-subreaper-v1", "native-subreaper-pty-v1"] as const)(
         expect(actual).toEqual(backend);
         expect(requested).toBe(protocol);
         qualified++;
-        return { status: "enrolled" };
+        return { status: "enrolled", protocol };
       },
       providerCommandHandle: () => 41,
       providerCommandPersistence: () => f.persistence,

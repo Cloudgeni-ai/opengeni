@@ -118,8 +118,16 @@ does not qualify. No provider I/O runs inside the admission transaction.
 
 This is request binding and lifecycle ordering, not provider qualification.
 Neither the plan nor its in-memory proof grants command authority or verifies
-the initial stream. Application code does not yet select the opt-in. The frozen
-cohort/qualified image selection, authenticated task and initial stderr
+the initial stream. Application creation does not yet select the opt-in.
+Command routing now selects pipe/PTY transport from the exact frozen birth and
+live physical qualification through `selectNativeCommandProviderProtocol`;
+worker turns and API-direct command starts share that selection. A selected
+broker protocol must pass its own database-readiness and exact-instance
+capability gates before mutation admission or reservation. A changed shape,
+source, physical binding or missing broker adapter is not permission to use the
+router. Exact-protocol inspection remains separate for retained commands;
+older births are not reinterpreted. This selection does not construct or
+activate a broker. The frozen cohort/qualified image creation, authenticated task and initial stderr
 verification, qualified verified-prefix composition and session adapter must be
 connected to application creation before activation. Fake-provider lifecycle tests do not
 replace that physical proof, and this recipe cannot enroll an old warm sandbox
@@ -592,7 +600,9 @@ waiting for delivery, so cancellation and other commands remain usable.
 
 The shared coordinator provides input scheduling and demand-driven observation. The dedicated
 command-session surface carries exact private admissions; selecting/installing
-it in application sessions remains an unimplemented gate.
+it in application sessions remains an unimplemented gate. Routing's qualified
+protocol selection is present for new commands, but cannot authorize a missing
+session adapter or bypass its bootstrap/setup ownership.
 
 Rolling migration `0748` adds immutable `request_reply` and
 `stdin_reservation` indexes. Native status/error replies commit with their
