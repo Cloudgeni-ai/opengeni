@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import type { ConnectionMetadata } from "@opengeni/contracts";
+import type { ConnectionMetadata, VaultErrorCode } from "@opengeni/contracts";
 import {
   getConnectionMetadata,
   loadConnectionCredentialForBroker,
@@ -9,8 +9,27 @@ import {
   createVaultProviderRegistry,
   VaultProviderError,
   type VaultProvider,
+  type VaultProviderErrorCode,
   type VaultProviderRegistry,
 } from "@opengeni/vaults";
+
+/**
+ * Provider error codes as vault API error codes (§10B.1.1). `provider_not_found`
+ * is the vault (or, for reads, the field); `provider_permission_denied` is
+ * `vault_read_only` for writes and `vault_permission_denied` otherwise.
+ */
+export function vaultErrorCodeForProvider(
+  code: VaultProviderErrorCode,
+  operation: "read" | "write" | "vault",
+): VaultErrorCode {
+  if (code === "provider_not_found") {
+    return operation === "read" ? "vault_field_not_found" : "vault_not_found";
+  }
+  if (code === "provider_permission_denied") {
+    return operation === "write" ? "vault_read_only" : "vault_permission_denied";
+  }
+  return code;
+}
 
 /**
  * 1Password service-account connections (dossier §10.9). The token lives in

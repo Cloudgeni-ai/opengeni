@@ -5,7 +5,6 @@ import {
   InstallOnePasswordResponse,
   ProviderVaultMeta,
   VAULT_ERROR_HTTP_STATUS,
-  type VaultErrorCode,
 } from "@opengeni/contracts";
 import {
   ONEPASSWORD_CREDENTIAL_ROLE,
@@ -16,6 +15,7 @@ import {
   onePasswordCredentialBundle,
   requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
+  vaultErrorCodeForProvider,
   type ApiRouteDeps,
   type OnePasswordConnectionMetadata,
   type OnePasswordVaultProviderFactory,
@@ -39,20 +39,9 @@ function routeProviderContext(connectionId: string | null): VaultProviderContext
   return { connectionId, budget: { take() {} } };
 }
 
-/**
- * Provider error codes surface as the vault API's error codes (§10B.1.1);
- * `provider_not_found` and `provider_permission_denied` have vault-level names.
- */
-export function vaultProviderErrorCode(code: string, write: boolean): VaultErrorCode {
-  if (code === "provider_not_found") return "vault_not_found";
-  if (code === "provider_permission_denied")
-    return write ? "vault_read_only" : "vault_permission_denied";
-  return code as VaultErrorCode;
-}
-
 function providerErrorResponse(c: Context, error: unknown, write = false) {
   if (!isVaultProviderError(error)) throw error;
-  const code = vaultProviderErrorCode(error.code, write);
+  const code = vaultErrorCodeForProvider(error.code, write ? "write" : "vault");
   const status = VAULT_ERROR_HTTP_STATUS[code] ?? 503;
   if (error.retryAfterMs) c.header("retry-after", String(Math.ceil(error.retryAfterMs / 1000)));
   return c.json(

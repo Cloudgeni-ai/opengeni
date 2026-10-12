@@ -88,6 +88,7 @@ import {
   vaultItemReferences,
   type VaultCallerAuthority,
 } from "./mapping";
+import { vaultErrorCodeForProvider } from "./provider-registry";
 import { chooseSecretCandidate, createSecretResolver } from "./secret-resolver";
 import type { VaultRequestActor, VaultServiceDeps } from "./types";
 
@@ -420,8 +421,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           source: read.source,
           providerConnectionId: read.providerConnectionId,
         });
+        // Providers charge the budget per call themselves.
         const budget = createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt);
-        budget.take("read");
         const [value] = await provider.readFields(
           { connectionId: read.providerConnectionId, budget },
           read.providerVaultRef ?? "",
@@ -440,8 +441,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         }
       } catch (error) {
         if (isVaultProviderError(error)) {
-          const code = error.code === "provider_not_found" ? "vault_field_not_found" : error.code;
-          throw new VaultError(code, error.message);
+          throw new VaultError(vaultErrorCodeForProvider(error.code, "read"), error.message);
         }
         throw error;
       }
