@@ -30,7 +30,7 @@ const compat = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.
 const fences = "0717_subscription_authority_fences.sql";
 // Built from the owner reader withheld 0715 rewrites; it follows 0715.
-const personalConnectionVersions = "0728_subscription_core_personal_connection_versions.sql";
+const personalConnectionVersions = "0729_subscription_core_personal_connection_versions.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

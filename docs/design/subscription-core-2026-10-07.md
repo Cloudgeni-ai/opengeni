@@ -4836,7 +4836,7 @@ core read before C3 fails closed in the registry.
   including one with no reading. A row without one throws (fail closed: a
   connected account never reports 0 or null); every shared row read carries
   it, and a personal row takes it from the owner-only
-  `readSubscriptionCorePersonalConnectionVersionsInTransaction` (0728,
+  `readSubscriptionCorePersonalConnectionVersionsInTransaction` (0729,
   derived from the 0707 owner reader, returning only id and version) or is
   not visible. `connected` is always true: the readers return no
   disconnected connection. Stored windows stay visible across credential
@@ -4987,7 +4987,7 @@ core read before C3 fails closed in the registry.
   assignments; the adapter's `usageReadingsComplete` with the matching
   `applyQuotaObservation` option and the conformance expectation; `applied`
   on the probe's `read` result; and, copied unchanged from C2b, `version` on
-  the shared connection row reads with the 0728 owner-only personal version
+  the shared connection row reads with the 0729 owner-only personal version
   reader (renumbered at merge).
 
 ### 5.4 Workspace-managed connections as organization accounts

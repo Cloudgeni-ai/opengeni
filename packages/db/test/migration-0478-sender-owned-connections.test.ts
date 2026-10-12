@@ -88,7 +88,7 @@ const withheldMigrations = [
   // Built from the connect writer withheld 0715 rewrites; it follows 0715.
   "0728_subscription_core_personal_connect_format.sql",
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
-  "0728_subscription_core_personal_connection_versions.sql",
+  "0729_subscription_core_personal_connection_versions.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

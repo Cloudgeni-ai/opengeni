@@ -30,7 +30,7 @@ const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
-const PERSONAL_CONNECTION_VERSIONS = "0728_subscription_core_personal_connection_versions.sql";
+const PERSONAL_CONNECTION_VERSIONS = "0729_subscription_core_personal_connection_versions.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 83);
 const MODEL = "codex/gpt-5.5";

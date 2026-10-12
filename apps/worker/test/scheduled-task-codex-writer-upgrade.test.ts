@@ -51,7 +51,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // 0726 patches the acceptance writers 0688 and 0707 define; it follows them.
   const acceptanceReads = "0726_subscription_personal_acceptance_reads.sql";
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
-  const personalConnectionVersions = "0728_subscription_core_personal_connection_versions.sql";
+  const personalConnectionVersions = "0729_subscription_core_personal_connection_versions.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.

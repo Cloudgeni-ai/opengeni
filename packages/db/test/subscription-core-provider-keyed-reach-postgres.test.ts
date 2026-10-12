@@ -52,7 +52,7 @@ const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
-const PERSONAL_CONNECTION_VERSIONS = "0728_subscription_core_personal_connection_versions.sql";
+const PERSONAL_CONNECTION_VERSIONS = "0729_subscription_core_personal_connection_versions.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -521,12 +521,12 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         sql`select current_user as role`,
       );
       expect(current?.role).toBe("opengeni_app");
-      // 0715 and 0728 and 0728 (built on it) are still held back here, so
-      // this binary also reports the routines 0728 and 0728 add as missing.
+      // 0715, and 0728 and 0729 (built on it), are still held back here, so
+      // this binary also reports the routines 0728 and 0729 add as missing.
       expect(staged!.unprovisionedPosture).toEqual([
         "subscription M3 precursor private routine connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text) is missing or unsafe",
-        "subscription M3 precursor private routine subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint) is missing or unsafe",
         "subscription M3 precursor private routine subscription_core_personal_connection_versions(text, uuid, uuid, text) is missing or unsafe",
+        "subscription M3 precursor private routine subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint) is missing or unsafe",
       ]);
       // Every runtime routine 0713 adds is executable before provisioning,
       // which a previous binary's readiness requires of any opengeni_private
