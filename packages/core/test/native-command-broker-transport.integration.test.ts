@@ -29,6 +29,7 @@ import {
 } from "@opengeni/db/native-command-broker-transport";
 import {
   initialNativeBrokerTransportState,
+  durableNativeBrokerTransport,
   NativeBrokerDriver,
   NativeBrokerCoordinator,
   NativeBrokerCommandSession,
@@ -47,6 +48,7 @@ import {
   NativeBrokerInitialDiagnosticsError,
 } from "@opengeni/runtime/sandbox";
 import { encodeNativeBrokerCommandDefinition } from "../../runtime/src/sandbox/providers/native-command-broker-definition";
+import { nativeBrokerStdinChunkRequestId } from "../../runtime/src/sandbox/providers/native-command-broker-stdin";
 import {
   createDurableNativeBrokerTransport,
   registerCapturedNativeBrokerBootstrap,
@@ -62,6 +64,7 @@ import {
   withCommandSupervisionReady,
   withProviderCommandHandle,
   withSupervisedLaunchReservation,
+  withProviderCommandInputAdmission,
 } from "../../runtime/src/sandbox/provider-command-session";
 
 let database: SharedTestDatabase, client: DbClient;
@@ -1623,6 +1626,169 @@ test("missing, partial and invalid native stdin outcomes never authorize a later
   }
 });
 
+test("large stdin retains every original byte once and gates each frame on exact native delivery", async () => {
+  const { f, active, input, counter, custody } = await stdinFixture();
+  const bytes = Buffer.from("retained-original-€\0".repeat(4200));
+  const plans = await Promise.all(
+    [1, 2].map(() => f.service().prepareRetainedStdinPayload(active.writerId, 1, input, bytes)),
+  );
+  expect(plans[0]).toEqual(plans[1]);
+  expect(await counter()).toBe(bytes.length);
+  await expect(
+    f.service().prepareRetainedStdinPayload(active.writerId, 1, input, Buffer.from(bytes).fill(0)),
+  ).rejects.toThrow();
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, input, Buffer.from("replacement")),
+  ).rejects.toThrow();
+  const other = await custody.inputAdmission();
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, other, Buffer.from("overtake")),
+  ).rejects.toThrow();
+  const stored =
+    await database.admin`select kind, value_encrypted from native_command_broker_entries where broker_id=${f.binding.brokerId} and kind in ('stdin_plan','stdin_page')`;
+  expect(stored.filter((row) => row.kind === "stdin_plan")).toHaveLength(1);
+  expect(stored.filter((row) => row.kind === "stdin_page")).toHaveLength(
+    Math.ceil(bytes.length / 65536),
+  );
+  expect(stored.every((row) => !String(row.value_encrypted).includes("retained-original"))).toBe(
+    true,
+  );
+  let sequence = 1,
+    cursor = "1-0";
+  const received: Uint8Array[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    const result = await f.service().reserveRetainedStdinChunk(active.writerId, 1, input, offset);
+    expect(result.requestId).toBe(nativeBrokerStdinChunkRequestId(input.admissionId, offset));
+    const write = (await f
+      .service()
+      .dispatchRetainedStdinChunkIntent(active.writerId, 1, input, offset))!;
+    const decoder = new NativeBrokerFrameDecoder(f.binding.brokerId);
+    const frame = decoder.push(write.input)[0]!;
+    decoder.finish();
+    received.push(frame.payload);
+    const acceptedCursor = `${sequence + 1}-0`;
+    await f
+      .service()
+      .captureOutput(
+        cursor,
+        page(f, Buffer.from(accepted(f, write.input, ++sequence)).toString(), acceptedCursor),
+      );
+    cursor = acceptedCursor;
+    if (offset + 8192 < bytes.length)
+      await expect(
+        f.service().reserveRetainedStdinChunk(active.writerId, 1, input, offset + 8192),
+      ).rejects.toThrow();
+    const writtenCursor = `${sequence + 1}-0`;
+    await f
+      .service()
+      .captureOutput(
+        cursor,
+        page(
+          f,
+          Buffer.from(
+            nativeReply(
+              f,
+              write.input,
+              ++sequence,
+              "status",
+              { stdinWritten: true },
+              result.offset + result.byteLength,
+            ),
+          ).toString(),
+          writtenCursor,
+        ),
+      );
+    cursor = writtenCursor;
+    expect(await counter()).toBe(bytes.length);
+  }
+  expect(Buffer.concat(received)).toEqual(bytes);
+  expect(
+    (await f.service().reserveRetainedStdin(active.writerId, 1, other, Buffer.from("next"))).offset,
+  ).toBe(bytes.length);
+  expect(await counter()).toBe(bytes.length + 4);
+});
+
+test("cancelled or settled original stdin admissions cannot authorize another prepared chunk", async () => {
+  for (const cancel of [true, false]) {
+    const { f, active, input, counter, custody } = await stdinFixture();
+    const bytes = Buffer.alloc(9000, 0x61);
+    await f.service().prepareRetainedStdinPayload(active.writerId, 1, input, bytes);
+    if (cancel) await custody.persistence.requestCancellation!("explicit_stop");
+    else
+      await database.admin`update sandbox_workspace_mutation_admissions set settled_at=now(), provider_outcome='rejected' where id=${input.admissionId}`;
+    await expect(
+      f.service().reserveRetainedStdinChunk(active.writerId, 1, input, 0),
+    ).rejects.toThrow();
+    expect(await counter()).toBe(9000);
+    expect((await f.service().findRetainedStdinPlan(input, bytes))?.byteLength).toBe(9000);
+    expect(
+      await f.service().request(nativeBrokerStdinChunkRequestId(input.admissionId, 0)),
+    ).toBeNull();
+  }
+});
+
+test("failure retaining a later payload page rolls back the whole plan and canonical byte range", async () => {
+  const { f, active, input, counter } = await stdinFixture();
+  const rejected = durableNativeBrokerTransport(
+    {
+      ...f.store,
+      retainedInputTransaction: (scope, run) =>
+        f.store.retainedInputTransaction(scope, (tx) =>
+          run({
+            ...tx,
+            insert: async (entry) => {
+              if (entry.kind === "stdin_page" && entry.key.endsWith(":65536"))
+                throw new Error("fixture second page retention failed");
+              return tx.insert(entry);
+            },
+          }),
+        ),
+    },
+    f.binding,
+  );
+  await expect(
+    rejected.prepareRetainedStdinPayload(active.writerId, 1, input, Buffer.alloc(70000, 0x61)),
+  ).rejects.toThrow("second page retention failed");
+  expect(await counter()).toBe(0);
+  expect(await f.service().findRetainedStdinPlan(input, Buffer.alloc(70000, 0x61))).toBeNull();
+  expect(
+    await database.admin`select entry_key from native_command_broker_entries where broker_id=${f.binding.brokerId} and kind in ('stdin_plan','stdin_page')`,
+  ).toHaveLength(0);
+});
+
+test("large payload preparation refuses foreign scope, wrong writer, pending input and invalid size without reserving bytes", async () => {
+  const { f, active, input, counter } = await stdinFixture();
+  const bytes = Buffer.alloc(9000, 0x61);
+  for (const changed of [
+    { sessionId: crypto.randomUUID() },
+    { processId: crypto.randomUUID() },
+    { admissionId: crypto.randomUUID() },
+    { commandId: crypto.randomUUID() },
+  ])
+    await expect(
+      f.service().prepareRetainedStdinPayload(active.writerId, 1, { ...input, ...changed }, bytes),
+    ).rejects.toThrow();
+  await expect(
+    f.service().prepareRetainedStdinPayload(crypto.randomUUID(), 1, input, bytes),
+  ).rejects.toThrow();
+  for (const size of [0, 8192, 32 * 1024 * 1024 + 1])
+    await expect(
+      f.service().prepareRetainedStdinPayload(active.writerId, 1, input, Buffer.alloc(size)),
+    ).rejects.toThrow();
+  expect(await counter()).toBe(0);
+  await f.service().reserve(active.writerId, 1, {
+    ...fence(),
+    kind: "control",
+    commandId: input.commandId,
+    payload: Buffer.from("status"),
+  });
+  await expect(
+    f.service().prepareRetainedStdinPayload(active.writerId, 1, input, bytes),
+  ).rejects.toThrow();
+  expect(await counter()).toBe(0);
+  expect(await f.service().findRetainedStdinPlan(input, bytes)).toBeNull();
+});
+
 test("busy channel, invalid writer and oversized stdin roll back the canonical byte offset", async () => {
   const { f, active, input, counter, custody } = await stdinFixture();
   await expect(
@@ -2474,6 +2640,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     let index = 0,
       uncertain = false,
       dispatchCount = 0;
+    let uncertainStdinOffset: number | undefined;
     const channel: NativeBrokerChannel & NativeBrokerDiagnosticsChannel = {
       sandboxId: f.binding.sandboxId,
       taskId: f.binding.taskId,
@@ -2495,6 +2662,15 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
         dispatchCount++;
         // Model the physically measured Modal high-water input-index contract.
         if (input.index <= index) return;
+        if (uncertainStdinOffset !== undefined) {
+          const decoder = new NativeBrokerFrameDecoder(f.binding.brokerId);
+          const frame = decoder.push(input.input)[0]!;
+          decoder.finish();
+          if (frame.kind === "stdin" && frame.offset === uncertainStdinOffset) {
+            uncertain = true;
+            uncertainStdinOffset = undefined;
+          }
+        }
         // Simulate a genuinely unknown response before physical delivery. The
         // journal cannot know this and must keep the exact indexed bytes.
         if (uncertain) {
@@ -2867,6 +3043,67 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
         expect(await brokerSession!.captureCommandOutput(started)).toBe(true);
         return { command, custody: commandCustody };
       };
+
+      const chunked = await startRetained("cat > chunked-input", 5);
+      await brokerSession.releaseSupervisedCommand(5);
+      const chunkInput = await chunked.custody.inputAdmission();
+      const text = "€x\n".repeat(14_000);
+      uncertainStdinOffset = 8192; // Lose the SECOND chunk, preserving the delivered prefix.
+      await expect(
+        withProviderCommandInputAdmission(chunkInput, () =>
+          brokerSession!.writeStdin({ sessionId: 5, chars: text, yieldTimeMs: 0 }),
+        ),
+      ).rejects.toBeInstanceOf(NativeBrokerDispatchUnknownError);
+      expect(
+        (await f.service().request(nativeBrokerStdinChunkRequestId(chunkInput.admissionId, 8192)))
+          ?.phase,
+      ).toBe("dispatch_intent");
+      const beforeRecovery = dispatchCount;
+      await expect(
+        coordinator.sendRetainedStdin(chunkInput, Buffer.from(text), AbortSignal.timeout(50)),
+      ).rejects.toThrow();
+      expect(dispatchCount).toBe(beforeRecovery);
+      await driver.replayPending(undefined, chunkInput, 8192); // Explicit exact-index operator recovery.
+      await observeUntil(
+        async () =>
+          (await f.service().request(nativeBrokerStdinChunkRequestId(chunkInput.admissionId, 8192)))
+            ?.accepted === true,
+      );
+      const inputResult = await withProviderCommandInputAdmission(chunkInput, () =>
+        brokerSession!.writeStdin({ sessionId: 5, chars: text, yieldTimeMs: 0 }),
+      );
+      await brokerSession.captureCommandOutput(inputResult);
+      const finalInputOffset = Math.floor((Buffer.byteLength(text) - 1) / 8192) * 8192;
+      const finalInputReply = await f
+        .service()
+        .requestReply(nativeBrokerStdinChunkRequestId(chunkInput.admissionId, finalInputOffset));
+      expect(finalInputReply).toMatchObject({ kind: "status", offset: Buffer.byteLength(text) });
+      expect(JSON.parse(Buffer.from(finalInputReply!.payload).toString())).toEqual({
+        stdinWritten: true,
+      });
+      // Match routing's child-admission settlement after confirmed input, as
+      // the single-frame fixture above does. Do not weaken quiescence guards.
+      await database.admin`update sandbox_workspace_mutation_admissions set settled_at=now(), provider_outcome='resolved' where id=${chunkInput.admissionId}`;
+      await coordinator.send({
+        requestId: crypto.randomUUID(),
+        commandId: chunked.command.execId,
+        kind: "eof",
+        offset: Buffer.byteLength(text),
+        payload: new Uint8Array(),
+      });
+      let chunkExit: number | null = null;
+      for (let attempt = 0; attempt < 32; attempt++) {
+        const result = await brokerSession.writeStdin({ sessionId: 5, yieldTimeMs: 250 });
+        chunkExit = brokerSession.getProviderCommandOutput(result)!.exitCode;
+        await brokerSession.captureCommandOutput(result);
+        if (chunkExit !== null) break;
+      }
+      expect(chunkExit).toBe(0);
+      expect(await readFile(join(directory, "chunked-input"), "utf8")).toBe(text);
+      const [inputCount] =
+        await database.admin`select count(*)::int as count from sandbox_workspace_mutation_admissions where actor_id=${chunkInput.processId} and actor_kind='process' and operation='writeStdin'`;
+      expect(inputCount!.count).toBe(1);
+      expect((await chunked.custody.settle()).settled).toBe(true);
 
       // More than the actual 4 MiB native output window. Every provider ACK
       // follows durable journal capture; complete output is independently

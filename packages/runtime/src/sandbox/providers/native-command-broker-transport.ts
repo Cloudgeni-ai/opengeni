@@ -1,4 +1,12 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
+import {
+  createNativeBrokerStdinPlan,
+  parseNativeBrokerStdinPlan,
+  nativeBrokerStdinChunk,
+  NATIVE_BROKER_STDIN_MAX_BYTES,
+  NATIVE_BROKER_STDIN_PAGE_BYTES,
+} from "./native-command-broker-stdin";
 import {
   initialNativeBrokerInput,
   advanceNativeBrokerWriter,
@@ -33,6 +41,8 @@ type EntryKind =
   | "control_reply"
   | "request_reply"
   | "stdin_reservation"
+  | "stdin_plan"
+  | "stdin_page"
   | "diagnostic_fault";
 type Entry = {
   kind: EntryKind;
@@ -42,8 +52,9 @@ type Entry = {
   value: string;
 };
 type Writer = { id: string | null; epoch: number; live: boolean };
-/** Exact existing stdin admission, supplied by the trusted process route. The
- * admission UUID is also the immutable request UUID: one payload per admission. */
+/** Exact existing stdin admission, supplied by the trusted process route.
+ * Single-frame input retains its original admission/request UUID. Larger input
+ * has one immutable plan and derived frame UUIDs, never new admissions. */
 export type NativeBrokerRetainedInput = {
   sessionId: string;
   processId: string;
@@ -71,6 +82,7 @@ export type NativeBrokerTransportPort = {
     operation: (
       tx: NativeBrokerTransportTransaction & {
         inputOffset: number;
+        requireActiveInput(): void;
         reserveInput(byteLength: number): Promise<number>;
       },
     ) => Promise<T>,
@@ -79,6 +91,11 @@ export type NativeBrokerTransportPort = {
 type NativeBrokerTransportTransaction = Parameters<
   Parameters<NativeBrokerTransportPort["transaction"]>[0]
 >[0];
+type RetainedInputTransaction = NativeBrokerTransportTransaction & {
+  inputOffset: number;
+  requireActiveInput(): void;
+  reserveInput(byteLength: number): Promise<number>;
+};
 type Identity = { brokerId: string; sandboxId: string; taskId: string };
 /** Recovery-only operations remain available after a diagnostic fault. This
  * is not command authority and never permits skipping unresolved input. */
@@ -279,7 +296,7 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
       stdin
         ? frame.kind !== "stdin" ||
           frame.commandId !== stdin.commandId ||
-          frame.requestId !== stdin.admissionId
+          frame.requestId !== requestId
         : frame.kind === "stdin"
     )
       invalid();
@@ -294,6 +311,57 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
     state.input = markNativeBrokerInputDispatchIntent(state.input, epoch);
     tx.save(state);
     return pendingNativeBrokerProviderWrite(state.input, epoch);
+  };
+  const requireDeliveredStdin = async (
+    tx: NativeBrokerTransportTransaction,
+    commandId: string,
+    offset: number,
+  ) => {
+    if (!offset) return;
+    const prior = await tx.read("stdin_reservation", `${commandId}:${offset}`);
+    if (!prior) invalid();
+    const previous = requestFromWire(prior.value, identity);
+    const canonical = await tx.read("request", previous.requestId);
+    if (
+      !canonical ||
+      canonical.value !== prior.value ||
+      canonical.sha256 !== prior.sha256 ||
+      canonical.sequence !== prior.sequence ||
+      previous.sequence !== prior.sequence ||
+      previous.kind !== "stdin" ||
+      previous.commandId !== commandId ||
+      previous.offset + previous.payload.length !== offset
+    )
+      invalid();
+    const completed = await reply(tx, previous.requestId, "request_reply");
+    if (!completed || completed.kind !== "status" || completed.offset !== offset) invalid();
+    let body: unknown;
+    try {
+      body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(completed.payload));
+    } catch {
+      invalid();
+    }
+    if (
+      !z
+        .object({ stdinWritten: z.literal(true) })
+        .strict()
+        .safeParse(body).success
+    )
+      invalid();
+  };
+  const retainedChunk = async (
+    tx: RetainedInputTransaction,
+    input: NativeBrokerRetainedInput,
+    offset: number,
+  ) => {
+    const stored = await tx.read("stdin_plan", input.admissionId);
+    if (!stored || stored.sequence !== null) invalid();
+    const plan = parseNativeBrokerStdinPlan(JSON.parse(stored.value), input);
+    const pageOffset =
+      Math.floor(offset / NATIVE_BROKER_STDIN_PAGE_BYTES) * NATIVE_BROKER_STDIN_PAGE_BYTES;
+    const page = await tx.read("stdin_page", `${input.admissionId}:${pageOffset}`);
+    if (!page || page.sequence !== null) invalid();
+    return { plan, request: nativeBrokerStdinChunk(plan, offset, page.value) };
   };
   return {
     /** Immutable first observation, encrypted by the DB store. A clean later
@@ -345,40 +413,13 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
       const bytes = Buffer.from(payload);
       return store.retainedInputTransaction(input, async (tx) => {
         const old = await tx.read("request", input.admissionId);
+        if (await tx.read("stdin_plan", input.admissionId)) invalid();
         if (!old && tx.inputOffset > 0) {
           // Provider/broker acceptance does not prove stdin was delivered. A
           // second process writer must see the exact prior native write reply
           // before allocating its byte range, even after another input index
           // is available on the shared channel.
-          const prior = await tx.read("stdin_reservation", `${input.commandId}:${tx.inputOffset}`);
-          if (!prior) invalid();
-          const previous = requestFromWire(prior.value, identity);
-          const canonical = await tx.read("request", previous.requestId);
-          if (
-            !canonical ||
-            canonical.value !== prior.value ||
-            canonical.sha256 !== prior.sha256 ||
-            canonical.sequence !== prior.sequence ||
-            previous.sequence !== prior.sequence ||
-            previous.kind !== "stdin" ||
-            previous.commandId !== input.commandId ||
-            previous.offset + previous.payload.length !== tx.inputOffset
-          )
-            invalid();
-          const completed = await reply(tx, previous.requestId, "request_reply");
-          if (!completed || completed.kind !== "status" || completed.offset !== tx.inputOffset)
-            invalid();
-          let body: unknown;
-          try {
-            body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(completed.payload));
-          } catch {
-            invalid();
-          }
-          const result = z
-            .object({ stdinWritten: z.literal(true) })
-            .strict()
-            .safeParse(body);
-          if (!result.success) invalid();
+          await requireDeliveredStdin(tx, input.commandId, tx.inputOffset);
         }
         const offset = old
           ? requestFromWire(old.value, identity).offset
@@ -401,6 +442,151 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
           });
         }
         return { ...reserved, offset };
+      });
+    },
+    /** Reserve one canonical byte range and retain ALL original bytes before
+     * any chunk dispatch. Concurrent replay neither advances the counter nor
+     * reinterprets an earlier single-frame admission as a chunked one. */
+    async findRetainedStdinPlan(input: NativeBrokerRetainedInput, payload: Uint8Array) {
+      if (
+        !store.retainedInputTransaction ||
+        !(payload instanceof Uint8Array) ||
+        payload.length > NATIVE_BROKER_STDIN_MAX_BYTES
+      )
+        invalid();
+      input = { ...input };
+      const bytes = Buffer.from(payload);
+      return store.retainedInputTransaction(input, async (tx) => {
+        const old = await tx.read("stdin_plan", input.admissionId);
+        if (!old) return null;
+        const plan = parseNativeBrokerStdinPlan(JSON.parse(old.value), input);
+        if (
+          plan.byteLength !== bytes.length ||
+          plan.sha256 !== createHash("sha256").update(bytes).digest("hex")
+        )
+          invalid();
+        return plan;
+      });
+    },
+    async prepareRetainedStdinPayload(
+      writerId: string,
+      epoch: number,
+      input: NativeBrokerRetainedInput,
+      payload: Uint8Array,
+    ) {
+      if (
+        !store.retainedInputTransaction ||
+        !(payload instanceof Uint8Array) ||
+        payload.length > NATIVE_BROKER_STDIN_MAX_BYTES
+      )
+        invalid();
+      input = { ...input };
+      const bytes = Buffer.from(payload);
+      return store.retainedInputTransaction(input, async (tx) => {
+        const old = await tx.read("stdin_plan", input.admissionId);
+        if (old) {
+          const plan = parseNativeBrokerStdinPlan(JSON.parse(old.value), input);
+          if (
+            plan.byteLength !== bytes.length ||
+            plan.sha256 !== createHash("sha256").update(bytes).digest("hex")
+          )
+            invalid();
+          return plan;
+        }
+        if (await tx.read("request", input.admissionId)) invalid();
+        tx.requireWriter(writerId, epoch);
+        const state = validate(tx.state, identity);
+        if (
+          state.output.providerEof ||
+          state.input.pending ||
+          state.input.writerEpoch !== epoch ||
+          state.input.acceptedWriterEpoch !== epoch
+        )
+          invalid();
+        await requireHealthyForWork(tx, {
+          requestId: input.admissionId,
+          commandId: input.commandId,
+          kind: "stdin",
+          offset: tx.inputOffset,
+          payload: new Uint8Array(),
+        });
+        await requireDeliveredStdin(tx, input.commandId, tx.inputOffset);
+        const plan = createNativeBrokerStdinPlan(input, tx.inputOffset, bytes);
+        await tx.reserveInput(bytes.length);
+        await tx.insert({
+          kind: "stdin_plan",
+          key: input.admissionId,
+          sequence: null,
+          value: JSON.stringify(plan),
+        });
+        for (let offset = 0; offset < bytes.length; offset += NATIVE_BROKER_STDIN_PAGE_BYTES)
+          await tx.insert({
+            kind: "stdin_page",
+            key: `${input.admissionId}:${offset}`,
+            sequence: null,
+            value: bytes
+              .subarray(offset, offset + NATIVE_BROKER_STDIN_PAGE_BYTES)
+              .toString("base64"),
+          });
+        return plan;
+      });
+    },
+    async reserveRetainedStdinChunk(
+      writerId: string,
+      epoch: number,
+      input: NativeBrokerRetainedInput,
+      offset: number,
+    ) {
+      if (!store.retainedInputTransaction) invalid();
+      input = { ...input };
+      return store.retainedInputTransaction(input, async (tx) => {
+        const { plan, request } = await retainedChunk(tx, input, offset);
+        const old = await tx.read("request", request.requestId);
+        if (!old) {
+          tx.requireActiveInput();
+          if (tx.inputOffset !== plan.offset + plan.byteLength) invalid();
+          await requireDeliveredStdin(tx, input.commandId, request.offset);
+        }
+        const reserved = await reserve(tx, writerId, epoch, request);
+        if (!old) {
+          const saved = await tx.read("request", request.requestId);
+          if (!saved) invalid();
+          await tx.insert({
+            kind: "stdin_reservation",
+            key: `${input.commandId}:${request.offset + request.payload.length}`,
+            sequence: reserved.index,
+            value: saved.value,
+          });
+        }
+        return {
+          ...reserved,
+          requestId: request.requestId,
+          offset: request.offset,
+          byteLength: request.payload.length,
+        };
+      });
+    },
+    async dispatchRetainedStdinChunkIntent(
+      writerId: string,
+      epoch: number,
+      input: NativeBrokerRetainedInput,
+      offset: number,
+    ) {
+      if (!store.retainedInputTransaction) invalid();
+      input = { ...input };
+      return store.retainedInputTransaction(input, async (tx) => {
+        const { request } = await retainedChunk(tx, input, offset);
+        const original = await tx.read("request", request.requestId);
+        if (!original) invalid();
+        const frame = requestFromWire(original.value, identity);
+        if (
+          frame.kind !== request.kind ||
+          frame.commandId !== request.commandId ||
+          frame.offset !== request.offset ||
+          !Buffer.from(frame.payload).equals(request.payload)
+        )
+          invalid();
+        return dispatchIntent(tx, writerId, epoch, request.requestId, input);
       });
     },
     async dispatchIntent(writerId: string, epoch: number, requestId: string) {

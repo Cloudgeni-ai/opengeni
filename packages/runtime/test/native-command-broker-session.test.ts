@@ -228,7 +228,7 @@ test("stdin needs the exact canonical child admission and refuses oversized or l
       f.session.writeStdin({ sessionId: 37, chars: "hello" }),
     ),
   ).rejects.toThrow("child admission");
-  for (const chars of ["x".repeat(8193), "\ud800"])
+  for (const chars of ["x".repeat(32 * 1024 * 1024 + 1), "\ud800"])
     await expect(
       withProviderCommandInputAdmission(input, () =>
         f.session.writeStdin({ sessionId: 37, chars }),

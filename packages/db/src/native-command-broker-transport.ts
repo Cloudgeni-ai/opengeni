@@ -50,6 +50,8 @@ export type NativeBrokerEntryKind =
   | "control_reply"
   | "request_reply"
   | "stdin_reservation"
+  | "stdin_plan"
+  | "stdin_page"
   | "diagnostic_fault";
 export type NativeBrokerStoredEntry = {
   kind: NativeBrokerEntryKind;
@@ -85,6 +87,7 @@ export type NativeBrokerTransportStore = {
     operation: (
       tx: NativeBrokerTransportTransaction & {
         inputOffset: number;
+        requireActiveInput(): void;
         reserveInput(byteLength: number): Promise<number>;
       },
     ) => Promise<T>,
@@ -402,6 +405,7 @@ export function nativeBrokerTransportStore(
     operation: (
       tx: NativeBrokerTransportTransaction & {
         inputOffset: number;
+        requireActiveInput(): void;
         reserveInput(byteLength: number): Promise<number>;
       },
     ) => Promise<T>,
@@ -414,6 +418,7 @@ export function nativeBrokerTransportStore(
         ? await lockRetainedInput(dbtx, binding, retainedInput)
         : {
             inputOffset: -1,
+            requireActiveInput: () => fenced(),
             reserveInput: async (_byteLength: number): Promise<number> => fenced(),
           };
       // Consistent order: scoped workspace fence -> lease -> broker. Late output
@@ -448,6 +453,7 @@ export function nativeBrokerTransportStore(
         ["warming", "warm", "draining"].includes(lease.liveness);
       const tx: NativeBrokerTransportTransaction & {
         inputOffset: number;
+        requireActiveInput(): void;
         reserveInput(byteLength: number): Promise<number>;
       } = {
         ...retained,
@@ -601,7 +607,11 @@ async function lockRetainedInput(
   db: Database,
   binding: NativeBrokerTransportBinding,
   scope: NativeBrokerRetainedInput,
-): Promise<{ inputOffset: number; reserveInput(byteLength: number): Promise<number> }> {
+): Promise<{
+  inputOffset: number;
+  requireActiveInput(): void;
+  reserveInput(byteLength: number): Promise<number>;
+}> {
   const rows = await rawRows(
     db,
     sql`SELECT provider_command, provider_command_input_index,
@@ -636,19 +646,21 @@ async function lockRetainedInput(
   const offset = Number(row.provider_command_input_index);
   if (!Number.isSafeInteger(offset) || offset < 0) fenced();
   let used = false;
+  const requireActiveInput = () => {
+    if (
+      row.state !== "active" ||
+      row.cancellation_requested_at ||
+      row.supervision_receipt ||
+      admissions[0]!.settled_at
+    )
+      fenced();
+  };
   return {
     inputOffset: offset,
+    requireActiveInput,
     reserveInput: async (byteLength) => {
-      if (
-        used ||
-        row.state !== "active" ||
-        row.cancellation_requested_at ||
-        row.supervision_receipt ||
-        admissions[0]!.settled_at ||
-        !Number.isSafeInteger(byteLength) ||
-        byteLength <= 0
-      )
-        fenced();
+      requireActiveInput();
+      if (used || !Number.isSafeInteger(byteLength) || byteLength <= 0) fenced();
       if (!Number.isSafeInteger(offset + byteLength)) fenced();
       used = true;
       const updated = await rawRows(
@@ -680,6 +692,8 @@ function validateEntryIdentity(
       "control_reply",
       "request_reply",
       "stdin_reservation",
+      "stdin_plan",
+      "stdin_page",
       "diagnostic_fault",
     ].includes(kind) ||
     typeof key !== "string" ||
@@ -688,7 +702,10 @@ function validateEntryIdentity(
   )
     fenced();
   if (
-    (kind === "request" || kind === "control_reply" || kind === "request_reply") &&
+    (kind === "request" ||
+      kind === "control_reply" ||
+      kind === "request_reply" ||
+      kind === "stdin_plan") &&
     !uuid.safeParse(key).success
   )
     fenced();
@@ -699,6 +716,18 @@ function validateEntryIdentity(
       !uuid.safeParse(parts[0]).success ||
       !/^[1-9][0-9]*$/.test(parts[1]!) ||
       !Number.isSafeInteger(Number(parts[1]))
+    )
+      fenced();
+  }
+  if (kind === "stdin_page") {
+    const parts = key.split(":");
+    if (
+      parts.length !== 2 ||
+      !uuid.safeParse(parts[0]).success ||
+      !/^(0|[1-9][0-9]*)$/.test(parts[1]!) ||
+      !Number.isSafeInteger(Number(parts[1])) ||
+      Number(parts[1]) % 65536 ||
+      Number(parts[1]) >= 32 * 1024 * 1024
     )
       fenced();
   }

@@ -104,7 +104,11 @@ the task-router adapter explicitly refuses that separate locator.
 output and exact control requests. A request-keyed immutable control-reply index
 distinguishes positive pre-dispatch rejection from unknown control outcomes.
 The retained-input transaction locks an existing stdin admission and commits
-its command byte offset with the encrypted request. Standalone offset allocation
+its command byte offset with the encrypted request. Larger writes retain one
+complete encrypted payload plan and storage pages (`0753`) before dispatch;
+derived frame UUIDs do not create child admissions. Each next frame waits for
+the previous native delivery reply, while the full reserved byte range fences
+other writers. Unknown chunks are not silently replayed. Standalone offset allocation
 and generic broker dispatch refuse this path; recovery retains the exact bytes.
 An immutable per-command reservation/reply index requires complete native stdin
 delivery before another byte range is reserved, independently of provider ACK.

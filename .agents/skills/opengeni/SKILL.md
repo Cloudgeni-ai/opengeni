@@ -129,7 +129,7 @@ Then open the smallest source files that answer the question:
   surface without a legacy setup or TaskExec fallback. Output commits before
   presentation, and an uncertain global ACK retains the captured page without
   replaying input. Session-surface close does not close the shared coordinator.
-  Application installation and larger stdin framing remain incomplete; do not
+  Application installation remains incomplete; do not
   confuse adapter tests with activation or cancellation ACKs with settlement.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
@@ -143,6 +143,13 @@ Then open the smallest source files that answer the question:
   together; never call the legacy standalone input-index allocator for it.
   Its reservation/reply indexes gate the next byte range on complete native
   stdin delivery, not provider acknowledgement or broker acceptance.
+  Larger writes use `native-command-broker-stdin.ts` and immutable scoped
+  `stdin_plan` / `stdin_page` entries (migration `0753`). One original admission
+  reserves the complete byte range and bytes before frame dispatch; derived
+  chunk UUIDs are not new admissions. Delivery replies gate each successor,
+  unknown dispatch never replays automatically, and cancellation remains usable
+  while a command's stdin is blocked. Keep the 32 MiB input ceiling distinct
+  from the 8 KiB native frame and 64 KiB encrypted storage page boundaries.
   The retained route carries that admission in private runtime context, not
   command arguments, and requires atomic output and native cancellation.
   `modal-native-broker-create.ts` binds the internal fixed initial-process

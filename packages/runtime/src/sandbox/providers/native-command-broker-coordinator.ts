@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
+import {
+  nativeBrokerStdinChunkRequestId,
+  NATIVE_BROKER_STDIN_MAX_BYTES,
+} from "./native-command-broker-stdin";
 import { setTimeout as delay } from "node:timers/promises";
 import { NativeBrokerDriver, type NativeBrokerChannel } from "./native-command-broker-driver";
 import { NativeBrokerDiagnosticsOwner } from "./native-command-broker-diagnostics-owner";
@@ -311,11 +316,13 @@ export class NativeBrokerCoordinator {
     if (
       !(payload instanceof Uint8Array) ||
       !payload.length ||
-      payload.length > NATIVE_BROKER_PAYLOAD_MAX_BYTES
+      payload.length > NATIVE_BROKER_STDIN_MAX_BYTES
     )
       throw new Error("Native broker stdin payload exceeds its bound");
     const copy = { ...input },
       bytes = Uint8Array.from(payload);
+    if (bytes.length > NATIVE_BROKER_PAYLOAD_MAX_BYTES)
+      return this.sendRetainedStdinPayload(copy, bytes, signal);
     await this.diagnostics.check(this.signal(signal));
     return this.exclusive(async (bounded) => {
       await this.ready(bounded, copy.admissionId);
@@ -323,6 +330,79 @@ export class NativeBrokerCoordinator {
       await this.accepted(copy.admissionId, bounded);
       return { state: "accepted" as const, index: sent.index, offset: sent.offset };
     }, signal);
+  }
+
+  private async sendRetainedStdinPayload(
+    input: NativeBrokerRetainedInput,
+    bytes: Uint8Array,
+    signal?: AbortSignal,
+  ) {
+    const bounded = this.signal(signal);
+    const release = this.retainDiagnostics();
+    try {
+      await this.diagnostics.check(bounded);
+      const plan = await this.exclusive(async (current) => {
+        const old = await this.journal.findRetainedStdinPlan(input, bytes);
+        if (old) return old;
+        const writer = await this.ready(current);
+        return this.journal.prepareRetainedStdinPayload(writer.id!, writer.epoch, input, bytes);
+      }, bounded);
+      let index = 0;
+      for (let offset = 0; offset < plan.byteLength; offset += NATIVE_BROKER_PAYLOAD_MAX_BYTES) {
+        bounded.throwIfAborted();
+        const requestId = nativeBrokerStdinChunkRequestId(input.admissionId, offset);
+        const sent = await this.exclusive(async (current) => {
+          const old = await this.journal.request(requestId);
+          if (old?.accepted) {
+            // Replay of the committed prefix must not wait for a later chunk's
+            // still-reserved first dispatch. It sends nothing; the reply below
+            // must separately prove the exact original bytes were delivered.
+            const frame = old.frame;
+            if (
+              frame.kind !== "stdin" ||
+              frame.commandId !== input.commandId ||
+              frame.offset !== plan.offset + offset ||
+              !Buffer.from(frame.payload).equals(
+                bytes.subarray(offset, offset + NATIVE_BROKER_PAYLOAD_MAX_BYTES),
+              )
+            )
+              throw new Error("Retained broker stdin prefix changed its original bytes");
+            return {
+              index: frame.sequence,
+              offset: frame.offset,
+              byteLength: frame.payload.length,
+            };
+          }
+          await this.ready(current, requestId);
+          const dispatched = await this.driver.sendRetainedStdinChunk(input, offset, current);
+          await this.accepted(requestId, current);
+          return dispatched;
+        }, bounded);
+        // Acceptance alone does not prove delivery to the command's stdin.
+        // Do not hold the input queue while that command consumes its bytes:
+        // cancellation and other commands must remain usable meanwhile.
+        const reply = await this.reply(requestId, bounded);
+        let delivered = false;
+        try {
+          delivered =
+            reply.kind === "status" &&
+            reply.offset === sent.offset + sent.byteLength &&
+            z
+              .object({ stdinWritten: z.literal(true) })
+              .strict()
+              .safeParse(
+                JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(reply.payload)),
+              ).success;
+        } catch {
+          /* Preserve the original chunk on malformed or incomplete reply. */
+        }
+        if (!delivered) throw new NativeBrokerReconciliationRequiredError(requestId);
+        index = sent.index;
+      }
+      return { state: "accepted" as const, index, offset: plan.offset };
+    } finally {
+      await release();
+    }
   }
 
   /** Exact committed operation reply, independently of input acceptance. */

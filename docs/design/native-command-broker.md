@@ -525,10 +525,10 @@ ACK, but still needs the command's own complete terminal evidence. Presentation
 receipts are bounded host correlations, not durable output custody. Closing one
 session surface aborts only its observations and leaves the shared coordinator
 and physical commands owned by their existing lifecycle. Stdin requires its
-exact existing private child admission and currently rejects payloads beyond
-one native frame rather than silently splitting, truncating or reauthorizing.
-Application installation, larger-input framing, physical diagnostics qualification
-and setup-command ownership remain gates. A positive prelaunch cancel reply can
+exact existing private child admission. Larger writes use one retained payload
+plan and frame-sized native requests, never fresh child admissions or truncation.
+Application installation, physical diagnostics qualification and setup-command
+ownership remain gates. A positive prelaunch cancel reply can
 now settle its exact original reservation; uncertainty still cannot.
 
 `NativeBrokerRetainedCommand` bridges an already retained command to that
@@ -570,10 +570,27 @@ command, lease, provider namespace and physical broker/task.
 cannot send stdin. Explicit pending-stdin recovery requires the same admission
 and exact stored bytes; cancellation/settlement closes new reservations without
 erasing an already committed operation. This permits reconciliation of its
-original outcome, not a new stdin authorization. The path currently accepts one
-native-frame-bounded payload per admission; a future application adapter must
-not silently split larger input into fresh admissions or truncate it. The shared
-coordinator provides input scheduling and demand-driven observation. The dedicated
+original outcome, not a new stdin authorization. Single-frame admissions retain
+their original format. Larger writes use `native-command-broker-stdin.ts` and
+rolling migration `0753`: one immutable `stdin_plan` reserves the complete
+canonical byte range and scoped encrypted `stdin_page` entries retain every
+original byte before any dispatch. Storage pages are 64 KiB, native frames remain
+8 KiB, and one input is explicitly limited to the API body's 32 MiB absolute
+ceiling. Oversized or lossy UTF-8 input is refused, never truncated.
+
+Each frame UUID derives from the original admission and relative offset. Only
+that admission's still-active custody can reserve a new frame; cancellation or
+settlement closes further preparation. Complete native `stdinWritten` evidence
+for the preceding frame is required before the next frame is reserved, not just
+provider or broker acceptance. The whole byte range fences another admission
+until the final frame is delivered. Replay compares the original full payload,
+skips only the positively delivered prefix, and never resends an unknown frame.
+Explicit exact-index recovery also requires its original chunk offset. A
+partial or failed write keeps its original range and bytes; it does not allocate
+a replacement admission. The coordinator releases its shared input queue while
+waiting for delivery, so cancellation and other commands remain usable.
+
+The shared coordinator provides input scheduling and demand-driven observation. The dedicated
 command-session surface carries exact private admissions; selecting/installing
 it in application sessions remains an unimplemented gate.
 

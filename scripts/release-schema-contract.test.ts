@@ -37,6 +37,14 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("registers immutable native broker stdin payload plans as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0753_native_broker_stdin_plans.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "rolling" });
+  });
   test("registers native broker never-started settlement as maintenance-only", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2396,6 +2404,7 @@ describe("release schema contract", () => {
       "0750_native_broker_bootstrap_admission.sql",
       "0751_native_broker_diagnostic_fault.sql",
       "0752_native_broker_launch_rejection.sql",
+      "0753_native_broker_stdin_plans.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
       "0698_codex_ownerless_person_turns.sql",
       "0697_codex_retry_after_unknown_outcome.sql",

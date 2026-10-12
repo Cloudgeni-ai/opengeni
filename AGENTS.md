@@ -594,6 +594,12 @@ depend on that query succeeding. Retain definite faults before refusal, never
 turn timeout into fault or exit proof, and abort/join the final owner's actual
 read before replacement. The adapter remains uninstalled in application routing.
 
+Broker stdin framing preserves one canonical child admission for the full
+write. Retain the complete payload and byte range before chunk dispatch; frame
+UUIDs are transport identities, not new authority. Require exact native
+delivery before advancing a chunk, preserve unknown indexes for explicit
+recovery, and leave cancellation independent of a blocked stdin consumer.
+
 Public historical checkpoint consent (0495) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy
 fence before a complete group census; a visible session count is not authority.

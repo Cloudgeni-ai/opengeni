@@ -5,6 +5,7 @@ import type {
   NativeBrokerRetainedInput,
 } from "./native-command-broker-transport";
 import { NativeBrokerFrameDecoder } from "./native-command-broker-wire";
+import { nativeBrokerStdinChunkRequestId } from "./native-command-broker-stdin";
 
 /** Exact authenticated initial-process channels, never TaskExec, guest files,
  * or ordinary command stdout. Provider implementations must dispatch writes
@@ -82,10 +83,18 @@ export class NativeBrokerDriver {
     requestId: string,
     signal?: AbortSignal,
     stdin?: NativeBrokerRetainedInput,
+    stdinChunkOffset?: number,
   ) {
     signal?.throwIfAborted();
     const write = stdin
-      ? await this.journal.dispatchRetainedStdinIntent(this.writerId, epoch, stdin)
+      ? stdinChunkOffset === undefined
+        ? await this.journal.dispatchRetainedStdinIntent(this.writerId, epoch, stdin)
+        : await this.journal.dispatchRetainedStdinChunkIntent(
+            this.writerId,
+            epoch,
+            stdin,
+            stdinChunkOffset,
+          )
       : await this.journal.dispatchIntent(this.writerId, epoch, requestId);
     if (!write) return { state: "accepted" as const };
     try {
@@ -98,6 +107,37 @@ export class NativeBrokerDriver {
     } catch (error) {
       throw new NativeBrokerDispatchUnknownError(requestId, write.index, error);
     }
+  }
+
+  /** A chunk retains the ORIGINAL stdin admission. Its exact bytes are read
+   * from the committed payload plan, never reconstructed from a replacement
+   * caller body. Unknown physical dispatch is observed, not retried. */
+  async sendRetainedStdinChunk(
+    input: NativeBrokerRetainedInput,
+    offset: number,
+    signal?: AbortSignal,
+  ) {
+    input = { ...input };
+    return this.exclusive(async () => {
+      signal?.throwIfAborted();
+      await this.identity();
+      const writer = await this.journal.claimWriter(this.writerId);
+      const reserved = await this.journal.reserveRetainedStdinChunk(
+        this.writerId,
+        writer.epoch,
+        input,
+        offset,
+      );
+      const old = await this.journal.request(reserved.requestId);
+      if (!old) throw new Error("Native broker reserved stdin chunk is absent");
+      if (old.accepted) return { ...reserved, state: "accepted" as const };
+      if (old.phase !== "reserved")
+        return { ...reserved, state: "reconciliation_required" as const };
+      return {
+        ...reserved,
+        ...(await this.dispatch(writer.epoch, reserved.requestId, signal, input, offset)),
+      };
+    });
   }
 
   /** One canonical stdin admission owns one bounded immutable payload. The DB
@@ -164,7 +204,11 @@ export class NativeBrokerDriver {
    * Inspect/capture available output first. Replay retains the original body,
    * epoch and provider index even after a writer takeover; it never skips an
    * unresolved input to send a newer fence. No automatic retry loop exists. */
-  async replayPending(signal?: AbortSignal, stdin?: NativeBrokerRetainedInput) {
+  async replayPending(
+    signal?: AbortSignal,
+    stdin?: NativeBrokerRetainedInput,
+    stdinChunkOffset?: number,
+  ) {
     stdin = stdin ? { ...stdin } : undefined;
     return this.exclusive(async () => {
       signal?.throwIfAborted();
@@ -179,11 +223,16 @@ export class NativeBrokerDriver {
         throw new Error("Native broker pending input is corrupt");
       if (
         frame.kind === "stdin"
-          ? !stdin || stdin.admissionId !== frame.requestId || stdin.commandId !== frame.commandId
-          : stdin !== undefined
+          ? !stdin ||
+            (stdinChunkOffset === undefined
+              ? stdin.admissionId
+              : nativeBrokerStdinChunkRequestId(stdin.admissionId, stdinChunkOffset)) !==
+              frame.requestId ||
+            stdin.commandId !== frame.commandId
+          : stdin !== undefined || stdinChunkOffset !== undefined
       )
         throw new Error("Native broker stdin recovery requires its exact retained admission");
-      return this.dispatch(writer.epoch, frame.requestId, signal, stdin);
+      return this.dispatch(writer.epoch, frame.requestId, signal, stdin, stdinChunkOffset);
     });
   }
 

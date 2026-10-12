@@ -29,7 +29,7 @@ import {
 } from "./native-command-broker-coordinator";
 import { NativeBrokerDispatchUnknownError } from "./native-command-broker-driver";
 import type { DurableNativeBrokerTransport } from "./native-command-broker-transport";
-import { NATIVE_BROKER_PAYLOAD_MAX_BYTES } from "./native-command-broker-wire";
+import { NATIVE_BROKER_STDIN_MAX_BYTES } from "./native-command-broker-stdin";
 
 type Entry = {
   command: ModalBrokerProviderCommand;
@@ -310,7 +310,7 @@ export class NativeBrokerCommandSession implements ProviderCommandSession {
       const bytes = Buffer.from(args.chars, "utf8");
       if (!input || input.commandId !== entry.command.execId)
         throw new Error("Broker stdin requires its exact canonical child admission");
-      if (bytes.length > NATIVE_BROKER_PAYLOAD_MAX_BYTES || bytes.toString("utf8") !== args.chars)
+      if (bytes.length > NATIVE_BROKER_STDIN_MAX_BYTES || bytes.toString("utf8") !== args.chars)
         throw new Error("Broker stdin exceeds one admission's exact UTF-8 payload bound");
       const signal = args.signal
         ? AbortSignal.any([args.signal, this.stopped.signal])
