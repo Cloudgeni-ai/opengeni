@@ -115,7 +115,8 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
           details: { reason: "account_not_eligible" },
         });
       case "conflict":
-        // Defensive: the binding is locked before its version is compared.
+        // The choice kept losing a deadlock to a concurrent placement after
+        // its bounded replay; nothing changed.
         throw new ApiHttpError(409, {
           code: "conflict",
           message: "the session's account changed at the same time; try again",
