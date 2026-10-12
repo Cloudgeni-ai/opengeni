@@ -50,6 +50,9 @@ const PROMPT_NAMED_TOOLS = [
   "sandbox_file_publish",
   "rig_propose_change",
   "rig_get",
+  "secret_search",
+  "secret_save",
+  "interaction_request_human",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 function compose(toolAvailability?: AgentPromptToolAvailability) {

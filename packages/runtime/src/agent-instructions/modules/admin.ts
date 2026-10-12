@@ -25,6 +25,9 @@ export const adminModule: AgentPromptModule = {
         customMcp &&
           "If no match exists and the task needs a remote MCP whose exact HTTPS URL the user supplied or reliable documentation establishes, call `custom_mcp_setup_request` with its name, URL, and rationale.",
         "Never invent URLs or request credentials in chat.",
+        context.capabilities.secrets &&
+          context.capabilities.humanInput &&
+          'For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.',
         setupCards &&
           "Showing either card does not need integration-management permission and grants no access; the authenticated human must authorize setup.",
         setupCards &&
