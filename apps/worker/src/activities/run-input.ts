@@ -16,6 +16,7 @@ import {
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
   listTurnOpenSuffixToolCalls,
+  readSubscriptionHistoryProvenance,
   type Database,
 } from "@opengeni/db";
 import {
@@ -148,6 +149,7 @@ export type TurnInputOptions = {
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   providerApi: HistoryProviderApi;
+  servingProviderId?: string;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -727,7 +729,7 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
-  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase"> = {},
+  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase" | "servingProviderId"> = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [stored, envelope] = await Promise.all([
@@ -742,7 +744,28 @@ async function messageInput(
     preparationOptions,
     "canonical_projection",
     async () => {
-      const active = projectRejectedProviderArtifacts(stored);
+      const provenance = preparationOptions.servingProviderId
+        ? await readSubscriptionHistoryProvenance(
+            db,
+            trigger.workspaceId,
+            trigger.sessionId,
+            stored.map((row) => row.id),
+          )
+        : null;
+      const active =
+        provenance && preparationOptions.servingProviderId
+          ? projectServingProviderArtifacts(
+              stored.map((row) => ({
+                ...row,
+                turnId: provenance.turnByHistoryId.get(row.id) ?? null,
+              })),
+              {
+                enabled: true,
+                servingProviderId: preparationOptions.servingProviderId,
+                turnMetadata: provenance.turnMetadata,
+              },
+            )
+          : projectRejectedProviderArtifacts(stored);
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );

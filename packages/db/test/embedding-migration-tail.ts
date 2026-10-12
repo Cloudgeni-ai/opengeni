@@ -220,7 +220,9 @@ export const embeddingMigrationTail = [
   // Rekeys the session bindings table from withheld 0642.
   "0733_subscription_session_bindings_per_provider.sql",
   // Reads withheld 0707/0712's registry/receipt and patches 0691's guard.
-  "0737_subscription_failover_readiness_and_request_fence.sql",
+  "0738_subscription_failover_readiness_and_request_fence.sql",
+  // Reads and narrows the personal authority routines withheld with 0642/0667.
+  "0741_subscription_shared_personal_choice.sql",
   // Reads the Knowledge claim installed by withheld 0461 (and the title/site
   // claims in historical lifecycle fixtures); preserve its full-name identity.
   "0730_maintenance_work_probes.sql",
@@ -228,6 +230,8 @@ export const embeddingMigrationTail = [
   "0732_sandbox_maintenance_work_probes.sql",
   // Owner-only routines over the shared connection table from withheld 0642.
   "0735_subscription_core_owned_connection_usage.sql",
-  "0738_subscription_core_xai_cutover.sql",
-  "0739_subscription_core_claude_cutover.sql",
+  "0739_subscription_core_xai_cutover.sql",
+  "0740_subscription_core_claude_cutover.sql",
+  // Extends the capacity waiter table from withheld shared-core migrations.
+  "0742_subscription_waiter_candidates.sql",
 ];

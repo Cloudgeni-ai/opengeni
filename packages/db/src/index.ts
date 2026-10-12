@@ -55,6 +55,7 @@ import {
   WorkspaceModelCompactionThresholdsPatch,
   cleanStoredSessionTitle,
   workspaceSettingsAllowCreditModels,
+  readTurnServingPolicyV1,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -451,6 +452,7 @@ import {
   wakeSubscriptionCoreCapacityWaiters,
   type SubscriptionCoreWakeScope,
 } from "./subscription-core/waiters";
+import { capacityWaitCandidateProviders } from "./subscription-core/waiter-candidates";
 export {
   chooseSubscriptionCoreSessionAccount,
   readSubscriptionCoreSessionAccountChoice,
@@ -25264,6 +25266,8 @@ export type SubscriptionCoreCodexCapacityWait = {
   waiterId: string;
   /** The provider whose turn waits (the Codex-named readers return only Codex rows). */
   provider: SubscriptionCoreWaiterProvider;
+  /** Fresh evaluation hints only; null denotes a legacy home-only waiter. */
+  candidateProviders: string[] | null;
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -25291,6 +25295,7 @@ export type SubscriptionCoreCodexCapacityWait = {
 type SubscriptionCoreCodexWaiterRow = {
   waiter_id: string;
   provider: string;
+  candidate_providers: string[] | null;
   account_id: string;
   workspace_id: string;
   session_id: string;
@@ -25312,7 +25317,7 @@ type SubscriptionCoreCodexWaiterRow = {
 };
 
 const SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS = sql.raw(`waiter_id::text as waiter_id,
-  provider, account_id::text as account_id, workspace_id::text as workspace_id,
+  provider, candidate_providers, account_id::text as account_id, workspace_id::text as workspace_id,
   session_id::text as session_id, turn_id::text as turn_id, blocked_turn_generation,
   generation, wake_revision, observed_wake_revision, wait_reason, reset_kind,
   refresh_attempt, earliest_reset_at, next_check_at, goal_id::text as goal_id,
@@ -25340,6 +25345,7 @@ function mapSubscriptionCoreCodexWaiter(
   return {
     waiterId: row.waiter_id,
     provider: subscriptionCoreWaiterProvider(row.provider),
+    candidateProviders: row.candidate_providers,
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
@@ -25497,12 +25503,14 @@ export function subscriptionCoreCodexNextCheckAt(input: {
   refreshAttempt: number;
   now: Date;
   rechecksBeforeReset?: boolean;
+  /** Also refresh an empty candidate set after settings/pool/cutover changes. */
+  failoverAware?: boolean;
 }): { nextCheckAt: Date; resetKind: CodexCapacityResetKind } {
   const { now } = input;
   const retryAt = input.healthRetryAt?.getTime();
   const futureRetryAt = retryAt !== undefined && retryAt > now.getTime() ? retryAt : null;
   if (input.earliestResetAt && input.earliestResetAt.getTime() > now.getTime()) {
-    if (input.rechecksBeforeReset === true) {
+    if (input.rechecksBeforeReset === true || input.failoverAware === true) {
       // A quarantine that ends sooner than the bounded check moves it earlier.
       const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
       const bounded = futureRetryAt !== null ? Math.min(futureRetryAt, backoff) : backoff;
@@ -25550,6 +25558,11 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
   waitReason: string;
   earliestResetAt: Date | null;
   healthRetryAt?: Date | null;
+  /** From a fresh failover-aware accepted-turn evaluation; never caller authority.
+   * Supply [] when that evaluation currently has no alternative providers.
+   * Omission preserves the legacy home-only path until worker integration.
+   */
+  candidateProviders?: readonly string[];
   failurePayload: Record<string, unknown>;
   /** The live core lease a reactive refusal still holds; released atomically. */
   leaseFence?: { connectionId: string; holderId: string; generation: number };
@@ -25566,6 +25579,7 @@ export async function armSubscriptionCoreCapacityWait(
   input: ArmSubscriptionCoreCapacityWaitInput,
 ): Promise<ArmSubscriptionCoreCodexCapacityWaitResult> {
   const vocabulary = subscriptionCoreWaitVocabulary(provider);
+  const candidateProviders = capacityWaitCandidateProviders(input.candidateProviders);
   const label = vocabulary.label;
   const now = input.now ?? new Date();
   const goalId = input.goalId ?? null;
@@ -25739,6 +25753,7 @@ export async function armSubscriptionCoreCapacityWait(
           refreshAttempt: 0,
           now,
           rechecksBeforeReset: vocabulary.recheckBeforeReset,
+          failoverAware: candidateProviders !== null,
         });
         const nextCheckAt = new Date(
           Math.max(
@@ -25764,13 +25779,22 @@ export async function armSubscriptionCoreCapacityWait(
           const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
             tx,
             sql`insert into subscription_capacity_waiters (
-                account_id, workspace_id, session_id, turn_id, provider, wait_reason,
+                account_id, workspace_id, session_id, turn_id, provider, candidate_providers, wait_reason,
                 policy_hash, reset_kind, refresh_attempt, resumed_update_id, earliest_reset_at,
                 generation, wake_revision, observed_wake_revision, next_check_at,
                 blocked_turn_generation, goal_id, goal_version, last_wake_reason, updated_at
               ) values (
                 ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
-                ${input.turnId}::uuid, ${provider}, ${input.waitReason}, null,
+                ${input.turnId}::uuid, ${provider},
+                ${
+                  candidateProviders === null
+                    ? sql`null`
+                    : sql`array[${sql.join(
+                        candidateProviders.map((id) => sql`${id}`),
+                        sql`, `,
+                      )}]::text[]`
+                },
+                ${input.waitReason}, null,
                 ${scheduled.resetKind}, 0, null,
                 ${input.earliestResetAt?.toISOString() ?? null}::timestamptz,
                 ${generation}, ${wakeRevision}, ${wakeRevision},
@@ -25780,6 +25804,7 @@ export async function armSubscriptionCoreCapacityWait(
               )
               on conflict (workspace_id, session_id) do update
                 set turn_id = excluded.turn_id, provider = excluded.provider,
+                    candidate_providers = excluded.candidate_providers,
                     wait_reason = excluded.wait_reason, policy_hash = null,
                     reset_kind = excluded.reset_kind, refresh_attempt = 0,
                     resumed_update_id = null, earliest_reset_at = excluded.earliest_reset_at,
@@ -25973,12 +25998,14 @@ export async function armSubscriptionCoreCapacityWait(
 
 /** What core placement says about a blocked turn, evaluated before the reconcile transaction. */
 export type SubscriptionCoreCodexWaitEvaluation =
-  | { kind: "run" }
+  | { kind: "run"; candidateProviders?: readonly string[] }
   | {
       kind: "wait";
       waitReason: string;
       earliestResetAt: Date | null;
       healthRetryAt: Date | null;
+      /** Entire freshly derived candidate set, not a union with stored hints. */
+      candidateProviders?: readonly string[];
     }
   /** The accepted turn can no longer use the core under its frozen authority. */
   | { kind: "revoked" }
@@ -26142,6 +26169,14 @@ export async function reconcileSubscriptionCoreCapacityWait(
         const observed = Math.min(waiter.wakeRevision, input.evaluatedWakeRevision);
         const recovery = readCodexCapacityRecovery(blockedTurn.metadata);
         const evaluation = input.evaluation;
+        // A legacy evaluation cannot leave a previously failover-aware waiter
+        // asleep until a distant reset. Discard its old hints and keep the
+        // bounded recheck; the next full evaluation rebuilds eligibility.
+        const candidateProviders = capacityWaitCandidateProviders(
+          evaluation.kind === "wait" || evaluation.kind === "run"
+            ? (evaluation.candidateProviders ?? (waiter.candidateProviders === null ? null : []))
+            : waiter.candidateProviders,
+        );
         if (
           evaluation.kind !== "run" ||
           (recovery.retryNotBefore && Date.parse(recovery.retryNotBefore) > now.getTime())
@@ -26160,13 +26195,16 @@ export async function reconcileSubscriptionCoreCapacityWait(
             waitEvaluation.earliestResetAt.getTime() > now.getTime();
           // A provider that rechecks before its reset backs off across checks.
           const refreshAttempt =
-            authoritative && !vocabulary.recheckBeforeReset ? 0 : waiter.refreshAttempt + 1;
+            authoritative && !vocabulary.recheckBeforeReset && candidateProviders === null
+              ? 0
+              : waiter.refreshAttempt + 1;
           const scheduled = subscriptionCoreCodexNextCheckAt({
             earliestResetAt: waitEvaluation.earliestResetAt,
             healthRetryAt: waitEvaluation.healthRetryAt,
             refreshAttempt,
             now,
             rechecksBeforeReset: vocabulary.recheckBeforeReset,
+            failoverAware: candidateProviders !== null,
           });
           // Capacity changes can prompt a recheck but never bypass a persisted
           // false-resumption delay.
@@ -26180,6 +26218,14 @@ export async function reconcileSubscriptionCoreCapacityWait(
             tx,
             sql`update subscription_capacity_waiters
               set wait_reason = ${waitEvaluation.waitReason},
+                  candidate_providers = ${
+                    candidateProviders === null
+                      ? sql`null`
+                      : sql`array[${sql.join(
+                          candidateProviders.map((id) => sql`${id}`),
+                          sql`, `,
+                        )}]::text[]`
+                  },
                   earliest_reset_at = ${waitEvaluation.earliestResetAt?.toISOString() ?? null}::timestamptz,
                   next_check_at = ${nextCheckAt.toISOString()}::timestamptz,
                   reset_kind = ${scheduled.resetKind},
@@ -27719,12 +27765,150 @@ export type SetSessionCodexPinOptions = {
   expected?: Pick<SessionCodexState, "pinnedCredentialId" | "pinSource">;
 };
 
-/**
- * The core counterpart of `recordSessionCodexSelectionForTurnAttempt`: the
- * same attempt-fenced, idempotent `codex.credential.selected` (and
- * `codex.account.switched`) events, but the previous account comes from the
- * session's core binding and the legacy `sessions.codex_last_credential_id`
- * pointer is never written with a core connection id.
+/** Lease-backed serving audit, written after placement in its own fenced
+ * transaction. Proposals and claim-time provenance alone emit no transition.
+ */
+export async function recordSubscriptionCoreServingSelectionForTurnAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    provider: string;
+    connectionId: string;
+    modelId: string;
+    reason: import("@opengeni/contracts").TurnServingPolicyV1["reason"];
+  },
+): Promise<{ events: SessionEvent[]; previousProvider: string | null }> {
+  return withWorkspaceSessionEventActivityRls(db, input.workspaceId, true, async (tx) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, sessionLock: "no_key_update" });
+    if (!fence.allowed || !fence.session || fence.turn.accountId !== input.accountId)
+      throw new Error("Subscription selection attempt fenced");
+    const stored = readTurnServingPolicyV1(fence.turn.metadata);
+    const revision = stored.kind === "valid" ? stored.revisions.at(-1) : undefined;
+    if (
+      !revision ||
+      revision.executionGeneration !== input.executionGeneration ||
+      revision.policy.productModelId !== input.modelId
+    )
+      throw new Error("Subscription selection requires this generation's serving revision");
+    const key = `opengeni:subscription-selection:${input.attemptId}`;
+    const prior = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          inArray(schema.sessionEvents.clientEventId, [key, `${key}:switch`]),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    if (prior.length) {
+      const selected = prior.find((event) => event.type === "subscription.account.selected");
+      if (!selected) throw new Error("Subscription selection receipt missing");
+      const payload = sessionEventPayloadRecord(selected.payload, selected.payloadCodecVersion);
+      if (
+        payload.connectionId !== input.connectionId ||
+        payload.provider !== input.provider ||
+        payload.modelId !== input.modelId
+      )
+        throw new Error("An attempt cannot record conflicting subscription selections");
+      return {
+        events: prior.map(mapEvent),
+        previousProvider:
+          typeof payload.previousProvider === "string" ? payload.previousProvider : null,
+      };
+    }
+    // Provenance is not dispatch permission. An event describes only a live,
+    // committed placement of this exact generation, never a pending proposal.
+    const [lease] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select exists (
+      select 1 from subscription_leases where account_id=${input.accountId}::uuid
+        and workspace_id=${input.workspaceId}::uuid and session_id=${input.sessionId}::uuid
+        and turn_id=${input.turnId}::uuid and provider=${input.provider}
+        and connection_id=${input.connectionId}::uuid and generation=${input.executionGeneration}
+        and leased_until > clock_timestamp()
+    ) as present`,
+    );
+    if (!lease?.present) throw new Error("Subscription selection requires its live placed lease");
+    const [last] = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "subscription.account.selected"),
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    const previous = last
+      ? sessionEventPayloadRecord(last.payload, last.payloadCodecVersion)
+      : null;
+    const previousProvider = typeof previous?.provider === "string" ? previous.provider : null;
+    const fromAccountId = typeof previous?.connectionId === "string" ? previous.connectionId : null;
+    const accepted = readTurnExecutionPolicyV1(fence.turn.metadata);
+    const fromModelId =
+      typeof previous?.modelId === "string"
+        ? previous.modelId
+        : accepted.kind === "valid"
+          ? accepted.policy.productModelId
+          : input.modelId;
+    const common = {
+      provider: input.provider,
+      executionGeneration: input.executionGeneration,
+      servingHistoryPosition: revision.historyPosition,
+      reason: input.reason,
+    };
+    const events: AppendEventInput[] = [];
+    if (
+      (fromAccountId !== null && fromAccountId !== input.connectionId) ||
+      fromModelId !== input.modelId
+    )
+      events.push({
+        type: "subscription.account.switched",
+        clientEventId: `${key}:switch`,
+        payload: {
+          ...common,
+          fromProvider: previousProvider,
+          fromAccountId,
+          toAccountId: input.connectionId,
+          fromModelId,
+          toModelId: input.modelId,
+        },
+      });
+    events.push({
+      type: "subscription.account.selected",
+      clientEventId: key,
+      payload: {
+        ...common,
+        previousProvider,
+        connectionId: input.connectionId,
+        modelId: input.modelId,
+      },
+    });
+    const appended = await appendSessionEventsForTurnAttempt(
+      tx,
+      input.workspaceId,
+      input.sessionId,
+      input.turnId,
+      input.executionGeneration,
+      input.attemptId,
+      events,
+    );
+    if (!appended.accepted) throw new Error("Subscription selection attempt fenced");
+    return { events: appended.events, previousProvider };
+  });
+}
+
+/** Legacy Codex audit/alias, projected from core placement without writing
+ * the old session credential pointer. Idempotent under the same attempt fence.
  */
 export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
   db: Database,
@@ -78645,7 +78829,18 @@ export type SettleCodexCredentialLeaseLossResult =
   | { action: "failed"; events: SessionEvent[] }
   | { action: "stale"; events: [] };
 
+import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";
+import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
+
 export type RequestSessionTurnRecoveryInput = {
+  /** C2 only: proposal is persisted atomically with recovery, never placement. */
+  subscriptionServingTarget?: {
+    crossProviderFailoverEnabled: true;
+    executionGeneration: number;
+    policy: import("@opengeni/contracts").TurnServingPolicyV1["policy"];
+    connectionId: string;
+    reason: import("@opengeni/contracts").TurnServingPolicyV1["reason"];
+  };
   sessionId: string;
   turnId: string;
   triggerEventId: string;
@@ -78870,6 +79065,33 @@ export async function requestSessionTurnRecovery(
           };
         }
       }
+      let servingTarget: import("@opengeni/contracts").TurnPendingServingPolicyV1 | null = null;
+      if (input.subscriptionServingTarget) {
+        const target = input.subscriptionServingTarget;
+        if (
+          target.crossProviderFailoverEnabled !== true ||
+          session.codexCompactionMode !== "portable"
+        )
+          throw new Error("Serving recovery requires enabled failover and portable history");
+        const scope = {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+        };
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          ...scope,
+          attemptId: input.attemptId,
+          executionGeneration: target.executionGeneration,
+        });
+        if (!fence.allowed) throw new Error(`Serving recovery fenced: ${fence.reason}`);
+        await assertSubscriptionServingRecoverySettledTx(tx as unknown as Database, scope);
+        servingTarget = await stageSubscriptionCorePendingServingPolicyTx(
+          tx as unknown as Database,
+          { ...scope, ...target, attemptId: input.attemptId },
+          fence,
+        );
+      }
       await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
         id: input.attemptId,
         accountId: session.accountId,
@@ -78949,6 +79171,7 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(servingTarget ? { turnPendingServingPolicyV1: servingTarget } : {}),
             ...(input.subscriptionLeaseBusy
               ? {
                   subscriptionLeaseBusy: {
@@ -86152,3 +86375,19 @@ export async function loadDirectModelProviderConnection(
   return { ...metadata, apiKey: connection.credential.apiKey };
 }
 export { apiIntegrationToolEffect } from "./api-integration-approvals";
+export {
+  subscriptionCoreProvider,
+  subscriptionCoreProviderIds,
+} from "./subscription-core-providers";
+export {
+  placeSubscriptionCoreTurnWithFailover,
+  evaluateSubscriptionCorePlacementWithFailover,
+  type SubscriptionCoreFailoverPlacement,
+} from "./subscription-core/failover";
+export { type SubscriptionCoreFailoverModel } from "./subscription-core/failover-world";
+export { readSubscriptionCoreFailoverProvider } from "./subscription-core/failover-readiness";
+export {
+  recordSubscriptionCoreServingPolicyForTurnAttempt,
+  readSubscriptionCoreServingPolicyForTurn,
+} from "./subscription-core/serving-policy";
+export { readSubscriptionHistoryProvenance } from "./subscription-core/serving-runtime";

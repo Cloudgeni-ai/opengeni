@@ -361,6 +361,55 @@ request; it marks the lease for failover at the next model-call boundary.
 - Membership removal (0263) learns the `subscription_connection` resource
   kind and revokes personal connections on leave (SUB-ACCESS-06).
 
+#### Owner decision: explicit personal choice in a shared chat (2026-10-12)
+
+The private-work rule above remains the meaning of existing v2 entries and
+compatibility records. Its only new exception is an authenticated participant
+explicitly choosing **their own** personal account in a shared session, subject
+to live organization/workspace personal-account policy. The participant need
+not be the session creator. Shared `people` scopes still mean the session
+owner; do not substitute the choosing person for the session identity.
+
+Fresh human acceptance can add `sharedSessionChoice: { sessionId, connectionId }`
+to that provider's v2 entry. Both UUIDs are required, canonical and strictly
+validated; unknown fields and malformed restrictions fail closed. The entry
+still carries the account owner's membership and exact resource generation.
+The authenticated accepting human must own the explicit provider binding's
+connection and participate in the session. A service, API key, ownerless
+context, automatic binding or different sender grants no such entry. No
+creator fallback is available for this new branch. Existing private entries
+and compatibility `connectionIds` keep their original interpretation.
+
+Readers must support the restricted shape before any writer emits it. This
+is not a rolling-writer-compatible extension: old strict readers reject the
+extra field. Activation uses the established drained-maintenance upgrade and
+transaction-local runtime protocol receipt, not a parallel feature gate.
+The migration rejects live configured runtime database sessions; restricted
+acceptance rejects a missing receipt and restricted spending fails closed.
+Pre-upgrade binaries may not restart after activation. No backfill,
+generation rotation or rewriting of already accepted work is permitted.
+SQL access and placement consume the stored exact restriction, never a live
+binding as a substitute for consent. Live account-owner membership, workspace
+participation, resource generation, effective policy, provider receipt and
+cutover checks remain mandatory. The genuine session owner and initiating
+human remain separate fields in every runtime capability.
+
+Background, replay, recovery, schedules and causal copies retain the original
+entry verbatim. It cannot authorize a different session or a same-generation
+sibling connection. A later choice affects only the next acceptance unless
+the waiting turn's frozen authority already admits the exact target under
+live checks; the choice response must not claim `waiting_turn` otherwise.
+Shared visibility never activates automatic personal fallback. Administered
+credential/version/refresh/quota routes remain exact-owner Personal-workspace
+only: an inference capability does not open them.
+
+The forward implementation preserves 0716 receipt/compatibility gates, 0717
+immutability and copy fences, 0726 lifecycle marker bracketing and 0728
+inserted-now replay protection. Provider-qualified binding keys, placement
+commits and cache clocks remain the independent 0733 contract. Real PostgreSQL
+verification must run as a non-owner, non-superuser, non-BYPASSRLS application
+role and include a non-superuser owner-migrated database.
+
 ## 4. Placement
 
 One transaction per placement. No provider call happens inside it. It reads
@@ -4836,11 +4885,11 @@ connect writer gains `credentialFormat` and `personal`.
 
 #### X3: the drained SuperGrok cutover
 
-Migration 0738 (`-- deployment-mode: maintenance`) is the SuperGrok
+Migration 0739 (`-- deployment-mode: maintenance`) is the SuperGrok
 counterpart of 0689 and follows "Data mapping", "Accepted authority across
 the cutover", "Personal authority generations" and "Cutover protocol"
 above. The runbook is `docs/deployment.md`, "SuperGrok on the shared
-subscription core (0738)". Choices made where the plan left room, for
+subscription core (0739)". Choices made where the plan left room, for
 reviewers:
 
 - **One writer for every provider's stage.** The credential stage is
@@ -4871,7 +4920,7 @@ reviewers:
   `personalFallbackAllowed`). `subscription_effective_settings` already
   ignores a workspace override of a locked key, so the effective outcome is
   the one the lock gives, and M5's trigger, which refuses a workspace write
-  of a locked key with `42501`, is never contradicted (0738 disables
+  of a locked key with `42501`, is never contradicted (0739 disables
   non-internal triggers on the relations it moves during the owner window,
   so the trigger would not fire there, but an unseen override would take
   effect if the organization later unlocked the key). The workspace follows
@@ -4930,8 +4979,8 @@ reviewers:
   binds, so they cannot write either. The policies leave deletes open.
   Organization retention deletion removes an offboarded member's migrated
   connection with their Personal workspace; row security hides their legacy
-  `user` rows from it, as before the cutover, and 0738 has blanked those rows'
-  ciphertext. 0738 reduces the legacy disconnect routine to a refusal with
+  `user` rows from it, as before the cutover, and 0739 has blanked those rows'
+  ciphertext. 0739 reduces the legacy disconnect routine to a refusal with
   `55000` (its old body could never run after the receipt), so it can never
   report a revocation while the moved connection keeps serving. Membership lifecycle still revokes, retains and restores the
   existing authorities. The migration asserts FORCE on the five tables.
@@ -4948,16 +4997,16 @@ reviewers:
 - **Quota window.** A SuperGrok connection's quota snapshot has one window,
   id `billing` (`SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID`), the id the core
   adapter writes for SuperGrok usage.
-- **Readiness.** `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai` is 0738, so a
-  binary with 0738 in its ledger refuses to start without the `xai` receipt
+- **Readiness.** `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai` is 0739, so a
+  binary with 0739 in its ledger refuses to start without the `xai` receipt
   (the provider-keyed readiness function
   `subscription_provider_cutover_committed('xai')`).
 - **Tests of the legacy runtime.** Characterization tests of the legacy
-  SuperGrok runtime run in a database that withholds 0738 (the shared test
+  SuperGrok runtime run in a database that withholds 0739 (the shared test
   harness's `withheldMigrations` option builds a separate template with
   those ledger rows pre-recorded), the state a rolling deployment has
   before the window. X4 deletes them with the legacy runtime.
-- **Temporal seam.** 0738 keeps every live waiter's id (as `waiter_id`),
+- **Temporal seam.** 0739 keeps every live waiter's id (as `waiter_id`),
   generation, wake revisions and blocked-turn generation and moves its
   pending wake to the wake outbox, so a workflow parked on a legacy
   SuperGrok wait reconciles the reference its history recorded (`provider:
@@ -5948,11 +5997,11 @@ designed here and are carried by C2a.
 
 #### C3: the drained Claude cutover
 
-Migration 0739 (`-- deployment-mode: maintenance`) is the Claude counterpart
-of 0738 and follows "Data mapping", "Accepted authority across the
+Migration 0740 (`-- deployment-mode: maintenance`) is the Claude counterpart
+of 0739 and follows "Data mapping", "Accepted authority across the
 cutover", "Personal authority generations" and "Cutover protocol" above.
 The runbook is `docs/deployment.md`, "Claude on the shared subscription core
-(0739)". It reuses X3's machinery rather than forking it: the receipt,
+(0740)". It reuses X3's machinery rather than forking it: the receipt,
 registry row, readiness, `subscription_cutover_report`, compatibility
 records, the neutral planner and `subscription-core/cutover-stage.ts`. C3
 generalizes the pieces X3 had inline: the migrator runs every provider's
@@ -5979,7 +6028,7 @@ Choices made where the plan left room, for reviewers:
   the combined-window ledger test refuses a stack that violates that order.
 - **Format.** The legacy plaintext is copied unchanged; the stage writes
   `claude_oauth_v1` for a secret with `oauth` and `claude_setup_token_v1`
-  otherwise, the formats the adapter derives at runtime (as 0738 writes
+  otherwise, the formats the adapter derives at runtime (as 0739 writes
   `xai_oauth_v1`). The column is informational: no decision reads it, the
   adapter derives the format from the decrypted secret, and the shared
   connect and reconnect writers record the envelope version `v1`, so a
@@ -6053,14 +6102,14 @@ Choices made where the plan left room, for reviewers:
   commands only: a restrictive policy that also covered SELECT would make
   the lifecycle-facts backfill of 0565 refuse the table), and the legacy
   disconnect refuses after the receipt.
-- **Together with SuperGrok.** 0738 and 0739 share no legacy table or key,
+- **Together with SuperGrok.** 0739 and 0740 share no legacy table or key,
   so one migrator run applies both in ledger order, each in its own
   transaction with its own report and readiness gate; a Claude abort leaves
-  0738 committed and a rerun resumes at 0739. The combined-window ledger
+  0739 committed and a rerun resumes at 0740. The combined-window ledger
   test (`subscription-core-combined-cutover-ledger.test.ts`) proves this
   and that only rolling migrations lie between them.
 - **Merge gates as ordinary tests.** The Claude seam integration test's
-  peek and reconcile cases need C1b's Claude core waits, and the 0739 test's
+  peek and reconcile cases need C1b's Claude core waits, and the 0740 test's
   "a newer Claude usage reading that omits a still-exhausted window" case
   needs C2a's `usageReadingsComplete: false`. They are ordinary tests, red
   until those land in the base, so C3 cannot pass its exact-head validation

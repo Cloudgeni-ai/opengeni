@@ -31,7 +31,10 @@ import {
   subscriptionCapacityArmingFailure,
 } from "./subscription-capacity-arming";
 
-type WaitPlacement = Extract<SubscriptionCorePlacement, { kind: "wait" }>;
+type WaitPlacement = Extract<SubscriptionCorePlacement, { kind: "wait" }> & {
+  /** Fresh failover evaluation hints, never authority. */
+  candidateProviders?: readonly string[];
+};
 type RunPlacement = Extract<SubscriptionCorePlacement, { kind: "run" }>;
 
 /** One provider's chat placement on the core, as the worker uses it. */
@@ -351,6 +354,9 @@ export async function parkCoreSubscriptionTurn(
       waitReason: wait.reason,
       earliestResetAt: wait.earliestResetAt,
       healthRetryAt: wait.healthRetryAt,
+      ...(wait.candidateProviders !== undefined
+        ? { candidateProviders: wait.candidateProviders }
+        : {}),
       failurePayload: subscriptionCoreCapacityWaitPayload(
         wait.reason,
         wait.earliestResetAt,
@@ -394,7 +400,7 @@ export async function parkCoreSubscriptionTurn(
   }
   if (armed.action === "waiting") {
     const evaluated = await reconcileCoreCapacityWait(
-      { db, bus, signalCodexCapacityWorkflow },
+      { db, bus, signalCodexCapacityWorkflow, settings: deps.settings },
       waits,
       {
         accountId: input.accountId,

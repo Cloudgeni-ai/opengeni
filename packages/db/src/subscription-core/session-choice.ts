@@ -15,8 +15,8 @@
  *   provider is the chosen connection's, found through the registry; the
  *   binding guard in the database decides whether this session may use it
  *   (an active connection; a personal one only for its owner, in their
- *   private session or Personal workspace, while personal connections are
- *   allowed there).
+ *   private session or Personal workspace, or explicitly for their own
+ *   sends in a shared session, while personal connections are allowed).
  * - `readSubscriptionPersonPreferences` / `writeSubscriptionPersonPreferences`:
  *   the caller's own personal-fallback opt-in, through the owner policies
  *   of migration 0729. Placement reads the opt-in only for the session
@@ -72,7 +72,7 @@ export type SubscriptionCoreAccountChoiceRefusal =
   | "inactive"
   /** Personal connections are not allowed in this workspace. */
   | "personal_not_allowed"
-  /** A personal connection serves only its owner's private sessions and Personal workspace. */
+  /** The caller cannot authorize this personal connection for this session. */
   | "personal_not_owner_work"
   /**
    * The session has no owner (for example a run of a schedule created with an
@@ -148,8 +148,11 @@ function choiceRefusal(
   if (!personal) return null;
   if (!connectionsAllowed) return "personal_not_allowed";
   const ownersWork =
-    session.ownerSubjectId === subjectId &&
-    (session.visibility === "user_private" || session.workspaceKind === "personal");
+    (session.ownerSubjectId === subjectId &&
+      (session.visibility === "user_private" || session.workspaceKind === "personal")) ||
+    (subjectId.startsWith("user:") &&
+      session.visibility === "workspace_shared" &&
+      session.workspaceKind === "shared");
   return ownersWork ? null : "personal_not_owner_work";
 }
 
@@ -516,7 +519,7 @@ async function chooseOnce(
 
       // Resolve the named connection to its provider and canonical id among
       // the connections this caller may name, before any lock is taken.
-      let target: { provider: string; connectionId: string } | null = null;
+      let target: { provider: string; connectionId: string; personal: boolean } | null = null;
       if (input.connectionId !== null) {
         const effective = await readSubscriptionEffectiveSettings(
           tx,
@@ -544,7 +547,11 @@ async function chooseOnce(
               candidate.provider === providerId && candidate.connectionId === canonical,
           );
           if (match) {
-            target = { provider: providerId, connectionId: match.connectionId };
+            target = {
+              provider: providerId,
+              connectionId: match.connectionId,
+              personal: match.personal,
+            };
             break;
           }
         }
@@ -688,8 +695,26 @@ async function chooseOnce(
       if (!written) return none("conflict");
       const changedProvider = target?.provider ?? (touched.length === 1 ? touched[0]! : null);
 
+      // Choosing an account never grants new authority to already accepted
+      // work. A personal choice applies to waiting work only when its frozen
+      // authority already admits the connection under the live owner checks.
+      // In a shared session the accepted authority is exact to that session
+      // and connection; neither the new binding nor the current sender can
+      // enlarge it. The same check preserves legacy private frozen pools.
+      let waitingHasAuthority = true;
+      if (target?.personal && session.status === "waiting_capacity" && session.activeTurnId) {
+        const [waiting] = await rawRows<{ authorized: boolean }>(
+          tx,
+          sql`select opengeni_private.authorize_subscription_personal_access(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.sessionId}::uuid, ${session.activeTurnId}::uuid,
+            ${target.connectionId}::uuid, ${target.provider},
+            ${session.ownerSubjectId}, ${input.subjectId}) as authorized`,
+        );
+        waitingHasAuthority = waiting?.authorized === true;
+      }
       const appliedTo: "waiting_turn" | "next_turn" =
-        session.status === "waiting_capacity" && session.activeTurnId
+        session.status === "waiting_capacity" && session.activeTurnId && waitingHasAuthority
           ? "waiting_turn"
           : "next_turn";
       const inserted = await tx

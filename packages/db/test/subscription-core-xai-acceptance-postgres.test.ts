@@ -194,7 +194,7 @@ let beforeReceipt: { v2: unknown; xai: unknown } | null = null;
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("subscription-core-xai-acceptance", {
-    withheldMigrations: ["0738_subscription_core_xai_cutover.sql"],
+    withheldMigrations: ["0739_subscription_core_xai_cutover.sql"],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });

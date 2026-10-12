@@ -640,10 +640,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     eventing.modelRunSettings.reasoningConfigurationUpdatesEnabled &&
     resolvedModel?.provider.api === "responses" &&
     (resolvedModel.provider.id === "codex" || resolvedModel.provider.id === "openai") &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    );
   const requestReasoningEffort =
     useReasoningUpdates &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort)
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    )
       ? await ensureSessionReasoningConfiguration(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -651,9 +657,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           turnId: turn.id,
           expectedExecutionGeneration: turn.executionGeneration,
           expectedAttemptId: input.attemptId,
-          effort: turn.reasoningEffort,
+          effort: turnExecutionPolicy.reasoningEffort,
         })
-      : turn.reasoningEffort;
+      : turnExecutionPolicy.reasoningEffort;
   const toolRouterInHistory = session.agent
     ? await sessionHasToolRouterHistory(db, {
         accountId: input.accountId,

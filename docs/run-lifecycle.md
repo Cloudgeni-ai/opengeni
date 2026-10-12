@@ -1,5 +1,19 @@
 # Run lifecycle: turns, goals, and memory
 
+Subscription failover keeps the accepted turn model and authority immutable.
+For portable sessions, the enabled serving path records a per-generation
+serving policy, then obtains a lease before recording
+`subscription.account.selected` or `subscription.account.switched`. A pending
+recovery target is not a completed switch. Recovery checks unresolved model
+requests and preserves canonical history; only the outbound request projection
+removes another provider's opaque artifacts. The control worker resolves the
+current metadata-only catalog and re-evaluates the full eligible pool for a
+parked turn. Stored candidate-provider hints accelerate wakes but grant no
+authority. Missing model mappings leave the capacity wait for an actionable
+claim-time failure rather than waiting indefinitely for unrelated quota.
+See [the subscription contract](subscription-accounts.md) and
+`apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts`.
+
 This is the orientation for how an Opengeni agent run actually executes over
 time. It ties together three subsystems a contributor touching the session
 workflow, the worker activity, or the runtime must keep straight. Code wins

@@ -34,8 +34,8 @@ let client: DbClient | null = null;
 let appConnectionUrl = "";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0738_subscription_core_xai_cutover.sql); apply the pending migrations first",
-  "database is missing the claude subscription-core cutover receipt (0739_subscription_core_claude_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
@@ -79,12 +79,12 @@ beforeAll(async () => {
     // 0735's owner-only usage routines run on 0707's owner internals.
     "0735_subscription_core_owned_connection_usage.sql",
     // Reads the registry/receipt and rewrites the admission guard withheld above.
-    "0737_subscription_failover_readiness_and_request_fence.sql",
+    "0738_subscription_failover_readiness_and_request_fence.sql",
   ];
   // The drained SuperGrok cutover is maintenance-only: a rolling deployment
   // of 0707 never applies it, so it stays recorded and unapplied here.
-  const xaiCutover = "0738_subscription_core_xai_cutover.sql";
-  const claudeCutover = "0739_subscription_core_claude_cutover.sql";
+  const xaiCutover = "0739_subscription_core_xai_cutover.sql";
+  const claudeCutover = "0740_subscription_core_claude_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;

@@ -384,6 +384,8 @@ export const subscriptionCapacityWaiters = pgTable(
     sessionId: uuid("session_id").notNull(),
     turnId: uuid("turn_id").notNull(),
     provider: text("provider").notNull(),
+    /** NULL is home-only; even an empty failover-aware set needs bounded refresh. */
+    candidateProviders: text("candidate_providers").array(),
     waitReason: text("wait_reason").notNull(),
     policyHash: text("policy_hash"),
     resetKind: text("reset_kind"),
@@ -411,6 +413,16 @@ export const subscriptionCapacityWaiters = pgTable(
       table.provider,
       table.earliestResetAt,
       table.wakeRevision,
+    ),
+    candidates: index("subscription_capacity_waiters_candidates_idx").using(
+      "gin",
+      table.candidateProviders,
+    ),
+    homeScope: index("subscription_capacity_waiters_home_scope_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.provider,
+      table.sessionId,
     ),
   }),
 );

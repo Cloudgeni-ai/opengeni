@@ -56,8 +56,8 @@ const FENCES = "0717_subscription_authority_fences.sql";
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
-const XAI_CUTOVER = "0738_subscription_core_xai_cutover.sql";
-const CLAUDE_CUTOVER = "0739_subscription_core_claude_cutover.sql";
+const XAI_CUTOVER = "0739_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;

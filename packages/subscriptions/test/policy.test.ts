@@ -34,6 +34,85 @@ import {
 
 const NOW = 10_000_000;
 
+describe("exact personal authority in shared chats", () => {
+  function sharedChoice(): PlacementInput {
+    const state = input({
+      connections: [personal("own", "codex"), personal("other", "codex")],
+      personalFallbackOptIn: true,
+      session: {
+        ownerMembershipId: "chat-owner",
+        personalAuthority: [
+          {
+            provider: "codex",
+            ownerMembershipId: "member-a",
+            sharedSessionChoice: { sessionId: "session-1", connectionId: "own" },
+          },
+        ],
+        binding: {
+          provider: "codex",
+          connectionId: "own",
+          modelId: "codex/a",
+          choice: "explicit",
+          lastModelCallAt: NOW,
+        },
+      },
+    });
+    state.people = [
+      ...state.people,
+      { membershipId: "chat-owner", active: true, personalFallbackOptIn: true },
+    ];
+    return state;
+  }
+
+  test("a participating noncreator's explicit account is eligible, not their other account", () => {
+    const state = sharedChoice();
+    const result = decidePlacement(state);
+    expect(result).toMatchObject({ kind: "run", connectionId: "own" });
+    expect(authorizationIneligibility(state, state.connections[1]!)).toContain(
+      "personal_not_owners_work",
+    );
+    expect(checkPlacementDecision(state, result)).toEqual([]);
+  });
+
+  test("automatic selection, foreign sessions, absent authority, policy off and inactive owners refuse", () => {
+    for (const mutate of [
+      (state: PlacementInput) => {
+        state.session.binding = null;
+      },
+      (state: PlacementInput) => {
+        state.session.id = "other-session";
+      },
+      (state: PlacementInput) => {
+        state.session.personalAuthority = [];
+      },
+      (state: PlacementInput) => {
+        state.settings.personalConnectionsAllowed = false;
+      },
+      (state: PlacementInput) => {
+        state.people = state.people.map((person) => ({ ...person, active: false }));
+      },
+      (state: PlacementInput) => {
+        state.session.ownerMembershipId = null;
+      },
+    ]) {
+      const state = sharedChoice();
+      mutate(state);
+      const result = decidePlacement(state);
+      expect(result.kind).toBe("wait");
+      expect(checkPlacementDecision(state, result)).toEqual([]);
+    }
+  });
+
+  test("legacy private-work authority never becomes shared-chat consent", () => {
+    const state = sharedChoice();
+    state.session.ownerMembershipId = "member-a";
+    state.session.personalAuthority = [{ provider: "codex", ownerMembershipId: "member-a" }];
+    expect(decidePlacement(state).kind).toBe("wait");
+    state.session.visibility = "private";
+    expect(decidePlacement(state)).toMatchObject({ kind: "run", connectionId: "own" });
+  });
+});
+
 function quota(patch: Partial<SubscriptionQuota> = {}): SubscriptionQuota {
   return {
     windows: [{ id: "primary", usedPercent: 20, resetsAt: NOW + 3_600_000, status: "ok" }],

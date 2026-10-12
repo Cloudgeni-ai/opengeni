@@ -31,33 +31,33 @@ DO $claude_cutover_drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF to_regclass('pg_temp.claude_cutover_stage') IS NULL THEN
-    RAISE EXCEPTION '0739 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 requires the codec-aware TypeScript migration runner' USING ERRCODE = '55000';
   END IF;
   -- The workspace settings writes follow the settings lock protocol, which
   -- requires READ COMMITTED; refuse any other isolation level up front.
   IF current_setting('transaction_isolation') <> 'read committed' THEN
-    RAISE EXCEPTION '0739 requires READ COMMITTED' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 requires READ COMMITTED' USING ERRCODE = '55000';
   END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0739 requires explicit application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 requires explicit application database roles' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR octet_length(item #>> '{}') NOT BETWEEN 1 AND 63
       OR item #>> '{}' <> btrim(item #>> '{}')
-  ) THEN RAISE EXCEPTION '0739 received invalid application roles' USING ERRCODE = '55000'; END IF;
+  ) THEN RAISE EXCEPTION '0740 received invalid application roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r.value = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0739 requires drained application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 requires drained application sessions' USING ERRCODE = '55000';
   END IF;
   IF to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)') IS NULL
     OR to_regclass('opengeni_private.subscription_authority_compat') IS NULL
     OR to_regclass('opengeni_private.subscription_core_auto_assignments') IS NULL THEN
-    RAISE EXCEPTION '0739 requires the generic precursor, provider-keyed reach and compatibility migrations'
+    RAISE EXCEPTION '0740 requires the generic precursor, provider-keyed reach and compatibility migrations'
       USING ERRCODE = '55000';
   END IF;
   IF opengeni_private.subscription_provider_cutover_committed('claude') THEN
-    RAISE EXCEPTION '0739 found an existing Claude cutover receipt' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 found an existing Claude cutover receipt' USING ERRCODE = '55000';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
     WHERE conrelid = 'subscription_session_bindings'::regclass AND contype = 'p'
@@ -67,7 +67,7 @@ BEGIN
         AND tgname = 'subscription_session_bindings_provider_fixed'
         AND tgenabled IN ('O', 'A') AND NOT tgisinternal
         AND tgfoid = to_regprocedure('opengeni_private.guard_subscription_binding_provider()')) THEN
-    RAISE EXCEPTION '0739 requires provider-keyed session bindings and their enabled provider guard'
+    RAISE EXCEPTION '0740 requires provider-keyed session bindings and their enabled provider guard'
       USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_drain$;
@@ -103,11 +103,11 @@ DO $claude_cutover_owner_window$
 DECLARE item record;
 BEGIN
   IF (SELECT count(*) FROM claude_cutover_relations) <> 41 THEN
-    RAISE EXCEPTION '0739 could not resolve every cutover relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 could not resolve every cutover relation' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM claude_cutover_relations r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user)) THEN
-    RAISE EXCEPTION '0739 requires the schema owner' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 requires the schema owner' USING ERRCODE = '55000';
   END IF;
   -- A runtime login missing from the passed role list still writes: refuse
   -- every other client backend whose role may insert, update or delete a
@@ -125,7 +125,7 @@ BEGIN
           OR has_table_privilege(activity.usesysid, relation.oid, 'UPDATE')
           OR has_table_privilege(activity.usesysid, relation.oid, 'DELETE'))
   ) THEN
-    RAISE EXCEPTION '0739 requires drained application sessions (a connected role outside the listed application roles can write moved relations)'
+    RAISE EXCEPTION '0740 requires drained application sessions (a connected role outside the listed application roles can write moved relations)'
       USING ERRCODE = '55000';
   END IF;
   FOR item IN SELECT * FROM claude_cutover_relations ORDER BY oid LOOP
@@ -195,7 +195,7 @@ DO $claude_cutover_owner_window_open$
 BEGIN
   IF EXISTS (SELECT 1 FROM claude_cutover_relations r JOIN pg_class c ON c.oid = r.oid
     WHERE c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0739 owner window did not open' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 owner window did not open' USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_owner_window_open$;
 
@@ -208,7 +208,7 @@ BEGIN
   BEGIN
     EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT claude_cutover_empty_probe', relation);
   EXCEPTION WHEN check_violation THEN
-    RAISE EXCEPTION '0739 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 counted zero rows in a non-empty relation' USING ERRCODE = '55000';
   END;
   EXECUTE format('ALTER TABLE %s DROP CONSTRAINT claude_cutover_empty_probe', relation);
 END $claude_cutover_assert_empty$;
@@ -273,7 +273,7 @@ BEGIN
     OR EXISTS (SELECT 1 FROM opengeni_private.subscription_authority_compat WHERE provider = 'claude')
     OR EXISTS (SELECT 1 FROM subscription_settings WHERE claude_primary_connection_id IS NOT NULL)
   THEN
-    RAISE EXCEPTION '0739 refuses pre-existing core Claude state' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 refuses pre-existing core Claude state' USING ERRCODE = '55000';
   END IF;
   -- 0598 moved every legacy Claude model connection to the account pools and
   -- revoked it; its trigger keeps them revoked and blank. A connection that is
@@ -285,7 +285,7 @@ BEGIN
     OR EXISTS (SELECT 1 FROM organization_model_provider_connections
       WHERE provider_kind = 'claude_subscription'
         AND (status <> 'revoked' OR credential_encrypted <> '')) THEN
-    RAISE EXCEPTION '0739 refused a legacy Claude model connection that is not revoked (legacy_connection_not_revoked)'
+    RAISE EXCEPTION '0740 refused a legacy Claude model connection that is not revoked (legacy_connection_not_revoked)'
       USING ERRCODE = '55000';
   END IF;
   -- Ambiguous session ownership on live work aborts activation.
@@ -302,7 +302,7 @@ BEGIN
             AND membership.id = session.owner_organization_membership_id
             AND membership.subject_id = session.owner_subject_id)))
   ) THEN
-    RAISE EXCEPTION '0739 refused ambiguous session ownership on live work (session_owner_ambiguous)'
+    RAISE EXCEPTION '0740 refused ambiguous session ownership on live work (session_owner_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_preflight$;
@@ -318,14 +318,14 @@ INSERT INTO opengeni_private.subscription_core_providers (provider, extra_credit
 VALUES ('claude', false, 'claude_primary_connection_id');
 INSERT INTO opengeni_private.subscription_provider_cutover_receipts (
   provider, migration, committed_at, seed_rotation
-) VALUES ('claude', '0739_subscription_core_claude_cutover.sql', transaction_timestamp(), '{"mode":"spread"}');
+) VALUES ('claude', '0740_subscription_core_claude_cutover.sql', transaction_timestamp(), '{"mode":"spread"}');
 
 -- opengeni:claude-subscription-core-cutover-v1
 
 DO $claude_cutover_codec_receipt$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_temp.claude_cutover_stage WHERE completed) THEN
-    RAISE EXCEPTION '0739 codec stage did not complete' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 codec stage did not complete' USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_codec_receipt$;
 
@@ -350,7 +350,7 @@ BEGIN
     GROUP BY map.account_id, map.owner_membership_id
     HAVING count(DISTINCT map.authority_generation) <> 1
   ) THEN
-    RAISE EXCEPTION '0739 refused ambiguous personal generations (personal_generation_ambiguous)'
+    RAISE EXCEPTION '0740 refused ambiguous personal generations (personal_generation_ambiguous)'
       USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_generations$;
@@ -552,7 +552,7 @@ DO $claude_cutover_binding_unique$
 BEGIN
   IF EXISTS (SELECT 1 FROM claude_cutover_bindings WHERE moves
     GROUP BY workspace_id, session_id HAVING count(*) > 1) THEN
-    RAISE EXCEPTION '0739 refused ambiguous session pins (pin_pool_ambiguous)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 refused ambiguous session pins (pin_pool_ambiguous)' USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_binding_unique$;
 
@@ -598,7 +598,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM claude_cutover_live_leases legacy
     JOIN subscription_leases core ON core.workspace_id = legacy.workspace_id
      AND core.turn_id = legacy.turn_id) THEN
-    RAISE EXCEPTION '0739 refused a turn leased on both runtimes (lease_conflict)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 refused a turn leased on both runtimes (lease_conflict)' USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_lease_conflict$;
 INSERT INTO subscription_leases (
@@ -636,7 +636,7 @@ DO $claude_cutover_waiter_checks$
 BEGIN
   IF EXISTS (SELECT 1 FROM claude_cutover_waiters waiter WHERE waiter.rank = 1
     AND waiter.workflow_id IS DISTINCT FROM waiter.session_workflow_id) THEN
-    RAISE EXCEPTION '0739 refused a waiter of another workflow (waiter_workflow_mismatch)'
+    RAISE EXCEPTION '0740 refused a waiter of another workflow (waiter_workflow_mismatch)'
       USING ERRCODE = '55000';
   END IF;
   -- Waiters (unlike bindings) still have one row per workspace/session.
@@ -645,7 +645,7 @@ BEGIN
     JOIN subscription_capacity_waiters core ON core.workspace_id = waiter.workspace_id
      AND core.session_id = waiter.session_id
     WHERE waiter.rank = 1) THEN
-    RAISE EXCEPTION '0739 refused a session waiting on both runtimes (waiter_conflict)'
+    RAISE EXCEPTION '0740 refused a session waiting on both runtimes (waiter_conflict)'
       USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_waiter_checks$;
@@ -1040,7 +1040,7 @@ BEGIN
       <> (SELECT count(DISTINCT connection_id) FROM pg_temp.subscription_cutover_connection_map)
     OR (SELECT count(*) FROM pg_temp.subscription_cutover_connection_map)
       <> (SELECT count(*) FROM claude_subscription_credentials) THEN
-    RAISE EXCEPTION '0739 parity mismatch (secret_readability)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 parity mismatch (secret_readability)' USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_readability$;
 UPDATE claude_subscription_credentials SET credential_encrypted = ''
@@ -1658,14 +1658,14 @@ BEGIN
   SELECT string_agg(DISTINCT metric, ', ' ORDER BY metric) INTO mismatches
   FROM claude_cutover_parity WHERE legacy_count <> core_count;
   IF mismatches IS NOT NULL THEN
-    RAISE EXCEPTION '0739 parity mismatch (%)', mismatches USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 parity mismatch (%)', mismatches USING ERRCODE = '55000';
   END IF;
   -- Zero-row success is invalid: a source with rows must yield a non-empty
   -- target, and every counted source was counted inside the owner window.
   IF EXISTS (SELECT 1 FROM claude_cutover_inventory WHERE legacy_count > 0
       AND metric LIKE 'credentials_%')
     AND NOT EXISTS (SELECT 1 FROM subscription_connections WHERE provider = 'claude') THEN
-    RAISE EXCEPTION '0739 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 parity mismatch (zero_row_backfill)' USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_parity_check$;
 
@@ -1685,7 +1685,7 @@ BEGIN
   END LOOP;
   IF EXISTS (SELECT 1 FROM claude_cutover_relations r JOIN pg_class c ON c.oid = r.oid
     WHERE r.relforcerowsecurity AND NOT c.relforcerowsecurity) THEN
-    RAISE EXCEPTION '0739 could not restore FORCE row security' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0740 could not restore FORCE row security' USING ERRCODE = '55000';
   END IF;
 END $claude_cutover_restore$;
 
@@ -1716,7 +1716,7 @@ BEGIN
         'claude_credential_leases', 'claude_session_account_pins', 'claude_capacity_waiters',
         'claude_subscription_account_usage')
         AND c.relrowsecurity AND c.relforcerowsecurity) <> 6 THEN
-    RAISE EXCEPTION '0739 requires FORCE row security on the legacy Claude tables'
+    RAISE EXCEPTION '0740 requires FORCE row security on the legacy Claude tables'
       USING ERRCODE = '55000';
   END IF;
   FOREACH legacy IN ARRAY ARRAY['claude_subscription_credentials', 'claude_rotation_settings',

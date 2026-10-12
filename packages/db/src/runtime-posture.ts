@@ -918,8 +918,8 @@ export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
  */
 export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
   codex: "0689_subscription_core_codex_cutover.sql",
-  xai: "0738_subscription_core_xai_cutover.sql",
-  claude: "0739_subscription_core_claude_cutover.sql",
+  xai: "0739_subscription_core_xai_cutover.sql",
+  claude: "0740_subscription_core_claude_cutover.sql",
 };
 
 /**

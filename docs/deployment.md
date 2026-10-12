@@ -4998,6 +4998,33 @@ triggers, the policy `subscription_settings_lock_guard_read`, the four
 routines and the two CHECKs; the stored locks stay and the resolver keeps
 ignoring locked workspace overrides.
 
+### Shared-chat explicit personal choice (0741)
+
+This is a **maintenance**, one-way runtime protocol upgrade. Stop all API,
+control-worker and turn-worker processes using this database, including old
+and candidate versions; supply their exact login names through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`).
+The migration checks the inventory and refuses live sessions before and after
+locking the accepted-work tables. It installs strict readers before enabling
+the acceptance writer. Start only the matching runtime after commit; its
+transaction-local protocol receipt prevents an incompatible writer from
+emitting restricted authority and incompatible readers from spending it.
+This receipt is not a feature flag or delegated permission.
+
+New explicit shared-chat consent is restricted to the exact session and
+connection owned by the accepting human, who need not be the chat creator.
+Existing v2 entries, compatibility records, waiting turns, background launch
+receipts and replay histories are not rewritten or reauthorized. Live owner,
+membership, resource-generation and effective-policy checks still apply.
+Other senders and automatic placement do not inherit the choice.
+
+After any restricted entry exists, do not restart a pre-upgrade image: its
+strict readers cannot parse that entry. Recovery is forward-only with readers
+that preserve the exact restriction; removing the field or regenerating old
+pools is not rollback. No provider cutover, data move or deployment is performed
+by this source change. The provisional ordinal must be reconciled against the
+published ledger during batch integration without renaming published SQL.
+
 ### Personal Codex acceptance under row security (0726)
 
 Migration `0726_subscription_personal_acceptance_reads.sql` is **rolling**
@@ -5111,9 +5138,9 @@ unchanged on 0729. An opt-in a person turned on stays in effect after a
 rollback (placement already read it); dropping the four policies and two
 routines removes only the person's own access.
 
-### SuperGrok on the shared subscription core (0738)
+### SuperGrok on the shared subscription core (0739)
 
-Migration `0738_subscription_core_xai_cutover.sql` is a one-way maintenance
+Migration `0739_subscription_core_xai_cutover.sql` is a one-way maintenance
 cutover, the SuperGrok counterpart of 0689. It moves every organization's
 SuperGrok (`xai`) subscription state onto the shared subscription core,
 records the `xai` receipt and registry row, and enables the SuperGrok cutover
@@ -5274,7 +5301,7 @@ ownership ambiguity, named by content-free classes such as
 `personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
 session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
 waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
-pre-existing core SuperGrok state; or any parity mismatch (`0738 parity
+pre-existing core SuperGrok state; or any parity mismatch (`0739 parity
 mismatch (<metrics>)`). A database error while writing the core surfaces only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
 statement parameter, token, label or email leaves the migration. Fix the named
@@ -5377,27 +5404,27 @@ legacy tables and only their own provider's keys in shared relations, and
 each commits in its own transaction with its own parity. Either order of
 releases works:
 
-- Separately: deploy the release that carries 0738, run steps 1 to 6 in one
+- Separately: deploy the release that carries 0739, run steps 1 to 6 in one
   window, and run the Claude cutover's window with its later release.
 - In one window: deploy a release that carries both. Drain and back up once,
   take both inventories, and run the migrator once with the same roles and
-  key; it applies 0738 and then the Claude cutover in ledger order. If the
-  Claude cutover aborts, 0738 stays committed: fix the named Claude rows and
+  key; it applies 0739 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0739 stays committed: fix the named Claude rows and
   run the migrator again (it resumes at the Claude cutover). Start binaries
   only after both receipts exist; readiness refuses a database missing
-  either. Validate each provider's report rows separately. While only 0738
+  either. Validate each provider's report rows separately. While only 0739
   is committed no binary can start: this release needs both receipts and
-  the old release must not run after 0738. If the Claude rows cannot be
+  the old release must not run after 0739. If the Claude rows cannot be
   fixed within the window, restore the step 3 backup and use the separate
-  path, or deploy a release that carries 0738 but not the Claude cutover.
+  path, or deploy a release that carries 0739 but not the Claude cutover.
   The Claude steps are in
-  [Claude on the shared subscription core (0739)](#claude-on-the-shared-subscription-core-0739).
+  [Claude on the shared subscription core (0740)](#claude-on-the-shared-subscription-core-0739).
 
-### Claude on the shared subscription core (0739)
+### Claude on the shared subscription core (0740)
 
-Migration `0739_subscription_core_claude_cutover.sql` is a one-way
-maintenance cutover, the Claude counterpart of 0689 and 0738, and shares
-0738's receipt, readiness, report, compatibility-record and stage machinery.
+Migration `0740_subscription_core_claude_cutover.sql` is a one-way
+maintenance cutover, the Claude counterpart of 0689 and 0739, and shares
+0739's receipt, readiness, report, compatibility-record and stage machinery.
 It moves every organization's Claude (`claude`) subscription state onto the
 shared subscription core, records the `claude` receipt and registry row, and
 enables the Claude cutover row for every organization, in one transaction.
@@ -5464,7 +5491,7 @@ session with this guard, which stops otherwise:
 DO $$ BEGIN
   IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
       WHERE rolname = current_user) THEN
-    RAISE EXCEPTION 'run the 0739 inventory as a superuser or BYPASSRLS role';
+    RAISE EXCEPTION 'run the 0740 inventory as a superuser or BYPASSRLS role';
   END IF;
 END $$;
 ```
@@ -5566,7 +5593,7 @@ account id is neither the token's Claude account nor its `oauth:` or
 `session_owner_ambiguous`, `personal_generation_ambiguous` or
 `pin_pool_ambiguous`; `lease_conflict`, `waiter_conflict` or
 `waiter_workflow_mismatch`; pre-existing core Claude state; or a parity
-mismatch (`0739 parity mismatch (<metrics>)`). Database errors surface only
+mismatch (`0740 parity mismatch (<metrics>)`). Database errors surface only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`. Fix the
 named legacy rows and run the migrator again; nothing was committed.
 
@@ -5632,11 +5659,11 @@ an older binary must never be restarted after it.
 
 **Containment and fix forward.** As for 0721, with the Claude cutover row.
 
-**With the SuperGrok cutover.** 0738 and 0739 touch disjoint legacy tables
+**With the SuperGrok cutover.** 0739 and 0740 touch disjoint legacy tables
 and only their own provider's keys, each with its own parity report and
 readiness gate. Run them in separate windows (each release carries one) or
 together as described in "With the Claude cutover" above. A release that
-carries 0739 also carries 0738, so the SuperGrok window comes first or
+carries 0740 also carries 0739, so the SuperGrok window comes first or
 shares the Claude window.
 
 ### Slack API pilot activation (0597)

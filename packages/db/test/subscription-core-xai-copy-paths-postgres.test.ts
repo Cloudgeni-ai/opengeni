@@ -437,8 +437,8 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("subscription-core-xai-copy-paths", {
     // Sources must be accepted before the receipt installed below.
     withheldMigrations: [
-      "0738_subscription_core_xai_cutover.sql",
-      "0739_subscription_core_claude_cutover.sql",
+      "0739_subscription_core_xai_cutover.sql",
+      "0740_subscription_core_claude_cutover.sql",
     ],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");

@@ -2321,6 +2321,8 @@ export const SESSION_EVENT_TYPES = [
   "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  "subscription.account.selected",
+  "subscription.account.switched",
   "codex.account.selection.changed",
   // A person chose the session's account (any provider) or returned it to
   // automatic placement.

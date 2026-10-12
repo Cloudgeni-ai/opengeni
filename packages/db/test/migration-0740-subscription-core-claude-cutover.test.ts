@@ -1,5 +1,5 @@
 /**
- * Migration 0739: the drained, one-way Claude cutover onto the shared
+ * Migration 0740: the drained, one-way Claude cutover onto the shared
  * subscription core (design 5.3 "Data mapping", "Accepted authority across
  * the cutover", "Personal authority generations", "Cutover protocol",
  * "Claude track"). The legacy state is seeded as the database superuser in
@@ -37,7 +37,7 @@ import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/
 import { subscriptionCoreOperations } from "../src/subscription-core/operations";
 import { subscriptionCoreProvider } from "../src/subscription-core-providers";
 
-const MIGRATION = "0739_subscription_core_claude_cutover.sql";
+const MIGRATION = "0740_subscription_core_claude_cutover.sql";
 const key = Buffer.alloc(32, 79);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const PROVIDER = "organization-claude-subscription";
@@ -948,7 +948,7 @@ function errorChain(error: unknown): string {
 }
 
 describe.skipIf(!realDb)(
-  "SUB-COMPAT-02 migration 0739: Claude onto the shared subscription core",
+  "SUB-COMPAT-02 migration 0740: Claude onto the shared subscription core",
   () => {
     let before: Awaited<ReturnType<typeof snapshotUntouched>>;
     beforeAll(async () => {
@@ -1013,7 +1013,7 @@ describe.skipIf(!realDb)(
       try {
         const error = await migrateCutover({ key }).catch((caught: Error) => caught);
         expect(error).toMatchObject({ code: "55000" });
-        expect(errorChain(error)).toContain("0739 requires READ COMMITTED");
+        expect(errorChain(error)).toContain("0740 requires READ COMMITTED");
       } finally {
         await owned.admin.unsafe(`ALTER ROLE "${ownerName}" RESET default_transaction_isolation`);
       }
@@ -1106,7 +1106,7 @@ describe.skipIf(!realDb)(
       // A rule silently drops the converted receipts, which only parity sees.
       await owned.admin`CREATE RULE claude_cutover_parity_probe AS ON INSERT TO subscription_turn_failures DO INSTEAD NOTHING`;
       try {
-        expect(await abortMessage()).toContain("0739 parity mismatch (auth_recovery_live_turns)");
+        expect(await abortMessage()).toContain("0740 parity mismatch (auth_recovery_live_turns)");
       } finally {
         await owned.admin`DROP RULE claude_cutover_parity_probe ON subscription_turn_failures`;
       }

@@ -96,7 +96,7 @@ export type MigrationRuntimeOptions = {
   /**
    * Existing operator key; used only by the closed maintenance conversions:
    * Claude (0598), Codex (0680) and the provider cutover codec stages
-   * (0689, 0738, 0739).
+   * (0689, 0739, 0740).
    */
   environmentsEncryptionKey?: Uint8Array;
   maxNestedAgentDepth?: number;

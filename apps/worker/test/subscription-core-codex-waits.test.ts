@@ -59,6 +59,7 @@ function outbox(deliveries: db.SubscriptionCapacityWakeDelivery[]) {
 const waiter: db.SubscriptionCoreCodexCapacityWait = {
   waiterId: "waiter-1",
   provider: "codex",
+  candidateProviders: null,
   accountId: "account-1",
   workspaceId: "workspace-1",
   sessionId: "session-1",

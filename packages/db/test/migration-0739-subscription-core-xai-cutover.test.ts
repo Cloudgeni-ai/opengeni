@@ -1,5 +1,5 @@
 /**
- * Migration 0738: the drained, one-way SuperGrok cutover onto the shared
+ * Migration 0739: the drained, one-way SuperGrok cutover onto the shared
  * subscription core (design 5.3 "Data mapping", "Accepted authority across
  * the cutover", "Personal authority generations", "Cutover protocol"). The
  * legacy state is seeded as the database superuser (an upgrade fixture, not
@@ -33,8 +33,8 @@ import { subscriptionCoreProviderIds } from "../src/subscription-core-providers"
 import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
 import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
 
-const MIGRATION = "0738_subscription_core_xai_cutover.sql";
-const CLAUDE_CUTOVER = "0739_subscription_core_claude_cutover.sql";
+const MIGRATION = "0739_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
 const key = Buffer.alloc(32, 73);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const NIL = "00000000-0000-0000-0000-000000000000";
@@ -852,7 +852,7 @@ function errorChain(error: unknown): string {
 }
 
 describe.skipIf(!realDb)(
-  "SUB-COMPAT-02 migration 0738: SuperGrok onto the shared subscription core",
+  "SUB-COMPAT-02 migration 0739: SuperGrok onto the shared subscription core",
   () => {
     let before: Awaited<ReturnType<typeof snapshotUntouched>>;
     beforeAll(async () => {
@@ -937,7 +937,7 @@ describe.skipIf(!realDb)(
       try {
         const isolated = await migrateCutover({ key }).catch((error: Error) => error);
         expect(isolated).toMatchObject({ code: "55000" });
-        expect(errorChain(isolated)).toContain("0738 must run at READ COMMITTED");
+        expect(errorChain(isolated)).toContain("0739 must run at READ COMMITTED");
       } finally {
         await owned.admin.unsafe(
           `ALTER ROLE "${owned.ownerRole}" RESET default_transaction_isolation`,
@@ -1064,7 +1064,7 @@ describe.skipIf(!realDb)(
       // A rule silently drops moved leases, which only the parity check can see.
       await owned.admin`CREATE RULE xai_cutover_parity_probe AS ON INSERT TO subscription_leases DO INSTEAD NOTHING`;
       try {
-        expect(await abortMessage()).toContain("0738 parity mismatch (live_leases)");
+        expect(await abortMessage()).toContain("0739 parity mismatch (live_leases)");
       } finally {
         await owned.admin`DROP RULE xai_cutover_parity_probe ON subscription_leases`;
       }
@@ -2031,7 +2031,7 @@ describe.skipIf(!realDb)(
         // The member's migrated personal connection is deleted with their
         // Personal workspace. The legacy row stays: the retention delete has no
         // workspace context and the legacy `user` row is not visible to it, the
-        // same as before the receipt (its ciphertext is blank since 0738).
+        // same as before the receipt (its ciphertext is blank since 0739).
         expect(finalized!.result.deletedResources).toMatchObject({
           subscriptionConnections: 1,
           personalWorkspaces: 1,

@@ -12,6 +12,10 @@ import { readSubscriptionProviderCutoverState } from "../subscription-core-repos
 import { subscriptionCoreProvider } from "../subscription-core-providers";
 import { withPoolWakeServiceScopeInTransaction } from "../subscription-session-access";
 
+/** Bound additional cross-provider fan-out; timer reconciliation covers the
+ * remainder. Home-provider wakes retain their existing delivery semantics. */
+const CANDIDATE_WAKE_BATCH_SIZE = 256;
+
 /**
  * Delete the shared subscription core's waiters for one provider of turns
  * whose wait a human or control transition ended (Steer, Cancel), inside
@@ -172,7 +176,18 @@ export async function wakeSubscriptionCoreCapacityWaiters(
           tx,
           sql`select session_id::text as session_id from subscription_capacity_waiters
             where account_id = ${input.accountId}::uuid
-              and workspace_id = ${workspaceId}::uuid and provider = ${provider}
+              and workspace_id = ${workspaceId}::uuid
+              and (provider = ${provider} or session_id in (
+                select session_id from subscription_capacity_waiters
+                where account_id = ${input.accountId}::uuid
+                  and workspace_id = ${workspaceId}::uuid
+                  and provider <> ${provider}
+                  and candidate_providers @> array[${provider}]::text[]
+                  ${sessionFilter}
+                  ${ownerFilter}
+                order by updated_at, session_id
+                limit ${CANDIDATE_WAKE_BATCH_SIZE}
+              ))
               ${sessionFilter}
               ${ownerFilter}
             order by subscription_capacity_waiters.session_id`,
@@ -256,7 +271,8 @@ export async function wakeSubscriptionCoreCapacityWaiters(
             set wake_revision = wake_revision + 1, last_wake_reason = ${input.reason},
                 updated_at = clock_timestamp()
             where account_id = ${input.accountId}::uuid
-              and workspace_id = ${workspaceId}::uuid and provider = ${provider}
+              and workspace_id = ${workspaceId}::uuid
+              and (provider = ${provider} or candidate_providers @> array[${provider}]::text[])
               and session_id in (${sql.join(
                 present.map((row) => sql`${row.session_id}::uuid`),
                 sql`, `,

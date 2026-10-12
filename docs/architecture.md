@@ -114,6 +114,15 @@ Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
+Subscription serving revisions are attempt-scoped; the accepted model and
+frozen connection authority remain the logical turn's contract. Shared-core
+placement, candidate-aware capacity waits and lease-backed switch events use
+the same provider-neutral eligibility rules. The worker's serving hooks live
+in `apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts`;
+the metadata-only catalog helper also serves control-worker recovery without
+loading provider credentials. Remote-compaction conversion and UI activation
+remain separately gated; see [subscription accounts](subscription-accounts.md).
+
 **Turns** are accepted work; replaceable **attempts** append ordered,
 exactly-once atomic history batches.
 

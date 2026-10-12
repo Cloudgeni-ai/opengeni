@@ -4478,11 +4478,11 @@ export function describeSubscriptionCoreConformance<Credential>(
           [pooled]: "choosable",
           [personal]: "choosable",
         });
-        // In a shared session the personal account is listed for its owner but
-        // cannot be chosen; another person never sees it.
+        // An explicit shared-session choice is offered only to the account's
+        // owner; another participant never sees or inherits that account.
         expect(await offered(sharedTurn, org.ownerSubjectId)).toEqual({
           [pooled]: "choosable",
-          [personal]: "personal_not_owner_work",
+          [personal]: "choosable",
         });
         expect(await offered(sharedTurn, member)).toEqual({ [pooled]: "choosable" });
         // Another person cannot read the owner's private session at all.
@@ -4507,7 +4507,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         });
       });
 
-      test("SUB-SEL-04, D-28: the owner chooses their personal account for their private session; the database refuses it anywhere else", async () => {
+      test("SUB-SEL-04, D-28: personal choices remain owner-only in private and shared sessions", async () => {
         const org = await organization();
         const pooled = await sharedConnection(org, `choose-shared-${crypto.randomUUID()}`);
         const personal = await personalConnection(org, `choose-personal-${crypto.randomUUID()}`);
@@ -4569,10 +4569,13 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(await bindingOf(second)).toMatchObject({ choice: "automatic" });
         expect((await choose(second, org.ownerSubjectId, null)).outcome).toBe("unchanged");
 
-        // A shared session of the owner: the binding guard refuses the
-        // personal account (the picker listed it as not choosable).
+        // A shared choice affects the next acceptance, never authority on
+        // the already accepted turn.
         const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
-        expect((await choose(sharedTurn, org.ownerSubjectId, personal)).outcome).toBe("refused");
+        expect(await choose(sharedTurn, org.ownerSubjectId, personal)).toMatchObject({
+          outcome: "changed",
+          appliedTo: "next_turn",
+        });
         // Any member may choose a pool account for a shared session.
         expect(await choose(sharedTurn, member, pooled)).toMatchObject({
           outcome: "changed",
@@ -4631,6 +4634,129 @@ export function describeSubscriptionCoreConformance<Credential>(
           choice: "explicit",
         });
       });
+
+      test("shared explicit consent belongs to the participating account owner, not the session creator or next sender", async () => {
+        const org = await organization();
+        const member = await workspaceMember(org);
+        const [membership] = await admin()<{ id: string; personal_workspace_id: string }[]>`
+          select id::text, personal_workspace_id::text from organization_memberships
+          where account_id = ${org.accountId}::uuid and subject_id = ${member}`;
+        const memberOrg = {
+          ...org,
+          ownerSubjectId: member,
+          ownerMembershipId: membership!.id,
+          personalWorkspaceId: membership!.personal_workspace_id,
+        };
+        const own = await personalConnection(memberOrg, `participant-${crypto.randomUUID()}`);
+        const sibling = await personalConnection(
+          memberOrg,
+          `participant-sibling-${crypto.randomUUID()}`,
+        );
+        const creatorAccount = await personalConnection(org, `creator-${crypto.randomUUID()}`);
+        const first = await runningTurn(org, { visibility: "workspace_shared" });
+        expect(first.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await offered(first, member)).toEqual({
+          [own]: "choosable",
+          [sibling]: "choosable",
+        });
+        expect((await choose(first, member, creatorAccount)).outcome).toBe("not_found");
+        expect(await choose(first, member, own)).toMatchObject({
+          outcome: "changed",
+          appliedTo: "next_turn",
+        });
+        expect((await picker(first, org.ownerSubjectId))!.binding).toEqual({
+          provider: providerId,
+          connectionId: null,
+          choice: "explicit",
+        });
+        // The old turn cannot gain the participant's authority through a
+        // choice made after acceptance, even with a live explicit binding.
+        expect(await placeChecked(first)).toMatchObject({
+          kind: "wait",
+          reason: "pinned_account_ineligible",
+        });
+        const accepted = await nextTurn(org, first, { initiator: { subjectId: member } });
+        const exact = {
+          version: 2,
+          personal: [
+            {
+              provider: providerId,
+              ownerMembershipId: membership!.id,
+              authorityGeneration: 1,
+              sharedSessionChoice: { sessionId: first.identity.sessionId, connectionId: own },
+            },
+          ],
+        };
+        expect(accepted.identity.acceptedAuthorityV2 as unknown).toEqual(exact);
+        expect(await placeChecked(accepted)).toMatchObject({
+          kind: "run",
+          connectionId: own,
+          personal: true,
+        });
+        // The account owner's same-generation sibling is not in this pool.
+        expect(await choose(accepted, member, sibling)).toMatchObject({
+          outcome: "changed",
+          appliedTo: "next_turn",
+        });
+        const [frozen] = await admin()<{ subscription_authority: unknown }[]>`
+          select subscription_authority from session_turns where id = ${accepted.identity.turnId}::uuid`;
+        expect(frozen!.subscription_authority).toEqual(exact);
+        const creator = await nextTurn(org, accepted);
+        expect(creator.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await placeChecked(creator)).toMatchObject({
+          kind: "wait",
+          reason: "pinned_account_ineligible",
+        });
+        const service = await nextTurn(org, creator, { initiator: "service" });
+        expect(service.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await placeChecked(service)).toMatchObject({
+          kind: "wait",
+          reason: "pinned_account_ineligible",
+        });
+        // Returning to automatic prevents personal fallback even for a
+        // subsequent send by the participant with live own personal accounts.
+        expect((await choose(service, member, null)).outcome).toBe("changed");
+        const automatic = await nextTurn(org, service, { initiator: { subjectId: member } });
+        expect(automatic.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await placeChecked(automatic)).toMatchObject({ kind: "wait" });
+      });
+
+      test.skipIf(!subject.sessionWaits)(
+        "shared consent does not expand frozen authority for a waiting turn",
+        async () => {
+          const org = await organization();
+          const personal = await personalConnection(org, `waiting-personal-${crypto.randomUUID()}`);
+          const first = await runningTurn(org, { visibility: "workspace_shared" });
+          const wait = await placeChecked(first);
+          if (wait.kind !== "wait") throw new Error("expected a wait");
+          // The public choice's response must describe the accepted work, not
+          // imply that the write repaired a previously empty frozen pool.
+          const armed = await armSubscriptionCoreCapacityWait(
+            db(),
+            subject.sessionWaits!.provider,
+            {
+              ...sessionOf(first),
+              turnId: first.identity.turnId,
+              attemptId: first.attemptId,
+              waitReason: wait.reason,
+              earliestResetAt: wait.earliestResetAt,
+              failurePayload: { code: "subscription_capacity_unavailable" },
+            },
+          );
+          expect(armed.action).toBe("waiting");
+          expect(await choose(first, org.ownerSubjectId, personal)).toMatchObject({
+            outcome: "changed",
+            appliedTo: "next_turn",
+            events: [
+              expect.objectContaining({
+                payload: expect.objectContaining({ appliedTo: "next_turn", turnId: null }),
+              }),
+            ],
+          });
+          const identity = await readSubscriptionCoreTurnIdentity(db(), first.identity);
+          expect(identity!.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        },
+      );
 
       test("SUB-OWN-05, D-24, D-27: turning personal accounts off makes an explicit personal choice wait as ineligible", async () => {
         const org = await organization();
@@ -5232,7 +5358,7 @@ export function describeSubscriptionCoreConformance<Credential>(
     // isolation helper suite separately inverts access to other owners.
     for (const visibility of ["workspace_shared", "user_private"] as const) {
       test.skipIf(!sessionWaits)(
-        `${visibility}: a placement wait parks the session on its core waiter; only this provider's wake reaches it; capacity resumes it`,
+        `SUB-ACCESS-03 ${visibility}: a placement wait parks the session on its core waiter; only this provider's wake reaches it; capacity resumes it`,
         async () => {
           const waits = sessionWaits!;
           const org = await organization();

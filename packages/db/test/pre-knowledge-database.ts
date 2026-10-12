@@ -42,7 +42,7 @@ export async function acquirePreKnowledgeTestDatabase(
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // The drained SuperGrok cutover reads the withheld 0560 import column; this
     // fixture never runs that maintenance step, so it stays recorded.
-    await admin`INSERT INTO schema_migrations(name) VALUES('0738_subscription_core_xai_cutover.sql'), ('0739_subscription_core_claude_cutover.sql')`;
+    await admin`INSERT INTO schema_migrations(name) VALUES('0739_subscription_core_xai_cutover.sql'), ('0740_subscription_core_claude_cutover.sql')`;
     await migrate(blank.databaseUrl);
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.

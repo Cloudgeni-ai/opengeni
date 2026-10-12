@@ -3,12 +3,8 @@ import {
   subscriptionCoreCapacityWaitRef,
 } from "@opengeni/db";
 
-import {
-  reconcileCoreCapacityWait,
-  reconcileCoreCodexCapacityWait,
-} from "./subscription-core-codex-waits";
-import { XAI_CORE_WAIT_BINDING } from "./subscription-core-xai-waits";
-import { CLAUDE_CORE_WAIT_BINDING } from "./subscription-core-claude-waits";
+import { reconcileCoreCapacityWait } from "./subscription-core-codex-waits";
+import { subscriptionCoreWaitBindings } from "./subscription-core-wait-bindings";
 
 import type {
   ControlActivityServices,
@@ -38,26 +34,13 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     input: ReconcileCodexCapacityWaitInput,
   ): Promise<ReconcileCodexCapacityWaitResult> {
     const resolved = await services();
-    if (input.provider === "xai" || input.provider === "claude") {
-      // The core waiter by its exact id and generation first: a SuperGrok or
-      // Claude waiter the cutover moved to the core keeps both, so a history
-      // that recorded the legacy reference reconciles against the core
-      // waiter.
-      const core = await reconcileCoreCapacityWait(
-        resolved,
-        input.provider === "xai" ? XAI_CORE_WAIT_BINDING : CLAUDE_CORE_WAIT_BINDING,
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          waiterId: input.waiterId,
-          generation: input.generation,
-        },
-      );
-      return core ?? { action: "stale" };
-    }
-    // The same reference may name a core waiter (looked up by its exact id).
-    const core = await reconcileCoreCodexCapacityWait(resolved, {
+    // Histories without a provider keep the original Codex binding. Migrated
+    // waiters retain their ids/generations; lookup never infers new authority.
+    const binding = subscriptionCoreWaitBindings().find(
+      (candidate) => candidate.provider === (input.provider ?? "codex"),
+    );
+    if (!binding) return { action: "stale" };
+    const core = await reconcileCoreCapacityWait(resolved, binding, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,

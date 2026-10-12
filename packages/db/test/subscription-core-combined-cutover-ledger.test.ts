@@ -1,5 +1,5 @@
 /**
- * The SuperGrok (0738) and Claude (0739) drained cutovers in one maintenance
+ * The SuperGrok (0739) and Claude (0740) drained cutovers in one maintenance
  * window or in two (design 5.3 "Cutover protocol", ordering decision). The
  * ledger orders SuperGrok first; each cutover commits in its own transaction
  * and touches only its own provider, so:
@@ -209,7 +209,7 @@ describe.skipIf(!realDb)("a Claude abort in a combined window", () => {
   }, 60_000);
 
   test("leaves SuperGrok cut over; the rerun after the fix completes Claude", async () => {
-    // A legacy Claude model connection that is not revoked aborts 0739 only.
+    // A legacy Claude model connection that is not revoked aborts 0740 only.
     await owned.admin`ALTER TABLE connections DISABLE TRIGGER USER`;
     await owned.admin`UPDATE connections SET status = 'active' WHERE id = ${fixture.legacy}`;
     await owned.admin`ALTER TABLE connections ENABLE TRIGGER USER`;
