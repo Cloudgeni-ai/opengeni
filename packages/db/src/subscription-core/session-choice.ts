@@ -672,7 +672,7 @@ async function chooseOnce(
             return { ...none("refused"), provider: target?.provider ?? null };
           }
           // A lost compare-and-swap, or a racing first binding that met
-          // 0731's rolling index: the savepoint rolled back; retry.
+          // 0732's rolling index: the savepoint rolled back; retry.
           if (error instanceof LostSessionChoice) continue;
           if (isSubscriptionSessionBindingRollingConflict(error)) continue;
           throw error;

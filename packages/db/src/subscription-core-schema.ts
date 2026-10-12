@@ -274,9 +274,9 @@ export const subscriptionSessionBindings = pgTable(
     version: bigint("version", { mode: "number" }).notNull().default(1),
   },
   (table) => ({
-    // One binding per session and provider (0731, D-32).
+    // One binding per session and provider (0732, D-32).
     identity: primaryKey({ columns: [table.workspaceId, table.sessionId, table.provider] }),
-    // Rolling window of 0731 only; the next drained provider cutover drops it.
+    // Rolling window of 0732 only; the next drained provider cutover drops it.
     rollingSession: uniqueIndex("subscription_session_bindings_rolling_session_idx").on(
       table.workspaceId,
       table.sessionId,

@@ -1172,7 +1172,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         subjectId: org.ownerSubjectId,
         connectionId,
       });
-    // While 0731's rolling index exists (production until the next drained
+    // While 0732's rolling index exists (production until the next drained
     // provider cutover drops it), a first Codex pin meets it the way a racing
     // first binding does: the pin reports it unchanged, never an error.
     expect((await pin(codex)).result.changed).toBe(false);

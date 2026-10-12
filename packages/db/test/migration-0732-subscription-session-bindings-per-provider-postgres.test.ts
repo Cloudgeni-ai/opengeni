@@ -1,7 +1,7 @@
-// Migration 0731: per-provider session bindings (D-32 of
+// Migration 0732: per-provider session bindings (D-32 of
 // docs/subscription-accounts.md). The database is migrated by the
-// NOSUPERUSER, NOBYPASSRLS owner without 0731, bindings are written the way
-// the previous binary writes them, then 0731 is applied alone. Both sides of
+// NOSUPERUSER, NOBYPASSRLS owner without 0732, bindings are written the way
+// the previous binary writes them, then 0732 is applied alone. Both sides of
 // the rolling window run as the restricted application role: the previous
 // binary's SQL (conflict target (workspace_id, session_id), which also sets
 // provider) against the new key, and the new writer (conflict target
@@ -9,7 +9,7 @@
 // wrote. While the rolling index exists a session still holds at most one
 // binding row; once the next drained provider cutover drops it (with every
 // previous binary gone), providers coexist and the previous upsert fails. A
-// live binding writer that overlaps 0731 must not deadlock with it.
+// live binding writer that overlaps 0732 must not deadlock with it.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -40,7 +40,7 @@ import {
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0731_subscription_session_bindings_per_provider.sql";
+const MIGRATION = "0732_subscription_session_bindings_per_provider.sql";
 const ROLLING_INDEX = "subscription_session_bindings_rolling_session_idx";
 
 type Org = { accountId: string; subjectId: string; workspaceId: string };
@@ -50,10 +50,10 @@ type StoredRow = Record<string, unknown>;
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let org: Org | null = null;
-/** Sessions whose bindings were written before 0731, and their rows then. */
+/** Sessions whose bindings were written before 0732, and their rows then. */
 let staged: { sessions: string[]; rows: StoredRow[] } | null = null;
 let posture: { unprovisioned: string[]; provisioned: string[] } | null = null;
-/** How a live binding writer and 0731 ended when they overlapped. */
+/** How a live binding writer and 0732 ended when they overlapped. */
 let overlap: { writer: string | null; migration: string | null } | null = null;
 
 async function stageOrganization(): Promise<Org> {
@@ -132,7 +132,7 @@ type BindingInput = {
 
 /**
  * The previous binary's binding writer, verbatim apart from its inputs
- * (packages/db/src/subscription-core-repository.ts before 0731): one row per
+ * (packages/db/src/subscription-core-repository.ts before 0732): one row per
  * session, conflict target (workspace_id, session_id), provider overwritten.
  */
 async function previousBinaryWrite(input: BindingInput): Promise<number | null> {
@@ -227,15 +227,15 @@ async function bindingLockWaiter(): Promise<void> {
     if (row!.waiting > 0) return;
     await Bun.sleep(25);
   }
-  throw new Error("0731 never queued for the bindings table");
+  throw new Error("0732 never queued for the bindings table");
 }
 
 beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-session-bindings-per-provider");
   if (!database) throw new Error("Real PostgreSQL is required");
-  // A provisioned database before 0731: 0731 and every later migration are
-  // held back, and only 0731 is applied below.
+  // A provisioned database before 0732: 0732 and every later migration are
+  // held back, and only 0732 is applied below.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
     .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
     .sort();
@@ -300,12 +300,12 @@ beforeAll(async () => {
   staged = { sessions, rows: await rows(sessions) };
 
   // A rolling migration keeps the previous binary's runtime posture until
-  // roles are provisioned again: apply 0731 alone, evaluate as the runtime
+  // roles are provisioned again: apply 0732 alone, evaluate as the runtime
   // role, then provision and evaluate again.
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await applying`delete from schema_migrations where name = ${MIGRATION}`;
-    // A live binding writer overlaps 0731: it reads its row FOR UPDATE, 0731
+    // A live binding writer overlaps 0732: it reads its row FOR UPDATE, 0732
     // starts and queues behind it, then the writer writes the row and commits,
     // as a placement, a pin or a request's cache clock does. Neither may fail.
     let migrating = null as Promise<string | null> | null;
@@ -331,7 +331,7 @@ beforeAll(async () => {
     if (overlap.migration !== null) await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${MIGRATION}`;
-    if (applied?.count !== 1) throw new Error("0731 was not applied by the second migrate");
+    if (applied?.count !== 1) throw new Error("0732 was not applied by the second migrate");
   } finally {
     await applying.end();
   }
@@ -356,7 +356,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe.skipIf(!realDb)("0731 per-provider session bindings", () => {
+describe.skipIf(!realDb)("0732 per-provider session bindings", () => {
   test("restricted roles; the rolling posture holds before and after provisioning", async () => {
     const roles = await database!.admin<{ superuser: boolean; bypass: boolean }[]>`
       select rolsuper as superuser, rolbypassrls as bypass
@@ -373,7 +373,7 @@ describe.skipIf(!realDb)("0731 per-provider session bindings", () => {
     expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
   });
 
-  test("every binding the previous binary wrote keeps every value across 0731", async () => {
+  test("every binding the previous binary wrote keeps every value across 0732", async () => {
     expect(staged!.rows).toHaveLength(3);
     expect(staged!.rows.map((row) => [row.choice, row.connection_id === null])).toEqual(
       expect.arrayContaining([
@@ -385,8 +385,8 @@ describe.skipIf(!realDb)("0731 per-provider session bindings", () => {
     expect(await rows(staged!.sessions)).toEqual(staged!.rows);
   });
 
-  test("a live binding writer and 0731 overlap without a deadlock", async () => {
-    // 0731 takes its whole lock set first, so it waits for the writer that
+  test("a live binding writer and 0732 overlap without a deadlock", async () => {
+    // 0732 takes its whole lock set first, so it waits for the writer that
     // locked its row, and the writer's write is not blocked by a SHARE lock.
     expect(overlap).toEqual({ writer: null, migration: null });
   });

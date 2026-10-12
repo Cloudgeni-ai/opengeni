@@ -2264,7 +2264,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0731_subscription_session_bindings_per_provider.sql",
+      "0732_subscription_session_bindings_per_provider.sql",
       "0730_subscription_core_personal_connection_versions.sql",
       "0729_subscription_person_preferences_owner.sql",
       "0728_subscription_core_personal_connect_format.sql",
@@ -4332,8 +4332,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0326_interaction_operation_error_codes.sql")) {
         return includesActivation
-          ? "c4ec5d41697c791e8083ae6285c7dd46b33d843b1ddf4024925d05fdceb5115c"
-          : "92906a57900983a7be80dd460e3fcc16e9f40da1441ae6be190fc088c168c1e9";
+          ? "1d4768f1c943dfcd55873511de1d0e834dea534c43e801c89e7bc44b770b5c98"
+          : "f80aa6aca27f7f8961fe628e2506bf22854067dc7e6f1d66e925b2b6da9d2760";
       }
       if (migrations.has("0321_slack_bot_environment_display_name.sql")) {
         return includesActivation

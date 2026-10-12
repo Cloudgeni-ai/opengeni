@@ -218,5 +218,5 @@ export const embeddingMigrationTail = [
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   "0730_subscription_core_personal_connection_versions.sql",
   // Rekeys the session bindings table from withheld 0642.
-  "0731_subscription_session_bindings_per_provider.sql",
+  "0732_subscription_session_bindings_per_provider.sql",
 ];
