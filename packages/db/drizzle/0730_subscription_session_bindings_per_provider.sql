@@ -40,7 +40,7 @@ LOCK TABLE subscription_session_bindings IN ACCESS EXCLUSIVE MODE;
 CREATE UNIQUE INDEX subscription_session_bindings_rolling_session_idx
   ON subscription_session_bindings (workspace_id, session_id);
 COMMENT ON INDEX subscription_session_bindings_rolling_session_idx IS
-  'Rolling window of 0729 only: keeps the previous binary''s ON CONFLICT (workspace_id, session_id) valid. Dropped by the next drained provider cutover.';
+  'Rolling window of 0730 only: keeps the previous binary''s ON CONFLICT (workspace_id, session_id) valid. Dropped by the next drained provider cutover.';
 ALTER TABLE subscription_session_bindings DROP CONSTRAINT subscription_session_bindings_pkey;
 ALTER TABLE subscription_session_bindings
   ADD CONSTRAINT subscription_session_bindings_pkey PRIMARY KEY (workspace_id, session_id, provider);

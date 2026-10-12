@@ -216,5 +216,5 @@ export const embeddingMigrationTail = [
   // Adds owner policies on the person preferences table from withheld 0642.
   "0729_subscription_person_preferences_owner.sql",
   // Rekeys the session bindings table from withheld 0642.
-  "0729_subscription_session_bindings_per_provider.sql",
+  "0730_subscription_session_bindings_per_provider.sql",
 ];

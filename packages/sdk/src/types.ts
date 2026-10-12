@@ -4213,11 +4213,18 @@ export type ModelAccountChoiceOption = {
 
 /** A session's current account, what it may switch to, and the effective personal settings. */
 export type SessionModelAccountChoiceResponse = {
+  /** The session's account when it has bindings for one provider only; else null (see `bindings`). */
   binding: {
     provider: string;
     connectionId: string | null;
     choice: "explicit" | "automatic";
   } | null;
+  /** One binding per provider. */
+  bindings: {
+    provider: string;
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+  }[];
   accounts: ModelAccountChoiceOption[];
   personal: {
     connectionsAllowed: boolean;
@@ -4226,8 +4233,15 @@ export type SessionModelAccountChoiceResponse = {
   };
 };
 
-/** `connectionId: null` returns the session to automatic account selection. */
-export type SetSessionModelAccountChoiceRequest = { connectionId: string | null };
+/**
+ * A connection becomes the choice for its provider; other providers' choices
+ * stay. `connectionId: null` returns `provider`'s choice to automatic, or
+ * every provider's when `provider` is omitted.
+ */
+export type SetSessionModelAccountChoiceRequest = {
+  connectionId: string | null;
+  provider?: string;
+};
 
 export type SetSessionModelAccountChoiceResponse = {
   changed: boolean;

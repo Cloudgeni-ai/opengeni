@@ -1111,7 +1111,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
    * session changed it since the decision; the comparison below is defense
    * in depth, and the only race left is two first placements of a session
    * that has no binding row yet (the insert's compare-and-swap, or while it
-   * exists 0729's rolling index, refuses the second, which retries). Placing
+   * exists 0730's rolling index, refuses the second, which retries). Placing
    * a turn uses the account: the clock moves
    * to the placement time, so a placement that waited for the row lock finds
    * the account warm and keeps it. A cache clock never carries to another
@@ -1194,7 +1194,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         expectedVersion: current?.version ?? null,
       });
     } catch (error) {
-      // A racing first binding of the session met 0729's rolling index: a lost
+      // A racing first binding of the session met 0730's rolling index: a lost
       // compare-and-swap, retried in a new transaction.
       if (isSubscriptionSessionBindingRollingConflict(error))
         throw new SubscriptionBindingConflict();

@@ -156,6 +156,7 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     const read = await call(owner, "GET", path);
     expect(read.status).toBe(200);
     expect(read.json.binding).toBeNull();
+    expect(read.json.bindings).toEqual([]);
     expect(read.json.accounts).toEqual([]);
     expect(read.json.personal).toMatchObject({ fallbackOptIn: false });
 
@@ -186,6 +187,9 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     const path = `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sessionId}/model-account`;
     expect((await call(owner, "PUT", path, { connectionId: "nope" })).status).toBe(422);
     expect((await call(owner, "PUT", path, { connectionId: null, extra: 1 })).status).toBe(422);
+    expect(
+      (await call(owner, "PUT", path, { connectionId: null, provider: "INVALID" })).status,
+    ).toBe(422);
     expect((await call(owner, "PUT", path, {})).status).toBe(422);
     expect((await call(owner, "PUT", path, { connectionId: crypto.randomUUID() })).status).toBe(
       404,
@@ -193,6 +197,9 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     const automatic = await call(owner, "PUT", path, { connectionId: null });
     expect(automatic.status).toBe(200);
     expect(automatic.json).toMatchObject({ changed: false, choice: "automatic" });
+    const scoped = await call(owner, "PUT", path, { connectionId: null, provider: "codex" });
+    expect(scoped.status).toBe(200);
+    expect(scoped.json).toMatchObject({ changed: false, choice: "automatic" });
     expect([403, 404]).toContain(
       (await call(stranger, "PUT", path, { connectionId: null })).status,
     );

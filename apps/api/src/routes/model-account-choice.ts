@@ -82,6 +82,7 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
     return c.json(
       SessionModelAccountChoiceResponse.parse({
         binding: choice.binding,
+        bindings: choice.bindings,
         accounts: choice.connections,
         personal: choice.personal,
       }),
@@ -94,13 +95,16 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const parsed = SetSessionModelAccountChoiceRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
-      throw new HTTPException(422, { message: "connectionId must be an account id or null" });
+      throw new HTTPException(422, {
+        message: "connectionId must be an account id or null, with an optional provider",
+      });
     }
     const result = await chooseSubscriptionCoreSessionAccount(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       sessionId,
       connectionId: parsed.data.connectionId,
+      provider: parsed.data.provider ?? null,
       subjectId: grant.subjectId,
     });
     switch (result.outcome) {

@@ -34,6 +34,7 @@ test("model-account choice and preference shapes are parity-pinned", () => {
   const connectionId = "00000000-0000-4000-8000-000000000001";
   const response = ContractChoice.parse({
     binding: { provider: "acme", connectionId, choice: "explicit" },
+    bindings: [{ provider: "acme", connectionId, choice: "explicit" }],
     accounts: [
       {
         provider: "acme",
@@ -69,11 +70,19 @@ test("model-account choice and preference shapes are parity-pinned", () => {
   expect(ContractSetChoice.parse(setChoice({ connectionId: null }))).toEqual({
     connectionId: null,
   });
+  expect(ContractSetChoice.parse(setChoice({ connectionId: null, provider: "acme" }))).toEqual({
+    connectionId: null,
+    provider: "acme",
+  });
+  expect(choice(response).bindings).toEqual([response.binding!]);
   expect(
     ContractUpdatePreferences.parse(
       updatePreferences({ personalFallbackOptIn: false, expectedVersion: 0 }),
     ),
   ).toEqual({ personalFallbackOptIn: false, expectedVersion: 0 });
   // Unknown request fields are refused rather than silently dropped.
-  expect(ContractSetChoice.safeParse({ connectionId: null, provider: "acme" }).success).toBe(false);
+  expect(ContractSetChoice.safeParse({ connectionId: null, extra: "acme" }).success).toBe(false);
+  expect(ContractSetChoice.safeParse({ connectionId: null, provider: "INVALID" }).success).toBe(
+    false,
+  );
 });

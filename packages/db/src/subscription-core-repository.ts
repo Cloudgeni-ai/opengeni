@@ -405,7 +405,7 @@ export type SubscriptionSessionBinding = {
 };
 
 /**
- * The session's binding for one provider (0729, D-32): a session keeps one
+ * The session's binding for one provider (0730, D-32): a session keeps one
  * binding per provider, and a provider reads and writes only its own.
  */
 export async function readSubscriptionSessionBinding(
@@ -463,7 +463,7 @@ export async function readSubscriptionSessionBinding(
 const ROLLING_SESSION_BINDING_INDEX = "subscription_session_bindings_rolling_session_idx";
 
 /**
- * Whether an error is a concurrent first binding of the session meeting 0729's
+ * Whether an error is a concurrent first binding of the session meeting 0730's
  * rolling `(workspace_id, session_id)` index. That index is not the conflict
  * target of `writeSubscriptionSessionBinding`, so two first bindings of one
  * session can race on it as a unique violation instead of a lost
@@ -482,7 +482,7 @@ export function isSubscriptionSessionBindingRollingConflict(error: unknown): boo
 
 /**
  * Inserts the provider's binding once or compare-and-swaps its version. A
- * binding never changes provider (the 0729 trigger refuses it). While 0729's
+ * binding never changes provider (the 0730 trigger refuses it). While 0730's
  * rolling index exists a racing first binding can fail with
  * `isSubscriptionSessionBindingRollingConflict`.
  */

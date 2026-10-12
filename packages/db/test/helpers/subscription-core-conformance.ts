@@ -108,6 +108,10 @@ import {
   type SubscriptionCoreProvider,
 } from "../../src/subscription-core/provider";
 import {
+  subscriptionCoreProvider,
+  subscriptionCoreProviderIds,
+} from "../../src/subscription-core-providers";
+import {
   readSubscriptionCoreTurnIdentity,
   subscriptionCoreReselectionPoints,
   subscriptionCoreTurns,
@@ -2014,7 +2018,7 @@ export function describeSubscriptionCoreConformance<Credential>(
 
     /**
      * A session holds one binding per provider (D-32) once the rolling window
-     * of 0729 closes: the next drained provider cutover drops the index that
+     * of 0730 closes: the next drained provider cutover drops the index that
      * kept one row per session for the previous binary. The tests that call
      * this run last in the suite, so every earlier test runs on the schema
      * production runs during the rolling window.
@@ -4892,14 +4896,14 @@ export function describeSubscriptionCoreConformance<Credential>(
     });
 
     // Runs before the tests that close the rolling window: production keeps
-    // 0729's rolling index until the next drained provider cutover drops it.
-    test("rolling window: a first binding that meets 0729's rolling index is a lost compare-and-swap, not an error", async () => {
+    // 0730's rolling index until the next drained provider cutover drops it.
+    test("rolling window: a first binding that meets 0730's rolling index is a lost compare-and-swap, not an error", async () => {
       const [index] = await admin()<{ present: boolean }[]>`
         select to_regclass('subscription_session_bindings_rolling_session_idx') is not null
           as present`;
       expect(index!.present).toBe(true);
       const org = await organization();
-      await sharedConnection(org, `rolling-${crypto.randomUUID()}`);
+      const own = await sharedConnection(org, `rolling-${crypto.randomUUID()}`);
       const turn = await runningTurn(org);
       await storeBinding(turn, org.ownerSubjectId, {
         provider: subject.foreignProvider,
@@ -4917,8 +4921,164 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(await storedBindingRow(turn, providerId)).toBeNull();
       expect(await storedBindingRow(turn, subject.foreignProvider)).toEqual(pinned);
       expect(await leaseCount(org, turn)).toBe(0);
+      // The neutral choice writer rolls back its savepoint and reports a
+      // retryable conflict too; no partial event, wake or binding escapes.
+      const choice = await chooseSubscriptionCoreSessionAccount(
+        db(),
+        {
+          ...turn.identity,
+          subjectId: org.ownerSubjectId,
+          connectionId: own,
+        },
+        [provider],
+      );
+      expect(choice).toMatchObject({ outcome: "conflict", events: [], wakes: [] });
+      expect(await storedBindingRow(turn, providerId)).toBeNull();
+      expect(await storedBindingRow(turn, subject.foreignProvider)).toEqual(pinned);
       await expectForeignUntouched(org);
     });
+
+    test("D-32: neutral choices preserve other providers; scoped and whole-session automatic reset exactly their rows", async () => {
+      await closeBindingRollingWindow();
+      const org = await organization();
+      const own = await sharedConnection(org, `choice-own-${crypto.randomUUID()}`);
+      const other = await sharedConnection(org, `choice-other-${crypto.randomUUID()}`);
+      const turn = await runningTurn(org);
+      const input = { ...turn.identity, subjectId: org.ownerSubjectId };
+      const choose = (connectionId: string | null, selectedProvider?: string) =>
+        chooseSubscriptionCoreSessionAccount(
+          db(),
+          { ...input, connectionId, provider: selectedProvider ?? null },
+          [provider],
+        );
+      // Choose ours first, then store the other provider's pin as its runtime
+      // does. Updating ours afterwards must not mutate either identity.
+      expect(await choose(own)).toMatchObject({ outcome: "changed", provider: providerId });
+      const ownBeforeForeign = await storedBindingRow(turn, providerId);
+      await storeBinding(turn, org.ownerSubjectId, {
+        provider: subject.foreignProvider,
+        connectionId: org.foreign.healthy,
+        choice: "explicit",
+      });
+      expect(await storedBindingRow(turn, providerId)).toEqual(ownBeforeForeign);
+      const foreign = await storedBindingRow(turn, subject.foreignProvider);
+      expect(await choose(other)).toMatchObject({ outcome: "changed", provider: providerId });
+      expect(await storedBindingRow(turn, subject.foreignProvider)).toEqual(foreign);
+      expect(await choose(other, subject.foreignProvider)).toMatchObject({ outcome: "not_found" });
+      const ownPinned = await storedBindingRow(turn, providerId);
+      const picker = await readSubscriptionCoreSessionAccountChoice(db(), input, [provider]);
+      expect(picker!.binding).toBeNull();
+      expect(picker!.bindings).toEqual(
+        [
+          { provider: providerId, connectionId: other, choice: "explicit" as const },
+          // A binding alone never makes a connection visible to the caller.
+          { provider: subject.foreignProvider, connectionId: null, choice: "explicit" as const },
+        ].sort((a, b) => a.provider.localeCompare(b.provider)),
+      );
+
+      const scoped = await choose(null, providerId);
+      expect(scoped).toMatchObject({ outcome: "changed", provider: providerId });
+      expect(scoped.events).toHaveLength(1);
+      expect(scoped.events[0]!.payload).toMatchObject({
+        providers: [providerId],
+        choice: "automatic",
+      });
+      expect(scoped.wakes.map((wake) => wake.provider)).toEqual([providerId]);
+      expect(await storedBindingRow(turn, providerId)).toMatchObject({
+        connection_id: other,
+        choice: "automatic",
+        version: Number(ownPinned!.version) + 1,
+      });
+      expect(await storedBindingRow(turn, subject.foreignProvider)).toEqual(foreign);
+      expect(await choose(null, providerId)).toMatchObject({
+        outcome: "unchanged",
+        events: [],
+        wakes: [],
+      });
+
+      expect((await choose(own)).outcome).toBe("changed");
+      const all = await choose(null);
+      expect(all).toMatchObject({ outcome: "changed", provider: null, connectionId: null });
+      expect(all.events).toHaveLength(1);
+      expect(all.events[0]!.payload).toMatchObject({
+        provider: null,
+        providers: [providerId, subject.foreignProvider].sort(),
+        choice: "automatic",
+      });
+      expect(await storedBindingRow(turn, providerId)).toMatchObject({
+        connection_id: own,
+        choice: "automatic",
+      });
+      expect(await storedBindingRow(turn, subject.foreignProvider)).toMatchObject({
+        provider: subject.foreignProvider,
+        connection_id: org.foreign.healthy,
+        choice: "automatic",
+        version: Number(foreign!.version) + 1,
+      });
+      expect(await choose(null)).toMatchObject({ outcome: "unchanged", events: [], wakes: [] });
+      await expectForeignUntouched(org);
+    });
+
+    // Some subjects deliberately leave the foreign binding unregistered, or
+    // seed a wrong-kind foreign connection to catch a lost provider filter.
+    // Subjects with two compatible bindings exercise the real neutral writer
+    // in both directions, without fabricating a provider binding.
+    const peerRegistered = subscriptionCoreProviderIds().includes(subject.foreignProvider);
+    const choicePeer = peerRegistered ? subscriptionCoreProvider(subject.foreignProvider) : null;
+    test.skipIf(!choicePeer || subscriptionCoreConnectionKind(choicePeer) !== connectionKind)(
+      "D-32: the neutral writer chooses both enabled providers and wakes only the changed choices",
+      async () => {
+        await closeBindingRollingWindow();
+        const org = await organization();
+        const own = await sharedConnection(org, `two-choices-${crypto.randomUUID()}`);
+        await admin()`insert into subscription_provider_cutovers (account_id, provider, enabled)
+          values (${org.accountId}::uuid, ${subject.foreignProvider}, true)
+          on conflict (account_id, provider) do update set enabled = true`;
+        const turn = await runningTurn(org);
+        const input = { ...turn.identity, subjectId: org.ownerSubjectId };
+        const both = [provider, choicePeer!];
+        const choose = (connectionId: string | null, selectedProvider?: string) =>
+          chooseSubscriptionCoreSessionAccount(
+            db(),
+            { ...input, connectionId, provider: selectedProvider ?? null },
+            both,
+          );
+        expect((await choose(own)).outcome).toBe("changed");
+        const ownPin = await storedBindingRow(turn, providerId);
+        expect(await choose(org.foreign.healthy)).toMatchObject({
+          outcome: "changed",
+          provider: subject.foreignProvider,
+        });
+        expect(await storedBindingRow(turn, providerId)).toEqual(ownPin);
+        const peerPin = await storedBindingRow(turn, subject.foreignProvider);
+        expect((await choose(null, providerId)).wakes.map((wake) => wake.provider)).toEqual([
+          providerId,
+        ]);
+        expect(await storedBindingRow(turn, subject.foreignProvider)).toEqual(peerPin);
+        expect((await choose(own)).outcome).toBe("changed");
+        expect(await storedBindingRow(turn, subject.foreignProvider)).toEqual(peerPin);
+        const picker = await readSubscriptionCoreSessionAccountChoice(db(), input, both);
+        expect(picker!.bindings).toEqual(
+          [
+            { provider: providerId, connectionId: own, choice: "explicit" as const },
+            {
+              provider: subject.foreignProvider,
+              connectionId: org.foreign.healthy,
+              choice: "explicit" as const,
+            },
+          ].sort((a, b) => a.provider.localeCompare(b.provider)),
+        );
+        const cleared = await choose(null);
+        expect(cleared.outcome).toBe("changed");
+        expect(cleared.wakes.map((wake) => wake.provider)).toEqual(
+          [providerId, subject.foreignProvider].sort(),
+        );
+        expect(cleared.events[0]!.payload).toMatchObject({
+          providers: [providerId, subject.foreignProvider].sort(),
+          choice: "automatic",
+        });
+      },
+    );
 
     test("D-32: another provider's explicit pin stays exactly as stored while this provider binds the session automatically", async () => {
       await closeBindingRollingWindow();

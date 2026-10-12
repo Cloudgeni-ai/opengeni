@@ -22915,6 +22915,11 @@
         "$.binding.choice": "enum!=[\"\\\"automatic\\\"\",\"\\\"explicit\\\"\"]",
         "$.binding.connectionId": "string! null",
         "$.binding.provider": "string!",
+        "$.bindings": "array!",
+        "$.bindings[]": "object",
+        "$.bindings[].choice": "enum!=[\"\\\"automatic\\\"\",\"\\\"explicit\\\"\"]",
+        "$.bindings[].connectionId": "string! null",
+        "$.bindings[].provider": "string!",
         "$.personal": "object!",
         "$.personal.connectionsAllowed": "boolean!",
         "$.personal.fallbackAllowed": "boolean!",
@@ -23330,7 +23335,8 @@
       ],
       "shape": {
         "$": "object",
-        "$.connectionId": "string! null"
+        "$.connectionId": "string! null",
+        "$.provider": "string?"
       }
     },
     "SetSessionModelAccountChoiceResponse": {
