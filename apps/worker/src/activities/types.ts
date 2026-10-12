@@ -17,6 +17,8 @@ import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
+import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
+import type { OnePasswordVaultProviderFactory } from "@opengeni/core";
 
 // Signal (start-if-needed) a session's Temporal workflow so a queued turn it
 // cannot otherwise observe gets claimed. Used to wake a PARENT session's
@@ -133,7 +135,12 @@ export type SharedActivityServices = {
   // credential to; the consuming activity ASSERTS agreement with the run's
   // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
   // mapping bug returning tenant B's creds for a tenant-A run is caught here.
-  connectionCredentials?: ConnectionCredentialsPort | null;
+  connectionCredentials?: VaultConnectionCredentialsPort | null;
+  /**
+   * Builds 1Password providers for linked vaults (dynamic import of
+   * `@opengeni/vaults-onepassword`); null leaves 1Password vaults unavailable.
+   */
+  onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
   /** Standalone, default-off personal GitHub smart-HTTP broker consumer. */
   personalGitHubCredentials?: ConnectionCredentialsPort["gitCredentials"] | null;
 };

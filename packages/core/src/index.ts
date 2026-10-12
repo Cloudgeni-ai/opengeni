@@ -39,6 +39,7 @@ export * from "./domain/realtime-voice-billing";
 // The central dependency type surface (AppDependencies, ApiRouteDeps,
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
+export * from "./domain/vaults/provider-registry";
 export * from "./workflow-wake-contract";
 export * from "./user-presence";
 export * from "./product-usage-metrics";
