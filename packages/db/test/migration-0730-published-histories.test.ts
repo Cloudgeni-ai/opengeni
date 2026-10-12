@@ -114,7 +114,7 @@ for (const history of ["fresh", "neither", "personal", "maintenance", "both"] as
         WHERE n.nspname = 'opengeni_private' AND p.proname = ANY(${routines}::text[])
         ORDER BY p.proname`,
       ).toEqual(
-        routines.toSorted().map((proname) => ({
+        [...routines].sort().map((proname) => ({
           proname,
           public_execute: false,
           app_execute: true,
