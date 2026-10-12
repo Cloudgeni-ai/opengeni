@@ -118,12 +118,13 @@ function normalizeFileList(stdout: string): string[] {
 // The organization MCP server is a distinct, explicitly admitted endpoint, not
 // the deleted unscoped workspace tool gateway. Keep its exact leaf reference
 // confined to its implementation, organization UI, SDK, generated inventory
-// and end-to-end test.
+// and end-to-end tests (including personal API keys acting through it).
 // Child paths remain forbidden even in these files. See docs/mcp-surfaces.md.
 const organizationMcpSurfaceFiles = new Set([
   "apps/api/src/mcp-oauth.ts",
   "apps/api/src/organization-mcp.ts",
   "apps/api/test/organization-mcp-e2e.test.ts",
+  "apps/api/test/personal-api-keys.test.ts",
   "apps/web/src/App.tsx",
   "apps/web/src/components/organization-access/organization-connected-agents.tsx",
   "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",

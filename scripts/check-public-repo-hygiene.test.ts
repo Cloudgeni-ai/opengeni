@@ -176,6 +176,13 @@ describe("public repository hygiene", () => {
     ).toEqual([]);
   });
 
+  test("treats dot segments as no account, but not names that merely start with dots", () => {
+    expect(auditPublicText("fixture.rs", 'let invalid = ["/Users/..", "/home/."];')).toEqual([]);
+    expect(
+      auditPublicText("fixture.rs", 'let hidden = "/Users/..owner";').map((f) => f.reason),
+    ).toEqual(["non-generic home path"]);
+  });
+
   test("does not mistake repository URL path segments for local home directories", () => {
     expect(
       auditPublicText(
