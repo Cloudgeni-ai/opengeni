@@ -413,7 +413,7 @@ export async function listSubscriptionCorePersonalConnectionRowsInTransaction(
 
 /**
  * The row versions of the viewing person's own personal connections of this
- * provider, through the owner-only reader (0729), keyed by connection id.
+ * provider, through the owner-only reader (0730), keyed by connection id.
  * Same context and visibility as
  * `listSubscriptionCorePersonalConnectionRowsInTransaction`.
  */

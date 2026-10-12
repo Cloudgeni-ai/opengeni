@@ -60,7 +60,7 @@ const COMPAT = "0716_subscription_authority_compat.sql";
 const FENCES = "0717_subscription_authority_fences.sql";
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
-const PERSONAL_CONNECTION_VERSIONS = "0729_subscription_core_personal_connection_versions.sql";
+const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 

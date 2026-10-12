@@ -776,7 +776,7 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "set_subscription_core_reach_allocator(text, uuid, uuid, boolean)",
   // Migration 0728: the personal connect writer with the credential's format.
   "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
-  // Migration 0729: the owner's personal connections with their row version.
+  // Migration 0730: the owner's personal connections with their row version.
   "subscription_core_personal_connection_versions(text, uuid, uuid, text)",
 ] as const;
 

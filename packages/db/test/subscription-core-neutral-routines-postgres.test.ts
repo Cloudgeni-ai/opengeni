@@ -69,8 +69,8 @@ beforeAll(async () => {
     "0726_subscription_personal_acceptance_reads.sql",
     // 0728 adds a format-aware overload next to 0707's personal connect writer.
     "0728_subscription_core_personal_connect_format.sql",
-    // 0729 derives the personal version reader from 0707's owner reader.
-    "0729_subscription_core_personal_connection_versions.sql",
+    // 0730 derives the personal version reader from 0707's owner reader.
+    "0730_subscription_core_personal_connection_versions.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -525,12 +525,12 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
   );
 
   test.skipIf(!realDb)(
-    "the personal version reader is the live owner reader plus exactly 0729's changes",
+    "the personal version reader is the live owner reader plus exactly 0730's changes",
     async () => {
-      // 0729 builds its reader from the live owner reader (0707, as 0715
+      // 0730 builds its reader from the live owner reader (0707, as 0715
       // rewrote it). A later fix to the owner reader's membership, writer
       // context or kind rule must reach the version reader too: this compares
-      // the two live bodies after 0729's three substitutions.
+      // the two live bodies after 0730's three substitutions.
       const [row] = await database!.admin<{ base: string; versions: string }[]>`
         select
           pg_get_functiondef('opengeni_private.subscription_core_personal_connections(text,uuid,uuid,text)'::regprocedure) as base,
