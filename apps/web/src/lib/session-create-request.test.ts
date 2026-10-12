@@ -214,6 +214,29 @@ describe("buildCreateSessionRequest", () => {
     expect(request.expectedNewSessionDraftRevision).toBe(7);
   });
 
+  test("sends the chat's Secrets narrowing as agent.vaultPolicy and restores it", () => {
+    const vaultId = "8d6f1d3e-4c1b-4b8f-9a55-1f0c9f0d2a11";
+    const all = submissionFromSessionDraft({
+      ...emptySessionDraft(),
+      vaultPolicy: { mode: "all" },
+    });
+    expect(all.extras).not.toHaveProperty("agent");
+
+    const narrowed = {
+      ...emptySessionDraft(),
+      vaultPolicy: { mode: "selected" as const, vaultIds: [vaultId] },
+    };
+    expect(submissionFromSessionDraft(narrowed).extras.agent).toEqual({
+      vaultPolicy: { mode: "selected", vaultIds: [vaultId] },
+    });
+    const options = newSessionDraftOptionsFromSessionDraft(narrowed);
+    expect(options.agent?.vaultPolicy).toEqual({ mode: "selected", vaultIds: [vaultId] });
+    expect(sessionDraftFromNewSessionDraftOptions(options).vaultPolicy).toEqual({
+      mode: "selected",
+      vaultIds: [vaultId],
+    });
+  });
+
   test("omits tools only when the ready catalog selection equals workspace defaults", () => {
     const result = build([], [], {
       selectedTools: [{ kind: "mcp", id: "docs" }],

@@ -232,6 +232,40 @@ export type {
   UseEnvironmentsOptions,
   UseEnvironmentsResult,
 } from "./hooks/use-environments";
+export {
+  useVaultsApi,
+  useVaults,
+  useVault,
+  useVaultItems,
+  useVaultItem,
+  useVaultFieldVersions,
+  useSessionSecrets,
+  VAULT_ITEM_PAGE_LIMIT,
+} from "./hooks/use-vaults";
+export type { UseVaultQueryOptions } from "./hooks/use-vaults";
+export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults";
+export type { VaultClientLike, VaultsApi } from "./vaults";
+export type * from "./types/vaults";
+export { SecretsUiProvider, useSecretsUi } from "./secrets-ui";
+export {
+  SecretAnswerChip,
+  SecretRefChip,
+  SecretRefText,
+  secretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretAnswerChipProps,
+  SecretRefChipProps,
+  SecretRefTextProps,
+  SecretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretsUi,
+  SecretReferenceLike,
+  SecretReferenceTargetLike,
+  SecretTextTokenLike,
+  PasswordStrengthLike,
+} from "./secrets-ui";
 export { useChannels } from "./hooks/use-channels";
 export type { UseChannelsOptions, UseChannelsResult } from "./hooks/use-channels";
 export { useRigs, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";

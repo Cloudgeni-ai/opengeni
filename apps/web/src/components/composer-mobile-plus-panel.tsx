@@ -6,6 +6,7 @@ import {
   ChevronRightIcon,
   EyeIcon,
   GitBranchIcon,
+  LockKeyholeIcon,
   PaperclipIcon,
   PlugIcon,
   ServerIcon,
@@ -60,6 +61,7 @@ export type Panel =
   | "repos"
   | "voice"
   | "variables"
+  | "secrets"
   | "settings"
   | "runs-on"
   | "visibility";
@@ -132,6 +134,8 @@ export type ComposerPlusProps = {
     selectedCount: number;
     panel: ReactElement<{ leading?: ReactNode; onClose?: () => void }>;
   };
+  /** Which vaults agents in this chat may use, and the task's own items. */
+  secrets?: ComposerSettingPanel;
   /** Where the chat runs: managed sandbox and environment, or a connected machine. */
   runsOn?: ComposerSettingPanel;
   /** Who can see the chat, when the organization offers a choice. */
@@ -301,6 +305,16 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
+          {props.secrets ? (
+            <SettingRowItem
+              panel="secrets"
+              icon={<LockKeyholeIcon className="size-4" />}
+              label="Secrets"
+              setting={props.secrets}
+              disabled={props.disabled}
+              onOpen={() => setPanel("secrets")}
+            />
+          ) : null}
           {props.variableSets ? (
             <DropdownMenuItem
               data-composer-panel="variables"
@@ -414,6 +428,11 @@ export function ComposerMobilePlusPanel(
             setPanel("root");
           },
         })
+      ) : panel === "secrets" && props.secrets ? (
+        cloneElement(props.secrets.panel, {
+          leading: backButton,
+          presentation: dialogOpen ? "dialog" : "menu",
+        })
       ) : panel === "runs-on" && props.runsOn ? (
         cloneElement(props.runsOn.panel, {
           leading: backButton,
@@ -458,6 +477,7 @@ export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
   repos: "Repositories",
   voice: "Voice model",
   variables: "Variable sets",
+  secrets: "Secrets",
   settings: "Chat settings",
   "runs-on": "Runs on",
   visibility: "Who can see this chat",
@@ -513,6 +533,8 @@ function ComposerPanelContent(props: {
 }
 
 function SettingRowItem(props: {
+  /** Focus returns to this row when its drill-in goes back. */
+  panel?: Panel;
   icon: ReactNode;
   label: string;
   setting: ComposerSettingPanel;
@@ -521,6 +543,7 @@ function SettingRowItem(props: {
 }) {
   return (
     <DropdownMenuItem
+      data-composer-panel={props.panel}
       className="cursor-pointer"
       disabled={props.disabled || props.setting.disabled}
       onSelect={(event) => {

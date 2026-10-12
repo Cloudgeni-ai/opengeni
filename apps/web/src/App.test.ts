@@ -1112,7 +1112,7 @@ describe("api key permission options", () => {
       "Sessions",
       "Files & documents",
       "Scheduled tasks",
-      "Variable sets",
+      "Secrets",
       "Connections",
       "Machines",
       "GitHub",

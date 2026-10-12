@@ -393,8 +393,8 @@ export function RigDetailRoute({
                   onVerify={rig.verify}
                   onOpenVariableSet={(id) =>
                     void navigate({
-                      to: "/workspaces/$workspaceId/variable-sets/$variableSetId",
-                      params: { workspaceId, variableSetId: id },
+                      to: "/workspaces/$workspaceId/secrets/$vaultId",
+                      params: { workspaceId, vaultId: id },
                     })
                   }
                 />

@@ -3355,6 +3355,8 @@ export type ScheduledTask = {
   environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
+  /** Vaults every run may resolve secret references from (the task vault is always included). */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -6894,6 +6896,8 @@ export type CreateAgentScheduledTaskRequest = {
    * existing-session task. `null` means none.
    */
   rigId?: string | null | undefined;
+  /** Vault narrowing for every run; omission adds none. */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -6956,6 +6960,8 @@ export type UpdateScheduledTaskRequest = {
   environmentId?: string | null | undefined;
   // The rig each run binds to (M3); active version resolved per fire.
   rigId?: string | null | undefined;
+  /** Vault narrowing for every run. */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
