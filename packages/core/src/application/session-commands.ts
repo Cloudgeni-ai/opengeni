@@ -341,7 +341,8 @@ async function wakeSessionCommand(
 /**
  * Nudge the one bounded dispatcher after a set-based control transaction. The
  * API never materializes descendant session ids; Postgres remains the complete
- * wake ledger and the 10-second Schedule repairs a lost immediate trigger.
+ * wake ledger and the control worker's 10-second repair cadence recovers a
+ * lost immediate trigger.
  */
 async function requestControlWakeDispatch(
   deps: {

@@ -82,6 +82,8 @@ export type SubscriptionCoreWake = {
   workspaceIds?: readonly string[];
   /** Only these sessions' waiters (requires exactly one workspace). */
   sessionIds?: readonly string[];
+  /** Only waiters of sessions owned by this organization membership. */
+  ownerMembershipId?: string;
 };
 
 /** The wake reason for an administration event of this provider. */

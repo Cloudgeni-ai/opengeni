@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionAuthorizationOperation } from "@opengeni/contracts";
+import {
+  canonicalSessionAuthorizationOperation,
+  SessionAuthorizationOperation,
+} from "@opengeni/contracts";
 import { SessionTenancyConflictError, SessionTenancyNotActivatedError } from "@opengeni/db";
 import { SessionTenancyPersistenceOutcomeUnknownError } from "@opengeni/core";
 import { ApiHttpError } from "../src/http/api-error";
@@ -31,9 +34,9 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "/tool-reviews/synthetic-approval/details", "session.read"],
   ["GET", "/codex-accounts", "session.read"],
   ["DELETE", "/background-commands/33333333-3333-4333-8333-333333333333", "session.control"],
-  ["POST", "/codex-account", "session.codex_account.write"],
+  ["POST", "/codex-account", "session.model_account.write"],
   ["GET", "/model-account", "session.read"],
-  ["PUT", "/model-account", "session.codex_account.write"],
+  ["PUT", "/model-account", "session.model_account.write"],
   ["POST", "/realtime/webrtc", "session.realtime.start"],
   ["POST", "/realtime/gateway", "session.realtime.start"],
   ["POST", "/realtime", "session.realtime.start"],
@@ -142,5 +145,25 @@ describe("session HTTP authorization classification", () => {
       null,
     );
     expect(sessionAuthorizationOperationForHttp("DELETE", `${root}/events`, sessionId)).toBe(null);
+  });
+
+  test("internal account-choice classification is neutral; the older host name stays a valid alias", () => {
+    // Hosts written against the older name still parse and can normalize it.
+    expect(SessionAuthorizationOperation.parse("session.codex_account.write")).toBe(
+      "session.codex_account.write",
+    );
+    expect(canonicalSessionAuthorizationOperation("session.codex_account.write")).toBe(
+      "session.model_account.write",
+    );
+    expect(canonicalSessionAuthorizationOperation("session.model_account.write")).toBe(
+      "session.model_account.write",
+    );
+    expect(canonicalSessionAuthorizationOperation("session.read")).toBe("session.read");
+    // Internal classification stays canonical, independent of host capabilities.
+    for (const [method, suffix] of cases) {
+      expect(sessionAuthorizationOperationForHttp(method, `${root}${suffix}`, sessionId)).not.toBe(
+        "session.codex_account.write",
+      );
+    }
   });
 });

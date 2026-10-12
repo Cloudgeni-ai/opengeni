@@ -177,18 +177,43 @@ export function sessionTitleCodexRequestContext(
   };
 }
 
+/**
+ * The durable `agent.model.request` payload of a SuperGrok request event. It
+ * carries every transport field, including `meaningfulOutput` on `completed`,
+ * which the shared false-resumption breaker resets on.
+ */
+export function xaiModelRequestEventPayload<Event extends object>(
+  event: Event,
+  ids: {
+    turnId: string;
+    attemptId: string;
+    dispatchId: string | undefined;
+    executionGeneration: number | null | undefined;
+  },
+): Event & { provider: "supergrok-subscription" } & typeof ids {
+  return { ...event, provider: "supergrok-subscription", ...ids };
+}
+
 export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
-  /** On the shared core: the turn's dispatch fence and the title custody lane. */
-  core?: { assertDispatch: () => Promise<void>; requests: CoreSubscriptionRequests },
+  /**
+   * On the shared core: the turn's dispatch fence, the title custody lane and
+   * the title lane's bearer (which never moves the main lane's refusal fence).
+   */
+  core?: {
+    assertDispatch: () => Promise<void>;
+    requests: CoreSubscriptionRequests;
+    getToken: XaiSubscriptionRequestContext["getToken"];
+    refresh: XaiSubscriptionRequestContext["refresh"];
+  },
 ): XaiSubscriptionRequestContext {
   return {
     clientVersion: context.clientVersion,
     sessionId: context.sessionId,
     turnId: context.turnId,
-    getToken: context.getToken,
-    refresh: context.refresh,
+    getToken: core?.getToken ?? context.getToken,
+    refresh: core?.refresh ?? context.refresh,
     resolveModel: context.resolveModel,
     ...(context.streamIdleTimeoutMs !== undefined
       ? { streamIdleTimeoutMs: context.streamIdleTimeoutMs }
@@ -1089,14 +1114,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       : []),
                     {
                       type: "agent.model.request",
-                      payload: {
-                        ...event,
-                        provider: "supergrok-subscription",
+                      payload: xaiModelRequestEventPayload(event, {
                         turnId: attempt.turnId,
                         attemptId: input.attemptId,
                         dispatchId,
                         executionGeneration: attempt.executionGeneration,
-                      },
+                      }),
                     },
                   ]);
                   // SuperGrok places bytes on the wire immediately after this

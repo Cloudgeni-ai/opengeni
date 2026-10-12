@@ -56,6 +56,7 @@ export function createCoreSubscriptionRequests(deps: CoreSubscriptionRequestsDep
   let ownUnknown = false;
   let admissionRefused = false;
   let reserving = false;
+  let lastResponseAt: number | null = null;
   const key = (request: SubscriptionCoreRequestIdentity) =>
     JSON.stringify([request.requestId, request.transportAttempt]);
   return {
@@ -85,6 +86,7 @@ export function createCoreSubscriptionRequests(deps: CoreSubscriptionRequestsDep
       if (!pending) throw new Error(`${deps.displayName} request settlement has no reservation`);
       if (request.outcome === "response_received") {
         pending.responseReceived = true;
+        lastResponseAt = Date.now();
         return;
       }
       if (request.outcome === "unknown") {
@@ -122,6 +124,10 @@ export function createCoreSubscriptionRequests(deps: CoreSubscriptionRequestsDep
     /** The durable fence refused this attempt because of an earlier unresolved request. */
     admissionRefused(): boolean {
       return admissionRefused;
+    },
+    /** When a request of this lane last received a response (the binding's cache clock). */
+    lastResponseReceivedAt(): Date | null {
+      return lastResponseAt === null ? null : new Date(lastResponseAt);
     },
   };
 }

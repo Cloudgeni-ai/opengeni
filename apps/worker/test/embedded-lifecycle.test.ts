@@ -745,6 +745,15 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
         },
+        // Migration 0730: the Knowledge claim's read-only work check.
+        {
+          name: "knowledge_index_due_v1(text, integer)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+          configuration: ["search_path=pg_catalog"],
+        },
         ...[
           "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
           "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",

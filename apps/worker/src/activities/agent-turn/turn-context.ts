@@ -191,6 +191,11 @@ export type SubscriptionCoreTurn = {
   connectionId: string;
   /** Refresh generation of the connection when it was placed. */
   placedRefreshGeneration: number;
+  /**
+   * Refresh generation of the credential the latest request carried, when
+   * the provider's resolver reports it (SuperGrok; Codex keeps its own field).
+   */
+  credentialVersion?: number;
   personal: boolean;
   requests?: import("./subscription-core-requests").CoreSubscriptionRequests;
   titleRequests?: import("./subscription-core-requests").CoreSubscriptionRequests;

@@ -378,29 +378,28 @@ export type WorkflowWakeReconciliationResult = {
   >;
 };
 
-export async function reconcilePendingSessionWorkflowWakes(
-  svc: NotifyServices,
-  limit = 1_000,
-  overrides: ReconcileSessionWorkflowWakeOverrides = {},
-): Promise<WorkflowWakeReconciliationResult> {
-  const claimPendingSessionWorkflowWakesFn =
-    overrides.claimPendingSessionWorkflowWakes ?? claimPendingSessionWorkflowWakes;
-  if (!svc.wakeSessionWorkflow) {
-    return {
-      claimed: 0,
-      signaled: 0,
-      delivered: 0,
-      pendingAdmission: 0,
-      unconfirmed: 0,
-      failed: 0,
-      pendingAdmissionBlockers: {},
-    };
-  }
+/**
+ * Register durable wakes that a producer committed work for but never woke:
+ * pending child results on an idle parent, and recovering sessions still
+ * owed a physical-quiescence receipt. Registration is idempotent and lock
+ * fenced, writes only when it finds a real repair, and never delivers. The
+ * dispatcher activity runs it before claiming, and the worker's maintenance
+ * cadence runs it before checking for due wakes, so an idle tick needs no
+ * workflow execution to keep this repair cadence.
+ */
+export async function repairMissedSessionWorkflowWakes(
+  svc: Pick<NotifyServices, "db" | "observability">,
+  limit = 100,
+  overrides: Pick<
+    ReconcileSessionWorkflowWakeOverrides,
+    "repairPendingChildTerminalResultWakes" | "repairMissingQuiescenceReceiptWakes"
+  > = {},
+): Promise<void> {
   const repairChildren =
     overrides.repairPendingChildTerminalResultWakes ?? repairPendingChildTerminalResultWakes;
   const inventory = await repairChildren(
     svc.db,
-    Math.min(100, limit),
+    limit,
     childTerminalRepairCursors.get(svc.db) ?? null,
   );
   if (inventory.cursor) childTerminalRepairCursors.set(svc.db, inventory.cursor);
@@ -418,7 +417,7 @@ export async function reconcilePendingSessionWorkflowWakes(
   try {
     const quiescenceInventory = await repairQuiescence(
       svc.db,
-      Math.min(100, limit),
+      limit,
       quiescenceRepairCursors.get(svc.db) ?? null,
     );
     if (quiescenceInventory.cursor) {
@@ -438,6 +437,27 @@ export async function reconcilePendingSessionWorkflowWakes(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+export async function reconcilePendingSessionWorkflowWakes(
+  svc: NotifyServices,
+  limit = 1_000,
+  overrides: ReconcileSessionWorkflowWakeOverrides = {},
+): Promise<WorkflowWakeReconciliationResult> {
+  const claimPendingSessionWorkflowWakesFn =
+    overrides.claimPendingSessionWorkflowWakes ?? claimPendingSessionWorkflowWakes;
+  if (!svc.wakeSessionWorkflow) {
+    return {
+      claimed: 0,
+      signaled: 0,
+      delivered: 0,
+      pendingAdmission: 0,
+      unconfirmed: 0,
+      failed: 0,
+      pendingAdmissionBlockers: {},
+    };
+  }
+  await repairMissedSessionWorkflowWakes(svc, Math.min(100, limit), overrides);
   const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);
   let signaled = 0;
   let pendingAdmission = 0;
