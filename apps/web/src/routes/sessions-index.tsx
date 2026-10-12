@@ -370,7 +370,11 @@ function SessionsIndexRouteContent({
   const canListSecrets =
     hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
     hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
-  const draftVaults = useVaults({ workspaceId, enabled: canListSecrets && draftSecretsOn });
+  const draftVaults = useVaults({
+    client: context.client,
+    workspaceId,
+    enabled: canListSecrets && draftSecretsOn,
+  });
   const draftVaultPolicy = draft.vaultPolicy ?? { mode: "all" as const };
   const draftVaultRows = draftVaults.vaults
     ? draftSecretsRows(draftVaults.vaults, draftVaultPolicy)

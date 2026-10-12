@@ -27,6 +27,10 @@ import type {
  */
 export type VaultClientLike = Pick<OpenGeniClient, "requestJson">;
 
+/**
+ * The client's JSON transport. A client without one still renders (a disabled
+ * hook never calls it); each request then fails with a clear error.
+ */
 export function asVaultClient(client: unknown): VaultClientLike {
   if (
     client &&
@@ -36,7 +40,12 @@ export function asVaultClient(client: unknown): VaultClientLike {
   ) {
     return client as VaultClientLike;
   }
-  throw new Error("@opengeni/react: vaults need a client with requestJson.");
+  return {
+    requestJson: (() =>
+      Promise.reject(
+        new Error("@opengeni/react: vaults need a client with requestJson."),
+      )) as VaultClientLike["requestJson"],
+  };
 }
 
 const enc = encodeURIComponent;

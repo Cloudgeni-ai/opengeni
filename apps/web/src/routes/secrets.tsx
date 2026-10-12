@@ -4,7 +4,6 @@
 //   /secrets                      the vault list   ?view=new|connect-1password
 //   /secrets/$vaultId             a vault's page   ?view=availability|new-item&type=
 //   /secrets/$vaultId/$itemId     an item's page   ?view=edit
-import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
 import {
   useVault,
   useVaultItem,
@@ -30,7 +29,7 @@ import {
 } from "@/components/secrets/vault-forms";
 import { SecretsListPage, type SecretsListState } from "@/components/secrets/vault-list";
 import { MIN_HIT_AREAS } from "@/components/secrets/secret-actions";
-import { vaultError } from "@/components/secrets/vault-model";
+import { secretsCapabilityOff, vaultError } from "@/components/secrets/vault-model";
 import { SecretsMissing, VaultPage, VaultPageLoading } from "@/components/secrets/vault-page";
 import { ContentPage } from "@/components/ui/content-layout";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
@@ -53,13 +52,6 @@ export function parseCreatableType(value: unknown): CreatableType | undefined {
 }
 
 /** True when the workspace's default agent has the Secrets capability off. */
-export function secretsCapabilityOff(settings: unknown): boolean {
-  const capabilities = resolveWorkspaceAgentDefaults(settings)?.capabilities;
-  if (capabilities === undefined || capabilities === "all") return false;
-  if (capabilities === "none") return true;
-  if (capabilities.secrets !== undefined) return !capabilities.secrets;
-  return capabilities.from === "none";
-}
 
 /** Wraps a mutation so its error carries the vault copy (UI-9). */
 async function attempt<T>(operation: () => Promise<T>): Promise<T> {

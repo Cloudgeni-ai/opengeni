@@ -7,6 +7,7 @@ import {
   type VaultSummary,
 } from "@opengeni/react";
 
+import { resolveWorkspaceAgentDefaults, type AgentCapabilities } from "@opengeni/contracts";
 import { userErrorText } from "@/lib/api-error";
 
 /* ----------------------------------------------------------------------------
@@ -236,4 +237,21 @@ export function isNotFoundError(error: unknown): boolean {
 export function isPermissionError(error: unknown): boolean {
   if (vaultErrorCode(error) === "vault_permission_denied") return true;
   return (error as { status?: unknown } | null)?.status === 403;
+}
+
+/**
+ * Whether these capabilities turn Secrets off: true or false when they decide
+ * it, null when they follow the workspace default (or there are none).
+ */
+export function secretsOffIn(capabilities: AgentCapabilities | undefined): boolean | null {
+  if (capabilities === undefined) return null;
+  if (capabilities === "all") return false;
+  if (capabilities === "none") return true;
+  if (capabilities.secrets !== undefined) return !capabilities.secrets;
+  return capabilities.from === "none";
+}
+
+/** The workspace default turns Secrets off for its agents. */
+export function secretsCapabilityOff(settings: unknown): boolean {
+  return secretsOffIn(resolveWorkspaceAgentDefaults(settings)?.capabilities) ?? false;
 }

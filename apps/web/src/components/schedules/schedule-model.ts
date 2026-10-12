@@ -27,6 +27,7 @@ import type {
   CreateScheduledTaskRequest,
   McpConnectionAccountSelection,
   UpdateScheduledTaskRequest,
+  VaultPolicy,
 } from "@opengeni/sdk";
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
@@ -226,6 +227,13 @@ export interface ScheduleDraft extends ScheduledTaskFormState {
   rigId: string | null;
   /** Who can see the schedule and the chats it creates. */
   visibility: "private" | "workspace";
+  /** Vaults every run may use. Undefined: all the owner can reach. */
+  vaultPolicy?: VaultPolicy;
+}
+
+/** A selected policy, or undefined for "all" (the server default). */
+export function narrowedVaultPolicy(policy: VaultPolicy | undefined): VaultPolicy | undefined {
+  return policy?.mode === "selected" ? policy : undefined;
 }
 
 export interface DraftDefaults {
@@ -454,6 +462,7 @@ export function createRequestFromDraft(
     agentConfig: agentConfigFromFormState(draft),
     ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
+    ...(narrowedVaultPolicy(draft.vaultPolicy) ? { vaultPolicy: draft.vaultPolicy } : {}),
   };
 }
 
@@ -545,6 +554,10 @@ export function updateRequestFromDraft(
       ? {}
       : { variableSetId: draft.variableSetId }),
     ...(inheritsChatSettings || initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
+    ...(inheritsChatSettings ||
+    same(narrowedVaultPolicy(initial.vaultPolicy), narrowedVaultPolicy(draft.vaultPolicy))
+      ? {}
+      : { vaultPolicy: narrowedVaultPolicy(draft.vaultPolicy) ?? { mode: "all" } }),
   };
 }
 

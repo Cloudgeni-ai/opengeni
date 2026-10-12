@@ -154,6 +154,32 @@ describe("schedule requests", () => {
     expect(request.overlapPolicy).toBe("skip");
   });
 
+  test("Secrets narrowing is sent only when vaults are picked, and cleared back to all", () => {
+    const vaultIds = ["00000000-0000-4000-8000-0000000000a1"];
+    const all = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });
+    expect("vaultPolicy" in all).toBe(false);
+    const narrowed = createRequestFromDraft(
+      { ...base(), vaultPolicy: { mode: "selected", vaultIds } },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect("vaultPolicy" in narrowed && narrowed.vaultPolicy).toEqual({
+      mode: "selected",
+      vaultIds,
+    });
+
+    const initial: ScheduleDraft = { ...base(), vaultPolicy: { mode: "selected", vaultIds } };
+    expect("vaultPolicy" in updateRequestFromDraft(task(), initial, initial, { now: NOW })).toBe(
+      false,
+    );
+    const { vaultPolicy: _dropped, ...widened } = initial;
+    expect(updateRequestFromDraft(task(), initial, widened, { now: NOW }).vaultPolicy).toEqual({
+      mode: "all",
+    });
+    expect(
+      updateRequestFromDraft(task(), base(), initial, { now: NOW }).vaultPolicy,
+    ).toEqual({ mode: "selected", vaultIds });
+  });
+
   test("a new schedule is shared by default and sends Only me only when chosen", () => {
     const shared = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });
     expect("visibility" in shared).toBe(false);
