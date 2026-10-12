@@ -19,21 +19,14 @@ import {
   type SubscriptionCoreCodexOperationLeaseRef,
   type SubscriptionCoreCodexOperationScope,
 } from "@opengeni/db";
-import { fetchError, responseError } from "./openai";
+import { fetchError } from "./openai";
+import {
+  coreTranscriptionResult,
+  coreTranscriptionUnavailable,
+  withoutFallback,
+} from "./subscription-core";
 
 const TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
-
-/**
- * Once the shared-core Codex provider is selected, its failures are final for
- * that audio: provider ordering chose the initial provider only (design 6.5).
- */
-function coreTranscriptionUnavailable(): TranscriptionServiceError {
-  return new TranscriptionServiceError({
-    fallbackSafe: false,
-    code: "unavailable",
-    message: "Transcription is unavailable.",
-  });
-}
 
 /**
  * Codex transcription on the shared subscription core (M3 PR 2c, EP-N01..N04):
@@ -114,22 +107,12 @@ async function transcribeOnCore(
         throw withoutFallback(fetchError(error));
       }
       // Keep operation custody through parsing, not just response headers.
-      return await transcriptionResult(response);
+      return await coreTranscriptionResult(response);
     } finally {
       await releaseSubscriptionCoreCodexOperationLease(input.db, scope, ref).catch(() => false);
     }
   }
   throw coreTranscriptionUnavailable();
-}
-
-function withoutFallback(error: TranscriptionServiceError): TranscriptionServiceError {
-  return new TranscriptionServiceError({
-    code: error.code,
-    message: error.message,
-    status: error.status,
-    retryable: error.retryable,
-    fallbackSafe: false,
-  });
 }
 
 async function sendTranscription(
@@ -163,21 +146,6 @@ async function sendTranscription(
     body: form,
     ...(input.signal ? { signal: input.signal } : {}),
   });
-}
-
-async function transcriptionResult(
-  response: Response,
-): Promise<{ text: string; languages: string[] }> {
-  if (!response.ok) {
-    await response.arrayBuffer().catch(() => undefined);
-    throw withoutFallback(responseError(response.status));
-  }
-  const body = await response.json().catch(() => null);
-  if (!body || typeof body.text !== "string") throw withoutFallback(responseError(502));
-  return {
-    text: body.text,
-    languages: typeof body.language === "string" && body.language ? [body.language] : [],
-  };
 }
 
 export function createCodexSubscriptionTranscriptionProvider(input: {

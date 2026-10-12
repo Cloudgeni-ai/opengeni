@@ -37,6 +37,7 @@ import {
 import type { SubscriptionCoreTurn } from "./turn-context";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { selectXaiTurnCapacity } from "./xai-capacity";
+import { refreshExhaustedXaiCoreQuota } from "../xai-quota";
 
 const XAI = SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider;
 const DISPLAY_NAME = "SuperGrok";
@@ -58,6 +59,16 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
     await subscriptionCoreTurns(XAI)
       .recoverSubscriptionCoreConnectionHealth(db, identity)
       .catch(() => 0);
+  },
+  // Re-read billing for exhausted shared connections before placement
+  // trusts a stored exhaustion, as the legacy path did (EP-N22, X2a).
+  beforePlacement: async ({ db, settings }, identity) => {
+    await refreshExhaustedXaiCoreQuota({
+      db,
+      settings,
+      accountId: identity.accountId,
+      workspaceId: identity.workspaceId,
+    });
   },
   adopt: ({ providerTurn }, core, placement) => {
     providerTurn.xaiSubscriptionCore = core;
