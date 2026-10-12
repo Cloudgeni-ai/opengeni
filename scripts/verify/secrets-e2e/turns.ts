@@ -11,10 +11,23 @@ import type { StackApi } from "./stack";
 
 export type ToolCallRecord = {
   callId: string;
+  /** Product tool name; native Responses items are normalized (apply_patch_call -> apply_patch). */
   name: string;
+  /** Name as recorded on the event (for example `apply_patch_call` on the built-in OpenAI/Azure route). */
+  rawName?: string;
   arguments: unknown;
   output?: unknown;
 };
+
+/**
+ * On the built-in OpenAI/Azure Responses route the patch tool is the native
+ * `apply_patch_call` item (event name and toolFamily `apply_patch_call`, the
+ * operation in `raw.operation`); Gateway/Chat routes record a function call
+ * named `apply_patch`. Normalize so scenarios match either.
+ */
+export function normalizeToolName(name: string): string {
+  return name === "apply_patch_call" ? "apply_patch" : name;
+}
 
 export type TurnResult = {
   sessionId: string;
@@ -125,15 +138,17 @@ function collectToolCall(event: SessionEvent, calls: Map<string, ToolCallRecord>
   const callId = String(data.callId ?? data.toolCallId ?? data.id ?? "");
   if (!callId) return;
   if (event.type === "agent.toolCall.created") {
+    const rawName = String(data.name ?? data.toolName ?? "");
     calls.set(callId, {
       callId,
-      name: String(data.name ?? data.toolName ?? ""),
-      arguments: parseMaybeJson(data.arguments ?? data.input),
+      name: normalizeToolName(rawName),
+      rawName,
+      arguments: parseMaybeJson(data.arguments || data.input || data.raw?.operation),
     });
   } else if (event.type === "agent.toolCall.output") {
     const existing = calls.get(callId) ?? {
       callId,
-      name: String(data.name ?? ""),
+      name: normalizeToolName(String(data.name ?? "")),
       arguments: null,
     };
     existing.output = data.output ?? data.result ?? data;

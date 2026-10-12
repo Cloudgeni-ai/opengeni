@@ -3,7 +3,7 @@
  * Opt-in: it needs a running localstack for the worktree under test.
  *
  *   SECRETS_GATE_WORKTREE=<wt> SECRETS_GATE_SLOT=3 SECRETS_GATE_NAME=sv-w7 \
- *   [SECRETS_GATE_SCENARIOS=all] [SECRETS_GATE_MODEL=kimi-k3] [SECRETS_GATE_EVIDENCE=<dir>] \
+ *   [SECRETS_GATE_SCENARIOS=all] [SECRETS_GATE_MODEL=gpt-6-sol] [SECRETS_GATE_EVIDENCE=<dir>] \
  *     bun --no-env-file test --timeout 7200000 ./test/e2e/secrets-gate.e2e.ts
  *
  * The gate runs once; each selected scenario is then reported as its own test,
@@ -29,7 +29,7 @@ describe.skipIf(!worktree)("secrets full-stack gate", () => {
       slot: Number(process.env.SECRETS_GATE_SLOT ?? "3"),
       name: process.env.SECRETS_GATE_NAME ?? "sv-w7",
       scenarios,
-      model: process.env.SECRETS_GATE_MODEL ?? "kimi-k3",
+      model: process.env.SECRETS_GATE_MODEL ?? "gpt-6-sol",
       evidenceDir:
         process.env.SECRETS_GATE_EVIDENCE ??
         join(root, ".agent/evidence", `gate-${new Date().toISOString().replace(/[:.]/gu, "-")}`),

@@ -7,7 +7,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { type StackApi, type StackState, listMachines } from "./stack";
+import { type StackApi, type StackState, listMachines, readEnvFile } from "./stack";
 import { directiveMessage, parseDirectiveReport, runTurn } from "./turns";
 
 export const KEYS_DIR = process.env.F598_KEYS_DIR ?? "/workspace/sessions/f5980f29/keys";
@@ -18,7 +18,7 @@ export type FeatureId =
   | "secret_tools"
   | "secrets_capability_toggle"
   | "ask_card_secret_field"
-  | "gateway_credits"
+  | "real_model"
   | "onepassword_token"
   | "connected_machine"
   | "directive_worker"
@@ -36,6 +36,51 @@ export type ProbeContext = {
   scriptedWorkerActive: boolean;
   harnessRoot: string;
 };
+
+/**
+ * Which real-model rail the stack runs. `up.sh --model-key azure` records
+ * F598_MODEL_ROUTE=azure and pins the built-in provider to Azure OpenAI (key and
+ * base URL from keys/cloud.env, values never written to .env); otherwise real
+ * turns go through the Vercel AI Gateway rail and need Gateway credit.
+ */
+export function realModelRoute(
+  stack: Pick<StackState, "modelRoute" | "worktree">,
+  azureEnvFile = join(KEYS_DIR, "cloud.env"),
+): { ok: boolean; route: "azure" | "gateway"; models: string[]; detail: string } {
+  if (stack.modelRoute === "azure") {
+    const dotenv = readEnvFile(join(stack.worktree, ".env"));
+    const models = (dotenv.OPENGENI_OPENAI_ALLOWED_MODELS ?? "").split(",").filter(Boolean);
+    if (dotenv.OPENGENI_OPENAI_PROVIDER !== "azure") {
+      return { ok: false, route: "azure", models, detail: ".env does not pin provider=azure" };
+    }
+    const names = Bun.spawnSync(
+      [
+        "bash",
+        "-c",
+        '. "$1" >/dev/null 2>&1; [ -n "${F598_AZURE_OPENAI_API_KEY:-}" ] && [ -n "${F598_AZURE_OPENAI_BASE_URL:-}" ] && echo ok',
+        "_",
+        azureEnvFile,
+      ],
+      { stdout: "pipe", stderr: "ignore", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } },
+    );
+    const ok = names.stdout.toString().trim() === "ok";
+    return {
+      ok,
+      route: "azure",
+      models,
+      detail: ok
+        ? `azure built-in provider (${models.join(",") || "default catalog"})`
+        : `${azureEnvFile} lacks F598_AZURE_OPENAI_API_KEY/BASE_URL`,
+    };
+  }
+  const credits = gatewayCredits();
+  return {
+    ok: credits.ok,
+    route: "gateway",
+    models: [],
+    detail: `gateway: ${credits.detail} (start the stack with up.sh --model-key azure for the Azure route)`,
+  };
+}
 
 /** Read the Gateway balance in a subshell; the key never enters this process. */
 export function gatewayCredits(envFile = join(KEYS_DIR, "env.sh")): {
@@ -87,8 +132,8 @@ export async function probeFeatures(context: ProbeContext): Promise<FeatureRepor
   const legacy = await owner.request("GET", `/v1/workspaces/${workspaceId}/variable-sets`);
   set("legacy_routes_removed", legacy.status === 410, `GET /variable-sets -> ${legacy.status}`);
 
-  const credits = gatewayCredits();
-  set("gateway_credits", credits.ok, credits.detail);
+  const realModel = realModelRoute(context.stack);
+  set("real_model", realModel.ok, realModel.detail);
 
   const opEnv = join(KEYS_DIR, "op.env");
   set(

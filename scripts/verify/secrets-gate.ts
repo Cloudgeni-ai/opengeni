@@ -6,14 +6,16 @@
  * seeding and logging in), starts the fake-login suite on the slot's ports,
  * probes which secrets features exist, seeds canaries, and then runs:
  *   1. scripted scenarios on the model-free `directive` turn worker;
- *   2. real-model scenarios through the Vercel AI Gateway (`--model`);
+ *   2. real-model scenarios (`--model`) on the stack's real-model rail: the
+ *      built-in Azure OpenAI provider (`up.sh --model-key azure`; gpt-6-sol for
+ *      the eval, gpt-6-luna for cheap smokes) or the Vercel AI Gateway;
  *   3. the canary sweep (E2E-11) and the upgrade path (E2E-12).
  * Each scenario writes `<evidence>/<id>/result.json` (plus value-free turn
  * trails and scrubbed tool calls); the run writes `summary.json` and `summary.md`.
  * Scenarios whose product features are missing fail with `missing_feature`.
  *
  *   bun --no-env-file scripts/verify/secrets-gate.ts --worktree <wt> --slot 3 --name sv-w7 \
- *     [--scenarios all|E2E-1,E2E-6|BASE-*] [--model kimi-k3] [--evidence <dir>] \
+ *     [--scenarios all|E2E-1,E2E-6|BASE-*] [--model gpt-6-sol] [--evidence <dir>] \
  *     [--up] [--machine-up] [--keep-canaries]
  *
  * Exit 0 only when every selected scenario passed.
@@ -88,7 +90,7 @@ export async function runGate(options: GateOptions): Promise<GateSummary> {
     name: options.name,
     worktree: options.worktree,
     slot: options.slot,
-    modelKey: true,
+    modelKey: "azure",
     allowUp: options.allowUp,
     log,
   });
@@ -297,7 +299,7 @@ async function main(): Promise<number> {
       slot: { type: "string", default: "3" },
       name: { type: "string" },
       scenarios: { type: "string", default: "all" },
-      model: { type: "string", default: "kimi-k3" },
+      model: { type: "string", default: "gpt-6-sol" },
       evidence: { type: "string" },
       up: { type: "boolean", default: false },
       "machine-up": { type: "boolean", default: false },

@@ -1,7 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Gateway model probe (dossier §16.4 "use a stronger Gateway model if the M0
- * probe shows it is selectable", AG-6 prerequisite).
+ * Real-model tool-compatibility probe (dossier §16.4 "use a stronger Gateway
+ * model if the M0 probe shows it is selectable", AG-6 prerequisite).
+ *
+ * Route: when the stack runs `up.sh --model-key azure` (F598_MODEL_ROUTE=azure)
+ * the selectable models are the built-in Azure OpenAI deployments from the
+ * worktree .env (OPENGENI_OPENAI_ALLOWED_MODELS) and no Gateway credit is needed;
+ * steps 1–2 below then only inform. Otherwise the Gateway rail is probed.
  *
  * 1. Catalog: reads the public Vercel AI Gateway model list and ranks language
  *    models that advertise `tool-use` (candidates for the eval), and records which
@@ -20,7 +25,7 @@
  *    per model and task, latency, and failure codes.
  *
  *   bun --no-env-file scripts/verify/secrets-model-probe.ts --name sv-w7 --slot 3 \
- *     [--models kimi-k3,deepseek-v4-flash-0731] [--runs 2] [--tasks exec,patch,discover,login] \
+ *     [--models gpt-6-luna,gpt-6-sol] [--runs 2] [--tasks exec,patch,discover,login] \
  *     [--out <dir>] [--catalog-only] [--emit-managed-models moonshotai/kimi-k3,zai/glm-5]
  */
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -29,7 +34,7 @@ import { parseArgs } from "node:util";
 
 import { OPENGENI_GATEWAY_MODELS } from "../../packages/config/src/index";
 import { startFakeLoginServer } from "../../packages/testing/src/fake-login";
-import { gatewayCredits } from "./secrets-e2e/features";
+import { gatewayCredits, realModelRoute } from "./secrets-e2e/features";
 import { needlesFor, scanBuffer } from "./secrets-e2e/scan";
 import {
   StackApi,
@@ -251,7 +256,10 @@ async function main(): Promise<number> {
       force: { type: "boolean", default: false },
     },
   });
-  const catalog = await gatewayCatalog();
+  const catalog = await gatewayCatalog().catch((error: unknown) => {
+    console.log(`gateway catalog unavailable: ${String(error)}`);
+    return [] as GatewayModel[];
+  });
   if (flags["emit-managed-models"]) {
     for (const line of managedModelsEnv(catalog, flags["emit-managed-models"].split(","))) {
       console.log(line);
@@ -269,13 +277,24 @@ async function main(): Promise<number> {
     productId: string;
     upstreamModelId: string;
   }[];
-  const selectable = [...BUILT_IN, ...extra].map((model) => ({
-    productId: model.productId,
-    upstreamModelId: model.upstreamModelId,
-    inGatewayCatalog: catalog.some((row) => row.id === model.upstreamModelId),
-    toolUse: candidates.some((row) => row.id === model.upstreamModelId),
-  }));
-  const credits = gatewayCredits();
+  const route = stack ? realModelRoute(stack) : null;
+  const azure = route?.route === "azure";
+  const selectable = azure
+    ? route.models.map((productId) => ({
+        productId,
+        upstreamModelId: `azure/${productId}`,
+        inGatewayCatalog: false,
+        toolUse: true,
+      }))
+    : [...BUILT_IN, ...extra].map((model) => ({
+        productId: model.productId,
+        upstreamModelId: model.upstreamModelId,
+        inGatewayCatalog: catalog.some((row) => row.id === model.upstreamModelId),
+        toolUse: candidates.some((row) => row.id === model.upstreamModelId),
+      }));
+  const credits = azure
+    ? { ok: route.ok, balance: null, detail: `route ${route.detail}` }
+    : gatewayCredits();
   writeFileSync(join(out, "catalog-candidates.json"), `${JSON.stringify(candidates, null, 2)}\n`);
   console.log(`catalog: ${catalog.length} models, ${candidates.length} tool-use language models`);
   for (const model of selectable) {
@@ -357,6 +376,7 @@ async function main(): Promise<number> {
   }));
   const report = {
     at: new Date().toISOString(),
+    route: route ? { route: route.route, ok: route.ok, detail: route.detail } : null,
     gatewayCatalogModels: catalog.length,
     toolUseCandidates: candidates.length,
     credits: { ok: credits.ok, balance: credits.balance, detail: credits.detail },

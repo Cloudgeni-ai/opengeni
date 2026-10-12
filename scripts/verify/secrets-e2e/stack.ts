@@ -32,6 +32,8 @@ export type StackState = {
   composeProject: string;
   unit: string;
   log: string;
+  /** up.sh model rail: `azure` (--model-key azure), `key-file` (--model-key) or `none`. */
+  modelRoute: string;
 };
 
 export function readEnvFile(path: string): Record<string, string> {
@@ -64,6 +66,7 @@ export function loadStack(name: string): StackState | null {
     composeProject: env.F598_PROJECT ?? `f598-${name}`,
     unit: env.F598_UNIT ?? `f598-stack-${name}`,
     log: env.F598_LOG ?? join(localstackDir(), "logs", `stack-${name}.log`),
+    modelRoute: env.F598_MODEL_ROUTE ?? "unknown",
   };
 }
 
@@ -119,7 +122,8 @@ export type EnsureStackOptions = {
   name: string;
   worktree: string;
   slot: number;
-  modelKey: boolean;
+  /** up.sh `--model-key` (key-file rails) or `--model-key azure`; false starts model-free. */
+  modelKey: boolean | "azure";
   /** Start, seed and log in when the stack is not ready. */
   allowUp: boolean;
   log?: (line: string) => void;
@@ -152,6 +156,7 @@ export async function ensureStack(options: EnsureStackOptions): Promise<StackSta
       options.name,
     ];
     if (options.modelKey) up.push("--model-key");
+    if (options.modelKey === "azure") up.push("azure");
     log(`starting stack: ${up.slice(1).join(" ")}`);
     const started = runLocalstack(null, up, { timeoutMs: 30 * 60_000 });
     if (started.exitCode !== 0) {

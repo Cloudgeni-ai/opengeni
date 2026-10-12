@@ -43,4 +43,29 @@ describe("model env selection", () => {
     expect(hasModelCredential({ OPENGENI_VERCEL_AI_GATEWAY_API_KEY: "k" })).toBe(true);
     expect(hasModelCredential({ OPENGENI_GATEWAY_MODELS: "kimi-k3" })).toBe(false);
   });
+
+  test("maps the localstack Azure pair onto the built-in Azure provider", () => {
+    const env = selectModelEnv(
+      parseDotenv(
+        [
+          "export AZURE_CLIENT_SECRET=never",
+          "export F598_AZURE_OPENAI_API_KEY=k",
+          "export F598_AZURE_OPENAI_BASE_URL=https://example.invalid/openai/v1",
+        ].join("\n"),
+      ),
+    );
+    expect(env).toEqual({
+      OPENGENI_AZURE_OPENAI_API_KEY: "k",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.invalid/openai/v1",
+      OPENGENI_OPENAI_PROVIDER: "azure",
+    });
+    expect(hasModelCredential(env)).toBe(true);
+  });
+
+  test("an explicit provider in the file is kept", () => {
+    const env = selectModelEnv(
+      parseDotenv("F598_AZURE_OPENAI_API_KEY=k\nOPENGENI_OPENAI_PROVIDER=openai"),
+    );
+    expect(env.OPENGENI_OPENAI_PROVIDER).toBe("openai");
+  });
 });

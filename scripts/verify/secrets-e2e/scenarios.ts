@@ -57,7 +57,7 @@ export type ScenarioContext = {
   workspaceId: string;
   features: FeatureReport;
   fakeLogin: FakeLoginServer;
-  /** Real-model id for `mode: "real"` turns (Gateway product id). */
+  /** Real-model id for `mode: "real"` turns (built-in Azure deployment such as gpt-6-sol, or a Gateway product id). */
   model: string;
   /** Known secret values for this run (canaries plus per-scenario values). */
   knownValues: KnownValue[];
@@ -253,10 +253,10 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     id: "BASE-REAL",
-    title: "Baseline: a real Gateway model completes a tool-using turn",
+    title: "Baseline: a real model completes a tool-using turn",
     mode: "real",
     acceptance: ["harness", "AG-6 prerequisite"],
-    requires: ["gateway_credits"],
+    requires: ["real_model"],
     run: async (context, run) => {
       const turn = await realTurn(
         context,
@@ -325,7 +325,7 @@ export const SCENARIOS: Scenario[] = [
     title: "Real-model turn logs into the fake password site with a saved login",
     mode: "real",
     acceptance: ["E2E-1", "BR-1", "RF-*", "AG-1"],
-    requires: ["vaults_api", "secret_tools", "gateway_credits"],
+    requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (context, run) => {
       const account = context.fakeLogin.account("alice")!;
       const vaultId = await defaultVaultId(context, run);
@@ -362,7 +362,7 @@ export const SCENARIOS: Scenario[] = [
     title: "TOTP enrollment, then a TOTP login in a new session",
     mode: "real",
     acceptance: ["E2E-2", "GEN-*", "BR-*"],
-    requires: ["vaults_api", "secret_tools", "gateway_credits"],
+    requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (context, run) => {
       const account = context.fakeLogin.account("alice")!;
       await realTurn(
@@ -391,7 +391,7 @@ export const SCENARIOS: Scenario[] = [
     title: "Signup with a generated password (saved first), then a re-login",
     mode: "real",
     acceptance: ["E2E-3", "GEN-1", "AG-2"],
-    requires: ["vaults_api", "secret_tools", "gateway_credits"],
+    requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (context, run) => {
       const username = `gate-${crypto.randomUUID().slice(0, 8)}`;
       const signup = await realTurn(
@@ -421,7 +421,7 @@ export const SCENARIOS: Scenario[] = [
     title: "Missing credential raises the ask card; Playwright fills it as the human",
     mode: "real",
     acceptance: ["E2E-4", "AC-3", "AC-4", "UI S9"],
-    requires: ["vaults_api", "secret_tools", "ask_card_secret_field", "gateway_credits"],
+    requires: ["vaults_api", "secret_tools", "ask_card_secret_field", "real_model"],
     run: async (_context, run) => {
       run.notImplemented(
         "drive the ask card in the real web UI once W3 lands its DOM (SecretInput selectors and Save to select)",
@@ -433,7 +433,7 @@ export const SCENARIOS: Scenario[] = [
     title: "Passkey registration, then a passkey login in a fresh browser session",
     mode: "real",
     acceptance: ["E2E-5", "BR-* passkeys"],
-    requires: ["vaults_api", "secret_tools", "gateway_credits"],
+    requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (context, run) => {
       await realTurn(
         context,
@@ -495,7 +495,7 @@ export const SCENARIOS: Scenario[] = [
     title: "Live 1Password: read RO Test Login and log in; write to RW, then archive",
     mode: "real",
     acceptance: ["E2E-7", "OP-*"],
-    requires: ["vaults_api", "secret_tools", "onepassword_token", "gateway_credits"],
+    requires: ["vaults_api", "secret_tools", "onepassword_token", "real_model"],
     run: async (_context, run) => {
       run.notImplemented(
         "connect 1Password through POST /connections/1password/install (W5), start a fake-login instance with the RO Test Login values in-process, run the login turn, then the RW write and archive",
@@ -519,7 +519,7 @@ export const SCENARIOS: Scenario[] = [
     title: "Schedule run uses the owner's Only-me secret; denied after the owner is removed",
     mode: "real",
     acceptance: ["E2E-9", "AX-3"],
-    requires: ["vaults_api", "secret_tools", "gateway_credits"],
+    requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (_context, run) => {
       run.notImplemented(
         "create a schedule with vaultPolicy (F2), trigger it, remove the owner's membership, trigger again and expect `denied`",
