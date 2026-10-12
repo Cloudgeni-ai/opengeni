@@ -28,11 +28,10 @@ import {
   getFilesForSubject,
   getGeneratedImageArtifact,
   getSessionAuthorityProjection,
-  getWorkspaceArtifact,
+  isWorkspaceArtifactVisible,
   listArtifactCatalogCandidates,
   nestedPostgresSqlState,
   updateArtifactPin,
-  WorkspaceArtifactNotFoundError,
   withSessionRlsActorContext,
   type ArtifactCatalogCandidate,
   type ArtifactCatalogPosition,
@@ -117,20 +116,17 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
           throw editableArtifactHttpError(error);
         }
       }
-      if (kind.data === "site") {
-        try {
-          await getWorkspaceArtifact(
-            deps.db,
-            workspaceId,
-            await siteViewerForGrant(deps.db, grant),
-            artifactId,
-          );
-        } catch (error) {
-          if (error instanceof WorkspaceArtifactNotFoundError)
-            throw new HTTPException(404, { message: "Artifact not found" });
-          throw error;
-        }
-      }
+      // An Only me Site someone else owns answers exactly like a missing one.
+      if (
+        kind.data === "site" &&
+        !(await isWorkspaceArtifactVisible(
+          deps.db,
+          workspaceId,
+          await siteViewerForGrant(deps.db, grant),
+          artifactId,
+        ))
+      )
+        throw new HTTPException(404, { message: "Artifact not found" });
       if (fileKind) {
         const subjectId = await fileAuthoritySubjectIdForGrant(deps, grant);
         const [file] = await getFilesForSubject(deps.db, {

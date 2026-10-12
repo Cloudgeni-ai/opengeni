@@ -52,11 +52,14 @@ function fixture(
     file?: Record<string, unknown>;
     image?: Record<string, unknown>;
     pinUnavailable?: boolean;
+    /** The pinned Site is someone else's Only me Site, so the viewer cannot see it. */
+    hiddenSite?: boolean;
   } = {},
 ) {
   const reads: Array<Parameters<EditableArtifactApplicationPort["readArtifact"]>[0]> = [];
   const queries: Array<{ sql: string; params: unknown[] }> = [];
   const selectedTables: string[] = [];
+  const siteVisibilityChecks: Array<{ sql: string; params: unknown[] }> = [];
   const db = {
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
     execute: async (query: SQL) => {
@@ -99,7 +102,11 @@ function fixture(
           selectedTables.push(tableName);
           return builder;
         },
-        where: () => builder,
+        where: (condition?: SQL) => {
+          if (tableName === "workspace_artifacts" && condition)
+            siteVisibilityChecks.push(new PgDialect().sqlToQuery(condition));
+          return builder;
+        },
         innerJoin: () => builder,
         leftJoin: () => builder,
         then: (resolve: (value: unknown[]) => unknown, reject?: (error: unknown) => unknown) =>
@@ -109,6 +116,8 @@ function fixture(
           ),
         limit: async () => {
           if (tableName === "workspaces") return [{ accountId }];
+          if (tableName === "workspace_artifacts")
+            return options.hiddenSite ? [] : [{ id: "40000000-0000-4000-8000-000000000004" }];
           if (tableName === "generated_image_artifacts")
             return options.image && options.file
               ? [{ artifact: options.image, file: options.file, uploadStatus: "uploaded" }]
@@ -178,7 +187,7 @@ function fixture(
       },
       body: JSON.stringify(body),
     });
-  return { app, request, pin, reads, queries, selectedTables };
+  return { app, request, pin, reads, queries, selectedTables, siteVisibilityChecks };
 }
 
 test("pin mutations require publish plus target-domain read authority and validate closed input", async () => {
@@ -210,6 +219,16 @@ test("pin/unpin returns compact state and maps scoped missing/foreign/hidden tar
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.json()).toEqual({ kind: "site", artifactId: target, pinned });
   }
+  // The Site is looked up as this person: shared Sites or their own Only me ones.
+  const check = visible.siteVisibilityChecks[0]!;
+  expect(check.sql).toContain('"visibility"');
+  expect(check.sql).toContain('"owner_subject_id"');
+  expect(check.params).toContain("user:catalog");
+  const hidden = fixture([], { hiddenSite: true });
+  const hiddenResponse = await hidden.pin("site", target);
+  expect(hiddenResponse.status).toBe(404);
+  expect(await hiddenResponse.json()).toEqual({ message: "Artifact not found" });
+  expect(hidden.queries.some(({ sql }) => sql.includes("update_artifact_pin("))).toBe(false);
   const absent = fixture([], { pinUnavailable: true });
   expect((await absent.pin("site", target)).status).toBe(404);
   const file = fixture([]);
@@ -311,7 +330,12 @@ test("catalog projection and encrypted frontiers retain pins across the global p
 });
 
 test("catalog is read-only and redacts unauthorized provenance before projection", async () => {
-  const { request, queries } = fixture([[candidate("site-one")]]);
+  const { request, queries } = fixture([
+    [
+      candidate("site-one", "site", { site_visibility: "workspace_shared" }),
+      candidate("site-two", "site", { site_visibility: "user_private" }),
+    ],
+  ]);
   const response = await request();
   expect(response.status, await response.clone().text()).toBe(200);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -324,12 +348,25 @@ test("catalog is read-only and redacts unauthorized provenance before projection
         status: "active",
         createdAt,
         updatedAt: createdAt,
+        visibility: "workspace",
+      },
+      {
+        id: "site-two",
+        kind: "site",
+        title: "Report",
+        status: "active",
+        createdAt,
+        updatedAt: createdAt,
+        visibility: "private",
       },
     ],
     nextCursor: null,
   });
   const query = queries.find((entry) => entry.sql.includes("WITH candidates AS"))!;
   expect(query.sql).toContain("workspace_artifacts");
+  // Sites are limited to the workspace's and the viewer's own Only me ones.
+  expect(query.sql).toContain("a.owner_subject_id");
+  expect(query.params).toContain("user:catalog");
   expect(query.sql).not.toContain("generated_image_artifacts");
   expect(query.sql).not.toContain("sandbox_file_publications");
   expect(query.sql).not.toContain("editable_artifacts");
