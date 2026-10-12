@@ -81,6 +81,30 @@ function fixture(fetchImpl: CodexFetch) {
 }
 
 describe("core model discovery physical request custody", () => {
+  test("SUB-ELIG-06: an unreachable eligible account is uncertainty, not a pooled entitlement denial", async () => {
+    const f = fixture(async () => Response.json({ models: [] }));
+    const uncertain = { ...f.connection, connectionId: crypto.randomUUID() };
+    f.deps.listServing = async () => [f.connection, uncertain];
+    f.deps.getCoreToken = async (_db, _settings, _context, id) => ({
+      accessToken: id,
+      chatgptAccountId: null,
+      isFedramp: false,
+      credentialVersion: 1,
+      planType: "pro",
+    });
+    f.deps.fetchModels = async ({ accessToken }) => ({
+      ok: accessToken !== uncertain.connectionId,
+      status: accessToken === uncertain.connectionId ? 503 : 200,
+      slugs: [models[0]!.upstreamModelId],
+    });
+    const read = await f.read();
+    expect(read.observations[models[0]!.definitionVersion]?.status).toBe("available");
+    expect(read.observations[models[1]!.definitionVersion]?.reason).toBe("provider_unhealthy");
+    // An account outside this model's allowlist cannot introduce uncertainty.
+    uncertain.allowedModelIds = [models[0]!.id];
+    const restricted = await f.read();
+    expect(restricted.observations[models[1]!.definitionVersion]?.reason).toBe("not_entitled");
+  });
   test("placement reads the picker's per-credential facts and refresh invalidates old entitlements", async () => {
     let slugs = [models[0]!.upstreamModelId];
     const upstream = mock<CodexFetch>(async () =>

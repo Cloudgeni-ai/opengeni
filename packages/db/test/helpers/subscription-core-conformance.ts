@@ -1202,7 +1202,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
     });
 
-    test("connects shared and personal connections of the provider's kind; identity fails closed", async () => {
+    test("SUB-ELIG-04: connects the provider's kind and reconnects health without changing allocation consent", async () => {
       const org = await organization();
       const connect = (
         label: string,
@@ -1242,11 +1242,16 @@ export function describeSubscriptionCoreConformance<Credential>(
         provider: providerId,
       });
       // The same identity reconnects in place.
+      await admin()`update subscription_connections set status = 'needs_relogin', allocator_enabled = false
+        where id = ${first.id}::uuid`;
       expect(await connect(label, null, identity)).toMatchObject({
         kind: "connected",
         id: first.id,
         isNew: false,
       });
+      const [reconnected] =
+        await admin()`select status, allocator_enabled from subscription_connections where id = ${first.id}::uuid`;
+      expect(reconnected).toEqual({ status: "active", allocator_enabled: false });
       // A row of this provider with the other connection kind is never
       // reconnected in place (taken over) by a connect of the same identity.
       // The identity index spans kinds, so such a connect cannot succeed at
@@ -1350,7 +1355,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("SUB-ELIG-01: placement honours shared scopes and keeps ownerless sessions shared-only", async () => {
+    test("SUB-OWN-02 SUB-ELIG-01: placement honours shared scopes and keeps ownerless sessions shared-only", async () => {
       const org = await organization();
       const otherWorkspace = await sharedConnection(org, `other-${crypto.randomUUID()}`, {
         kind: "workspaces",
@@ -2987,7 +2992,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("SUB-LEASE-02: leases are generation-fenced: replay, renew, foreign holders, release", async () => {
+    test("SUB-LEASE-01 SUB-LEASE-02: one turn lease is generation-fenced: replay, renew, foreign holders, release", async () => {
       const org = await organization();
       const connectionId = await sharedConnection(org, `lease-${crypto.randomUUID()}`);
       const turn = await runningTurn(org);
@@ -2998,6 +3003,9 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
       // The same attempt's retry keeps its live lease.
       expect(await place(turn)).toMatchObject({ kind: "run", connectionId, reusedLease: true });
+      const [turnLeaseCount] =
+        await admin()`select count(*)::int as n from subscription_leases where turn_id = ${turn.identity.turnId}::uuid`;
+      expect(turnLeaseCount!.n).toBe(1);
       // Another holder at the same generation is not this attempt.
       expect(await place(turn, { holderId: `${turn.holderId}:other` })).toEqual({
         kind: "attempt_fenced",
@@ -3059,6 +3067,9 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(
         await withRlsContext(db(), tenant, (tx) => releaseSubscriptionTurnLease(tx, leaseIdentity)),
       ).toBe(true);
+      expect(
+        await withRlsContext(db(), tenant, (tx) => releaseSubscriptionTurnLease(tx, leaseIdentity)),
+      ).toBe(false);
       expect(
         await runtime().loadSubscriptionCoreCredential(
           db(),
@@ -5353,7 +5364,7 @@ export function describeSubscriptionCoreConformance<Credential>(
     });
 
     const sessionWaits = subject.sessionWaits;
-    // OPE-700 section 4 / SUB-ACCESS-03: the same core arm, workflow peek,
+    // SUB-ACCESS-03: the same core arm, workflow peek,
     // wake and recovery must work for private and shared sessions. The
     // isolation helper suite separately inverts access to other owners.
     for (const visibility of ["workspace_shared", "user_private"] as const) {

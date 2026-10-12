@@ -5202,10 +5202,9 @@ cutover tolerates its absence. The provider-identity trigger stays enabled
 throughout the owner window. Shared settings rows gain
 only their `xai` keys and the SuperGrok primary, and a Personal workspace
 with moved accounts gets the provider-neutral `personal_fallback_allowed`
-override. The owner of accounts connected in their Personal workspace is
-opted in to personal fallback; that preference is per person, so it also
-covers the owner's personal connections of other providers. Owners whose
-SuperGrok accounts were only `user`-scoped get no opt-in.
+override. Existing per-person fallback preferences remain unchanged. D-28
+already permits automatic use in the owner's Personal workspace; moving a
+credential does not opt its owner into fallback in other workspaces.
 
 **1. Inventory (before the window).** As a superuser or `BYPASSRLS` role,
 record the source counts the migration compares. The schema owner is subject
@@ -5482,8 +5481,10 @@ exactly unchanged, including choice, version and cache clock; the
 `other_provider_session_bindings` parity metric checks every stored field.
 There is no Claude `pin_other_provider_binding_kept` disposition. Shared
 settings rows gain only their `claude` keys and the Claude primary, subject
-to organization locks, plus the Personal-workspace fallback override and
-the owner's per-person fallback opt-in. No SuperGrok legacy data is moved.
+to organization locks, plus the Personal-workspace fallback override.
+Existing per-person fallback preferences remain unchanged; D-28 preserves
+Personal-workspace use without inventing consent elsewhere. No SuperGrok
+legacy data is moved.
 
 **Provider-keyed binding prerequisite.** The release must include the
 provider-keyed binding precursor before the first provider cutover (planned

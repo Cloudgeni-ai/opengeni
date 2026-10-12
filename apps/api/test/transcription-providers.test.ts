@@ -238,81 +238,92 @@ describe("transcription providers", () => {
     expect(sends).toBe(0);
   });
 
-  test("prefers Codex when subscription is attached even if OpenAI is configured", async () => {
-    // An enabled cutover with a shared connection selects the core path.
-    const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
-    const candidates = spyOn(
-      dbModule,
-      "listSubscriptionCoreCodexOperationCandidates",
-    ).mockResolvedValue([{ connectionId: "connection-1" }] as never);
-    const acquired = spyOn(
-      dbModule,
-      "acquireSubscriptionCoreCodexOperationLease",
-    ).mockResolvedValue({ kind: "acquired" } as never);
-    const renewed = spyOn(dbModule, "renewSubscriptionCoreCodexOperationLease").mockResolvedValue(
-      true as never,
-    );
-    const released = spyOn(
-      dbModule,
-      "releaseSubscriptionCoreCodexOperationLease",
-    ).mockResolvedValue(true as never);
-    const resolver = spyOn(
-      dbModule,
-      "buildSubscriptionCoreCodexConnectionTokenResolver",
-    ).mockReturnValue({
-      getToken: async () => ({
-        accessToken: "access",
-        chatgptAccountId: "acct",
-      }),
-      refresh: async () => ({
-        accessToken: "access",
-        chatgptAccountId: "acct",
-      }),
-    } as never);
-    const operationFetch = spyOn(
-      dbModule,
-      "buildSubscriptionCoreCodexOperationFetch",
-    ).mockImplementation(
-      ((_db: unknown, _scope: unknown, _ref: unknown, _id: unknown, base: unknown) =>
-        base) as never,
-    );
-    try {
-      let url: string | undefined;
-      const service = createTranscriptionService({
-        settings: testSettings({
-          codexSubscriptionEnabled: true,
-          voiceInputProviderOrder: "codex-subscription,openai,azure-openai",
+  test.each([200, 429])(
+    "SUB-FAIL-10 prefers Codex and never switches providers after its response %i",
+    async (status) => {
+      // An enabled cutover with a shared connection selects the core path.
+      const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
+      const candidates = spyOn(
+        dbModule,
+        "listSubscriptionCoreCodexOperationCandidates",
+      ).mockResolvedValue([{ connectionId: "connection-1" }] as never);
+      const acquired = spyOn(
+        dbModule,
+        "acquireSubscriptionCoreCodexOperationLease",
+      ).mockResolvedValue({ kind: "acquired" } as never);
+      const renewed = spyOn(dbModule, "renewSubscriptionCoreCodexOperationLease").mockResolvedValue(
+        true as never,
+      );
+      const released = spyOn(
+        dbModule,
+        "releaseSubscriptionCoreCodexOperationLease",
+      ).mockResolvedValue(true as never);
+      const resolver = spyOn(
+        dbModule,
+        "buildSubscriptionCoreCodexConnectionTokenResolver",
+      ).mockReturnValue({
+        getToken: async () => ({
+          accessToken: "access",
+          chatgptAccountId: "acct",
         }),
-        db: {} as never,
-        codexFetch: async (input) => {
-          url = String(input);
-          return Response.json({ text: "from-codex", language: "en" });
-        },
-        fetch: async () => Response.json({ text: "from-openai", language: "en" }),
-      });
-      const result = await service.transcribe({
-        workspaceId: "workspace",
-        accountId: "account",
-        audio,
-        mimeType: "audio/webm",
-        requestId: "request",
-      });
-      expect(result.text).toBe("from-codex");
-      expect(result.providerId).toBe("codex-subscription");
-      expect(url).toContain("/backend-api/transcribe");
-    } finally {
-      for (const spy of [
-        disposition,
-        candidates,
-        acquired,
-        renewed,
-        released,
-        resolver,
-        operationFetch,
-      ])
-        spy.mockRestore();
-    }
-  });
+        refresh: async () => ({
+          accessToken: "access",
+          chatgptAccountId: "acct",
+        }),
+      } as never);
+      const operationFetch = spyOn(
+        dbModule,
+        "buildSubscriptionCoreCodexOperationFetch",
+      ).mockImplementation(
+        ((_db: unknown, _scope: unknown, _ref: unknown, _id: unknown, base: unknown) =>
+          base) as never,
+      );
+      try {
+        let url: string | undefined;
+        let otherProviderCalls = 0;
+        const service = createTranscriptionService({
+          settings: testSettings({
+            codexSubscriptionEnabled: true,
+            voiceInputProviderOrder: "codex-subscription,openai,azure-openai",
+          }),
+          db: {} as never,
+          codexFetch: async (input) => {
+            url = String(input);
+            return Response.json({ text: "from-codex", language: "en" }, { status });
+          },
+          fetch: async () => {
+            otherProviderCalls++;
+            return Response.json({ text: "from-openai", language: "en" });
+          },
+        });
+        const pending = service.transcribe({
+          workspaceId: "workspace",
+          accountId: "account",
+          audio,
+          mimeType: "audio/webm",
+          requestId: "request",
+        });
+        if (status === 200) {
+          const result = await pending;
+          expect(result.text).toBe("from-codex");
+          expect(result.providerId).toBe("codex-subscription");
+        } else await expect(pending).rejects.toMatchObject({ fallbackSafe: false });
+        expect(otherProviderCalls).toBe(0);
+        expect(url).toContain("/backend-api/transcribe");
+      } finally {
+        for (const spy of [
+          disposition,
+          candidates,
+          acquired,
+          renewed,
+          released,
+          resolver,
+          operationFetch,
+        ])
+          spy.mockRestore();
+      }
+    },
+  );
 
   test("a credit refusal before any audio is sent falls back to the connected Codex subscription", async () => {
     const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");

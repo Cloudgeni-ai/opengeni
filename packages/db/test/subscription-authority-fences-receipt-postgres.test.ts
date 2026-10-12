@@ -497,7 +497,8 @@ beforeAll(async () => {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values
       (${SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!}),
-      (${SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!})`;
+      (${SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!}),
+      ('0744_subscription_core_legacy_retirement.sql')`;
   } finally {
     await owner.end();
   }

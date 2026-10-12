@@ -20,6 +20,12 @@ import { sessionHistoryItems, sessionTurns } from "../schema";
 
 type TurnScope = { accountId: string; workspaceId: string; sessionId: string; turnId: string };
 export const SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT = 4;
+export class SubscriptionCoreServingFailoverLimitError extends Error {
+  constructor(readonly steps: number) {
+    super("Serving failover bound exceeded");
+    this.name = "SubscriptionCoreServingFailoverLimitError";
+  }
+}
 type ServingWriteFence = Extract<
   Awaited<ReturnType<typeof lockTurnAttemptWriteFenceTx>>,
   { allowed: true }
@@ -224,11 +230,10 @@ export async function stageSubscriptionCorePendingServingPolicyTx(
       throw new Error("Conflicting pending serving target");
     return existingTarget;
   }
-  if (
-    countTurnServingPolicyChangesV1(serving.revisions) + (await servingRefusalsTx(tx, input)) >=
-    SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT
-  )
-    throw new Error("Serving failover bound exceeded");
+  const steps =
+    countTurnServingPolicyChangesV1(serving.revisions) + (await servingRefusalsTx(tx, input));
+  if (steps >= SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT)
+    throw new SubscriptionCoreServingFailoverLimitError(steps);
   const [updated] = await tx
     .update(sessionTurns)
     .set({
@@ -289,4 +294,25 @@ export async function countSubscriptionCoreTurnServingPolicyChanges(
   const read = await readSubscriptionCoreServingPolicyForTurn(db, input);
   if (read === null) return null;
   return countTurnServingPolicyChangesV1(read.kind === "valid" ? read.revisions : []);
+}
+
+/** One scoped read counts every provider, including held providers, plus
+ * committed model/provider changes. Hidden turns cannot invent a zero budget. */
+export async function readSubscriptionCoreTurnFailoverBudget(db: Database, input: TurnScope) {
+  return withRlsContext(db, input, async (tx) => {
+    const [turn] = await rawRows<{ metadata: Record<string, unknown> }>(
+      tx,
+      sql`
+      select metadata from session_turns where account_id = ${input.accountId}::uuid
+        and workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+        and id = ${input.turnId}::uuid for share`,
+    );
+    if (!turn) return null;
+    const serving = readTurnServingPolicyV1(turn.metadata);
+    const changes = countTurnServingPolicyChangesV1(
+      serving.kind === "valid" ? serving.revisions : [],
+    );
+    const refusals = await servingRefusalsTx(tx, input);
+    return { changes, refusals, steps: changes + refusals };
+  });
 }

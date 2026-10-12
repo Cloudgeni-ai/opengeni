@@ -137,6 +137,11 @@ export async function withSubscriptionCoreAccessScope<T>(
     db,
     { accountId: target.accountId, workspaceId: null },
     async (tx) => {
+      // Administration overview share-locks membership rows. Membership
+      // lifecycle takes this advisory fence first, so access/sharing must
+      // take it before the overview too (not only inside the sharing routine).
+      await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(
+        ${`organization-membership:${target.accountId}`}, 0))`);
       await setSubjectRlsContext(tx, target.subjectId);
       await tx.execute(
         sql`select get_organization_administration_overview(${target.accountId}::uuid, ${target.subjectId})`,

@@ -486,12 +486,18 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         },
       ];
     }
-    // A target's personal pin cannot bootstrap personal fallback permission.
+    const servingBinding = policyBinding(bindings.get(serving.provider) ?? null);
+    // A target's personal pin cannot bootstrap fallback consent. An already
+    // automatic serving binding may, however, keep its warm account (D-27).
+    // Normal eligibility still checks frozen authority and live revocation;
+    // decidePlacement excludes it at the next re-selection without consent.
     if (!personalFallbackActive(input))
       input.connections = input.connections.filter(
-        (connection) => connection.provider === homeId || connection.ownership.kind === "shared",
+        (connection) =>
+          connection.provider === homeId ||
+          connection.ownership.kind === "shared" ||
+          (servingBinding?.choice === "automatic" && servingBinding.connectionId === connection.id),
       );
-    const servingBinding = policyBinding(bindings.get(serving.provider) ?? null);
     input.session.binding = servingBinding ? { ...servingBinding, choice: "automatic" } : null;
     input.session.reselectionPoints = subscriptionCoreReselectionPoints({
       binding: input.session.binding,

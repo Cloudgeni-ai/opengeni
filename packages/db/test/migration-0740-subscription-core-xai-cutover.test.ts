@@ -1385,7 +1385,8 @@ describe.skipIf(!realDb)(
           new Set(
             preferences.filter((row) => row.personal_fallback_opt_in).map((row) => row.membership),
           ),
-        ).toEqual(new Set([a.om]));
+        ).toEqual(new Set());
+        expect([...preferences]).toEqual([{ membership: a.bm, personal_fallback_opt_in: false }]);
         // Organization B kept its own settings; only the SuperGrok key changed.
         const [orgB] =
           await owned.admin`SELECT personal_connections_allowed, rotation FROM subscription_settings

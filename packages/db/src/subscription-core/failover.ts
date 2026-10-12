@@ -7,7 +7,6 @@ import {
   failoverCandidateModels,
   mapReasoningLevel,
   modelPermitted,
-  personalFallbackActive,
   type PlacementDecision,
   type PlacementInput,
   type PlacementSwitch,
@@ -258,7 +257,6 @@ function canReuse(input: PlacementInput, connectionId: string, modelId: string):
     connection !== undefined &&
     failoverCandidateModels(input).includes(modelId) &&
     modelPermitted(input, modelId) &&
-    (connection.ownership.kind === "shared" || personalFallbackActive(input)) &&
     connectionIneligibility(input, connection, modelId).length === 0 &&
     !connectionUsesExtraCredits(input, connection)
   );

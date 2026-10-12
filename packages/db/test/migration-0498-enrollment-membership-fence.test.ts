@@ -13,6 +13,8 @@ import {
   approveDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
   createDb,
+  EnrollTokenAlreadyRedeemedError,
+  EnrollTokenOwnerUnavailableError,
   finalizeEnrollmentByToken,
 } from "../src/index";
 
@@ -159,6 +161,70 @@ test("legacy token lane remains workspace-owned", async () => {
   });
   expect(result.enrollment.scope).toBe("workspace");
 });
+
+test("a personal token connects one machine owned by its signer", async () => {
+  const f = await fixture();
+  const tokenId = crypto.randomUUID();
+  const pubkey = `ed25519:${crypto.randomUUID()}`;
+  const input = {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    ownerSubjectId: f.subject,
+    pubkey,
+    hasDisplay: true,
+    allowScreenControl: false,
+    os: "macos" as const,
+    arch: "aarch64",
+    sandboxName: "personal",
+    tokenId,
+    tokenExpiresAt: new Date(Date.now() + 3_600_000),
+  };
+  const first = await finalizeEnrollmentByToken(client.db, input);
+  expect(first.enrollment.scope).toBe("user");
+  const [owner] = await shared.admin`select m.subject_id from enrollments e
+    join organization_memberships m on m.id = e.owner_organization_membership_id
+    where e.id = ${first.enrollment.id}`;
+  expect(owner?.subject_id).toBe(f.subject);
+  // The same machine may retry; another machine is refused.
+  const retry = await finalizeEnrollmentByToken(client.db, input);
+  expect(retry.enrollment.id).toBe(first.enrollment.id);
+  await expect(
+    finalizeEnrollmentByToken(client.db, { ...input, pubkey: `ed25519:${crypto.randomUUID()}` }),
+  ).rejects.toBeInstanceOf(EnrollTokenAlreadyRedeemedError);
+}, 30000);
+
+test("a personal token fails closed when its owner is no longer a member", async () => {
+  const f = await fixture();
+  const input = {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    pubkey: `ed25519:${crypto.randomUUID()}`,
+    hasDisplay: false,
+    allowScreenControl: false,
+    os: "linux" as const,
+    arch: "x86_64",
+    sandboxName: "personal",
+    tokenId: crypto.randomUUID(),
+    tokenExpiresAt: new Date(Date.now() + 3_600_000),
+  };
+  // A subject that was never a member of the organization.
+  await expect(
+    finalizeEnrollmentByToken(client.db, {
+      ...input,
+      ownerSubjectId: `user:${crypto.randomUUID()}`,
+    }),
+  ).rejects.toBeInstanceOf(EnrollTokenOwnerUnavailableError);
+  // A member whose membership was suspended after the token was minted.
+  await shared.admin`update organization_memberships set status='suspended' where id=${f.membershipId}`;
+  await expect(
+    finalizeEnrollmentByToken(client.db, { ...input, ownerSubjectId: f.subject }),
+  ).rejects.toBeInstanceOf(EnrollTokenOwnerUnavailableError);
+  // Nothing was claimed or created: the refused attempts rolled back.
+  const [counts] = await shared.admin`select
+      (select count(*)::int from enrollment_token_redemptions where token_id=${input.tokenId}) as redemptions,
+      (select count(*)::int from enrollments where account_id=${f.accountId}) as enrollments`;
+  expect(counts).toMatchObject({ redemptions: 0, enrollments: 0 });
+}, 30000);
 
 test("maintenance declares drain and patches no policies or workspace row locks", async () => {
   const source = await readFile(

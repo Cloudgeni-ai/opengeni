@@ -21,6 +21,7 @@ type Machine = {
   allowScreenControl: boolean;
   desktopUnavailableReason: string | null;
   runtime: Runtime | null;
+  scope: "user" | "workspace" | "organization";
 };
 type Permissions = { screenRecording: boolean; accessibility: boolean; inputMonitoring: boolean };
 type Runtime = {
@@ -50,6 +51,7 @@ const machine = (sandboxId: string, name: string, overrides: Partial<Machine> = 
   allowScreenControl: false,
   desktopUnavailableReason: null,
   runtime: null,
+  scope: "workspace",
   ...overrides,
 });
 const sessionBox = machine("home", "Cloud sandbox", {
@@ -75,16 +77,22 @@ const fleet = {
 };
 mock.module("@/lib/use-workspace-machines", () => ({ useWorkspaceMachines: () => fleet }));
 mock.module("@/api", () => ({ apiBaseUrl: "https://app.example.test" }));
+const copyTextToClipboard = mock(async (_text: string) => true);
+mock.module("@opengeni/react/clipboard", () => ({ copyTextToClipboard }));
 
 let mintCount = 0;
-const mintEnrollToken = mock(async (_workspaceId: string, _input: unknown) => {
-  mintCount += 1;
-  return {
-    token: `oget_token${mintCount}.sig`,
-    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-    expiresInSeconds: 3600,
-  };
-});
+const mintEnrollToken = mock(
+  async (_workspaceId: string, input: { scope?: string; allowScreenControl?: boolean }) => {
+    mintCount += 1;
+    return {
+      token: `oget_token${mintCount}.sig`,
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      expiresInSeconds: 3600,
+      scope: input.scope ?? "workspace",
+      allowScreenControl: input.allowScreenControl ?? false,
+    };
+  },
+);
 let browsers: { devices: unknown[]; bridges: unknown[]; revision: number } = {
   devices: [],
   bridges: [],
@@ -169,6 +177,7 @@ beforeEach(() => {
   enableFailure = null;
   sendMessage.mockClear();
   mintEnrollToken.mockClear();
+  copyTextToClipboard.mockClear();
   listAttachedBrowsers.mockClear();
   browsers = { devices: [], bridges: [], revision: 1 };
   fleet.machines = [sessionBox];
@@ -204,16 +213,22 @@ async function render(sendContext?: () => SendContext) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   await draw();
+  const dialog = () => document.querySelector<HTMLElement>("[data-connect-machine-dialog]");
+  const buttonIn = (scope: ParentNode | null, name: string) =>
+    [...(scope?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (button) => button.getAttribute("aria-label") === name || button.textContent?.trim() === name,
+    ) ?? null;
   return {
     container,
     onConfigured,
     rerender: draw,
     text: () => container.textContent ?? "",
-    button: (name: string) =>
-      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) =>
-          button.getAttribute("aria-label") === name || button.textContent?.trim() === name,
-      ) ?? null,
+    button: (name: string) => buttonIn(container, name),
+    /** The connect dialog renders in a portal outside the card. */
+    dialog,
+    dialogText: () => dialog()?.textContent ?? "",
+    dialogButton: (name: string) => buttonIn(dialog(), name),
+    command: () => dialog()?.querySelector("[data-connect-command]")?.textContent ?? "",
     close: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -239,40 +254,52 @@ describe("Connected Machine conversation card", () => {
 
       await click(h.button("Connect a machine"));
       expect(mintEnrollToken).toHaveBeenCalledTimes(1);
-      expect(mintEnrollToken.mock.calls[0]).toEqual(["workspace", { allowScreenControl: false }]);
-      const command = () => h.container.querySelector("pre")?.textContent ?? "";
+      // Only me is the default, and the command is minted for it.
+      expect(mintEnrollToken.mock.calls[0]).toEqual([
+        "workspace",
+        { scope: "user", allowScreenControl: false },
+      ]);
+      expect(h.dialogText()).toContain("Connect a machine");
+      expect(h.dialogText()).toContain("Who can use it?");
+      const command = h.command;
       expect(command()).toContain("https://app.example.test/install.sh");
       expect(command()).toContain("OPENGENI_ENROLL_TOKEN=oget_token1.sig");
-      expect(h.text()).toContain("Works for one machine until");
-      expect(h.text()).toContain("Keep it private.");
-      expect(h.text()).toContain("Waiting for the machine");
+      expect(h.dialogText()).toContain("Works for one machine until");
+      expect(h.dialogText()).toContain("Keep it private.");
+      await click(h.dialogButton("Copy command"));
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
+      expect(copyTextToClipboard.mock.calls[0]![0]).toBe(command());
+      expect(h.dialogText()).toContain("Waiting for the machine to connect");
 
       // Windows gets the PowerShell form of the same single-use token.
-      const windows = [...h.container.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent === "Windows",
-      );
-      await click(windows ?? null);
+      await click(h.dialogButton("Windows"));
       expect(command()).toContain("irm 'https://app.example.test/install.ps1' | iex");
       expect(command()).toContain("$env:OPENGENI_ENROLL_TOKEN='oget_token1.sig'");
 
       // Screen control is baked into a fresh token.
-      const screen = h.container.querySelector<HTMLButtonElement>('button[role="switch"]');
+      const screen = h.dialog()?.querySelector<HTMLButtonElement>('button[role="switch"]');
       await click(screen as HTMLElement | null);
       expect(mintEnrollToken.mock.calls.at(-1)).toEqual([
         "workspace",
-        { allowScreenControl: true },
+        { scope: "user", allowScreenControl: true },
       ]);
+      expect(command()).toContain("oget_token2.sig");
 
-      // The machine comes online.
-      fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
+      // The machine comes online: the same dialog says so, by name and access.
+      fleet.machines = [sessionBox, machine("mac", "Studio Mac", { scope: "user" })];
       await h.rerender();
+      expect(h.dialogText()).toContain("Machine connected");
+      expect(h.dialogText()).toContain("Studio Mac");
+      expect(h.dialogText()).toContain("Connected");
+      expect(h.dialogText()).toContain("Only me");
+      expect(h.dialog()?.querySelector("[data-connect-command]")).toBeNull();
+      expect(h.dialogButton("Done")).not.toBeNull();
       expect(h.text()).toContain("Studio Mac connected. Choose it below to use it here.");
-      expect(h.text()).not.toContain("Waiting for the machine");
-      expect(h.container.querySelector("pre")).toBeNull();
-      const use = h.button("Use Studio Mac in this chat");
-      expect(use?.textContent).toContain("Use in this chat");
+      expect(h.button("Use Studio Mac in this chat")?.textContent).toContain("Use in this chat");
 
-      await click(use);
+      // Use in this chat goes through the card's existing attach path.
+      await click(h.dialogButton("Use in this chat"));
+      expect(h.dialog()).toBeNull();
       expect(attach).toHaveBeenCalledWith("mac");
       expect(sendMessage).toHaveBeenCalledTimes(1);
       const [workspaceId, sessionId, input] = sendMessage.mock.calls[0]!;
@@ -376,7 +403,8 @@ describe("Connected Machine conversation card", () => {
       expect(h.button("Connect a machine")).toBeNull();
       await click(h.button("Connect another machine"));
       expect(mintEnrollToken).toHaveBeenCalledTimes(1);
-      expect(h.text()).toContain("Waiting for the machine");
+      expect(h.dialogText()).toContain("Connect a machine");
+      expect(h.command()).toContain("oget_token1.sig");
     } finally {
       await h.close();
     }
@@ -503,7 +531,59 @@ describe("Connected Machine conversation card", () => {
       await h.rerender();
       expect(h.text()).toContain("Needs a fresh connection");
       await click(h.button("Connect again"));
-      expect(h.container.querySelector("pre")).not.toBeNull();
+      // Reconnecting to turn screen control on starts with it chosen, and with
+      // the machine's own access: a workspace machine stays a workspace machine.
+      expect(h.command()).toContain("oget_token1.sig");
+      expect(mintEnrollToken.mock.calls[0]).toEqual([
+        "workspace",
+        { scope: "workspace", allowScreenControl: true },
+      ]);
+      expect(h.dialog()?.querySelector('button[role="switch"]')?.getAttribute("aria-checked")).toBe(
+        "true",
+      );
+      const thisWorkspace = [
+        ...(h.dialog()?.querySelectorAll<HTMLElement>('[role="radio"]') ?? []),
+      ].find((radio) => radio.textContent?.startsWith("This workspace"));
+      expect(thisWorkspace?.getAttribute("aria-checked")).toBe("true");
+      // A plain Connect another machine afterwards starts from the defaults.
+      await click(h.dialogButton("Close"));
+      await click(h.button("Connect another machine"));
+      expect(mintEnrollToken.mock.calls.at(-1)).toEqual([
+        "workspace",
+        { scope: "user", allowScreenControl: false },
+      ]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("reconnecting a personal machine keeps it Only me", async () => {
+    enableResult = {
+      status: "pending",
+      reason: "reconnect_required",
+      message: "Run the connect command on the machine again with screen control on.",
+    };
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { scope: "user", runtime: runtime(false) }),
+    ];
+    const h = await render();
+    try {
+      await click(h.button("Turn on"));
+      fleet.machines = [
+        sessionBox,
+        machine("mac", "Studio Mac", {
+          scope: "user",
+          allowScreenControl: true,
+          runtime: runtime(false),
+        }),
+      ];
+      await h.rerender();
+      await click(h.button("Connect again"));
+      expect(mintEnrollToken.mock.calls[0]).toEqual([
+        "workspace",
+        { scope: "user", allowScreenControl: true },
+      ]);
     } finally {
       await h.close();
     }
@@ -588,24 +668,31 @@ describe("Connected Machine conversation card", () => {
     }
   });
 
-  test("reconnecting a known offline machine counts as connected; Cancel stops watching", async () => {
+  test("reconnecting a known offline machine counts as connected; closing stops watching", async () => {
     fleet.machines = [sessionBox, machine("mac", "Studio Mac", { state: "offline" })];
     const h = await render();
     try {
       await click(h.button("Connect a machine"));
-      expect(h.text()).toContain("Waiting for the machine");
+      expect(h.command()).toContain("oget_token1.sig");
       fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
       await h.rerender();
+      // A workspace machine says so; Done just closes.
+      expect(h.dialogText()).toContain("Machine connected");
+      expect(h.dialogText()).toContain("Workspace");
+      await click(h.dialogButton("Done"));
+      expect(h.dialog()).toBeNull();
+      expect(attach).not.toHaveBeenCalled();
       expect(h.text()).toContain("Studio Mac connected.");
 
       await click(h.button("Connect another machine"));
-      expect(h.text()).toContain("Waiting for the machine");
-      await click(h.button("Cancel"));
-      expect(h.text()).not.toContain("Waiting for the machine");
+      expect(h.dialogText()).toContain("Connect a machine");
+      await click(h.dialogButton("Close"));
+      expect(h.dialog()).toBeNull();
       // Nothing that appears later is treated as just connected.
       fleet.machines = [...fleet.machines, machine("pc", "Office PC", { os: "windows" })];
       await h.rerender();
       expect(h.text()).not.toContain("Office PC connected.");
+      expect(h.dialog()).toBeNull();
     } finally {
       await h.close();
     }

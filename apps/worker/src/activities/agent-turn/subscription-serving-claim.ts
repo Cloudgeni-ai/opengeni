@@ -14,6 +14,8 @@ import {
   getSessionTurn,
   readSubscriptionCoreTurnIdentity,
   recordSubscriptionCoreServingPolicyForTurnAttempt,
+  readSubscriptionCoreTurnFailoverBudget,
+  SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
   subscriptionCoreProvider,
   readSubscriptionCoreFailoverProvider,
   withSubscriptionCoreAcceptedTurn,
@@ -24,7 +26,10 @@ import {
 import { servingCatalog } from "./subscription-serving-catalog";
 export { servingCatalog } from "./subscription-serving-catalog";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
-import { SubscriptionCoreCodexTurnError } from "./codex-core-errors";
+import {
+  SubscriptionCoreCodexTurnError,
+  subscriptionCoreServingFailoverExhaustedFailure,
+} from "./codex-core-errors";
 
 export type ServingAttempt = {
   acceptedPolicy: TurnExecutionPolicyV1;
@@ -158,6 +163,14 @@ export async function claimServingAttempt(input: {
     ...candidate,
     crossProviderFailoverEnabled: true,
   });
+  if (!receipt.accepted && receipt.reason === "failover_bound_exceeded") {
+    const budget = await readSubscriptionCoreTurnFailoverBudget(db, input);
+    if (!budget) throw new TurnAttemptFencedError("Serving budget lost accepted turn");
+    throw subscriptionCoreServingFailoverExhaustedFailure(
+      budget.steps,
+      SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
+    );
+  }
   if (!receipt.accepted)
     throw new TurnAttemptFencedError(`Serving revision refused: ${receipt.reason}`);
   context.revision = receipt.revision;

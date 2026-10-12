@@ -131,7 +131,7 @@ async function state(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence", () => {
-  test("restricted role, candidate/home/noncandidate wakes and durable outboxes", async () => {
+  test("restricted role, candidate, home and noncandidate wakes and durable outboxes", async () => {
     const [role] = await rawRows<{ super: boolean; bypass: boolean; owns: boolean }>(
       client.db,
       sql`select rolsuper as super,rolbypassrls as bypass,

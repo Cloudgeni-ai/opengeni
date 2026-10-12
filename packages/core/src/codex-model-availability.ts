@@ -248,7 +248,9 @@ export async function loadWorkspaceCodexCatalogReadiness(
     ) {
       continue;
     }
-    const uncertain = reachable.length === 0 ? permitted.find(({ ok }) => !ok) : undefined;
+    // A reachable Free account cannot establish that an unreachable Pro
+    // account lacks entitlement. Only definitive observations may deny it.
+    const uncertain = permitted.find(({ ok }) => !ok);
     observations[model.definitionVersion] = {
       status: "unavailable",
       reason: uncertain ? "provider_unhealthy" : "not_entitled",

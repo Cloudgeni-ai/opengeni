@@ -7,11 +7,13 @@ import {
 } from "@opengeni/contracts";
 import { failoverFixture } from "./helpers/subscription-core-failover-fixture";
 import { SUBSCRIPTION_CORE_CODEX } from "../src/subscription-core-codex-adapter";
+import { SUBSCRIPTION_CORE_XAI } from "../src/subscription-core-xai-adapter";
 import {
   getSessionTurn,
   recordSubscriptionCoreServingPolicyForTurnAttempt as record,
   requestSessionTurnRecovery,
   readSubscriptionHistoryProvenance,
+  recordModelCallFact,
   withRlsContext,
 } from "../src";
 import { rawRows } from "../src/database";
@@ -32,7 +34,7 @@ beforeAll(async () => {
   if (!shared) throw new Error("Real PostgreSQL required");
   fixture = failoverFixture(
     shared,
-    [SUBSCRIPTION_CORE_CODEX],
+    [SUBSCRIPTION_CORE_CODEX, SUBSCRIPTION_CORE_XAI],
     [
       {
         id: "codex/source",
@@ -43,6 +45,12 @@ beforeAll(async () => {
       {
         id: "codex/target",
         provider: "codex",
+        upstreamModelId: "target",
+        reasoningLevels: ["high"],
+      },
+      {
+        id: "xai/target",
+        provider: "xai",
         upstreamModelId: "target",
         reasoningLevels: ["high"],
       },
@@ -205,6 +213,99 @@ describe.skipIf(!enabled)("C2 serving recovery on restricted PostgreSQL app role
     const stored = await getSessionTurn(fixture.client.db, org.workspaceId, work.identity.turnId);
     expect(stored!.status).toBe("running");
     expect(readTurnPendingServingPolicyV1(stored!.metadata)).toBeNull();
+  });
+
+  test("SUB-ACCT-01 SUB-ACCT-02 SUB-FAIL-08 cross-provider recovery preserves completed history and deduplicates usage with its original attribution", async () => {
+    const { org, work, baseline, recovery, connectionId } = await setup();
+    const targetId = await fixture.connection(org, SUBSCRIPTION_CORE_XAI);
+    const policy = {
+      ...baseline.policy,
+      providerId: "xai",
+      productModelId: "xai/target",
+      upstreamModelId: "target",
+    };
+    const target = {
+      ...recovery.subscriptionServingTarget,
+      connectionId: targetId,
+      policy,
+      reason: "failover_cross_provider" as const,
+    };
+    const items = [
+      { type: "function_call", callId: "finished", name: "work", arguments: "{}" },
+      { type: "function_call_result", callId: "finished", name: "work", output: "done" },
+    ];
+    for (const [position, item] of items.entries())
+      await shared.admin`insert into session_history_items(account_id, workspace_id, session_id, turn_id, position, item)
+        values (${org.accountId}::uuid, ${org.workspaceId}::uuid, ${work.identity.sessionId}::uuid,
+          ${work.identity.turnId}::uuid, ${100 + position}, ${shared.admin.json(item)}::jsonb)`;
+    const readHistory = () => shared.admin`select id, position, item from session_history_items
+      where turn_id = ${work.identity.turnId}::uuid order by position`;
+    const originalHistory = await readHistory();
+    const fact = {
+      ...work.identity,
+      turnAttemptId: work.attemptId,
+      sourceKey: "response-before-switch",
+      provider: "codex",
+      providerApi: "responses",
+      model: baseline.policy.productModelId,
+      billingPath: "external" as const,
+      pricedCostMicros: 0,
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      connectionId,
+    };
+    const originalFact = await recordModelCallFact(fixture.client.db, fact);
+    expect(
+      await requestSessionTurnRecovery(fixture.client.db, org.workspaceId, {
+        ...recovery,
+        subscriptionServingTarget: target,
+      }),
+    ).toMatchObject({ action: "recovering" });
+    const next = await fixture.claim(org.workspaceId, work.identity.sessionId);
+    expect(await record(fixture.client.db, { ...baseline, ...target, ...next })).toMatchObject({
+      accepted: true,
+      installed: true,
+      modelChangeCount: 1,
+    });
+    // Replayed source receipts cannot reattribute or duplicate the old call.
+    expect(
+      (
+        await recordModelCallFact(fixture.client.db, {
+          ...fact,
+          turnAttemptId: next.attemptId,
+          provider: "xai",
+          connectionId: targetId,
+        })
+      ).id,
+    ).toBe(originalFact.id);
+    const nextFact = {
+      ...fact,
+      turnAttemptId: next.attemptId,
+      sourceKey: "response-after-switch",
+      provider: "xai",
+      model: policy.productModelId,
+      connectionId: targetId,
+    };
+    await recordModelCallFact(fixture.client.db, nextFact);
+    await recordModelCallFact(fixture.client.db, nextFact);
+    const rows = await shared.admin`select account_id, workspace_id, session_id,
+      initiator_subject_id, source_key, connection_id, provider, total_tokens::integer
+      from model_call_facts where turn_id = ${work.identity.turnId}::uuid order by source_key`;
+    expect(rows).toHaveLength(2);
+    for (const row of rows)
+      expect(row).toMatchObject({
+        account_id: org.accountId,
+        workspace_id: org.workspaceId,
+        session_id: work.identity.sessionId,
+        initiator_subject_id: org.subjectId,
+        total_tokens: 120,
+      });
+    expect(rows.map((row) => [row.source_key, row.provider, row.connection_id])).toEqual([
+      ["response-after-switch", "xai", targetId],
+      ["response-before-switch", "codex", connectionId],
+    ]);
+    expect(await readHistory()).toEqual(originalHistory);
   });
 
   test("SUB-FAIL-08 history provenance is tenant/session scoped without altering canonical bytes", async () => {

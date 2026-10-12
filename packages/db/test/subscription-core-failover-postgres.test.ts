@@ -923,6 +923,60 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(await evaluate(fixture.client.db, home, sharedWork)).toMatchObject({ kind: "wait" });
   });
 
+  test("SUB-STICK-02 D-27/D-42 opt-out retains only an existing warm automatic personal fallback", async () => {
+    const org = await fixture.organization();
+    const source = await fixture.connection(org, home);
+    const personal = await fixture.connection(org, target, { personal: true });
+    await fixture.exhausted(org.accountId, source);
+    await fixture.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
+      values (${org.accountId}::uuid, ${org.membershipId}::uuid, true)`;
+    const work = await fixture.turn(org, { private: true });
+    expect(await place(fixture.client.db, home, work)).toMatchObject({
+      kind: "run",
+      connectionId: personal,
+    });
+    const { TurnExecutionPolicyV1 } = await import("@opengeni/contracts");
+    const [row] = await fixture.admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from session_turns where id = ${work.identity.turnId}::uuid`;
+    const policy = TurnExecutionPolicyV1.parse({
+      ...(row!.metadata.turnExecutionPolicyV1 as object),
+      productModelId: "target/model",
+      providerId: target.adapter.modelPolicyProviderId,
+      upstreamModelId: "target-upstream",
+      reasoningEffort: "medium",
+    });
+    expect(
+      await recordServing(fixture.client.db, {
+        ...work.identity,
+        ...work,
+        policy,
+        connectionId: personal,
+        reason: "failover_cross_provider",
+      }),
+    ).toMatchObject({ accepted: true });
+    await fixture.admin`update subscription_person_preferences set personal_fallback_opt_in = false where account_id = ${org.accountId}::uuid`;
+    // An already placed attempt also keeps its exact lease after opting out.
+    expect(await place(fixture.client.db, home, work)).toMatchObject({
+      kind: "run",
+      connectionId: personal,
+    });
+    await fixture.finish(work);
+    const next = await fixture.turn(org, { sessionId: work.identity.sessionId, private: true });
+    expect(await place(fixture.client.db, home, next)).toMatchObject({
+      kind: "run",
+      connectionId: personal,
+      switch: "sticky",
+    });
+    await fixture.release(next);
+    expect(
+      await evaluate(fixture.client.db, home, { ...next, now: new Date(Date.now() + 25 * 60_000) }),
+    ).toMatchObject({ kind: "run", connectionId: source });
+    // Unlike an opt-out, revocation of the exact frozen authority is immediate.
+    await fixture.admin`update organization_user_resource_authorities set status = 'revoked', revoked_at = now()
+      where resource_id = ${personal}::uuid`;
+    expect(await place(fixture.client.db, home, next)).toMatchObject({ kind: "wait" });
+  });
+
   test("D-42 revoked or absent frozen personal entry never borrows another provider authority", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);

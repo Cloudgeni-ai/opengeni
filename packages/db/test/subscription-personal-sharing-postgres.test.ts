@@ -9,6 +9,10 @@ import {
   type DbClient,
   type ModelConnectionTarget,
 } from "../src";
+import { failoverFixture } from "./helpers/subscription-core-failover-fixture";
+import { subscriptionCoreCodexProvider } from "../src/subscription-core-codex-adapter";
+import { subscriptionCoreTurns } from "../src/subscription-core/turns";
+import { subscriptionCoreRequests } from "../src/subscription-core/requests";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -94,6 +98,88 @@ async function fixture(provider: "codex" | "claude" | "xai" = "codex") {
 }
 
 describe.skipIf(!realDb)("explicit personal account sharing", () => {
+  test("SUB-OWN-06 SUB-ACCESS-05: sharing preserves pins, leases and quota but fences the next private request outside its new reach", async () => {
+    const provider = subscriptionCoreCodexProvider();
+    const harness = failoverFixture(
+      database!,
+      [provider],
+      [
+        {
+          id: "codex/gpt-6-sol",
+          provider: "codex",
+          upstreamModelId: "gpt-6-sol",
+          reasoningLevels: ["high"],
+        },
+      ],
+    );
+    try {
+      const org = await harness.organization();
+      const connectionId = await harness.connection(org, provider, { personal: true });
+      await harness.exhausted(org.accountId, connectionId, Date.now() - 1_000);
+      const work = await harness.turn(org, { private: true });
+      await harness.pin(org, work, "codex", connectionId, "codex/gpt-6-sol");
+      const placed = await subscriptionCoreTurns(provider).placeSubscriptionCoreTurn(
+        harness.client.db,
+        work,
+      );
+      expect(placed).toMatchObject({ kind: "run", connectionId });
+      const ref = { connectionId, holderId: work.holderId, generation: work.executionGeneration };
+      const requests = subscriptionCoreRequests(provider);
+      const reserve = () =>
+        requests.reserveSubscriptionCoreRequest(harness.client.db, work.identity, ref, {
+          attemptId: work.attemptId,
+          executionGeneration: work.executionGeneration,
+          requestId: crypto.randomUUID(),
+          transportAttempt: 1,
+        });
+      await reserve();
+      const snapshot = async () => {
+        const [rows] = await database!.admin`select
+          (select jsonb_agg(to_jsonb(b)) from subscription_session_bindings b where session_id = ${work.identity.sessionId}::uuid) as bindings,
+          (select jsonb_agg(to_jsonb(l)) from subscription_leases l where turn_id = ${work.identity.turnId}::uuid) as leases,
+          (select jsonb_agg(to_jsonb(q)) from subscription_connection_quota q where connection_id = ${connectionId}::uuid) as quota,
+          (select subscription_authority from session_turns where id = ${work.identity.turnId}::uuid) as authority`;
+        return rows;
+      };
+      const before = await snapshot();
+      expect(before!.bindings).toHaveLength(1);
+      expect(before!.leases).toHaveLength(1);
+      expect(before!.quota).toHaveLength(1);
+      const [other] = await database!.admin<
+        { id: string }[]
+      >`insert into workspaces(account_id, name)
+        values (${org.accountId}::uuid, 'New shared reach') returning id`;
+      const target: ModelConnectionTarget = {
+        accountId: org.accountId,
+        subjectId: org.subjectId,
+        workspaceId: null,
+        connectionId,
+        kind: "codex",
+      };
+      const access = await readSubscriptionCoreProviderModelConnectionAccess(
+        harness.client.db,
+        target,
+      );
+      expect(
+        await updateSubscriptionCoreProviderModelConnectionAccess(harness.client.db, target, {
+          allowedModels: null,
+          allowedWorkspaces: [other!.id],
+          allowPersonalWorkspaces: false,
+          version: access!.policy.version,
+          sharePersonal: true,
+        }),
+      ).not.toBeNull();
+      expect(await snapshot()).toEqual(before);
+      await expect(reserve()).rejects.toThrow();
+      // Refused reservation is atomic: it cannot create another request row.
+      const [count] = await database!
+        .admin`select count(*)::int as n from subscription_operation_leases
+        where turn_id = ${work.identity.turnId}::uuid`;
+      expect(count!.n).toBe(1);
+    } finally {
+      await harness.client.close();
+    }
+  });
   for (const provider of ["codex", "claude", "xai"] as const) {
     test(`SUB-OWN-06, SUB-OWN-07 ${provider}: exact owner-admin shares without rewriting credentials or audit identity`, async () => {
       const f = await fixture(provider),
@@ -205,4 +291,77 @@ describe.skipIf(!realDb)("explicit personal account sharing", () => {
     expect(await f.read()).toBeNull();
     expect(await f.save()).toBeNull();
   });
+  test.each(["refresh", "disconnect", "management_revoked"] as const)(
+    "SUB-OWN-06: sharing rechecks after concurrent %s commits",
+    async (change) => {
+      const f = await fixture();
+      const locked = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const refreshed = encryptEnvironmentValue(credentialKey, "refreshed-sharing-fixture");
+      const holder = database!.admin.begin(async (tx) => {
+        const key =
+          change === "management_revoked"
+            ? `organization-membership:${f.accountId}`
+            : `subscription-refresh:${f.id}`;
+        await tx`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+        locked.resolve();
+        await release.promise;
+        if (change === "refresh")
+          await tx`update subscription_connections set credential_encrypted = ${refreshed},
+            refresh_generation = refresh_generation + 1 where id = ${f.id}::uuid`;
+        else if (change === "disconnect")
+          await tx`update subscription_connections set disconnected_at = now(), status = 'disabled',
+              credential_encrypted = '', provider_account_id = null, allocator_enabled = false where id = ${f.id}::uuid`;
+        else
+          await tx`update organization_memberships set role = 'member' where account_id = ${f.accountId}::uuid and subject_id = ${f.subjectId}`;
+      });
+      let saving: ReturnType<typeof f.save> | undefined;
+      try {
+        await Promise.race([locked.promise, holder]);
+        saving = f.save();
+        void saving.catch(() => {});
+        let blocked = false;
+        const deadline = Date.now() + 5_000;
+        while (!blocked && Date.now() < deadline) {
+          const [row] = await database!.admin`select exists (
+            select 1 from pg_stat_activity where datname = current_database()
+              and pid <> pg_backend_pid() and wait_event_type = 'Lock'
+                and (query like '%subscription_core_personal_sharing%' or query like '%pg_advisory_xact_lock_shared%')
+          ) as blocked`;
+          blocked = row!.blocked === true;
+          if (!blocked) await Bun.sleep(10);
+        }
+        expect(blocked).toBe(true);
+      } finally {
+        release.resolve();
+        await holder;
+      }
+      if (change === "management_revoked") {
+        await expect(saving!).rejects.toThrow();
+        expect(await f.stored()).toMatchObject({
+          ownership: "personal",
+          resource_status: "active",
+          access_version: 1,
+        });
+        return;
+      }
+      const saved = await saving;
+      const after = await f.stored();
+      if (change === "refresh") {
+        expect(saved).not.toBeNull();
+        expect(after).toMatchObject({
+          ownership: "shared",
+          credential_encrypted: refreshed,
+        });
+        expect(Number(after.refresh_generation)).toBe(2);
+      } else {
+        expect(saved).toBeNull();
+        expect(after).toMatchObject({
+          ownership: "personal",
+          resource_status: "active",
+          access_version: 1,
+        });
+      }
+    },
+  );
 });

@@ -209,7 +209,7 @@ test("SUB-FAIL-03 absent home readiness never enables the worker hook", async ()
   expect(record).not.toHaveBeenCalled();
 });
 
-test.each(["holder", null])(
+test.each(["holder", null, "at-limit"])(
   "SUB-FAIL-03 changed placement initializes or preserves holder %s, releases before recovery and never adopts credentials",
   async (holderId) => {
     setup();
@@ -252,6 +252,7 @@ test.each(["holder", null])(
       }),
     );
     const recovery = spyOn(db, "requestSessionTurnRecovery").mockImplementation(async () => {
+      if (holderId === "at-limit") throw new db.SubscriptionCoreServingFailoverLimitError(4);
       order.push("recovery committed");
       return { action: "recovering", events: [] };
     });
@@ -268,7 +269,7 @@ test.each(["holder", null])(
       acknowledgeRecoveryQuiescence: () => order.push("quiescence"),
       claimedResult: (value: unknown) => value,
     } as unknown as CapacityPhaseDeps;
-    const result = await selectServingTurnCapacity(deps, {
+    const result = selectServingTurnCapacity(deps, {
       identity,
       acceptedPolicy: policy,
       homeProviderId: "codex",
@@ -287,7 +288,19 @@ test.each(["holder", null])(
         historyPosition: 0,
       },
     });
-    expect(result).toEqual({ exit: { status: "recovering" } });
+    if (holderId === "at-limit") {
+      await expect(result).rejects.toMatchObject({
+        payload: {
+          code: "subscription_failover_exhausted",
+          retryable: false,
+          failoverSteps: 4,
+          maxFailoverSteps: 4,
+        },
+      });
+      expect(order).toEqual(["placement committed", "lease released"]);
+      return;
+    }
+    expect(await result).toEqual({ exit: { status: "recovering" } });
     expect(order).toEqual([
       "placement committed",
       "lease released",

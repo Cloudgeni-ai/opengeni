@@ -6,6 +6,8 @@ import {
   recordSubscriptionCoreServingPolicyForTurnAttempt,
   recordSubscriptionCoreServingSelectionForTurnAttempt,
   requestSessionTurnRecovery,
+  SubscriptionCoreServingFailoverLimitError,
+  SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { servingTurnProviders } from "./subscription-serving-providers";
@@ -16,7 +18,10 @@ import {
 } from "./subscription-serving-claim";
 import { selectCoreSubscriptionTurnCapacity } from "./subscription-core-capacity";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
-import { subscriptionCoreUnsupportedFailure } from "./codex-core-errors";
+import {
+  subscriptionCoreUnsupportedFailure,
+  subscriptionCoreServingFailoverExhaustedFailure,
+} from "./codex-core-errors";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 
 /** Between-attempt switch only: placement has committed before any provenance
@@ -122,6 +127,15 @@ export async function selectServingTurnCapacity(
           connectionId: placement.connectionId,
           reason: placement.switch,
         },
+      }).catch((error: unknown) => {
+        // The turn-locked writer is authoritative, including concurrent
+        // refusal receipts. Its transaction rolls back; no target is staged.
+        if (error instanceof SubscriptionCoreServingFailoverLimitError)
+          throw subscriptionCoreServingFailoverExhaustedFailure(
+            error.steps,
+            SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
+          );
+        throw error;
       });
       if (recovery.action !== "recovering") {
         deps.acknowledgeLostAttemptOwnership();

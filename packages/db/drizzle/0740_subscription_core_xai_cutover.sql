@@ -469,20 +469,9 @@ ON CONFLICT (account_id, workspace_id) DO UPDATE SET
   updated_by_subject_id = EXCLUDED.updated_by_subject_id,
   updated_at = EXCLUDED.updated_at;
 
--- The owner of a moved Personal-workspace account opts in to personal
--- fallback (design 5.2, the "Workspace-scoped credential in a Personal
--- workspace" row; D-18). The preference is per person, not per provider, so
--- an owner whose SuperGrok accounts were only `user`-scope gets none: the
--- cutover never records consent for another provider's personal fallback
--- that the owner did not give.
-INSERT INTO subscription_person_preferences (account_id, organization_membership_id, personal_fallback_opt_in, updated_at)
-SELECT DISTINCT account_id, owner_membership_id, true, now()
-FROM pg_temp.subscription_cutover_connection_map
-WHERE ownership = 'personal' AND legacy_scope = 'workspace'
-ON CONFLICT (account_id, organization_membership_id) DO UPDATE SET
-  personal_fallback_opt_in = true,
-  version = subscription_person_preferences.version + 1,
-  updated_at = EXCLUDED.updated_at;
+-- D-28 preserves automatic use in the owner's Personal workspace without
+-- global fallback consent. Preserve every existing per-person preference;
+-- migration of a credential is not consent to fallback in other workspaces.
 
 -- Per-session context for bindings and accepted authority: the latest
 -- accepted turn and the pool its v1 snapshot names. Other providers' pins

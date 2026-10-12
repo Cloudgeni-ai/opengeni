@@ -106,6 +106,7 @@ import {
 import {
   MODEL_PROVIDER_RECOVERY_CODES,
   providerRecoveryExhaustedMessage,
+  providerRecoverySubject,
   type ProviderCondition,
 } from "./provider-recovery-copy";
 import {
@@ -348,6 +349,38 @@ function isProviderCondition(value: unknown): value is ProviderCondition {
     value === "unresponsive" ||
     value === "rate_limited"
   );
+}
+
+/**
+ * A retryable failure whose automatic same-turn recovery was not authorized
+ * (for example, request custody could not be checkpointed). The classifier's
+ * "will retry" sentence would be false on a terminal record, so name the
+ * condition and the person's options instead.
+ */
+export function automaticRecoveryUnavailableFailure<
+  T extends Record<string, unknown> & { error: string },
+>(
+  failure: T,
+): T & {
+  retryable: false;
+  automaticRecovery: "unavailable";
+  lastRetryableError: string;
+} {
+  const subject = providerRecoverySubject({
+    code: typeof failure.code === "string" ? failure.code : null,
+    providerCondition: isProviderCondition(failure.providerCondition)
+      ? failure.providerCondition
+      : null,
+    modelLabel: typeof failure.modelLabel === "string" ? failure.modelLabel : null,
+    providerLabel: typeof failure.providerLabel === "string" ? failure.providerLabel : null,
+  });
+  return {
+    ...failure,
+    error: `${subject}. Opengeni couldn't retry this turn automatically. Try again, or send a message to continue.`,
+    retryable: false,
+    automaticRecovery: "unavailable",
+    lastRetryableError: failure.error,
+  };
 }
 
 /**

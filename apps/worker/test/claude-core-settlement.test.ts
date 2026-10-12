@@ -481,10 +481,14 @@ describe("Claude refusal settlement on the core", () => {
   });
 
   for (const provider of ["Codex", "SuperGrok"] as const) {
-    test(`a ${provider} core lane with an answer awaiting its checkpoint keeps its gate: terminal, no checkpoint`, async () => {
+    test(`a ${provider} core lane with an answer awaiting its checkpoint checkpoints it, then recovers`, async () => {
       coreRuntime({ refusals: 1 });
       const recovery = recoveringRecovery();
       spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      spy(db, "readSessionTurnToolProgressRecoveryState").mockResolvedValue({
+        toolCallInFlight: false,
+        toolInterruptedRecoveries: 0,
+      });
       const settles: string[] = [];
       const lane = await answeredLane(settles, { continuesAfterResponse: false });
       const { deps } = failureDeps(anthropic(529, "overloaded_error"), null);
@@ -498,13 +502,13 @@ describe("Claude refusal settlement on the core", () => {
         codexSubscriptionCore: provider === "Codex" ? turn : null,
         xaiSubscriptionCore: provider === "SuperGrok" ? turn : null,
       });
-      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
-      expect(settles).toEqual([]);
-      expect(recovery).not.toHaveBeenCalled();
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(settles).toEqual(["first:response_received"]);
+      expect(recovery).toHaveBeenCalledTimes(1);
     });
   }
 
-  test("the same retryable failure and lane recover on Claude (the control for the gate cases)", async () => {
+  test("the same retryable failure and lane recover on Claude", async () => {
     coreRuntime({ refusals: 1 });
     const recovery = recoveringRecovery();
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
@@ -566,6 +570,38 @@ describe("Claude refusal settlement on the core", () => {
       labels: { provider: "claude", outcome: "core_exhausted" },
     });
     expect(parent).toHaveBeenCalledWith(expect.anything(), "workspace-1", "session-1", "turn-1");
+  });
+
+  test("SUB-FAIL-11: cross-provider recovery spends the combined refusal and serving-change budget", async () => {
+    coreRuntime({ refusals: 1 });
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(db, "readSubscriptionCoreTurnFailoverBudget").mockResolvedValue({
+      changes: 2,
+      refusals: 2,
+      steps: 4,
+    });
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const { deps, settle, releaseCurrent } = failureDeps(
+      anthropic(429, "rate_limit_error"),
+      core(),
+    );
+    Object.assign(deps.settings, { subscriptionCrossProviderFailoverEnabled: true });
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "idle" });
+    expect(recovery).not.toHaveBeenCalled();
+    expect(releaseCurrent).toHaveBeenCalledTimes(1);
+    const settled = settle.mock.calls[0]![0] as {
+      events: Array<{ type: string; payload: Record<string, unknown> }>;
+    };
+    expect(settled.events[0]).toMatchObject({
+      type: "turn.failed",
+      payload: {
+        code: "subscription_failover_exhausted",
+        retryable: false,
+        failoverSteps: 4,
+        maxFailoverSteps: 4,
+      },
+    });
+    expect(settled.events[0]!.payload.refusals).toBeUndefined();
   });
 
   test("an unrecorded sign-in refusal is never replayed and fails with typed Claude copy", async () => {

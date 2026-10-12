@@ -750,6 +750,10 @@ async function seed() {
         FROM scheduled_tasks task WHERE task.id = ${id}`;
     }
 
+    // Existing explicit consent and opt-out are not migration-owned.
+    await admin`INSERT INTO subscription_person_preferences
+      (account_id, organization_membership_id, personal_fallback_opt_in, version)
+      VALUES (${a.account}, ${a.om}, false, 3), (${a.account}, ${a.bm}, true, 4)`;
     // Organization A also runs Codex on the shared core.
     await admin`INSERT INTO workspace_memberships (account_id, workspace_id, subject_id, role)
       VALUES (${a.account}, ${a.w1}, ${a.owner}, 'owner')`;
@@ -1393,6 +1397,15 @@ describe.skipIf(!realDb)(
       });
 
       test("pools and settings: organization rows, local pools frozen on the workspace source", async () => {
+        const preferences = await owned.admin`SELECT organization_membership_id::text AS membership,
+          personal_fallback_opt_in, version::int as version FROM subscription_person_preferences WHERE account_id = ${a.account}`;
+        expect(preferences).toHaveLength(2);
+        expect(preferences).toEqual(
+          expect.arrayContaining([
+            { membership: a.om, personal_fallback_opt_in: false, version: 3 },
+            { membership: a.bm, personal_fallback_opt_in: true, version: 4 },
+          ]),
+        );
         const policies =
           await owned.admin`SELECT connection_id::text AS id, workspace_id::text AS workspace,
             inference_pool, allowed_model_ids, managed_by_workspace_id::text AS manager

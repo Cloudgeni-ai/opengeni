@@ -625,11 +625,11 @@ refresh tokens outside the core's per-connection lock.
 | EP-N05–N07 and EP-S17: realtime catalog/begin, Codex WebRTC broker, and realtime selection | Catalog readiness uses core eligibility. Each session realtime operation resolves the session's accepted owner context, places and leases a Codex connection via core, and serializes refresh on that connection. Keep current client protocol and HTTP error translation; realtime operations do not write the chat binding. |
 | EP-N11–N14: video funding, credential selection, admission envelope and crash reconciliation | These paths currently have no Codex-specific video adapter; keep video owned by its existing provider adapter and preserve its operation ledger. Remove any Codex active-pointer or copied-token assumptions if shared funding or recovery touches Codex, and route any Codex-funded operation through the core lease and serialized refresh rather than adding a new Codex selector. |
 | EP-N15–N17: Codex Apps gateway, turn-time Apps auth, designation and clear/off | Keep designation separate from chat placement, but resolve its connection/alias and load its secret through core authorization and serialized refresh; remove any effective-pool-only token gate. Preserve setup-card and turn behavior. Clearing Apps must remain valid regardless of source mode. |
-| EP-N18: reset-credit prepare/redeem | Resolve the supplied legacy account id through aliases to a core connection and use the core secret/refresh lock and redemption ledger. Keep routes, payloads, HMAC confirmation and single-use fences, but use the §6.3 authority: same-origin managed browser human who is an organization administrator or that connection's delegated manager. The prior connecting-human/acting-person-agent rule is superseded; do not permit bearer, MCP/service, scheduled or agent-acting-as-person redemption. Do not route redemption through automatic placement. |
+| EP-N18: reset-credit prepare/redeem | Resolve legacy aliases to a core connection; retain the core secret/refresh lock, redemption ledger, HMAC confirmation and single-use fences. The organization administrator/delegated manager authority is checked independently of transport. Preserve the repository's supported owning-person organization-MCP path with explicit signed confirmation, alongside same-origin browser redemption; services, schedules and autonomous worker/allocator redemption remain forbidden. |
 | EP-N19–N20: funding bypass and usage attribution | Replace the Codex live-account predicate with a core eligibility/funding result using explicit workspace, session owner, accepted authority, and model. Keep subscription-use billing bypass (no deployment-credit charge) but do not let a stale/static catalog flag bypass admission. Attribute accepted usage to the selected connection. |
 | EP-N21–N27: usage/overview/refresh routes, quota refresh, readiness and scheduled/parent authority | Preserve route behavior through adapters over core projections and refresh APIs. Every batch refresh supplies explicit organization/workspace/provider/connection context and uses the per-connection refresh lock; usage reads may trigger existing bounded wake reconciliation but never select through legacy active pointers. Parent/schedule readiness uses causal owner and frozen personal authority, never viewer inference. |
 | EP-N28 and M1 shadow | Keep shadow comparison enabled for Claude and SuperGrok legacy paths. Codex's old-vs-new selector shadow is removed when the old selector is deleted; retain provider-neutral core observability, content-free and attempt-fenced. |
-| EP-S01–S07, EP-S09–S16, EP-S26: Codex workspace/organization connect, list/status/source, account mutations, usage, Apps, access policy, SDK | Keep current route paths, methods, payloads and response compatibility. Handlers become adapters over organization-owned core connections/settings and convert legacy account ids through aliases. Preserve source names (`automatic`, `workspace`, `organization`, `disabled`) as projections over effective provider settings. Retain current authorization except where the contract explicitly supersedes it: Apps designation and reset redemption use §6.3 authorities, and redemption is browser-only. Add typed SDK methods for existing raw organization Codex routes only as needed to preserve API parity; do not remove existing method names or response fields. |
+| EP-S01–S07, EP-S09–S16, EP-S26: Codex workspace/organization connect, list/status/source, account mutations, usage, Apps, access policy, SDK | Keep current route paths, methods, payloads and response compatibility. Handlers become adapters over organization-owned core connections/settings and convert legacy account ids through aliases. Preserve source names (`automatic`, `workspace`, `organization`, `disabled`) as projections over effective provider settings. Retain current authorization and the explicit owner-confirmed redemption path described by EP-N18. Add typed SDK methods for existing raw organization Codex routes only as needed to preserve API parity; do not remove existing method names or response fields. |
 | EP-S08, EP-S27, EP-S29, EP-S31: session projection/pin, React hook, account indicator, event/status compatibility | Back the existing Codex projection and pin endpoint with the session binding. Preserve selected/waiting projections and `codex.account.*`, `codex.capacity.*`, and `codex.credential.selected` events as aliases emitted from canonical subscription events; map old payloads and reason/status enums deterministically. No visible redesign is included. |
 | EP-S28, EP-S30 and remaining Codex-only bypasses | Keep current web account, model, audience and `remote_v2` controls unchanged; API/SDK compatibility aliases feed them. Remove every Codex-specific route into selection/routing, including `codex-rotation.ts` and Codex-only capacity/recovery branches. Do not change UI; if compatibility requires visible behavior, stop before merging it and obtain product-owner review with a real-component preview. |
 
@@ -848,9 +848,10 @@ no route removal or sunset date is introduced.
 Compatibility is wire-shape compatibility, not preservation of superseded
 authorization. In particular, Apps designation/clear uses the organization
 administrator or that connection's delegated manager in any inference source
-mode. Reset-credit prepare/redeem is a same-origin managed-browser action for
-those same principals only; an acting-person agent, organization MCP call,
-bearer, service, scheduled task or background agent is refused. Alias
+mode. Reset-credit prepare/redeem also preserves the owning person's signed
+organization-MCP path specified in AGENTS.md; it is not browser-only. An
+unattributed bearer, service, scheduled task or autonomous background agent
+cannot redeem. Alias
 resolution occurs before the same live management check, and the HMAC,
 attempt/credit binding, provider idempotency and ambiguous-outcome recovery
 remain unchanged. Add route tests for each allowed/denied principal through
@@ -1637,10 +1638,13 @@ enabled, and one added branch in the operation-lease guard.
     reader in place of the legacy `connected_by_subject_id` rule (an
     injected authority; legacy callers pass nothing and are unchanged);
     release and abandon touch only the attempt and are shared.
-  - Only a same-origin managed browser human may prepare or redeem: bearer,
-    MCP/service and scheduled callers are refused by the existing guard,
-    and an agent acting as a person, which the legacy route accepts, is
-    refused on the core.
+  - Same-origin managed browser humans and the supported organization-MCP
+    agent acting as its signed-in owning person may explicitly prepare and
+    redeem. Both retain live management authority, signed single-use
+    confirmation and durable provider idempotency. Unattributed bearers,
+    services, schedules and automatic allocator redemption remain refused.
+    This corrects the earlier browser-only prose to the repository's explicit
+    owner-agent rule; it does not add an executable caller.
   - Decision: redemption is served only for a connection managed by the
     requesting workspace. An organization-managed connection answers the
     legacy 409 ("managed in Organization settings"), because the ledger's
@@ -2655,7 +2659,7 @@ Codex Apps request reservation uses the shared
 | Legacy | New |
 | --- | --- |
 | Workspace-scoped credential in a shared workspace | Shared connection scoped to that workspace, managed by it. |
-| Workspace-scoped credential in a Personal workspace | Personal connection owned by that workspace's owner. Set the owner's `personal_fallback_opt_in` and the effective workspace `personal_fallback_allowed` override (D-18); otherwise opt-in alone cannot reach the fallback candidate. An explicit organization lock of `false` remains authoritative and is recorded as a non-parity disposition, never overridden. |
+| Workspace-scoped credential in a Personal workspace | Personal connection owned by that workspace's owner. Preserve existing per-person fallback consent; D-28 permits use in the owner's Personal workspace without opting them into fallback elsewhere. Retain the historical workspace `personal_fallback_allowed` override (D-18), subject to organization locks. Published Codex migration 0689's historical preference seed is unchanged; the new Claude/SuperGrok cutovers never synthesize consent. |
 | Organization credential with `allowed_workspace_ids` / `allow_personal_workspaces` | Shared connection: `organization` scope when the list is NULL, otherwise `workspaces` scope with the same list. |
 | User-scoped credential (xAI, Claude) | Remains on its existing provider-specific v1 path through M3; M4 maps it to a personal connection for the same membership. Work accepted before that provider's cutover carries its authority in a compatibility record (§5.3 "Accepted authority across the cutover"), because v2 is immutable; work accepted after the cutover writes that provider's v2 entry. |
 | Codex `automatic` | No override. Where the workspace has local accounts, the workspace's Codex rotation becomes `primary_first` with its active local account as primary, or `spread` if its rotation was on, so local accounts keep taking new work. |
@@ -5021,11 +5025,10 @@ reviewers:
   schema owner, can insert, update or delete any of the 37 relations the
   cutover locks, so a runtime login missing from the passed list cannot
   write during the window.
-- **Personal fallback opt-in.** The opt-in follows the "Workspace-scoped
-  credential in a Personal workspace" row only: owners of accounts connected
-  in their Personal workspace are opted in, owners of only `user`-scoped
-  accounts are not, because the preference is per person and would also
-  cover their other providers' personal connections.
+- **Personal fallback opt-in.** Preserve every existing per-person preference,
+  including explicit opt-outs and versions. D-28 already preserves automatic
+  use in the owner's Personal workspace; neither new provider cutover creates
+  global fallback consent from credential migration.
 - **Quota window.** A SuperGrok connection's quota snapshot has one window,
   id `billing` (`SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID`), the id the core
   adapter writes for SuperGrok usage.
@@ -8317,9 +8320,12 @@ written and how the indicator follows it (D-45).
 
 Apps credentials load by their designation, never through placement. Any
 organization administrator or the connection's delegated manager may
-designate or clear Apps in any routing mode. Reset-credit redemption stays
-human-only from a browser session, allowed to organization administrators
-and delegated managers of that connection (not "whoever connected it").
+designate or clear Apps in any routing mode. Reset-credit redemption requires
+an explicit owning-person action and live organization-administrator or
+connection-delegated-manager authority, not merely "whoever connected it".
+Preserve both the same-origin browser flow and AGENTS.md's signed-in
+organization-MCP agent acting as that person, with single-use signed
+confirmation. Workers, schedules and automatic capacity failover never redeem.
 
 ### 6.4 Compaction (SUB-FAIL-09)
 

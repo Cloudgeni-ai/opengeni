@@ -71,6 +71,8 @@ import {
   SqliteBrowserWorkingRuntimeJournal,
   assertDirectory,
   assertWorkingRuntimeReceipt,
+  boundedFailureCode,
+  isAbandonedLaunchReceipt,
   unavailable as workingRuntimeUnavailable,
   type BrowserWorkingRuntimeAuthority,
   type BrowserWorkingRuntimeReceipt,
@@ -898,20 +900,24 @@ export class BrowserSupervisor {
     const stateTransfer = this.stateTransferTails.get(reference.browserSessionId);
     if (stateTransfer) await stateTransfer.catch(() => undefined);
     if (!this.sessions.has(reference.browserSessionId)) {
+      const sessionDirectory = join(this.rootDirectory, "sessions", reference.browserSessionId);
+      let workingRuntimePresent = true;
       try {
-        await lstat(
-          join(
-            this.rootDirectory,
-            "sessions",
-            reference.browserSessionId,
-            "working-runtime.sqlite",
-          ),
-        );
-        // Missing memory cannot acknowledge cleanup of a possibly accepted
-        // launch. Its exact binding/holder must stay addressable for cleanup.
-        throw workingRuntimeUnavailable();
+        await lstat(join(sessionDirectory, "working-runtime.sqlite"));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        workingRuntimePresent = false;
+      }
+      // Missing memory cannot acknowledge cleanup of a possibly accepted
+      // launch. Its exact binding/holder must stay addressable for cleanup,
+      // unless this generation's latest launch provably never completed.
+      if (workingRuntimePresent) {
+        await this.cleanupAbandonedLaunch(
+          reference,
+          sessionDirectory,
+          options.removeState === true,
+        );
+        return;
       }
     }
     const runtime = this.requireBound(reference);
@@ -1221,6 +1227,7 @@ export class BrowserSupervisor {
     let driver: BrowserSupervisorDriver | null = null;
     let workingJournal: SqliteBrowserWorkingRuntimeJournal | null = null;
     let workingReceipt: BrowserWorkingRuntimeReceipt | null = null;
+    let workingReceiptCompleted = false;
     try {
       if (eligibleWorkingRuntime(options) && options.workingRuntimeAuthority) {
         workingJournal = await SqliteBrowserWorkingRuntimeJournal.open({
@@ -1312,6 +1319,7 @@ export class BrowserSupervisor {
           directoryLaunchAllowed: driver.requiresExplicitProfileRestore !== true,
         };
         runtime.workingReceipt = workingJournal.complete(workingReceipt, ownedProcess);
+        workingReceiptCompleted = true;
         if (recoveredReceipt)
           runtime.options.restoreAuthorityDigest = recoveredReceipt.restoreAuthorityDigest;
       }
@@ -1320,6 +1328,7 @@ export class BrowserSupervisor {
       if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
       let driverClosed = driver === null;
+      let restoredProfileRemoved = false;
       try {
         if (recoveredReceipt) await driver?.detach?.();
         else await driver?.close();
@@ -1330,9 +1339,44 @@ export class BrowserSupervisor {
       if (restoredProfileMaterialized && driverClosed) {
         try {
           await rm(profileDirectory, { recursive: true, force: true });
+          restoredProfileRemoved = true;
         } catch (cleanupError) {
           failures.push(cleanupError);
         }
+      }
+      // A fresh launch (not a reattach) whose driver closed and whose restored
+      // profile is gone can never be adopted. Settle its receipt failed so the
+      // exact binding can be cleaned up and restored again from durable state.
+      let launchReceiptSettled = false;
+      if (
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        !recoveredReceipt &&
+        driverClosed &&
+        (!restoredProfileMaterialized || restoredProfileRemoved)
+      ) {
+        try {
+          workingReceipt = workingJournal.fail(workingReceipt, launchFailureCode(error));
+          launchReceiptSettled = true;
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      if (workingReceipt) {
+        console.error("browser launch failed before its working-runtime receipt completed", {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          operationId: workingReceipt.operationId,
+          restoredProfile: restoredProfileMaterialized,
+          receiptState: workingReceiptCompleted
+            ? "completed"
+            : launchReceiptSettled
+              ? "failed"
+              : "dispatched",
+          failureCode: launchFailureCode(error),
+          error,
+        });
       }
       try {
         workingJournal?.close();
@@ -1862,6 +1906,46 @@ export class BrowserSupervisor {
       /* An unattested receipt cannot be used for directory recovery. */
     }
     runtime.workingReceipt = runtime.workingJournal.complete(receipt, ownedProcess);
+  }
+
+  /** Cleanup for a non-resident session whose latest working-runtime receipt,
+   * in this exact controller generation, is a launch that provably never
+   * completed. Any other history stays preserved for exact recovery. With
+   * removeState the session directory is removed so the next resume restores
+   * from durable state; nothing outside this session is touched. */
+  private async cleanupAbandonedLaunch(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+    removeState: boolean,
+  ): Promise<void> {
+    let abandoned = false;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        {
+          sessionDirectory,
+          browserSessionId: reference.browserSessionId,
+          controllerGeneration: reference.controllerGeneration,
+        },
+        true,
+      );
+      try {
+        abandoned = await isAbandonedLaunchReceipt(
+          reader.latest(),
+          join(sessionDirectory, "profile"),
+        );
+      } finally {
+        reader.close();
+      }
+    } catch {
+      abandoned = false;
+    }
+    if (!abandoned) throw workingRuntimeUnavailable();
+    if (!removeState) return;
+    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
+      recursive: true,
+      force: true,
+    });
+    await rm(sessionDirectory, { recursive: true, force: true });
   }
 
   private retireWorkingRuntime(runtime: Runtime) {
@@ -2942,6 +3026,14 @@ function defaultSocketRoot(rootDirectory: string): string {
 
 function shortDigest(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+/** Bounded, content-free cause for a launch receipt; never page data or secrets. */
+function launchFailureCode(error: unknown): string {
+  if (error instanceof InteractionControllerError) return boundedFailureCode(error.code);
+  if (error instanceof AggregateError) return "cleanup_failed";
+  const code = (error as { code?: unknown } | null)?.code;
+  return boundedFailureCode(typeof code === "string" ? code : "internal");
 }
 
 function boundedPositiveInteger(value: number, label: string): number {
