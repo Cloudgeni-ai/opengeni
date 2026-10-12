@@ -245,7 +245,7 @@ export type SecretFieldMessages = {
 export const defaultSecretFieldMessages: SecretFieldMessages = {
   saveTo: "Save to",
   saveToOption: { user: "Only me", task: "This task", workspace: "Workspace" },
-  vaultHint: (vault) => `Saves to ${vault}`,
+  vaultHint: (vault) => `Saves to the ${vault} vault`,
   show: "Show secret",
   hide: "Hide secret",
   generate: "Generate",

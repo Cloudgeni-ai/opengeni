@@ -100,7 +100,7 @@ export const defaultHumanInputFormMessages: HumanInputFormMessages = {
   secretSaveToOptions: { user: "Only me", task: "This task", workspace: "This workspace" },
   secretVaultHint: (saveTo, vault) =>
     vault
-      ? `Saves to ${vault}`
+      ? `Saves to the ${vault} vault`
       : saveTo === "user"
         ? "Saves to your private vault"
         : saveTo === "task"

@@ -335,14 +335,14 @@ describe("native ask card: secret question", () => {
 
   test("Save to defaults to the spec and can be changed", async () => {
     const { view, submitted, button, press, type } = await renderCard([
-      secretQuestion({ item: "Deploy key", saveTo: "task", vault: "Task vault" }),
+      secretQuestion({ item: "Deploy key", saveTo: "task", vault: "Deploys" }),
     ]);
     expect(button("This task").getAttribute("data-checked")).toBe("true");
     expect(button("Only me").getAttribute("data-checked")).toBeNull();
-    expect(view.container.textContent).toContain("Saves to Task vault");
+    expect(view.container.textContent).toContain("Saves to the Deploys vault");
     await press("Workspace");
     expect(button("Workspace").getAttribute("data-checked")).toBe("true");
-    expect(view.container.textContent).not.toContain("Saves to Task vault");
+    expect(view.container.textContent).not.toContain("Saves to the Deploys vault");
     await type("secret-input-pw", "k");
     await press("Send answers");
     expect(submitted[0]).toMatchObject({

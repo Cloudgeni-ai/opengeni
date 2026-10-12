@@ -548,13 +548,13 @@ describe("secret ask card: Save to", () => {
       secretQuestion({ item: "Deploy key", saveTo: "task", vault: "Release" }),
     ]);
     expect(select(container).value).toBe("task");
-    expect(container.textContent).toContain("Saves to Release");
+    expect(container.textContent).toContain("Saves to the Release vault");
     await act(async () => {
       select(container).value = "workspace";
       select(container).dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(container.textContent).toContain("Saves to the workspace vault");
-    expect(container.textContent).not.toContain("Saves to Release");
+    expect(container.textContent).not.toContain("Saves to the Release vault");
     await typeSecret(secretInput(container), SECRET);
     await submit(container);
     expect(secretAnswersOf(submissions[0])).toEqual([
