@@ -118,7 +118,8 @@ export async function runGate(options: GateOptions): Promise<GateSummary> {
   try {
     // Probe with the directive worker so the tool surface is inspected too.
     ensureScripted(stack, true, log);
-    if (options.machineUp && options.scenarios.some((scenario) => scenario.id === "E2E-6")) {
+    // The connected machine hosts the managed browser and E2E-6.
+    if (options.machineUp) {
       if (!(await listMachines(owner, workspaceId)).some((machine) => machine.online)) {
         log("bringing the connected machine online (machine.sh up)");
         const up = machineUp(stack);

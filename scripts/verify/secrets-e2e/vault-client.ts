@@ -53,6 +53,16 @@ export class VaultClient {
     return this.api.request("POST", this.#path(`/vaults/${vaultId}/items`), body);
   }
 
+  /** Create after permanently removing same-named items left by an earlier gate run. */
+  async replaceItem(vaultId: string, body: CreateVaultItemRequest): Promise<ApiResult> {
+    const existing: any[] = (await this.listItems(vaultId)).json?.items ?? [];
+    for (const row of existing.filter((candidate) => candidate.name === body.name)) {
+      await this.archiveItem(vaultId, row.id);
+      await this.archiveItem(vaultId, row.id, true);
+    }
+    return this.createItem(vaultId, body);
+  }
+
   /** DELETE archives (Q-12); `permanent` deletes an already archived item. */
   archiveItem(vaultId: string, itemId: string, permanent = false): Promise<ApiResult> {
     const query = permanent ? "?permanent=true" : "";

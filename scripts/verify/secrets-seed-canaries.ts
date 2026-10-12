@@ -55,6 +55,15 @@ export async function seedCanaries(api: StackApi, workspaceId: string): Promise<
     stack: api.stack.name,
     values: [],
   };
+  // Rerunnable: a previous gate run leaves its canaries behind (the sweep
+  // deletes only the canaries file), so drop same-named items first.
+  const existing: any[] = (await vaults.listItems(vault.id)).json?.items ?? [];
+  for (const item of items) {
+    for (const row of existing.filter((candidate) => candidate.name === item.name)) {
+      await vaults.archiveItem(vault.id, row.id);
+      await vaults.archiveItem(vault.id, row.id, true);
+    }
+  }
   for (const item of items) {
     const created = await vaults.createItem(vault.id, {
       type: item.type,

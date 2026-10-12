@@ -222,6 +222,32 @@ async function realTurn(
   return turn;
 }
 
+/**
+ * A real-model browser turn. The managed browser runs on the connected machine
+ * here (the local sandbox backend has no browser), so browser scenarios target
+ * it and must actually drive the browser rather than fall back to curl.
+ */
+async function browserTurn(
+  context: ScenarioContext,
+  run: ScenarioRun,
+  label: string,
+  message: string,
+): Promise<TurnResult> {
+  const turn = await realTurn(
+    context,
+    run,
+    label,
+    `${message} Use the browser tools for the website, not curl or scripts.`,
+    context.machineSandboxId ? { machineSandboxId: context.machineSandboxId } : {},
+  );
+  run.check(
+    `${label}: drove the managed browser`,
+    turn.toolCalls.some((call) => /browser_(act|open|navigate)/u.test(call.name)),
+    [...new Set(turn.toolCalls.map((call) => call.name))].join(","),
+  );
+  return turn;
+}
+
 async function defaultVaultId(context: ScenarioContext, run: ScenarioRun): Promise<string | null> {
   const vaults = new VaultClient(context.owner, context.workspaceId);
   const listed = await vaults.listVaults();
@@ -247,15 +273,22 @@ export const SCENARIOS: Scenario[] = [
     requires: ["directive_worker"],
     run: async (context, run) => {
       const marker = `f598-scripted-${crypto.randomUUID().slice(0, 8)}`;
+      // Hash the reference so the step never prints a secret on the vaults
+      // build (there is no output redaction by design, brief C1).
       const { report } = await scriptedTurn(context, run, "exec", [
         execStep(`echo ${marker}`),
-        execStep(`printf %s '{{secret:Canary}}'`),
+        execStep(`printf %s '{{secret:Canary}}' | sha256sum`),
       ]);
       run.check("exec output reached the model", report?.outputs[0]?.includes(marker) === true);
+      const canary = context.knownValues.find((value) => value.label === "Canary");
+      const expected = sha256(
+        context.features.vaults_api?.present && canary ? canary.value : "{{secret:Canary}}",
+      );
       run.check(
-        "reference text is passed through literally on this build",
-        report?.outputs[1]?.includes("{{secret:Canary}}") === true,
-        "baseline expectation; on the secrets build this flips to the resolved value (E2E-6)",
+        context.features.vaults_api?.present
+          ? "reference resolves to the vault value on this build"
+          : "reference text is passed through literally on this build",
+        report?.outputs[1]?.includes(expected) === true,
       );
       run.check("exec_command offered", report?.tools.includes("exec_command") === true);
     },
@@ -336,7 +369,7 @@ export const SCENARIOS: Scenario[] = [
       const vaultId = await defaultVaultId(context, run);
       if (!vaultId) return;
       const vaults = new VaultClient(context.owner, context.workspaceId);
-      const created = await vaults.createItem(vaultId, {
+      const created = await vaults.replaceItem(vaultId, {
         type: "login",
         name: "Fake Login Alice",
         websites: [context.fakeLogin.url],
@@ -346,7 +379,7 @@ export const SCENARIOS: Scenario[] = [
         ],
       });
       if (!run.check("seed login item", created.ok, `${created.status}`)) return;
-      await realTurn(
+      await browserTurn(
         context,
         run,
         "login",
@@ -370,7 +403,7 @@ export const SCENARIOS: Scenario[] = [
     requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (context, run) => {
       const account = context.fakeLogin.account("alice")!;
-      await realTurn(
+      await browserTurn(
         context,
         run,
         "enroll",
@@ -378,7 +411,7 @@ export const SCENARIOS: Scenario[] = [
       );
       const enrolled = context.fakeLogin.state().accounts.find((row) => row.username === "alice");
       if (!run.check("fake site: TOTP enabled for alice", enrolled?.totpEnabled === true)) return;
-      await realTurn(
+      await browserTurn(
         context,
         run,
         "totp-login",
@@ -399,7 +432,7 @@ export const SCENARIOS: Scenario[] = [
     requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (context, run) => {
       const username = `gate-${crypto.randomUUID().slice(0, 8)}`;
-      const signup = await realTurn(
+      const signup = await browserTurn(
         context,
         run,
         "signup",
@@ -412,7 +445,7 @@ export const SCENARIOS: Scenario[] = [
         JSON.stringify(saveCall?.arguments ?? {}).includes('"generate"'),
       );
       run.check("fake site: signup succeeded", loginSucceeded(context, "signup", username));
-      await realTurn(
+      await browserTurn(
         context,
         run,
         "relogin",
@@ -432,8 +465,9 @@ export const SCENARIOS: Scenario[] = [
       const ask = await runTurn(context.owner, {
         workspaceId: context.workspaceId,
         model: context.model,
-        message: `Create an account at ${context.fakeLogin.url}/signup with the username ${username}. I want to choose the password myself: ask me for it with a secret question that offers to generate one, save it as a login in my vault, then sign up with it in the browser.`,
+        message: `Create an account at ${context.fakeLogin.url}/signup with the username ${username}. I want to choose the password myself: ask me for it with a secret question that offers to generate one, save it as a login in my vault, then sign up with it using the browser tools (not curl).`,
         stopOnEventTypes: ["session.humanInput.requested"],
+        ...(context.machineSandboxId ? { machineSandboxId: context.machineSandboxId } : {}),
         timeoutMs: 600_000,
       });
       run.recordTurn("ask", ask);
@@ -533,7 +567,7 @@ export const SCENARIOS: Scenario[] = [
     acceptance: ["E2E-5", "BR-* passkeys"],
     requires: ["vaults_api", "secret_tools", "real_model"],
     run: async (context, run) => {
-      await realTurn(
+      await browserTurn(
         context,
         run,
         "register",
@@ -542,7 +576,7 @@ export const SCENARIOS: Scenario[] = [
       const passkeys =
         context.fakeLogin.state().accounts.find((row) => row.username === "alice")?.passkeys ?? [];
       if (!run.check("fake site: a passkey is registered for alice", passkeys.length > 0)) return;
-      await realTurn(
+      await browserTurn(
         context,
         run,
         "passkey-login",
@@ -683,7 +717,7 @@ export const SCENARIOS: Scenario[] = [
         log: () => undefined,
       });
       try {
-        await realTurn(
+        await browserTurn(
           context,
           run,
           "onepassword-login",
