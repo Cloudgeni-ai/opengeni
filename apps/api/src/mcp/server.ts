@@ -653,7 +653,21 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
   ),
 );
 
-const sessionCreateToolInput = staticToolInput(() => {
+const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCreateToolInput>>();
+
+/** Distinct selections are few; cache each built contract for reuse. */
+function sessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
+  const key = allowedTools.join(",");
+  let input = sessionCreateToolInputs.get(key);
+  if (!input) {
+    if (sessionCreateToolInputs.size >= 256) sessionCreateToolInputs.clear();
+    input = buildSessionCreateToolInput(allowedTools);
+    sessionCreateToolInputs.set(key, input);
+  }
+  return input;
+}
+
+function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
   const capabilityToggle = z4.boolean().optional();
   const sessionCreateAgentInput = z4
     .object({
@@ -760,10 +774,14 @@ const sessionCreateToolInput = staticToolInput(() => {
           "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
         ),
       firstPartyMcpTools: z4
-        .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
+        .array(
+          allowedTools.length
+            ? z4.enum(allowedTools as [FirstPartyMcpToolName, ...FirstPartyMcpToolName[]])
+            : z4.never(),
+        )
         .optional()
         .describe(
-          "Exact model-visible first-party tool selection for the child. Usually omit to inherit this session's effective selection. An explicit array replaces the entire inherited selection, including browser, computer, and scheduling tools; it is not an additions list. Do not construct a partial list merely because a worker has a specialist role or bounded task. For a worker that must not coordinate other sessions, prefer agent.capabilities with from: 'all' and subagents: false. Use an explicit array only for deliberate per-tool restrictions. Every listed tool must already be available to this session; a wider list is rejected and [] selects no tools from this server. This does not grant permissions.",
+          "Exact model-visible first-party tool selection for the child. Omit it in almost every case: omission inherits this session's effective selection, which is what workers normally need. The allowed values are exactly the tools this session holds that a child may keep. An explicit array replaces the entire inherited selection, including browser, computer, and scheduling tools; it is not an additions list. Do not construct a partial list merely because a worker has a specialist role or bounded task. For a worker that must not coordinate other sessions, prefer agent.capabilities with from: 'all' and subagents: false. Use an explicit array only for deliberate per-tool restrictions. A tool outside the allowed values is rejected, and [] selects no tools from this server. This does not grant permissions.",
         ),
       // The child's agent-access scope and end-user label are never model
       // choices: it inherits this session's exactly. Only the Memory
@@ -802,8 +820,10 @@ const sessionCreateToolInput = staticToolInput(() => {
       }
     })
     .strict();
-  return contractToolInput(sessionCreateInput);
-});
+  return contractToolInput(sessionCreateInput, sessionCreateInput, {
+    jsonObjectFields: ["agent", "goal", "machineTarget"],
+  });
+}
 
 class PolicyMcpServer extends McpServer {
   private registeredToolCount = 0;
@@ -815,6 +835,22 @@ class PolicyMcpServer extends McpServer {
     private readonly sessionAdminAccess: boolean = false,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
+  }
+
+  /**
+   * Whether a selection-governed tool is both selected and authorized for this
+   * grant. Admin-access tools are never selection-governed, so a child
+   * selection can never carry them.
+   */
+  holdsSelectableTool(toolName: FirstPartyMcpToolName): boolean {
+    const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
+    if (policy.adminAccessRequired) return false;
+    const authorized =
+      (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
+        true) &&
+      (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
+        true);
+    return authorized && (this.selectedTools === null || this.selectedTools.has(toolName));
   }
 
   override registerTool<
@@ -842,14 +878,9 @@ class PolicyMcpServer extends McpServer {
         // permissions, decides: the tools act as the person who gave it.
         admitted = this.sessionId !== null && this.sessionAdminAccess;
       } else {
-        const authorized =
+        admitted =
           (!policy.sessionRequired || this.sessionId !== null) &&
-          (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
-            true) &&
-          (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
-            true);
-        const selected = this.selectedTools === null || this.selectedTools.has(toolName);
-        admitted = authorized && selected;
+          this.holdsSelectableTool(toolName);
       }
     }
     if (!admitted) {
@@ -1165,6 +1196,11 @@ export function buildOpenGeniMcpServer(
     can,
     sessionId,
     sessionCreateVisible,
+    // A child selection may only narrow this session's: advertise exactly the
+    // deployment-allowed tools this session holds, never the whole catalog.
+    allowedFirstPartyMcpToolsForSession(deps.settings, FIRST_PARTY_MCP_TOOL_NAMES).filter((tool) =>
+      server.holdsSelectableTool(tool),
+    ),
     json,
   );
   registerProjectTools(server, deps, grant, can, json);
@@ -4785,6 +4821,7 @@ function registerWorkspaceOrchestrationTools(
   can: (permission: Permission) => boolean,
   callerSessionId: string | null,
   sessionCreateVisible: boolean,
+  childSelectableTools: readonly FirstPartyMcpToolName[],
   json: JsonResult,
 ): void {
   const acknowledgeReads = async (children: { sessionId: string; sequences: number[] }[]) => {
@@ -5702,7 +5739,7 @@ function registerWorkspaceOrchestrationTools(
       {
         description:
           "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, Opengeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
-        inputSchema: sessionCreateToolInput(),
+        inputSchema: sessionCreateToolInput(childSelectableTools),
       },
       async (args) => {
         try {

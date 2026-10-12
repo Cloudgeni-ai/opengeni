@@ -1441,7 +1441,7 @@ export function agentConfigDeploymentLimitsFromAllowlist(
   for (const id of AGENT_CAPABILITY_IDS) {
     const tools = firstPartyMcpToolsForCapability(id);
     if (tools.length > 0 && !tools.some((tool) => allowedSet.has(tool))) {
-      unavailable[id] = "its tools are not allowed on this server";
+      unavailable[id] = `its tools are not allowed on this server: ${tools.join(", ")}`;
     }
   }
   return { unavailable: { ...unavailable, ...extra } };
