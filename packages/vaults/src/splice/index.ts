@@ -5,7 +5,10 @@
  * `$env:OPENGENI_SECRET_<n>` on PowerShell); a literal fallback is used where
  * splicing cannot be safe (quoted heredocs, here-strings).
  */
-import { referenceKey, SecretReferenceError, type SecretTextToken } from "@opengeni/contracts";
+import { SecretReferenceError, type SecretTextToken } from "@opengeni/contracts";
+import { PosixSplicer } from "./posix";
+import { PowerShellSplicer } from "./powershell";
+import { BindingTable, streamFromTokens } from "./stream";
 
 export type ShellDialect = "posix" | "powershell" | "cmd" | "fish" | "unknown";
 export interface SecretExecBinding {
@@ -27,71 +30,44 @@ export const SECRET_EXEC_ENV_PREFIX = "OPENGENI_SECRET_";
 
 /**
  * Rewrites `tokens` (from `tokenizeSecretText(text)`) into a command that
- * reads each reference from its own env var. Throws
- * `SecretReferenceError(unsupported_shell)` for cmd, fish and unknown shells.
- *
- * F1 placeholder body (W1 replaces it with the quote- and heredoc-aware
- * scanner): every reference becomes a double-quoted variable expansion
- * regardless of its quoting context. Escapes are already removed by the
- * tokenizer, so `text` is rebuilt from `tokens`.
+ * reads each reference from its own env var, shell-aware (see `posix.ts` and
+ * `powershell.ts` for the context tables). Throws
+ * `SecretReferenceError(unsupported_shell)` for cmd, fish and unknown shells
+ * when the command holds a reference. Escapes are already removed by the
+ * tokenizer, so the result is rebuilt from `tokens` and `_text` is unused.
+ * Pure: no values are involved; literal fallbacks emit per-call sentinels
+ * that the delivery adapter replaces at dispatch.
  */
 export function spliceShellCommand(
   _text: string,
   dialect: ShellDialect,
   tokens: readonly SecretTextToken[],
+  options: { sentinelNonce?: string } = {},
 ): ShellSpliceResult {
   const references = tokens.filter((token) => token.type === "reference");
+  const items = streamFromTokens(tokens);
   if (references.length === 0) {
-    return {
-      text: tokens
-        .map((token) =>
-          token.type === "text"
-            ? token.value
-            : token.type === "invalid"
-              ? token.raw
-              : token.reference.raw,
-        )
-        .join(""),
-      bindings: [],
-    };
+    return { text: items.join(""), bindings: [] };
   }
   if (dialect !== "posix" && dialect !== "powershell") {
     throw new SecretReferenceError(
       references.map((token) => ({
         raw: token.type === "reference" ? token.reference.raw : "",
         code: "unsupported_shell" as const,
-        message: `secret references are not supported in ${dialect} shells; use sh/bash or PowerShell`,
+        message:
+          dialect === "cmd"
+            ? 'secret references cannot be used safely in cmd.exe; run the command with shell "powershell" instead, or pass the value as a file with {{secretfile:…}}'
+            : `secret references are not supported in ${dialect} shells; run the command with shell "sh" or "bash" (or "powershell" on Windows), or pass the value as a file with {{secretfile:…}}`,
       })),
       null,
     );
   }
-  const bindings: SecretExecBinding[] = [];
-  const byKey = new Map<string, SecretExecBinding>();
-  let out = "";
-  for (const token of tokens) {
-    if (token.type === "text") {
-      out += token.value;
-      continue;
-    }
-    if (token.type === "invalid") {
-      out += token.raw;
-      continue;
-    }
-    const key = referenceKey(token.reference);
-    let binding = byKey.get(key);
-    if (!binding) {
-      binding = {
-        envName: `${SECRET_EXEC_ENV_PREFIX}${bindings.length}`,
-        key,
-        literal: false,
-        sentinel: null,
-      };
-      byKey.set(key, binding);
-      bindings.push(binding);
-    }
-    out += dialect === "posix" ? `"\${${binding.envName}}"` : `"$env:${binding.envName}"`;
-  }
-  return { text: out, bindings };
+  const table = new BindingTable(SECRET_EXEC_ENV_PREFIX, options.sentinelNonce);
+  const text =
+    dialect === "posix"
+      ? new PosixSplicer(items, table).run()
+      : new PowerShellSplicer(items, table).run();
+  return { text, bindings: table.bindings };
 }
 
 /** Pick the splice dialect for a shell path or name on a given OS. */
