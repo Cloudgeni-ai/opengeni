@@ -5059,6 +5059,26 @@ GROUP BY 1, 2
 HAVING count(DISTINCT authority.generation) = 1;
 ```
 
+### A person's own subscription preferences (0727)
+
+Migration `0727_subscription_person_preferences_owner.sql` is **rolling**.
+Design record:
+[subscription core, M5 explicit choice](design/subscription-core-2026-10-07.md#56-m5-explicit-account-choice-and-personal-preferences).
+It changes no column, value or existing policy. It adds two
+`SECURITY DEFINER` routines that answer only for the caller's own active
+human membership in the caller's organization scope, and three owner
+policies (read, insert, update; no delete) on
+`subscription_person_preferences`, so a person can read and change their own
+personal-fallback opt-in through
+`/v1/organizations/{organizationId}/me/model-account-preferences`. Nobody
+else gains access to the row; placement keeps reading it under the accepted
+turn's capability as before.
+
+**Rollback.** Older binaries never call the new routines or routes and run
+unchanged on 0727. An opt-in a person turned on stays in effect after a
+rollback (placement already read it); dropping the three policies and two
+routines removes only the person's own access.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

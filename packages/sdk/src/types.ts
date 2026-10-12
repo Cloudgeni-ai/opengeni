@@ -4211,7 +4211,7 @@ export type ModelAccountChoiceOption = {
 };
 
 /** A session's current account, what it may switch to, and the effective personal settings. */
-export type SessionModelAccountChoice = {
+export type SessionModelAccountChoiceResponse = {
   binding: {
     provider: string;
     connectionId: string | null;
@@ -4228,7 +4228,7 @@ export type SessionModelAccountChoice = {
 /** `connectionId: null` returns the session to automatic account selection. */
 export type SetSessionModelAccountChoiceRequest = { connectionId: string | null };
 
-export type SetSessionModelAccountChoiceResult = {
+export type SetSessionModelAccountChoiceResponse = {
   changed: boolean;
   appliedTo: "waiting_turn" | "next_turn";
   provider: string | null;

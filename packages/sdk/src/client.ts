@@ -278,9 +278,9 @@ import type {
   UpdateWorkspaceModelAccountSettingsRequest,
   WorkspaceModelAccountSettings,
   ModelAccountPreferences,
-  SessionModelAccountChoice,
+  SessionModelAccountChoiceResponse,
   SetSessionModelAccountChoiceRequest,
-  SetSessionModelAccountChoiceResult,
+  SetSessionModelAccountChoiceResponse,
   UpdateModelAccountPreferencesRequest,
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
@@ -5585,8 +5585,8 @@ export class OpenGeniClient {
   async getSessionModelAccount(
     workspaceId: string,
     sessionId: string,
-  ): Promise<SessionModelAccountChoice> {
-    return await this.requestJson<SessionModelAccountChoice>(
+  ): Promise<SessionModelAccountChoiceResponse> {
+    return await this.requestJson<SessionModelAccountChoiceResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
     );
@@ -5597,8 +5597,8 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: SetSessionModelAccountChoiceRequest,
-  ): Promise<SetSessionModelAccountChoiceResult> {
-    return await this.requestJson<SetSessionModelAccountChoiceResult>(
+  ): Promise<SetSessionModelAccountChoiceResponse> {
+    return await this.requestJson<SetSessionModelAccountChoiceResponse>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
       request,

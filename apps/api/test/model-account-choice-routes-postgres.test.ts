@@ -172,8 +172,13 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
       ).status,
     ).toBe(404);
     expect(
-      (await call(owner, "GET", `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/x/model-account`))
-        .status,
+      (
+        await call(
+          owner,
+          "GET",
+          `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/x/model-account`,
+        )
+      ).status,
     ).toBe(404);
   });
 
@@ -199,7 +204,10 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     expect(initial.status).toBe(200);
     expect(initial.json).toMatchObject({ personalFallbackOptIn: false, version: 0 });
 
-    const on = await call(owner, "PATCH", path, { personalFallbackOptIn: true, expectedVersion: 0 });
+    const on = await call(owner, "PATCH", path, {
+      personalFallbackOptIn: true,
+      expectedVersion: 0,
+    });
     expect(on.status).toBe(200);
     expect(on.json).toMatchObject({ personalFallbackOptIn: true, version: 1 });
 
@@ -219,9 +227,7 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
 
     // Another organization's member neither reads nor writes this person's row.
     expect((await call(stranger, "GET", path)).status).toBe(404);
-    expect((await call(stranger, "PATCH", path, { personalFallbackOptIn: true })).status).toBe(
-      404,
-    );
+    expect((await call(stranger, "PATCH", path, { personalFallbackOptIn: true })).status).toBe(404);
     const after = await call(owner, "GET", path);
     expect(after.json).toMatchObject({ personalFallbackOptIn: true, version: 1 });
     // The stranger's own preferences in their own organization are independent.

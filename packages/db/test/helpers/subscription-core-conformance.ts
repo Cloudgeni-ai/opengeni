@@ -4318,7 +4318,7 @@ export function describeSubscriptionCoreConformance<Credential>(
 
       test("SUB-SEL-02, SUB-ELIG-05: the picker offers the pool and only the caller's own personal accounts", async () => {
         const org = await organization();
-        const shared = await sharedConnection(org, `pick-shared-${crypto.randomUUID()}`);
+        const pooled = await sharedConnection(org, `pick-shared-${crypto.randomUUID()}`);
         const personal = await personalConnection(org, `pick-personal-${crypto.randomUUID()}`);
         const foreignPersonal = await foreignPersonalConnection(org);
         const member = await workspaceMember(org);
@@ -4326,16 +4326,16 @@ export function describeSubscriptionCoreConformance<Credential>(
         const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
         // The owner's private session may use the pool and their own account.
         expect(await offered(privateTurn, org.ownerSubjectId)).toEqual({
-          [shared]: "choosable",
+          [pooled]: "choosable",
           [personal]: "choosable",
         });
         // In a shared session the personal account is listed for its owner but
         // cannot be chosen; another person never sees it.
         expect(await offered(sharedTurn, org.ownerSubjectId)).toEqual({
-          [shared]: "choosable",
+          [pooled]: "choosable",
           [personal]: "personal_not_owner_work",
         });
-        expect(await offered(sharedTurn, member)).toEqual({ [shared]: "choosable" });
+        expect(await offered(sharedTurn, member)).toEqual({ [pooled]: "choosable" });
         // Another person cannot read the owner's private session at all.
         expect(await picker(privateTurn, member)).toBeNull();
         // The foreign provider's and the other kind's rows are never offered.
@@ -4353,14 +4353,14 @@ export function describeSubscriptionCoreConformance<Credential>(
         const off = await picker(privateTurn, org.ownerSubjectId);
         expect(off!.personal).toMatchObject({ connectionsAllowed: false });
         expect(await offered(privateTurn, org.ownerSubjectId)).toEqual({
-          [shared]: "choosable",
+          [pooled]: "choosable",
           [personal]: "personal_not_allowed",
         });
       });
 
       test("SUB-SEL-04, D-28: the owner chooses their personal account for their private session; the database refuses it anywhere else", async () => {
         const org = await organization();
-        const shared = await sharedConnection(org, `choose-shared-${crypto.randomUUID()}`);
+        const pooled = await sharedConnection(org, `choose-shared-${crypto.randomUUID()}`);
         const personal = await personalConnection(org, `choose-personal-${crypto.randomUUID()}`);
         const member = await workspaceMember(org);
         // Without fallback consent, automatic placement prefers the pool.
@@ -4371,7 +4371,7 @@ export function describeSubscriptionCoreConformance<Credential>(
           visibility: "user_private",
           personalAuthority: true,
         });
-        expect(await placeChecked(first)).toMatchObject({ kind: "run", connectionId: shared });
+        expect(await placeChecked(first)).toMatchObject({ kind: "run", connectionId: pooled });
         const chosen = await choose(first, org.ownerSubjectId, personal);
         expect(chosen).toMatchObject({
           outcome: "changed",
@@ -4421,9 +4421,9 @@ export function describeSubscriptionCoreConformance<Credential>(
         const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
         expect((await choose(sharedTurn, org.ownerSubjectId, personal)).outcome).toBe("refused");
         // Any member may choose a pool account for a shared session.
-        expect(await choose(sharedTurn, member, shared)).toMatchObject({
+        expect(await choose(sharedTurn, member, pooled)).toMatchObject({
           outcome: "changed",
-          connectionId: shared,
+          connectionId: pooled,
         });
         // Another person's personal account is never found, in their own
         // private session or the owner's shared one.

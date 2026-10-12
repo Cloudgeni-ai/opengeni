@@ -11,18 +11,18 @@ import {
 import type { z } from "zod";
 import type {
   ModelAccountPreferences,
-  SessionModelAccountChoice,
+  SessionModelAccountChoiceResponse,
   SetSessionModelAccountChoiceRequest,
-  SetSessionModelAccountChoiceResult,
+  SetSessionModelAccountChoiceResponse,
   UpdateModelAccountPreferencesRequest,
 } from "../src/types";
 
 test("model-account choice and preference shapes are parity-pinned", () => {
   // Server -> client: what the API returns is what the SDK declares.
-  const choice = (v: z.infer<typeof ContractChoice>): SessionModelAccountChoice => v;
+  const choice = (v: z.infer<typeof ContractChoice>): SessionModelAccountChoiceResponse => v;
   const setResult = (
     v: z.infer<typeof ContractSetChoiceResult>,
-  ): SetSessionModelAccountChoiceResult => v;
+  ): SetSessionModelAccountChoiceResponse => v;
   const preferences = (v: z.infer<typeof ContractPreferences>): ModelAccountPreferences => v;
   // Client -> server: every SDK request is a valid contract input.
   const setChoice = (v: SetSessionModelAccountChoiceRequest): z.input<typeof ContractSetChoice> =>
