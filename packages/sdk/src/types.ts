@@ -4194,9 +4194,25 @@ export type ModelAccountChoiceRefusal =
   | "session_has_no_owner";
 
 /**
- * One account the model picker may list for a session: a shared account of
- * the workspace's pool or the caller's own personal account.
+ * Cached usage, not a live check or a promise of available capacity. Source/time
+ * describe the snapshot, not each retained window. A past reset does not prove replenishment.
  */
+export type ModelAccountUsageSnapshot = {
+  /** Snapshot-level time, not the observation time of every retained window. */
+  observedAt: string | null;
+  source: "usage_endpoint" | "response_headers" | "refusal" | null;
+  windows: Array<{
+    id: string;
+    /** Null means unknown; values over 100 can represent overage. */
+    usedPercent: number | null;
+    resetsAt: string | null;
+    status: "ok" | "warning" | "exhausted" | "unknown";
+  }>;
+  exhaustedUntil: string | null;
+  exhaustedKind: "quota" | "rate_limit" | null;
+};
+
+/** An already-visible account, with optional cached usage (never an eligibility decision). */
 export type ModelAccountChoiceOption = {
   provider: string;
   connectionId: string;
@@ -4209,6 +4225,8 @@ export type ModelAccountChoiceOption = {
   allowedModelIds: string[] | null;
   choosable: boolean;
   refusal: ModelAccountChoiceRefusal | null;
+  /** Omitted on older servers; null means no decodable stored snapshot. Readings may be partial or stale. */
+  usage?: ModelAccountUsageSnapshot | null | undefined;
 };
 
 /** A session's current account, what it may switch to, and the effective personal settings. */

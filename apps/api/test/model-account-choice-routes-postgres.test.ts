@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
@@ -18,6 +18,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { Hono } from "hono";
+import { sql } from "drizzle-orm";
 import { createApp } from "../src/app";
 
 // Explicit model-account choice and personal preference routes over real
@@ -193,6 +194,9 @@ let stranger: Human;
 let colleague: Human;
 let sessionId = "";
 let sharedSessionId = "";
+const network = spyOn(globalThis, "fetch").mockImplementation((async () => {
+  throw new Error("Model-account reads must not poll upstream providers");
+}) as unknown as typeof fetch);
 
 async function ownerSession(visibility: "user_private" | "workspace_shared"): Promise<string> {
   const session = await withSessionRlsActorContext({ subjectId: owner.subjectId }, () =>
@@ -229,8 +233,11 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  const networkCalls = network.mock.calls.length;
+  network.mockRestore();
   await client?.close().catch(() => undefined);
   await shared?.release();
+  expect(networkCalls).toBe(0);
 }, 60_000);
 
 describe.skipIf(!realDb)("model-account choice routes", () => {
@@ -416,5 +423,143 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     );
     expect(preferences.status).toBe(200);
     expect(preferences.json).toMatchObject({ personalFallbackOptIn: false, version: 0 });
+  });
+
+  test("cached usage follows the existing full-app account visibility boundary without refresh or writes", async () => {
+    const posture = await client!.db.execute(sql`
+      select current_user, rolsuper, rolbypassrls,
+        (select pg_get_userbyid(relowner) <> current_user from pg_class
+          where oid = 'subscription_connections'::regclass) as non_owner
+      from pg_roles where rolname = current_user`);
+    expect(posture[0]).toMatchObject({ rolsuper: false, rolbypassrls: false, non_owner: true });
+
+    const admin = shared!.admin;
+    const observedAt = "2020-01-01T00:00:00.000Z";
+    const quota = {
+      windows: [
+        { id: "primary", usedPercent: 100, resetsAt: Date.parse(observedAt), status: "exhausted" },
+        { id: "secondary", usedPercent: null, resetsAt: null, status: "unknown" },
+      ],
+      modelCooldowns: { "private-model-marker": 123 },
+      exhaustedUntil: Date.parse(observedAt),
+      exhaustedKind: "quota",
+      source: "response_headers",
+    };
+    async function connection(
+      who: Human,
+      label: string,
+      personal: boolean,
+      withQuota = true,
+      hiddenScope = false,
+    ) {
+      const id = crypto.randomUUID();
+      const [membership] = await admin`select id from organization_memberships
+        where account_id = ${who.accountId} and subject_id = ${who.subjectId} and status = 'active'`;
+      const authorityId = personal ? crypto.randomUUID() : null;
+      if (personal)
+        await admin`insert into organization_user_resource_authorities
+        (id, account_id, organization_membership_id, resource_kind, resource_id, generation, status)
+        values (${authorityId}, ${who.accountId}, ${membership!.id}, 'subscription_connection', ${id}, 1, 'active')`;
+      await admin`insert into subscription_connections
+        (id, account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+         owner_organization_membership_id, owner_subject_id, authority_id, authority_resource_kind,
+         authority_generation, provider_account_id, provider_subject_id, label, provider_state, refresh_generation)
+        values (${id}, ${who.accountId}, 'codex', 'subscription', 'private-credential-marker',
+          ${personal ? "personal" : "shared"}, ${personal ? "people" : hiddenScope ? "workspaces" : "organization"},
+          ${personal ? membership!.id : null}, ${personal ? who.subjectId : null}, ${authorityId},
+          ${personal ? "subscription_connection" : null}, ${personal ? 1 : null},
+          ${id}, ${id}, ${label}, ${admin.json({ secret: "private-provider-marker" })}, 9)`;
+      if (withQuota)
+        await admin`insert into subscription_connection_quota
+        (account_id, connection_id, quota, observed_refresh_generation, revision, updated_at)
+        values (${who.accountId}, ${id}, ${admin.json(quota)}, 1, 4, ${observedAt})`;
+      return id;
+    }
+    await admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${owner.accountId}, 'codex', true) on conflict (account_id, provider) do update set enabled = true`;
+    const poolId = await connection(owner, "Shared cached", false);
+    const unknownId = await connection(owner, "Shared unknown", false, false);
+    const mineId = await connection(owner, "Owner personal cached", true);
+    const theirsId = await connection(colleague, "Colleague personal cached", true);
+    const hiddenId = await connection(owner, "Outside workspace scope", false, true, true);
+    const foreignId = await connection(stranger, "Another organization", false);
+    const before =
+      await admin`select * from subscription_connection_quota where connection_id = ${poolId}`;
+    const path = `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sharedSessionId}/model-account`;
+    const response = await app!.request(`${ORIGIN}${path}`, { headers: { cookie: owner.cookie } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const result = (await response.json()) as {
+      accounts: Array<{ connectionId: string; usage: unknown }>;
+    };
+    expect(result.accounts.map((a) => a.connectionId).sort()).toEqual(
+      [poolId, unknownId, mineId].sort(),
+    );
+    expect(result.accounts.find((a) => a.connectionId === poolId)?.usage).toEqual({
+      observedAt,
+      source: "response_headers",
+      exhaustedUntil: observedAt,
+      exhaustedKind: "quota",
+      windows: [
+        { id: "primary", usedPercent: 100, resetsAt: observedAt, status: "exhausted" },
+        { id: "secondary", usedPercent: null, resetsAt: null, status: "unknown" },
+      ],
+    });
+    expect(result.accounts.find((a) => a.connectionId === unknownId)?.usage).toBeNull();
+    expect(result.accounts.find((a) => a.connectionId === mineId)?.usage).not.toBeNull();
+    const other = await call(colleague, "GET", path);
+    expect(other.status).toBe(200);
+    expect(
+      (other.json.accounts as Array<{ connectionId: string }>).map((a) => a.connectionId).sort(),
+    ).toEqual([poolId, unknownId, theirsId].sort());
+    for (const value of [
+      mineId,
+      hiddenId,
+      foreignId,
+      "private-credential-marker",
+      "private-provider-marker",
+      "private-model-marker",
+    ])
+      expect(JSON.stringify(other.json)).not.toContain(value);
+    expect((await call(null, "GET", path)).status).toBe(401);
+    expect([403, 404]).toContain((await call(stranger, "GET", path)).status);
+    const privatePath = `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sessionId}/model-account`;
+    expect((await call(colleague, "GET", privatePath)).status).toBe(404);
+    const operations: SessionAuthorizationOperation[] = [];
+    const denied = await call(
+      owner,
+      "GET",
+      path,
+      undefined,
+      ORIGIN,
+      fullApp({
+        authorizeSession: async ({ operation }) => {
+          operations.push(operation);
+          return { allowed: false, reason: "forbidden" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      }),
+    );
+    expect(denied.status).toBe(404);
+    expect(operations).toEqual(["session.read"]);
+    expect(JSON.stringify(denied.json)).not.toContain(poolId);
+
+    // A once-visible binding does not reveal an account or its quota after
+    // the existing provider visibility gate removes it from this caller's list.
+    expect((await call(owner, "PUT", privatePath, { connectionId: poolId })).status).toBe(200);
+    await admin`update subscription_provider_cutovers set enabled = false
+      where account_id = ${owner.accountId} and provider = 'codex'`;
+    const hiddenBinding = await call(owner, "GET", privatePath);
+    expect(hiddenBinding.status).toBe(200);
+    expect(hiddenBinding.json.accounts).toEqual([]);
+    expect(hiddenBinding.json.binding).toEqual({
+      provider: "codex",
+      connectionId: null,
+      choice: "explicit",
+    });
+    expect(JSON.stringify(hiddenBinding.json)).not.toContain(poolId);
+    const after =
+      await admin`select * from subscription_connection_quota where connection_id = ${poolId}`;
+    expect(after).toEqual(before);
   });
 });
