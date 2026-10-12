@@ -95,6 +95,10 @@ async function renderForm(questions: HumanInputQuestion[], options: FormOptions 
   return { container: mounted.container, submissions };
 }
 
+function secretAnswersOf(response: SubmitHumanInputResponseRequest | undefined) {
+  return response && "secretAnswers" in response ? response.secretAnswers : undefined;
+}
+
 function secretInput(container: HTMLElement): HTMLInputElement {
   const input = container.querySelector<HTMLInputElement>('input[name^="secret-"]');
   if (!input) throw new Error("secret input not rendered");
@@ -401,7 +405,7 @@ describe("secret ask card: browser and password-manager attributes", () => {
 
     await typeSecret(password, SECRET);
     await submit(container);
-    expect(submissions[0]?.secretAnswers).toEqual([
+    expect(secretAnswersOf(submissions[0])).toEqual([
       { questionId: "github", value: SECRET, username: "octocat", saveTo: "user" },
     ]);
   });
@@ -435,7 +439,7 @@ describe("secret ask card: Generate", () => {
     );
     expect(reactTreeContains(container, GENERATED)).toBe(false);
     await submit(container);
-    expect(submissions[0]?.secretAnswers).toEqual([
+    expect(secretAnswersOf(submissions[0])).toEqual([
       { questionId: "github", value: GENERATED, saveTo: "user" },
     ]);
     expect(input.value).toBe("");
@@ -471,7 +475,7 @@ describe("secret ask card: Generate", () => {
     ]);
     await click(button(container, "Generate"));
     await submit(container);
-    expect(submissions[0]?.secretAnswers).toEqual([
+    expect(secretAnswersOf(submissions[0])).toEqual([
       { questionId: "github", generate: {}, saveTo: "user" },
     ]);
   });
@@ -496,7 +500,7 @@ describe("secret ask card: hints and soft pattern warning", () => {
     expect(container.textContent).toContain("This doesn't look like sk-…. You can still send it.");
     expect(input.getAttribute("aria-invalid")).toBe("false");
     await submit(container);
-    expect(submissions[0]?.secretAnswers).toEqual([
+    expect(secretAnswersOf(submissions[0])).toEqual([
       { questionId: "github", value: "not-a-key", saveTo: "user" },
     ]);
   });
@@ -553,7 +557,7 @@ describe("secret ask card: Save to", () => {
     expect(container.textContent).not.toContain("Saves to Release");
     await typeSecret(secretInput(container), SECRET);
     await submit(container);
-    expect(submissions[0]?.secretAnswers).toEqual([
+    expect(secretAnswersOf(submissions[0])).toEqual([
       { questionId: "github", value: SECRET, saveTo: "workspace" },
     ]);
   });
@@ -570,7 +574,7 @@ describe("secret ask card: Save to", () => {
     );
     await typeSecret(secretInput(container), SECRET);
     await submit(container);
-    expect(submissions[0]?.secretAnswers?.[0]?.saveTo).toBe("user");
+    expect(secretAnswersOf(submissions[0])?.[0]?.saveTo).toBe("user");
   });
 
   test("resolveSecretSaveTo and secretVaultForTarget", () => {
