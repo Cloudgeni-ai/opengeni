@@ -19,8 +19,9 @@ import type {
 
 test("model-account settings responses and requests are parity-pinned", () => {
   // Server -> client: what the API returns is what the SDK declares.
-  const organization = (v: z.infer<typeof ContractOrganization>): OrganizationModelAccountSettings =>
-    v;
+  const organization = (
+    v: z.infer<typeof ContractOrganization>,
+  ): OrganizationModelAccountSettings => v;
   const workspace = (v: z.infer<typeof ContractWorkspace>): WorkspaceModelAccountSettings => v;
   const overview = (v: z.infer<typeof ContractOverview>): ModelAccountSettingsOverview => v;
   // Client -> server: every SDK request is a valid contract input.
