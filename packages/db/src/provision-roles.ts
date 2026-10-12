@@ -9,6 +9,9 @@ import {
   SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES,
   WORK_CLAIM_CAPABILITY_ROUTINES,
   SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES,
+  SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
+  SUBSCRIPTION_RETIRED_ROUTINES,
+  SUBSCRIPTION_RENAMED_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -531,6 +534,21 @@ async function grantAppRoleIfSchemaExists(
     )
     .join(", ")}]::text[][]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
+  // Provisioning may run before retirement. Keep the old owner-only ACLs
+  // through the same atomic DO statement as the schema-wide EXECUTE grant;
+  // a later readiness failure cannot undo a committed privilege exposure.
+  // Derive the signatures from the retirement inventory, not a second list
+  // of dead names. After retirement these conditional revokes are no-ops.
+  const twins = new Set<string>(SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES);
+  const retiringOwnerOnlyRoutines = `ARRAY[${[
+    ...SUBSCRIPTION_RETIRED_ROUTINES.filter(
+      ({ schema: home, signature }) =>
+        home !== "target" && !twins.has(signature) && !signature.endsWith("()"),
+    ).map(({ schema: home, signature }) => `${home}.${signature}`),
+    ...SUBSCRIPTION_RENAMED_ROUTINES.map(({ schema: home, from }) => `${home}.${from}`),
+  ]
+    .map(literal)
+    .join(", ")}]::text[]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "maintain_usage_allowances(integer,integer)",
     "usage_allowance_command(jsonb)",
@@ -2110,6 +2128,12 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ${retiringOwnerOnlyRoutines} LOOP
+      IF to_regprocedure(routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, %I',
+          routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_connection_visible(uuid,uuid,uuid,text,text,uuid,text,text)',
       'authorize_subscription_ownerless_session_access(uuid,uuid,uuid,uuid)',

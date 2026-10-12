@@ -5497,17 +5497,25 @@ Every refusal rolls back the whole migration, and nothing is committed:
 | SQLSTATE | Message | Meaning and fix |
 |---|---|---|
 | `55000` | `0721 requires explicit application database roles` or `received invalid application roles` | The role list is missing or malformed. Pass it and run again. |
-| `55000` | `0721 requires drained application sessions` | A listed login, or another non-superuser login that could execute a retired routine, is connected. Stop it and run again. |
+| `55000` | `0721 requires drained application sessions` | A listed login, or another non-superuser login that could execute a retired routine or write an affected table, is connected. This includes transitive `SET ROLE` access by `NOINHERIT` logins, before or after switching roles. Stop it and run again. |
 | `55000` | `0721 requires the provider cutover receipts (0712)` or `the committed cutover receipt of every provider; missing: <providers>` | A cutover has not committed. Complete 0719 or 0720 first. |
 | `55000` | `0721 found a retired routine missing or changed`, `an unexpected overload of a retired routine`, `a retired policy missing`, `a retired trigger missing or changed`, `the reach table, its view, its default or the connection key changed`, or `a reach routine` (or `reach trigger`, `reach policy`) `missing, changed or already renamed` | The schema differs from what 0719 and 0720 leave. Something changed it out of band, so do not edit around it: restore the step 3 backup or escalate. |
-| `2BP01` | `0721 found a kept object that depends on a retired routine`, `names a retired object` or `names a Codex-named reach object` | Something that stays still calls or names a retired object: a routine (SQL-standard bodies included), a policy, a trigger's `WHEN` clause or arguments, a view, a default or a `CHECK` constraint. It may name the object literally or build the name at run time, as a `format()` pattern or as literals concatenated around the provider. Escalate; never drop it by hand. |
+| `2BP01` | `0721 found a kept object that depends on a retired routine`, `names a retired object` or `names a Codex-named reach object` | Something that stays still calls or names a retired object: a routine (SQL-standard bodies included), a policy, a trigger's `WHEN` clause or arguments, a view, a default or a `CHECK` constraint. Matching is case-insensitive and covers `format()` patterns and ordinary or dollar-quoted fragments concatenated around the provider. Escalate; never drop it by hand. |
 | `55000` | `0721 received an invalid retired name` | A defect in the migration's own lists. Escalate. |
 | `23503` | `0721 found a reach row whose provider is not its connection's` | Fix it as in step 1 and run again. |
 | `55P03` | lock timeout | A session still holds a table. Drain it and run again. |
 
-**5. Provision roles and start.** Run `db:provision-roles`. It no longer
-names a dropped object, and it revokes the renamed reach trigger functions
-by their new names. Then start only binaries of this release.
+The FK validation temporarily removes FORCE RLS from
+`subscription_connections` within the migration transaction so the restricted
+schema owner can validate populated reach rows, then restores it. A refusal
+rolls back that change together with the migration; runtime sessions remain
+drained throughout.
+
+**5. Provision roles and start.** Run `db:provision-roles`. Its inventory-derived
+conditional revokes protect old owner-only helpers if provisioning runs before
+retirement and become no-ops after those objects disappear. It also revokes the
+renamed reach trigger functions by their new names. Then start only binaries
+of this release.
 
 **6. Validate after start.** Runtime posture is ready on every API and
 worker; the posture checks that every retired object is absent.

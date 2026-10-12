@@ -444,6 +444,25 @@ describe("M4 C4 Claude entry", () => {
 });
 
 describe("M4 R shared pool entry", () => {
+  test("blocks pool-access helpers and historical grant fixtures from runtime source", () => {
+    for (const name of [
+      "withSubscriptionPoolSessionAccess",
+      "withTemporaryPoolSessionAccessInTransaction",
+    ]) {
+      for (const code of [
+        `import { ${name} } from '@opengeni/db';`,
+        `export { ${name} } from '@opengeni/db';`,
+        `await ${name}(db, args, work);`,
+      ])
+        expect(pool("packages/db/src/probe.ts", code).length).toBeGreaterThan(0);
+    }
+    for (const code of [
+      'import { restorePreRetirementGrants } from "../test/fixtures/pre-retirement-grants";',
+      'export * from "../test/fixtures/pre-retirement-grants";',
+      'const fixture = await import("../test/fixtures/pre-retirement-grants");',
+    ])
+      expect(pool("packages/db/src/probe.ts", code)).toHaveLength(1);
+  });
   test("rejects the synthetic pool subjects, their helpers and every templated subject", () => {
     for (const code of [
       "const subject = subscriptionPoolWorkerSubject(provider);",

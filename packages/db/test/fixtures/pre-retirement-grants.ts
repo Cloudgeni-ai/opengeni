@@ -11,14 +11,15 @@ const TWINS = new Set<string>(SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES);
 /**
  * Restores, after provisionRoles, the runtime grants the last release before
  * the drained retirement migration (0721) gave the objects 0721 retires. This
- * release's provision-roles names no retired object, so a test database that
+ * release's provision-roles no longer grants the retired pool routines, so a test database that
  * models the window before 0721 (the retirement held back) calls this to
  * stand where that release left it:
  * - the runtime role executes the SuperGrok and Claude pool routines and
  *   PUBLIC does not (0234 granted the SuperGrok ones itself; only
  *   provision-roles granted the Claude ones);
  * - the Codex connection target, auto-assignment apply routine, writer
- *   context and Codex-named trigger functions stay owner-only.
+ *   context and Codex-named trigger functions stay owner-only (production
+ *   provisioning also keeps these conditional revokes before retirement).
  * The Codex twins need nothing: provision-roles' schema-wide grant on
  * opengeni_private already lets the runtime role execute them.
  */

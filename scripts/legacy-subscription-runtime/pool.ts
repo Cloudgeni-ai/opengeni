@@ -40,6 +40,8 @@ export const LEGACY_POOL_RUNTIME: LegacySubscriptionRetirement = {
   identifiers: [
     "subscriptionPoolWorkerSubject",
     "isSubscriptionPoolWorkerSubject",
+    "withSubscriptionPoolSessionAccess",
+    "withTemporaryPoolSessionAccessInTransaction",
     ...SUBSCRIPTION_RETIRED_ROUTINE_NAMES,
     ...new Set(SUBSCRIPTION_RETIRED_POLICIES.map(({ policy }) => policy)),
     ...SUBSCRIPTION_RETIRED_TRIGGERS.map(({ trigger }) => trigger),
@@ -95,6 +97,7 @@ export const LEGACY_POOL_RUNTIME: LegacySubscriptionRetirement = {
       message: "Retired provider-templated legacy subscription routine",
     },
   ],
+  testFixtures: /pre-retirement-grants/,
   exceptions: {
     "packages/db/src/runtime-posture.ts": {
       declarations: [

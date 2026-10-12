@@ -114,12 +114,14 @@ const regprocedure = (schema: string, signature: string) =>
  * migration's preflight refuses.
  */
 function namesAny(body: string, names: readonly string[]): boolean {
-  if (new RegExp(`(?<![A-Za-z0-9_])(?:${names.join("|")})(?![A-Za-z0-9_])`).test(body)) return true;
+  if (new RegExp(`(?<![A-Za-z0-9_])(?:${names.join("|")})(?![A-Za-z0-9_])`, "i").test(body))
+    return true;
+  const boundary = String.raw`(?:'|\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$|%[-0-9$*]*[sIL])`;
   return names.some((name) => {
     const [, head, , tail] = /^(.*?)(xai|claude|codex)(.*)$/.exec(name)!;
     return (
-      new RegExp(`(?:'|%[-0-9$*]*[sIL])${tail}(?![A-Za-z0-9_])`).test(body) &&
-      (head === "" || new RegExp(`(?<![A-Za-z0-9_])${head}(?:'|%)`).test(body))
+      new RegExp(`${boundary}${tail}(?![A-Za-z0-9_])`, "i").test(body) &&
+      (head === "" || new RegExp(`(?<![A-Za-z0-9_])${head}${boundary}`, "i").test(body))
     );
   });
 }
@@ -405,6 +407,11 @@ beforeAll(async () => {
   } finally {
     await client.close();
   }
+  // A populated upgrade, not merely an empty reach-table validation. The
+  // restricted migration owner must validate this row and preserve it.
+  await database.admin`insert into ${database.admin(CODEX_REACH)}
+      (account_id, provider, connection_id, shared_workspaces, personal_workspaces, allocator_enabled, allowed_model_ids)
+    values (${org.accountId}::uuid, 'codex', ${connections.reach}::uuid, true, false, true, null)`;
   // Forensic rows in two factory tables the runtime must never read again.
   await database.admin.begin(async (tx) => {
     await tx`SET LOCAL session_replication_role = replica`;
@@ -438,6 +445,45 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
     });
     expect(diff(before, await catalog())).toEqual(NO_CHANGE);
     expect(await ledger()).toBe(0);
+  }, 180_000);
+
+  test("provisioning before retirement never exposes the retired owner-only helpers", async () => {
+    const ownerOnly = [
+      "opengeni_private.subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+      "opengeni_private.apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
+      "opengeni_subscription_internal.subscription_codex_writer_context(uuid, uuid, text)",
+      ...SUBSCRIPTION_RENAMED_ROUTINES.map(({ schema, from }) => `${schema}.${from}`),
+    ];
+    // Start with the previous release's owner-only ACL, then reprovision
+    // with this release while the retired routines still exist.
+    for (const routine of ownerOnly) {
+      await database!.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${routine} FROM opengeni_app`);
+    }
+    const before = await catalog();
+    await provisionRoles(database!.adminUrl, { appPassword: database!.appPassword });
+    const app = postgres(appUrl(), { max: 1, onnotice: () => undefined });
+    try {
+      for (const routine of ownerOnly) {
+        // Resolve as owner: the application cannot even name routines in
+        // the internal schema, but its EXECUTE ACL must still be absent.
+        const [target] = await owner!`select ${routine}::regprocedure::oid as oid`;
+        const [access] =
+          await app`select has_function_privilege(${target!.oid}::oid, 'EXECUTE') as executable`;
+        expect({ routine, executable: access!.executable }).toEqual({ routine, executable: false });
+      }
+      await expect(
+        Promise.resolve(app`select opengeni_private.subscription_codex_connection_target(
+        NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::bigint)`),
+      ).rejects.toMatchObject({ code: "42501" });
+      await expect(
+        Promise.resolve(app`select opengeni_private.apply_subscription_codex_auto_assignments(
+        ${org.accountId}::uuid, gen_random_uuid(), false)`),
+      ).rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await app.end();
+      await drained();
+    }
+    expect(diff(before, await catalog())).toEqual(NO_CHANGE);
   }, 180_000);
 
   test("a connected application session refuses (the window is not drained)", async () => {
@@ -476,6 +522,74 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
       await unlisted.end();
       await database!.admin.unsafe(`DROP OWNED BY "${role}"`);
       await database!.admin.unsafe(`DROP ROLE "${role}"`);
+    }
+    expect(diff(pending, await catalog())).toEqual(NO_CHANGE);
+  }, 180_000);
+
+  test("connected NOINHERIT logins with transitive SET ROLE access refuse before and after switching", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const login = `r0721_login_${suffix}`;
+    const bridge = `r0721_bridge_${suffix}`;
+    const executor = `r0721_executor_${suffix}`;
+    const password = crypto.randomUUID().replaceAll("-", "");
+    const url = new URL(database!.ownerUrl);
+    const name = url.pathname.slice(1);
+    url.username = login;
+    url.password = password;
+    await database!.admin.unsafe(`CREATE ROLE "${executor}" NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+    await database!.admin.unsafe(
+      `CREATE ROLE "${bridge}" NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS`,
+    );
+    await database!.admin.unsafe(
+      `CREATE ROLE "${login}" LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS PASSWORD '${password}'`,
+    );
+    const client = postgres(url.toString(), { max: 1, onnotice: () => undefined });
+    try {
+      await database!.admin.unsafe(`GRANT CONNECT ON DATABASE "${name}" TO "${login}"`);
+      await database!.admin.unsafe(
+        `GRANT "${executor}" TO "${bridge}" WITH INHERIT FALSE, SET TRUE`,
+      );
+      await database!.admin.unsafe(`GRANT "${bridge}" TO "${login}" WITH INHERIT FALSE, SET TRUE`);
+      for (const access of ["routine", "table"] as const) {
+        const object =
+          access === "routine"
+            ? "FUNCTION xai_subscription_pool_visible(uuid, uuid, text, text, uuid)"
+            : "TABLE xai_rotation_settings";
+        const privilege = access === "routine" ? "EXECUTE" : "UPDATE";
+        await database!.admin.unsafe(`GRANT ${privilege} ON ${object} TO "${executor}"`);
+        for (const switched of [false, true]) {
+          await client.unsafe(switched ? `SET ROLE "${executor}"` : "RESET ROLE");
+          const [authority] = await client`
+            select current_user as effective_role, session_user as login_role,
+              pg_has_role(session_user, ${executor}, 'SET') as can_set,
+              has_function_privilege(session_user,
+                'xai_subscription_pool_visible(uuid,uuid,text,text,uuid)', 'EXECUTE') as login_execute,
+              has_table_privilege(session_user, 'xai_rotation_settings', 'UPDATE') as login_update`;
+          expect(authority).toEqual({
+            effective_role: switched ? executor : login,
+            login_role: login,
+            can_set: true,
+            login_execute: false,
+            login_update: false,
+          });
+          if (switched && access === "routine") {
+            await client`select xai_subscription_pool_visible(NULL::uuid, NULL::uuid,
+              NULL::text, NULL::text, NULL::uuid)`;
+          }
+          await refused(
+            "55000",
+            "0721 requires drained application sessions (a connected role outside the listed application roles can use a retired object)",
+          );
+        }
+        await client`RESET ROLE`;
+        await database!.admin.unsafe(`REVOKE ${privilege} ON ${object} FROM "${executor}"`);
+      }
+    } finally {
+      await client.end();
+      for (const role of [login, bridge, executor]) {
+        await database!.admin.unsafe(`DROP OWNED BY "${role}"`);
+        await database!.admin.unsafe(`DROP ROLE "${role}"`);
+      }
     }
     expect(diff(pending, await catalog())).toEqual(NO_CHANGE);
   }, 180_000);
@@ -696,6 +810,47 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
     expect(diff(pending, await catalog())).toEqual(NO_CHANGE);
   }, 300_000);
 
+  test("uppercase kept calls refuse without changing catalogs or the ledger", async () => {
+    await database!.admin.unsafe(`CREATE FUNCTION public.r0721_uppercase() RETURNS boolean
+      LANGUAGE plpgsql AS $body$ BEGIN
+        RETURN XAI_SUBSCRIPTION_POOL_VISIBLE(NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::uuid);
+      END $body$`);
+    try {
+      await database!.admin`select public.r0721_uppercase()`;
+      await refused(
+        "2BP01",
+        "0721 found a kept object that names a retired object: routine r0721_uppercase()",
+      );
+    } finally {
+      await database!.admin`DROP FUNCTION public.r0721_uppercase()`;
+    }
+    expect(diff(pending, await catalog())).toEqual(NO_CHANGE);
+  }, 180_000);
+
+  test("dollar-quoted kept calls refuse without changing catalogs or the ledger", async () => {
+    // Exercise actual callers, independently of the namesAny audit helper.
+    for (const expression of [
+      `$prefix$SELECT $prefix$ || provider || $suffix$_subscription_pool_visible(NULL::uuid,NULL::uuid,NULL::text,NULL::text,NULL::uuid)$suffix$`,
+      `$$SELECT $$ || provider || $$_SUBSCRIPTION_POOL_VISIBLE(NULL::uuid,NULL::uuid,NULL::text,NULL::text,NULL::uuid)$$`,
+      `$prefix$SELECT * FROM resolve_$prefix$ || provider || $suffix$_authority_pool(NULL::uuid,NULL::uuid,NULL::text,NULL::jsonb) LIMIT 0$suffix$`,
+    ]) {
+      await database!.admin.unsafe(`CREATE FUNCTION public.r0721_dollar_quoted() RETURNS void
+        LANGUAGE plpgsql AS $body$ DECLARE provider text := 'xai'; BEGIN
+          EXECUTE ${expression};
+        END $body$`);
+      try {
+        await database!.admin`select public.r0721_dollar_quoted()`;
+        await refused(
+          "2BP01",
+          "0721 found a kept object that names a retired object: routine r0721_dollar_quoted()",
+        );
+      } finally {
+        await database!.admin`DROP FUNCTION public.r0721_dollar_quoted()`;
+      }
+      expect(diff(pending, await catalog())).toEqual(NO_CHANGE);
+    }
+  }, 180_000);
+
   test("a reach row whose provider is not its connection's refuses without naming it", async () => {
     await database!.admin`
       insert into ${database!.admin(CODEX_REACH)} (account_id, provider, connection_id,
@@ -777,14 +932,13 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
       );
     }
     // Renamed routines keep their security mode, search path and owner and
-    // end owner-only (this database was provisioned before the rename, so
-    // the runtime role held EXECUTE on the Codex names); only the
+    // remain owner-only before and after the rename; only the
     // auto-assignment bodies change, to the new setting.
     for (const { schema, from, to } of SUBSCRIPTION_RENAMED_ROUTINES) {
       const before = pending.get(`routine ${regprocedure(schema, from)}`)!.split(" | ");
       const after = retired.get(`routine ${regprocedure(schema, to)}`)!.split(" | ");
       expect([after[0], after[1], after[3]]).toEqual([before[0], before[1], before[3]]);
-      expect(before[2]).toContain("opengeni_app=X/");
+      expect(before[2]).toBe(`{${before[3]}=X/${before[3]}}`);
       expect(after[2]).toBe(`{${after[3]}=X/${after[3]}}`);
       expect(after[4] === before[4]).toBe(from === "record_subscription_codex_plan_change()");
     }
@@ -1057,9 +1211,18 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
 
   test("auto-assignment runs through the provider-free trigger, function, policy and setting", async () => {
     const admin = database!.admin;
-    await admin`insert into ${admin(CORE_REACH)} (account_id, provider, connection_id,
-        shared_workspaces, personal_workspaces, allocator_enabled, allowed_model_ids)
-      values (${org.accountId}::uuid, 'codex', ${connections.reach}::uuid, true, false, true, null)`;
+    const existing = await admin`select provider, shared_workspaces, personal_workspaces,
+        allocator_enabled, allowed_model_ids from ${admin(CORE_REACH)}
+      where account_id = ${org.accountId}::uuid and connection_id = ${connections.reach}::uuid`;
+    expect([...existing]).toEqual([
+      {
+        provider: "codex",
+        shared_workspaces: true,
+        personal_workspaces: false,
+        allocator_enabled: true,
+        allowed_model_ids: null,
+      },
+    ]);
     // The trigger functions run as the NOBYPASSRLS owner, so only the
     // renamed owner-only policies, reading the provider-free setting, admit
     // their writes. The caller's value of the setting is restored.

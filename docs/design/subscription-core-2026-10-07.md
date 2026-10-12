@@ -4898,8 +4898,10 @@ transaction. Runbook:
 
 - **Preflight.** It changes nothing and refuses with a content-free `55000`
   unless: the migrator passed the application roles, and neither they nor
-  any other connected non-superuser role that could execute a retired
-  routine has a session (drained); the cutover receipt of every registered
+  any other connected non-superuser login that could execute a retired
+  routine or write an affected table has a session (drained). This includes
+  privileges reachable through transitive `SET ROLE` membership, even for
+  `NOINHERIT` logins and before they switch roles; the cutover receipt of every registered
   provider (`codex`, `xai`, `claude`) is committed
   (`opengeni_private.subscription_provider_cutover_committed`); every
   retired routine exists with its exact signature and no other overload of
@@ -4914,7 +4916,9 @@ transaction. Runbook:
   constraint for a retired name or a Codex reach name. It matches the name
   written literally or built at run time around its provider token, as a
   `format()` pattern (`'resolve_%s_authority_pool'`) or as concatenated
-  literals (`'resolve_' || provider || '_authority_pool'`). This also
+  literals (`'resolve_' || provider || '_authority_pool'`), including
+  tagged and untagged dollar-quoted fragments. Matching is case-insensitive
+  so unquoted uppercase calls cannot evade the check. This also
   covers the SQL that X4 and C4 leave deciding on stored v1 values
   (`admit_scheduled_agent_run_execution`,
   `record_scheduled_task_revision_authority` and their peers): none calls,
@@ -4996,19 +5000,33 @@ transaction. Runbook:
   - So the R release refuses a database that has not run 0721, and every
     older release refuses one that has, because its posture requires the
     dropped routines.
-- **provision-roles** names no dropped object. The twins' grants, the
-  writer context and connection target revokes and the apply routine's
-  revoke are gone. The renamed trigger functions are revoked by their new
+- **provision-roles** derives conditional owner-only revokes from the shared
+  retirement inventory, including the writer context, connection target,
+  apply routine and renamed trigger functions' old names. They run in the
+  same atomic block as the private-schema grants: provisioning before
+  retirement cannot expose those helpers. After retirement the conditional
+  revokes are no-ops; the renamed trigger functions are revoked by their new
   names.
+- **Reach validation.** The schema owner briefly removes FORCE RLS from
+  `subscription_connections` only inside the transactional foreign-key
+  validation window, then restores it. This lets a restricted migration
+  owner validate populated reach rows without runtime visibility filtering.
+  A failed validation rolls back the window too. Tests cover valid populated
+  reach and mismatched providers as a NOSUPERUSER, NOBYPASSRLS owner.
 - **Guard.** `scripts/legacy-subscription-runtime/pool.ts` (`pool`) rejects:
   - the synthetic subjects (`subscriptionPoolWorkerSubject`,
     `isSubscriptionPoolWorkerSubject`, and `worker:<provider>-workspace` in
     any spelling);
   - every retired routine name, from the shared list;
-  - the `"<legacy routine>".replace("xai" | "claude", provider)` shapes.
+  - the `"<legacy routine>".replace("xai" | "claude", provider)` shapes;
+  - `withSubscriptionPoolSessionAccess` and
+    `withTemporaryPoolSessionAccessInTransaction`;
+  - runtime imports of the `pre-retirement-grants` historical fixture.
 
   Its only exceptions are exact declarations: the posture inventory and the
-  historical migration tests.
+  historical `moveCodexCredentials` migration codec. Test files are outside
+  runtime scanning, but importing their historical fixture into runtime is
+  forbidden.
 - **Synthetic subjects.** `subscriptionPoolWorkerSubject`,
   `isSubscriptionPoolWorkerSubject` and the pool-only session-access
   helpers stay while X4's and C4's legacy callers remain on R's base: the

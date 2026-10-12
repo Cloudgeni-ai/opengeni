@@ -53,6 +53,9 @@ CREATE FUNCTION pg_temp.subscription_retirement_naming_objects(
 DECLARE
   name_pattern text;
   tail_pattern text;
+  -- A fragment may use an ordinary quote, an untagged/tagged dollar quote,
+  -- or a format placeholder. Dollar tags follow identifier spelling rules.
+  fragment_boundary text := '(''|\$([[:alpha:]_][[:alnum:]_]*)?\$|%[-0-9$*]*[sIL])';
   found text;
 BEGIN
   IF coalesce(cardinality(names), 0) = 0 OR EXISTS (SELECT 1 FROM unnest(names) name
@@ -62,7 +65,7 @@ BEGIN
   -- One literal and one tail prefilter keep the per-name check to the rare
   -- object that has a tail.
   SELECT '\m(' || string_agg(DISTINCT name, '|') || ')\M',
-    '(''|%[-0-9$*]*[sIL])(' || string_agg(DISTINCT parts[3], '|') || ')\M'
+    fragment_boundary || '(' || string_agg(DISTINCT parts[3], '|') || ')\M'
   INTO name_pattern, tail_pattern
   FROM unnest(names) name, regexp_match(name, '^(.*?)(xai|claude|codex)(.*)$') parts;
   SELECT string_agg(DISTINCT kept.object, ', ' ORDER BY kept.object) INTO found
@@ -106,11 +109,14 @@ BEGIN
     WHERE constraint_row.contype = 'c' AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
       AND namespace.nspname !~ '^pg_(toast_)?temp_'
   ) kept
-  WHERE kept.body ~ name_pattern
-    OR (kept.body ~ tail_pattern AND EXISTS (
+  -- Unquoted PostgreSQL identifiers fold to lowercase. A case-insensitive
+  -- search also conservatively refuses quoted lookalikes rather than missing
+  -- an executable uppercase call that has no pg_depend edge.
+  WHERE kept.body ~* name_pattern
+    OR (kept.body ~* tail_pattern AND EXISTS (
       SELECT 1 FROM unnest(names) name, regexp_match(name, '^(.*?)(xai|claude|codex)(.*)$') parts
-      WHERE kept.body ~ ('(''|%[-0-9$*]*[sIL])' || parts[3] || '\M')
-        AND (parts[1] = '' OR kept.body ~ ('\m' || parts[1] || '(''|%)'))));
+      WHERE kept.body ~* (fragment_boundary || parts[3] || '\M')
+        AND (parts[1] = '' OR kept.body ~* ('\m' || parts[1] || fragment_boundary))));
   RETURN found;
 END $subscription_retirement_naming_objects$;
 
@@ -342,6 +348,9 @@ BEGIN
   -- routine or write a table whose retired policies or triggers go. The
   -- owner's own sessions (serialized by the migration lock) and superusers
   -- are not runtime logins; trigger functions run without EXECUTE.
+  -- pg_stat_activity records the original login, not a SET ROLE identity.
+  -- Check every role it can SET (including transitive, NOINHERIT membership),
+  -- even before it switches, and each such role's inherited privileges.
   IF EXISTS (
     SELECT 1 FROM pg_stat_activity activity
     JOIN pg_roles login ON login.oid = activity.usesysid
@@ -349,16 +358,18 @@ BEGIN
       -- A non-superuser owner sees NULL for another role's backend_type.
       AND coalesce(activity.backend_type, 'client backend') = 'client backend'
       AND login.rolname <> current_user AND NOT login.rolsuper
-      AND (EXISTS (SELECT 1 FROM pg_proc routine
+      AND EXISTS (SELECT 1 FROM pg_roles usable
+        WHERE (usable.oid = login.oid OR pg_has_role(login.oid, usable.oid, 'SET'))
+        AND (EXISTS (SELECT 1 FROM pg_proc routine
           WHERE routine.oid = ANY(retired_routine_ids) AND routine.prorettype <> 'trigger'::regtype
-            AND has_function_privilege(activity.usesysid, routine.oid, 'EXECUTE'))
+            AND has_function_privilege(usable.oid, routine.oid, 'EXECUTE'))
         OR EXISTS (SELECT 1 FROM pg_class relation
           WHERE relation.relnamespace = data_schema::regnamespace
             AND relation.relname IN (
               SELECT split_part(entry, '.', 1) FROM unnest(retired_policies || retired_triggers) entry)
-            AND (has_table_privilege(activity.usesysid, relation.oid, 'INSERT')
-              OR has_table_privilege(activity.usesysid, relation.oid, 'UPDATE')
-              OR has_table_privilege(activity.usesysid, relation.oid, 'DELETE'))))
+            AND (has_table_privilege(usable.oid, relation.oid, 'INSERT')
+              OR has_table_privilege(usable.oid, relation.oid, 'UPDATE')
+              OR has_table_privilege(usable.oid, relation.oid, 'DELETE')))))
   ) THEN
     RAISE EXCEPTION '0721 requires drained application sessions (a connected role outside the listed application roles can use a retired object)'
       USING ERRCODE = '55000';
@@ -603,8 +614,14 @@ ALTER TABLE opengeni_private.subscription_core_auto_assignments
     REFERENCES subscription_connections (account_id, provider, id) ON DELETE CASCADE NOT VALID;
 DO $reach_key$
 BEGIN
+  -- The migration owner is NOSUPERUSER/NOBYPASSRLS with no tenant context.
+  -- PostgreSQL's FK validation can fall back to row checks when FORCE RLS
+  -- hides the referenced rows. Open only the owner's visibility window;
+  -- runtime roles remain policy-bound, and rollback restores FORCE on error.
+  ALTER TABLE subscription_connections NO FORCE ROW LEVEL SECURITY;
   ALTER TABLE opengeni_private.subscription_core_auto_assignments
     VALIDATE CONSTRAINT subscription_core_auto_assignments_connection_provider_fkey;
+  ALTER TABLE subscription_connections FORCE ROW LEVEL SECURITY;
 EXCEPTION WHEN foreign_key_violation THEN
   RAISE EXCEPTION '0721 found a reach row whose provider is not its connection''s; see the runbook'
     USING ERRCODE = '23503';
