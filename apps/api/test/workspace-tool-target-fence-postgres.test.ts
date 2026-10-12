@@ -1013,7 +1013,8 @@ describe("targeted tool fence on PostgreSQL", () => {
         Awaited<ReturnType<typeof measure>>,
         Awaited<ReturnType<typeof measure>>,
       ];
-      expect(pinned.physicalRequests).toEqual(single.physicalRequests);
+      // The same requests; the SSE GET may race tools/list.
+      expect(pinned.physicalRequests.toSorted()).toEqual(single.physicalRequests.toSorted());
       expect(pinned.fenceEvaluations).toBe(single.fenceEvaluations);
       expect(pinned.transactions).toBe(single.transactions);
       expect(pinned.statements.length).toBe(single.statements.length);
