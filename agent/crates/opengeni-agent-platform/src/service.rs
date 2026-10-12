@@ -632,15 +632,15 @@ mod tests {
 
     #[test]
     fn service_home_resolution_is_shared_with_print_mode() {
-        let home = OsString::from("/Users/home");
-        let profile = OsString::from("/Users/profile");
+        let home = OsString::from("/Users/user");
+        let profile = OsString::from("/Users/me");
         assert_eq!(
             service_user_home_from_environment(Some(home), Some(profile.clone())).unwrap(),
-            PathBuf::from("/Users/home")
+            PathBuf::from("/Users/user")
         );
         assert_eq!(
             service_user_home_from_environment(None, Some(profile)).unwrap(),
-            PathBuf::from("/Users/profile")
+            PathBuf::from("/Users/me")
         );
         assert!(service_user_home_from_environment(None, None).is_err());
     }
