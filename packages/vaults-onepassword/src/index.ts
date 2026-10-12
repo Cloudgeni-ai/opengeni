@@ -45,3 +45,9 @@ export {
   type OnePasswordSdkClient,
 } from "./sdk";
 export { itemTypeForCategory, categoryForItemType } from "./mapping";
+export {
+  ONEPASSWORD_FAKE_VAULT_IDS,
+  resetOnePasswordFakeProvidersForTests,
+  vaultProviderForOnePasswordConnection,
+  type OnePasswordConnectionProviderOptions,
+} from "./connection";
