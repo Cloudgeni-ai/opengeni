@@ -146,6 +146,10 @@ import {
   validateToolRefs,
   scheduledTaskRunTools,
 } from "./resources";
+import {
+  recordScheduledTaskAccountChoiceChanges,
+  scheduledTaskAccountChoiceChanges,
+} from "./scheduled-task-account-audit";
 
 /**
  * Whether a raw scheduled-task payload explicitly set agentConfig.tools.
@@ -688,6 +692,13 @@ export async function createValidatedScheduledTask(input: {
         rigId,
         metadata: input.payload.metadata,
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+      });
+      await recordScheduledTaskAccountChoiceChanges(transaction, {
+        grant: input.grant,
+        taskId: task.id,
+        operation: "create",
+        before: null,
+        after: task.agentConfig,
       });
       if (learning && learningContext)
         await saveAgentLearningSettings(transaction, learningContext, {
@@ -1421,7 +1432,36 @@ export async function validatedScheduledTaskUpdate(
     audience: visibility,
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
-  return visibility === current ? update : { ...update, visibility };
+  const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
+  return visibility === current ? audited : { ...audited, visibility };
+}
+
+/**
+ * Record the edit's account and connector choice changes in the transaction
+ * that commits it. Every update writer (form, API, agent tool, access
+ * refresh) commits through the validated update.
+ */
+function withScheduledTaskAccountChoiceAudit(
+  grant: AccessGrant,
+  existing: ScheduledTask,
+  update: UpdateScheduledTaskInput,
+): UpdateScheduledTaskInput {
+  const next = update.agentConfig;
+  if (!next || !scheduledTaskAccountChoiceChanges(existing.agentConfig, next)) return update;
+  const prior = update.beforeUpdateCommit;
+  return {
+    ...update,
+    beforeUpdateCommit: async (tx) => {
+      await prior?.(tx);
+      await recordScheduledTaskAccountChoiceChanges(tx, {
+        grant,
+        taskId: existing.id,
+        operation: "update",
+        before: existing.agentConfig,
+        after: next,
+      });
+    },
+  };
 }
 
 async function validatedScheduledTaskUpdateWithoutAudience(input: {

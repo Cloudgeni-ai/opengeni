@@ -324,6 +324,125 @@ describe("scheduled task access drift and refresh", () => {
     expect(narrowed.agentConfig.toolPolicy?.excludedMcpServerIds).toEqual(["notion"]);
   }, 60_000);
 
+  test("every change to a schedule's account and connector choices is audited", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const authorization = signedIn(workspace, workspace.owner);
+    const audits = async (taskId: string) =>
+      await admin<{ action: string; subject: string; metadata: Record<string, unknown> }[]>`
+        select action, subject_id as subject, metadata from audit_events
+        where target_type = 'scheduled_task' and target_id = ${taskId}
+        order by occurred_at, id`;
+    const created = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: authorization.grant,
+      authorization,
+      toolsProvided: false,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Audited digest",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "Summarize" },
+      }),
+    });
+    const edit = async (
+      existing: ScheduledTask,
+      agentConfig: Record<string, unknown>,
+    ): Promise<ScheduledTask> =>
+      await updateScheduledTaskForApi(
+        client.db,
+        authorization.grant,
+        existing.id,
+        await validatedScheduledTaskUpdate({
+          settings: settings(),
+          db: client.db,
+          objectStorage: null,
+          grant: authorization.grant,
+          authorization,
+          existing,
+          toolsProvided: true,
+          payload: UpdateScheduledTaskRequest.parse({ agentConfig }),
+        }),
+      );
+    // A message edit changes no choice and records nothing.
+    const reworded = await edit(created, { ...created.agentConfig, prompt: "Summarize briefly" });
+    // Turning a default off is recorded with its value before and after.
+    await edit(reworded, {
+      ...reworded.agentConfig,
+      toolPolicy: { mode: "workspace_default", excludedMcpServerIds: ["notion"] },
+    });
+    const followDefaults = (excluded: string[]) => ({
+      followsWorkspaceDefaults: true,
+      excludedMcpServerIds: excluded,
+      tools: [],
+    });
+    expect(await audits(created.id)).toEqual([
+      {
+        action: "scheduled_task.account_choices_changed",
+        subject: workspace.owner,
+        metadata: {
+          operation: "create",
+          principalKind: "human_session",
+          changes: {
+            connectors: {
+              before: { followsWorkspaceDefaults: false, excludedMcpServerIds: [], tools: [] },
+              after: followDefaults([]),
+            },
+          },
+        },
+      },
+      {
+        action: "scheduled_task.account_choices_changed",
+        subject: workspace.owner,
+        metadata: {
+          operation: "update",
+          principalKind: "human_session",
+          changes: {
+            connectors: { before: followDefaults([]), after: followDefaults(["notion"]) },
+          },
+        },
+      },
+    ]);
+
+    // An access refresh that adds connectors is recorded too.
+    const stale = await staleAgentTask(workspace);
+    await refreshScheduledTaskAccess({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      authorization,
+      taskId: stale.id,
+      request: { executionDigest: stale.executionDigest },
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+    });
+    expect(await audits(stale.id)).toEqual([
+      {
+        action: "scheduled_task.account_choices_changed",
+        subject: workspace.owner,
+        metadata: {
+          operation: "update",
+          principalKind: "human_session",
+          changes: {
+            connectors: {
+              before: {
+                followsWorkspaceDefaults: false,
+                excludedMcpServerIds: [],
+                tools: ["linear"],
+              },
+              after: {
+                followsWorkspaceDefaults: false,
+                excludedMcpServerIds: [],
+                tools: ["linear", "notion"],
+              },
+            },
+          },
+        },
+      },
+    ]);
+  }, 60_000);
+
   test("a schedule created with a list of tools gets exactly that list", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

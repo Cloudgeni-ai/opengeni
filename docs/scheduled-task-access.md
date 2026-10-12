@@ -316,6 +316,19 @@ those an agent or a service created, which start their own session. Their
 saved tools stayed as additions, so no run lost a connector. A list a person
 created directly was kept exactly.
 
+## Auditing account and connector choices
+
+Every create, edit or access refresh that changes a schedule's pinned
+accounts, `pinnedAccountsRequired` or connector choices (whether it follows
+the workspace defaults, which defaults it excludes, and its listed connectors)
+writes one `audit_events` row in the same transaction: action
+`scheduled_task.account_choices_changed`, target `scheduled_task`, the acting
+subject, and metadata with the `operation` (`create` or `update`), the
+caller's `principalKind` (a person, an agent, an API key or a service) and,
+for each changed choice, its value before and after. Only server and
+connection ids are recorded, never credentials or account labels. Edits that
+change no choice record nothing.
+
 ## Keeping defaults off in the drift view
 
 A person may deliberately leave a default connector or Opengeni tool off a
