@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { RetainedArtifactReference } from "@opengeni/sdk";
+import type { RetainedArtifactMetadata, RetainedArtifactReference } from "@opengeni/sdk";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -34,7 +34,7 @@ const artifact: RetainedArtifactReference = {
     maxRangeBytes: 1048576,
   },
 };
-let metadata = deferred<RetainedArtifactReference>();
+let metadata = deferred<RetainedArtifactMetadata>();
 let bytes = deferred<{ artifact: RetainedArtifactReference; bytes: Uint8Array }>();
 let metadataCalls = 0;
 let byteCalls = 0;
@@ -259,4 +259,20 @@ test("retry after a failure fetches again instead of reusing the cache", async (
   await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
   expect(metadataCalls).toBe(2);
   expect(byteCalls).toBe(2);
+});
+
+test("a not-yet-available thumbnail asks again on its next mount", async () => {
+  await render(true);
+  await act(async () =>
+    metadata.resolve({ available: false, artifactId: "image", reason: "pending" }),
+  );
+  expect(container.textContent).toContain("unavailable");
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  metadata = deferred();
+  await render(true);
+  await act(async () => metadata.resolve(artifact));
+  await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
+  expect(container.querySelector("img")).not.toBeNull();
+  expect(metadataCalls).toBe(2);
 });

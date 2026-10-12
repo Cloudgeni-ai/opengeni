@@ -31,7 +31,7 @@ export class RetainedImageCache {
   get<T>(
     key: string,
     create: () => Promise<T>,
-    describe: (value: T) => { size?: number; expiresAt?: number } = () => ({}),
+    describe: (value: T) => { size?: number; expiresAt?: number; retain?: boolean } = () => ({}),
   ): Promise<T> {
     const existing = this.fresh(key);
     if (existing) return existing.promise as Promise<T>;
@@ -41,8 +41,8 @@ export class RetainedImageCache {
     promise.then(
       (value) => {
         if (this.entries.get(key) !== entry) return;
-        const { size = 0, expiresAt } = describe(value);
-        if (size > MAX_ENTRY_BYTES) {
+        const { size = 0, expiresAt, retain = true } = describe(value);
+        if (!retain || size > MAX_ENTRY_BYTES) {
           this.entries.delete(key);
           return;
         }
@@ -124,7 +124,12 @@ export function cachedRetainedMetadata(
   scope: string,
   fetch: () => Promise<RetainedArtifactMetadata>,
 ) {
-  return cache.get(`${scope}meta`, fetch);
+  // Unavailable (e.g. still pending) is not final: the next mount asks again.
+  return cache.get(`${scope}meta`, fetch, (artifact) => {
+    if (!artifact.available) return { retain: false };
+    const expiresAt = Date.parse(artifact.retention.expiresAt ?? "");
+    return Number.isFinite(expiresAt) ? { expiresAt } : {};
+  });
 }
 
 /**
@@ -139,7 +144,7 @@ export function cachedRetainedArtifactLoader(
   load: RetainedArtifactLoader,
 ): RetainedArtifactLoader {
   return (artifact, signal, options) => {
-    signal.throwIfAborted();
+    if (signal.aborted) return Promise.reject(signal.reason);
     const scope = retainedImageScope(accessKeyVersion, workspaceId, artifact.artifactId);
     return cache.get<LoadedSource>(
       `${scope}bytes:${artifact.sha256}:${options?.prefer ?? ""}`,
