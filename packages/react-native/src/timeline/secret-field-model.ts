@@ -29,7 +29,7 @@ export type SecretInputMode =
   | "setup-key"
   | "off";
 
-export function secretInputMode(spec: HumanInputSecretSpec | undefined): SecretInputMode {
+export function secretInputMode(spec: HumanInputSecretSpec | null | undefined): SecretInputMode {
   const autocomplete = spec?.autocomplete;
   if (autocomplete === "one-time-code") return "one-time-code";
   if (autocomplete === "new-password") return "new-password";
@@ -59,7 +59,9 @@ export type SecretInputTraits = {
   passwordRules?: string | undefined;
 };
 
-export function secretInputTraits(spec: HumanInputSecretSpec | undefined): SecretInputTraits {
+export function secretInputTraits(
+  spec: HumanInputSecretSpec | null | undefined,
+): SecretInputTraits {
   const mode = secretInputMode(spec);
   const base = {
     mode,
@@ -158,7 +160,7 @@ export const SECRET_SAVE_TO_OPTIONS: readonly HumanInputSecretSaveTo[] = [
   "workspace",
 ];
 
-export function initialSecretDraft(spec: HumanInputSecretSpec | undefined): SecretDraft {
+export function initialSecretDraft(spec: HumanInputSecretSpec | null | undefined): SecretDraft {
   return {
     generate: false,
     username: spec?.username?.value ?? "",
@@ -214,7 +216,7 @@ export function secretSubmission(
  * A soft check against the question's `pattern` (anchored, like the HTML
  * attribute). Never blocks; an invalid pattern never warns.
  */
-export function secretPatternMismatch(pattern: string | undefined, value: string): boolean {
+export function secretPatternMismatch(pattern: string | null | undefined, value: string): boolean {
   if (!pattern || value.length === 0) return false;
   let expression: RegExp;
   try {
