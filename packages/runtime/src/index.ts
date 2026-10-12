@@ -102,9 +102,11 @@ import {
   type ToolGateway,
   type ToolGatewayAuthorization,
   type ToolGatewayApprovalResolver,
+  type ToolGatewayArgumentResolver,
   type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
+import { createSecretArgumentResolver } from "./secret-argument-resolution";
 import {
   approvalIdentifier,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
@@ -162,8 +164,15 @@ import {
   firstPartyToolFamily,
   integrationToolFamily,
   type ToolFamily,
+  isSecretReferenceError,
+  type SecretResolver,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
+export {
+  createSecretArgumentResolver,
+  secretArgumentMode,
+  type SecretArgumentMode,
+} from "./secret-argument-resolution";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_RESPONSE_BYTES,
@@ -2780,6 +2789,11 @@ export function mcpToolErrorOutput(error: unknown): {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
+  // Nothing ran; the output names each failure and, for a missing secret,
+  // carries the ready request_human_input call (never a value).
+  if (isSecretReferenceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+  }
   const text =
     invalidToolArgumentsText(error) ??
     (error instanceof SynchronousCommandOutcomeUnknownError ? error.message : null) ??
@@ -4393,6 +4407,12 @@ export type ToolPreparationPhaseMeasurement = {
 export type PrepareToolsOptions = {
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
+  /**
+   * Attempt-scoped secret resolver. When present and enabled, remote MCP and
+   * Codex-app tool arguments have their `{{secret:…}}` references resolved by
+   * the gateway after approval; otherwise references pass through literally.
+   */
+  secretResolver?: SecretResolver | null;
   /** Current-caller live selected-target fence, before every physical MCP request. */
   authorizeProviderRequest?: () => Promise<void>;
   /**
@@ -4500,6 +4520,8 @@ export type PrepareToolsOptions = {
       context: { transportMeta?: Record<string, unknown> | null },
     ) => boolean;
     filterDefinition?: (definition: ToolGatewayDefinition) => boolean;
+    /** Viewer-authority secret resolution for Site and workspace HTTP calls. */
+    resolveArguments?: ToolGatewayArgumentResolver;
   };
   /**
    * Persist an oversized *model-visible* tool result as a workspace File and
@@ -5590,6 +5612,7 @@ async function prepareAttemptToolEnvironment(
     ),
   );
   const subjectId = options.subjectId ?? "worker:mcp-model";
+  const secretArguments = createSecretArgumentResolver({ resolver: options.secretResolver });
   const guardedDefinitions = options.authorizeAttemptExecution
     ? definitions.map((definition) => ({
         ...definition,
@@ -5623,6 +5646,7 @@ async function prepareAttemptToolEnvironment(
       callerSubjectId === subjectId &&
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
+    ...(secretArguments ? { resolveArguments: secretArguments } : {}),
   });
   for (const { server } of prepared.servers) {
     server.bindAttemptToolEnvironment(environment, subjectId);
@@ -5909,6 +5933,9 @@ async function prepareWorkspaceToolGatewayEnvironment(
       : {}),
     ...(options.workspaceToolGateway.requireApproval
       ? { requireApproval: options.workspaceToolGateway.requireApproval }
+      : {}),
+    ...(options.workspaceToolGateway.resolveArguments
+      ? { resolveArguments: options.workspaceToolGateway.resolveArguments }
       : {}),
   });
 }
