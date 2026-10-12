@@ -38,6 +38,7 @@ import {
   type StoredAccount,
   writeAccountToken,
 } from "@/account-store";
+import { openLinkFromApp } from "@/app-link-registry";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
 
 /** The deployment a new account signs in to unless the person names another. */
@@ -117,13 +118,16 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const baseUrl = account?.baseUrl ?? DEFAULT_SERVER_URL;
   const client = useMemo(() => newClient(baseUrl, activeToken), [baseUrl, activeToken]);
   const adapters = useMemo(
-    () =>
-      createExpoOpenGeniAdapters({
+    () => ({
+      ...createExpoOpenGeniAdapters({
         persistence: createHydratedPersistenceAdapter(
           AsyncStorage,
           `opengeni:native:${accountId ?? "signed-out"}`,
         ),
       }),
+      // Tapped Opengeni links open in the app when it can show them.
+      links: { openUrl: openLinkFromApp },
+    }),
     [accountId],
   );
 

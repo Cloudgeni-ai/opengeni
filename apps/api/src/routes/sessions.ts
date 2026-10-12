@@ -2398,7 +2398,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       try {
         await requireSessionAuthorization(deps, grant, {
           sessionId,
-          operation: "session.codex_account.write",
+          operation: "session.model_account.write",
           surface: "http",
         });
       } catch (error) {
@@ -5386,7 +5386,15 @@ export function sessionAuthorizationOperationForHttp(
     return "session.control";
   }
   if (suffix === "/codex-account" && verb === "POST") {
-    return "session.codex_account.write";
+    return "session.model_account.write";
+  }
+  // The provider-neutral account choice (any provider) and the older
+  // per-provider pin share one internal operation. Core adapts its name at the
+  // host boundary according to the authorization port's explicit capability.
+  if (suffix === "/model-account") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT") return "session.model_account.write";
+    return null;
   }
   if (suffix === "/realtime/webrtc" && verb === "POST") {
     return "session.realtime.start";

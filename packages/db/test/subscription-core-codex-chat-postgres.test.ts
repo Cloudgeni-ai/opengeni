@@ -402,6 +402,52 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(await admitted()).toBe(false);
   });
 
+  test("live credit consent never approves spending past an explicit choice of a deleted account (D-24)", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const connectionId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "credit-deleted-pin",
+    });
+    const doomed = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "credit-deleted-pin-target",
+    });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const placed = await place(turn);
+    if (placed.kind !== "run") throw new Error("expected a run");
+    const running = placed.connectionId;
+    await shared!.admin`update subscription_connections set extra_credits_enabled=true
+      where id in (${connectionId}::uuid, ${doomed}::uuid)`;
+    const admitted = () =>
+      canSpendSubscriptionCoreCodexExtraCredits(client!.db, {
+        ...turn,
+        connectionId: running,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+        leaseTtlMs: TTL,
+      });
+    await shared!.admin`update subscription_connections set allocator_enabled=false
+      where id = ${running === connectionId ? doomed : connectionId}::uuid`;
+    expect(await admitted()).toBe(true);
+    // Mid-turn the person chooses the other account, which is then deleted:
+    // the explicit choice stays, with its reference cleared.
+    // Fixture only: the Codex pin writer is tested with the consumers.
+    const target = running === connectionId ? doomed : connectionId;
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update subscription_session_bindings
+        set connection_id = ${target}::uuid, choice = 'explicit'
+        where session_id = ${turn.identity.sessionId}::uuid and provider = 'codex'`;
+    });
+    await shared!.admin`delete from subscription_connections where id = ${target}::uuid`;
+    const [binding] = await shared!.admin<{ connection_id: string | null; choice: string }[]>`
+      select connection_id::text as connection_id, choice from subscription_session_bindings
+      where session_id = ${turn.identity.sessionId}::uuid and provider = 'codex'`;
+    expect(binding).toEqual({ connection_id: null, choice: "explicit" });
+    expect(await admitted()).toBe(false);
+  });
+
   test("runs as the non-superuser, non-bypass application role", async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
       client!.db,
@@ -462,7 +508,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     const binding = await withRlsContext(
       client!.db,
       { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
-      (db) => readSubscriptionSessionBinding(db, turn.identity),
+      (db) => readSubscriptionSessionBinding(db, { ...turn.identity, provider: "codex" }),
     );
     expect(binding).toMatchObject({
       provider: "codex",
@@ -716,7 +762,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     const binding = await withRlsContext(
       client!.db,
       { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
-      (db) => readSubscriptionSessionBinding(db, turn.identity),
+      (db) => readSubscriptionSessionBinding(db, { ...turn.identity, provider: "codex" }),
     );
     expect(binding).toMatchObject({ connectionId: pinned, choice: "explicit" });
     expect(
@@ -957,7 +1003,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     const binding = await withRlsContext(
       client!.db,
       { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
-      (db) => readSubscriptionSessionBinding(db, turn.identity),
+      (db) => readSubscriptionSessionBinding(db, { ...turn.identity, provider: "codex" }),
     );
     expect(binding).toBeNull();
     expect(
@@ -1103,7 +1149,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     const binding = await withRlsContext(
       client!.db,
       { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
-      (db) => readSubscriptionSessionBinding(db, turn.identity),
+      (db) => readSubscriptionSessionBinding(db, { ...turn.identity, provider: "codex" }),
     );
     expect(binding).toBeNull();
     expect(
@@ -1662,7 +1708,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     const binding = await withRlsContext(
       client!.db,
       { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
-      (db) => readSubscriptionSessionBinding(db, turn.identity),
+      (db) => readSubscriptionSessionBinding(db, { ...turn.identity, provider: "codex" }),
     );
     expect(binding?.lastModelCallAt?.getTime()).toBe(touchedAt.getTime());
     void first;
@@ -2195,7 +2241,7 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
       await withRlsContext(
         client!.db,
         { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
-        (db) => readSubscriptionSessionBinding(db, turn.identity),
+        (db) => readSubscriptionSessionBinding(db, { ...turn.identity, provider: "codex" }),
       ),
     ).toMatchObject({ connectionId: managed, choice: "explicit" });
 

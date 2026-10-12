@@ -18,6 +18,9 @@
  *   the separate permission to spend extra credits.
  * - An exact cache lifetime on the binding is that provider's lifetime.
  * - An explicit binding is the reference model's pin.
+ * - Model tiers pass through as declared, and the fallback order keeps its
+ *   own entries only, so the reference derives its own default order for a
+ *   preferred model without an entry (D-35).
  */
 import * as reference from "./reference-model";
 import { inferenceSourceFor } from "./settings";
@@ -191,7 +194,12 @@ export function toReferenceWorld(input: PlacementInput): {
         active: person.active,
         personalFallbackOptIn: person.personalFallbackOptIn,
       })),
-      models: input.models,
+      models: input.models.map((model) => ({
+        id: model.id,
+        provider: model.provider,
+        reasoningLevels: model.reasoningLevels,
+        tier: model.tier ?? null,
+      })),
       connections: usable.map((connection) => referenceConnection(input, connection)),
       sessions: [
         {

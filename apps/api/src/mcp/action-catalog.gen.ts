@@ -2540,6 +2540,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getModelAccountPreferences",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/me/model-account-preferences",
+    "request": [],
+    "response": [
+      "ModelAccountPreferences"
+    ]
+  },
+  {
     "id": "getModelAccountSettingsOverview",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/model-account-settings/overview",
@@ -2911,6 +2920,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
     "request": [],
     "response": []
+  },
+  {
+    "id": "getSessionModelAccount",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-account",
+    "request": [],
+    "response": [
+      "SessionModelAccountChoiceResponse"
+    ]
   },
   {
     "id": "getSessionModelContext",
@@ -6174,6 +6192,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setSessionModelAccount",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-account",
+    "request": [
+      "SetSessionModelAccountChoiceRequest"
+    ],
+    "response": [
+      "SetSessionModelAccountChoiceResponse"
+    ]
+  },
+  {
     "id": "setSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/allocator",
@@ -6817,6 +6846,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemorySlackPublicationConfiguration"
+    ]
+  },
+  {
+    "id": "updateModelAccountPreferences",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/me/model-account-preferences",
+    "request": [
+      "UpdateModelAccountPreferencesRequest"
+    ],
+    "response": [
+      "ModelAccountPreferences"
     ]
   },
   {

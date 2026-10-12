@@ -22,7 +22,10 @@ import {
   XAI_CORE_TURN_PROVIDER,
 } from "../src/activities/agent-turn/xai-core";
 import { isCoreSourceDisconnectedError } from "../src/activities/agent-turn/subscription-core-capacity";
-import { sessionTitleXaiRequestContext } from "../src/activities/agent-turn/run";
+import {
+  sessionTitleXaiRequestContext,
+  xaiModelRequestEventPayload,
+} from "../src/activities/agent-turn/run";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 import { testSettings } from "@opengeni/testing";
 
@@ -117,14 +120,19 @@ function route(value: db.SubscriptionCoreProviderRoute) {
   return spy(db, "readSubscriptionCoreProviderRoute").mockResolvedValue(value);
 }
 
-function coreTurns(placement: db.SubscriptionCorePlacement) {
+function coreTurns(
+  placement: db.SubscriptionCorePlacement,
+  evaluation: unknown = { kind: "run", connectionId: "connection-core", switch: "initial" },
+) {
   const place = spyOn({ place: async () => placement }, "place");
   const recover = spyOn({ recover: async () => 0 }, "recover");
+  const evaluate = spyOn({ evaluate: async () => evaluation }, "evaluate");
   spy(db, "subscriptionCoreTurns").mockReturnValue({
     placeSubscriptionCoreTurn: place,
     recoverSubscriptionCoreConnectionHealth: recover,
+    evaluateSubscriptionCorePlacement: evaluate,
   } as never);
-  return { place, recover };
+  return { place, recover, evaluate };
 }
 
 const runPlacement = {
@@ -216,26 +224,104 @@ describe("SuperGrok capacity by provider route", () => {
     }
   });
 
-  test("a core wait is a terminal capacity failure until SuperGrok waits exist", async () => {
+  test("a core wait parks the same turn on its SuperGrok core waiter and re-evaluates it", async () => {
     route("core");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue({
+      productModelId: "supergrok/grok-4.7",
+      reasoningLevel: "medium",
+    });
+    spy(db, "getSessionGoal").mockResolvedValue(null);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
     const resetAt = new Date(Date.now() + 3_600_000);
-    coreTurns({
-      kind: "wait",
-      reason: "all_accounts_exhausted",
+    const { evaluate } = coreTurns(
+      {
+        kind: "wait",
+        reason: "no_eligible_capacity",
+        earliestResetAt: resetAt,
+        healthRetryAt: null,
+        explicitConnectionId: null,
+      } as unknown as db.SubscriptionCorePlacement,
+      {
+        kind: "wait",
+        reason: "no_eligible_capacity",
+        earliestResetAt: resetAt,
+        healthRetryAt: null,
+        explicitConnectionId: null,
+      },
+    );
+    const waiter = {
+      waiterId: "waiter-1",
+      provider: "xai",
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      blockedTurnId: "turn-1",
+      blockedTurnGeneration: 3,
+      generation: 1,
+      wakeRevision: 1,
+      observedWakeRevision: 1,
+      waitReason: "no_eligible_capacity",
+      resetKind: "authoritative",
+      refreshAttempt: 0,
       earliestResetAt: resetAt,
-      healthRetryAt: null,
-      explicitConnectionId: null,
-    } as unknown as db.SubscriptionCorePlacement);
+      nextCheckAt: resetAt,
+      goalId: null,
+      goalVersion: null,
+      lastWakeReason: "capacity_wait_armed",
+    } satisfies db.SubscriptionCoreCodexCapacityWait;
+    const arm = spy(db, "armSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
+    });
+    const codexArm = spy(db, "armSubscriptionCoreCodexCapacityWait");
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(waiter);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
+    });
     const deps = capacityDeps();
-    await expect(selectXaiTurnCapacityByRoute(deps)).rejects.toMatchObject({
-      payload: { code: "subscription_capacity_unavailable" },
+    expect(await selectXaiTurnCapacityByRoute(deps)).toEqual({
+      exit: {
+        status: "waiting_capacity",
+        capacityWait: {
+          provider: "xai",
+          waiterId: "waiter-1",
+          generation: 1,
+          nextCheckAt: resetAt.toISOString(),
+          wakeRevision: 1,
+        },
+        turnId: "turn-1",
+      },
+    });
+    expect(arm).toHaveBeenCalledTimes(1);
+    expect(arm.mock.calls[0]![1]).toBe("xai");
+    expect(arm.mock.calls[0]![2]).toMatchObject({
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: resetAt,
+      failurePayload: { code: "subscription_capacity_unavailable" },
+    });
+    expect(
+      String((arm.mock.calls[0]![2] as { failurePayload: { error: string } }).failurePayload.error),
+    ).toContain("SuperGrok");
+    expect(codexArm).not.toHaveBeenCalled();
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0]![1]).toMatchObject({
+      waiterId: "waiter-1",
+      generation: 1,
+      provider: "xai",
+      evaluation: { kind: "wait", waitReason: "no_eligible_capacity" },
     });
     expect(deps.leases.xai.held).toBe(false);
   });
 
   test("a core wait for compaction defers with its request preserved, never parks", async () => {
     route("core");
+    const arm = spy(db, "armSubscriptionCoreCapacityWait");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     coreTurns({
       kind: "wait",
@@ -254,6 +340,8 @@ describe("SuperGrok capacity by provider route", () => {
       exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
     });
     expect(JSON.stringify(settled)).toContain('"requestPreserved":true');
+    // SuperGrok parks chat turns on the core (X1b); maintenance never parks.
+    expect(arm).not.toHaveBeenCalled();
   });
 });
 
@@ -287,10 +375,14 @@ function placedCore(options: { fence?: () => Promise<void> } = {}) {
   spy(db, "buildSubscriptionCoreXaiTokenResolver").mockImplementation(((...args: unknown[]) => {
     resolverInputs.push(args);
     return {
-      getToken: async () => ({ accessToken: "core-access", userId: "subject-1" }),
+      getToken: async () => ({
+        accessToken: "core-access",
+        userId: "subject-1",
+        credentialVersion: 4,
+      }),
       refresh: async () => {
         refreshes += 1;
-        return { accessToken: "core-fresh", userId: "subject-1" };
+        return { accessToken: "core-fresh", userId: "subject-1", credentialVersion: 5 };
       },
     };
   }) as never);
@@ -371,11 +463,21 @@ const completed = () =>
 
 describe("SuperGrok request custody on the core", () => {
   test("the bearer comes from the core resolver for the exact turn and lease", async () => {
-    const { authorization, resolverInputs } = placedCore();
+    const { authorization, resolverInputs, core } = placedCore();
     expect(await authorization.getToken()).toEqual({
       accessToken: "core-access",
       userId: "subject-1",
     });
+    // The refusal fence moves only when a main-lane request is dispatched,
+    // to the generation of the bearer that request carries.
+    expect(core.credentialVersion).toBeUndefined();
+    await authorization.beforeProviderDispatch({
+      requestId: "attempt-1:1:1:xai:1",
+      transportAttempt: 1,
+    } as never);
+    expect(core.credentialVersion).toBe(4);
+    await authorization.refresh();
+    expect(core.credentialVersion).toBe(4);
     expect((resolverInputs[0] as unknown[])[2]).toEqual(identity);
     expect((resolverInputs[0] as unknown[])[3]).toEqual({
       connectionId: "connection-core",
@@ -405,6 +507,8 @@ describe("SuperGrok request custody on the core", () => {
     expect(sent.calls()).toBe(2);
     expect(refreshes()).toBe(1);
     expect(sent.tokens).toEqual(["Bearer core-access", "Bearer core-fresh"]);
+    // The refreshed retry was dispatched with the refreshed bearer's generation.
+    expect(core.credentialVersion).toBe(5);
     expect(order).toEqual([
       "fence",
       "reserve:attempt-1:1:1:xai:1:1",
@@ -430,6 +534,20 @@ describe("SuperGrok request custody on the core", () => {
     ]);
     await (await sent.response).text().catch(() => undefined);
     expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1", "settle:operation-1:refused"]);
+  });
+
+  test("a title-lane refresh after a main-lane refusal keeps the refused bearer's generation", async () => {
+    const { core, authorization } = placedCore();
+    const refused = send(authorization, [
+      () => new Response(JSON.stringify({ error: "rate limited" }), { status: 429 }),
+    ]);
+    await refused.response.then((response) => response.text()).catch(() => undefined);
+    expect(core.credentialVersion).toBe(4);
+    // The title lane refreshes (generation 5) before failure settlement reads the fence.
+    const title = xaiCoreTitleCustody(core, authorization)!;
+    await title.getToken();
+    await title.refresh();
+    expect(core.credentialVersion).toBe(4);
   });
 
   test("an unknown outcome is settled unknown and never replayed", async () => {
@@ -533,7 +651,7 @@ describe("SuperGrok request custody on the core", () => {
     expect(await xaiCoreLanesRecoverAfterCheckpoint(unknown.core, async () => {})).toBe(false);
   });
 
-  test("an unknown title-lane outcome is terminal for the turn", async () => {
+  test("an unknown title-lane outcome does not fence the turn", async () => {
     const { core, authorization } = placedCore();
     const title = sessionTitleXaiRequestContext(
       {
@@ -561,10 +679,10 @@ describe("SuperGrok request custody on the core", () => {
       .catch(() => undefined);
     expect(core.requests!.hasUnknownOutcome()).toBe(false);
     expect(core.titleRequests!.hasUnknownOutcome()).toBe(true);
-    expect(xaiCoreRequestOutcomeUnknown(new Error("plain"), core)).toMatchObject({
-      code: "subscription_core_request_outcome_unknown",
-    });
-    expect(await xaiCoreLanesRecoverAfterCheckpoint(core, async () => {})).toBe(false);
+    // The tool-less title response never enters history, so its unknown
+    // outcome cannot make a replay of the turn unsafe.
+    expect(xaiCoreRequestOutcomeUnknown(new Error("plain"), core)).toBeNull();
+    expect(await xaiCoreLanesRecoverAfterCheckpoint(core, async () => {})).toBe(true);
   });
 });
 
@@ -628,4 +746,58 @@ test("a core-placed SuperGrok turn never reaches the legacy image or video crede
     expect(source.split(legacy).length).toBe(2);
     expect(source.indexOf(legacy)).toBeGreaterThan(source.indexOf(videoGate));
   }
+});
+
+test("a productive SuperGrok request reaches its durable event with the breaker's progress flag", async () => {
+  const requestEvents: Array<Record<string, unknown>> = [];
+  const fetch = xaiSubscriptionFetch(async () =>
+    sse({
+      type: "response.completed",
+      response: {
+        id: "r1",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "done" }],
+          },
+        ],
+      },
+    }),
+  );
+  const context: XaiSubscriptionRequestContext = {
+    clientVersion: "1.0.1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    getToken: async () => ({ accessToken: "access", userId: "subject-1" }),
+    refresh: async () => ({ accessToken: "fresh", userId: "subject-1" }),
+    resolveModel: (slug) => slug,
+    nextRequestId: () => "attempt-1:1:1:xai:1",
+    onModelRequestEvent: (event) => {
+      requestEvents.push(
+        xaiModelRequestEventPayload(event, {
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+          dispatchId: "dispatch-1",
+          executionGeneration: 3,
+        }),
+      );
+    },
+  };
+  const response = await xaiSubscriptionRequestStorage.run(context, () =>
+    fetch("https://cli-chat-proxy.grok.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "supergrok/grok-4.7", input: "hello" }),
+    }),
+  );
+  await response.text();
+  expect(requestEvents.find((event) => event.phase === "completed")).toMatchObject({
+    phase: "completed",
+    meaningfulOutput: true,
+    provider: "supergrok-subscription",
+    turnId: "turn-1",
+    attemptId: "attempt-1",
+    executionGeneration: 3,
+  });
 });

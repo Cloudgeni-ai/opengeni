@@ -50,7 +50,10 @@ import {
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
-import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
+import {
+  CodexIncludedUsageExhaustedError,
+  CodexIncludedUsageUnknownError,
+} from "../src/activities/agent-turn/codex-credit-policy";
 import {
   coreCodexFailoverDisposition,
   SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT,
@@ -70,6 +73,7 @@ import {
 } from "@opengeni/subscriptions";
 import { resolveTurnExecutionPolicyV1, withCodexCatalogProvider } from "@opengeni/config";
 import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
+import { SUBSCRIPTION_CORE_CODEX } from "../../../packages/db/src/subscription-core-codex-adapter";
 
 const restores: Array<{ mockRestore(): void }> = [];
 beforeEach(() => {
@@ -681,6 +685,11 @@ describe("core Codex credential materialization in the worker", () => {
 });
 
 describe("core Codex usage, quota and refusal bookkeeping", () => {
+  // Match the shared operation/turn writers: completeness comes from the
+  // provider adapter, not from the observation's source alone.
+  const quotaOptions = {
+    usageReadingsComplete: SUBSCRIPTION_CORE_CODEX.adapter.usageReadingsComplete === true,
+  };
   const core: CodexSubscriptionCoreTurn = {
     identity,
     connectionId: "connection-core",
@@ -831,7 +840,11 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
         observedRefreshGeneration: 5,
         source: "refusal",
       });
-      const refused = applyQuotaObservation({ refreshGeneration: 5, quota: stored }, observation)!;
+      const refused = applyQuotaObservation(
+        { refreshGeneration: 5, quota: stored },
+        observation,
+        quotaOptions,
+      )!;
       expect(refused.windows).toContainEqual({
         id: "secondary",
         usedPercent: 100,
@@ -848,7 +861,11 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
         usedPercent: 40,
         resetsAt: weeklyReset,
       });
-      const replaced = applyQuotaObservation({ refreshGeneration: 5, quota: refused }, read)!;
+      const replaced = applyQuotaObservation(
+        { refreshGeneration: 5, quota: refused },
+        read,
+        quotaOptions,
+      )!;
       expect(replaced.windows).toEqual(read.windows);
       expect(quotaCapacity(replaced, now.getTime() + 240_000)).toEqual({ kind: "available" });
     },
@@ -864,7 +881,11 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
     expect(observation.windows).toEqual([
       { id: "included_usage", usedPercent: 100, resetsAt: holdUntil, status: "exhausted" },
     ]);
-    const held = applyQuotaObservation({ refreshGeneration: 5, quota: null }, observation)!;
+    const held = applyQuotaObservation(
+      { refreshGeneration: 5, quota: null },
+      observation,
+      quotaOptions,
+    )!;
     // A credit-funded or concurrent turn's headers report only primary and secondary.
     const headers = codexUsageHeadersQuotaObservation(
       {
@@ -876,19 +897,32 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
       },
       5,
     );
-    const afterHeaders = applyQuotaObservation({ refreshGeneration: 5, quota: held }, headers)!;
+    const afterHeaders = applyQuotaObservation(
+      { refreshGeneration: 5, quota: held },
+      headers,
+      quotaOptions,
+    )!;
     expect(afterHeaders.windows).toEqual([...headers.windows, observation.windows[0]]);
     expect(quotaCapacity(afterHeaders, now.getTime() + 3_600_000)).toEqual({
       kind: "exhausted",
       resetsAt: holdUntil,
     });
     expect(quotaCapacity(afterHeaders, holdUntil + 1)).toEqual({ kind: "available" });
-    // A usage reading is complete, so it ends the hold early.
+    // Codex declares its usage readings complete, so one ends the hold early.
+    expect(quotaOptions.usageReadingsComplete).toBe(true);
     const read = usageReading(now.getTime() + 120_000, {
       usedPercent: 5,
       resetsAt: now.getTime() + 86_400_000,
     });
-    const afterUsage = applyQuotaObservation({ refreshGeneration: 5, quota: afterHeaders }, read)!;
+    // Without the adapter declaration, the merge remains fail-closed/partial.
+    expect(
+      applyQuotaObservation({ refreshGeneration: 5, quota: afterHeaders }, read)!.windows,
+    ).toEqual([...read.windows, observation.windows[0]]);
+    const afterUsage = applyQuotaObservation(
+      { refreshGeneration: 5, quota: afterHeaders },
+      read,
+      quotaOptions,
+    )!;
     expect(afterUsage.windows).toEqual(read.windows);
     expect(quotaCapacity(afterUsage, now.getTime() + 180_000)).toEqual({ kind: "available" });
   });
@@ -1127,7 +1161,7 @@ describe("core Codex failure settlement", () => {
     expect(settle).not.toHaveBeenCalled();
   });
 
-  test.each(["pending_model", "unknown_model", "uncheckpointed_title"] as const)(
+  test.each(["pending_model", "unknown_model"] as const)(
     "lease loss never upgrades %s to replay proof at the history checkpoint",
     async (state) => {
       const outcomes: string[] = [];
@@ -1147,7 +1181,7 @@ describe("core Codex failure settlement", () => {
       }
       const { deps } = failureDeps(new db.SubscriptionCoreCodexLeaseLostError(), {
         ...core,
-        ...(state === "uncheckpointed_title" ? { titleRequests: requests } : { requests }),
+        requests,
       });
       const checkpoint = mock(async (_options?: unknown) => undefined);
       deps.historySink.reconcileConversationTruth = checkpoint;
@@ -1160,6 +1194,32 @@ describe("core Codex failure settlement", () => {
       expect(requests.canRecover()).toBe(false);
     },
   );
+
+  test("an unsettled session-title request does not block lease-loss recovery", async () => {
+    const titleRequests = createCoreCodexRequests({
+      reserve: async () => ({ operationId: "title" }),
+      settle: async () => {},
+    });
+    // The cancelled title request was reserved but never observed.
+    await titleRequests.reserve({ requestId: "title", transportAttempt: 1 });
+    expect(titleRequests.canRecover()).toBe(false);
+    const { deps, settle } = failureDeps(new db.SubscriptionCoreCodexLeaseLostError(), {
+      ...core,
+      titleRequests,
+    });
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({ turnId: "turn-1", reason: "codex_lease_lost" }),
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
 
   test.each(["flush", "history", "request_settlement"] as const)(
     "lease loss cannot recover after the mandatory %s checkpoint fails",
@@ -1449,7 +1509,7 @@ describe("core Codex failure settlement", () => {
     "admission_refused",
     "checkpoint_failed",
   ] as const)(
-    "exceptional title cleanup preserves the %s replay fence on a main 503",
+    "a %s session-title request does not block recovery from a main 503",
     async (state) => {
       const titleRequests = createCoreCodexRequests({
         reserve: async () => {
@@ -1491,12 +1551,22 @@ describe("core Codex failure settlement", () => {
         ...core,
         titleRequests,
       });
-      const recovery = spy(db, "requestSessionTurnRecovery");
-      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
 
-      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
-      expect(recovery).not.toHaveBeenCalled();
-      expect(settle).toHaveBeenCalledTimes(1);
+      // The title request is tool-less and never enters history, so its
+      // custody cannot make a replay unsafe. The durable admission fence
+      // still decides whether the replacement generation may dispatch.
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recovery).toHaveBeenCalledWith(
+        {},
+        "workspace-1",
+        expect.objectContaining({ turnId: "turn-1", reason: "provider_unavailable" }),
+      );
+      expect(settle).not.toHaveBeenCalled();
     },
   );
 
@@ -1611,22 +1681,30 @@ describe("core Codex failure settlement", () => {
     );
   });
 
-  test("a request still in flight keeps the unknown outcome terminal", async () => {
+  test("an in-flight session-title request does not keep an own interruption terminal", async () => {
     const requests = await ownUnknownRequests();
     const title = createCoreCodexRequests({
       reserve: async () => ({ operationId: "title-op" }),
       settle: async () => {},
     });
     await title.reserve({ requestId: "t", transportAttempt: 1 });
-    const { deps } = failureDeps(httpTransportError(503), {
+    const { deps, settle } = failureDeps(httpTransportError(503), {
       ...core,
       requests,
       titleRequests: title,
     });
-    const recovery = spy(db, "requestSessionTurnRecovery");
-    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
-    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
-    expect(recovery).not.toHaveBeenCalled();
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(recovery).toHaveBeenCalledWith(
+      {},
+      "workspace-1",
+      expect.objectContaining({ turnId: "turn-1", reason: "provider_unavailable" }),
+    );
+    expect(settle).not.toHaveBeenCalled();
   });
 
   test.each([["response_incomplete", "The Codex response was incomplete (max_output_tokens)"]])(
@@ -1753,6 +1831,38 @@ describe("core Codex failure settlement", () => {
       expect(legacyStatuses).not.toHaveBeenCalled();
       expect(legacyQuarantine).not.toHaveBeenCalled();
       expect(legacyFailover).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ["provider quota refusal", () => usageCap()],
+    ["unverifiable included usage", () => new CodexIncludedUsageUnknownError()],
+  ] as const)(
+    "%s re-places the turn while a cancelled session-title request is unsettled",
+    async (_label, makeError) => {
+      spy(db, "recordSubscriptionCoreCodexQuotaObservation").mockResolvedValue(true);
+      spy(db, "recordSubscriptionCoreCodexTurnFailure").mockResolvedValue(true);
+      spy(db, "countSubscriptionCoreCodexTurnRefusals").mockResolvedValue(1);
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+      // The parallel title request was still running when the turn failed;
+      // cancelling it leaves its reservation without an observed outcome.
+      const titleRequests = createCoreCodexRequests({
+        reserve: async () => ({ operationId: "title" }),
+        settle: async () => {},
+      });
+      await titleRequests.reserve({ requestId: "turn-1:title:1", transportAttempt: 1 });
+      const { deps, settle } = failureDeps(makeError(), { ...core, titleRequests });
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recovery).toHaveBeenCalledWith(
+        {},
+        "workspace-1",
+        expect.objectContaining({ turnId: "turn-1", reason: "codex_credential_failover" }),
+      );
+      expect(settle).not.toHaveBeenCalled();
     },
   );
 

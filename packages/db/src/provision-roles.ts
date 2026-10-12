@@ -2136,6 +2136,7 @@ BEGIN
       'disconnect_subscription_core_connection(text,uuid,uuid,text,uuid)',
       'manage_subscription_core_personal(text,uuid,uuid,text,uuid,text,text,boolean,integer)',
       'subscription_core_personal_connections(text,uuid,uuid,text)',
+      'subscription_core_personal_connection_versions(text,uuid,uuid,text)',
       'subscription_core_reach(text,uuid,uuid)',
       'set_subscription_core_reach(text,uuid,uuid,boolean,boolean)',
       'set_subscription_core_reach_allocator(text,uuid,uuid,boolean)',
@@ -2152,6 +2153,7 @@ BEGIN
       'guard_subscription_turn_session_reference()',
       'guard_subscription_connection_reference()',
       'reset_subscription_binding_cache_clock()',
+      'guard_subscription_binding_provider()',
       'authorize_subscription_service_session_access(uuid,uuid,uuid,uuid,text)'
     ] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
@@ -2262,6 +2264,53 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
       EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
     END IF;
+    -- Read-only maintenance work checks (0730, 0732) carry exactly the authority of
+    -- the claim each one previews: same owner, no PUBLIC, runtime EXECUTE.
+    DECLARE
+      work_probe record;
+    BEGIN
+      FOR work_probe IN
+        SELECT * FROM (VALUES
+          ('opengeni_private.session_workflow_wakes_due_v1()',
+            'opengeni_private.claim_session_workflow_wakes(integer)'),
+          ('opengeni_private.automatic_session_title_fanout_due_v1()',
+            'opengeni_private.claim_automatic_session_title_fanout_v1(integer)'),
+          ('opengeni_private.knowledge_index_due_v1(text,integer)',
+            format('%I.knowledge_index_claim(text,integer,integer)', ${literal(schema)})),
+          ('opengeni_private.site_auth_maintenance_due_v1(bigint)',
+            'opengeni_private.claim_site_auth_maintenance(bigint,integer)'),
+          ('opengeni_private.sandbox_lease_reaper_due_v1()',
+            'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'),
+          ('opengeni_private.sandbox_idle_checkpoint_due_v1(bigint)',
+            'opengeni_private.list_idle_checkpoint_candidates(integer,bigint)'),
+          ('opengeni_private.browser_deadline_checkpoint_due_v1()',
+            'opengeni_private.list_browser_deadline_checkpoints(integer)'),
+          ('opengeni_private.session_system_update_outbox_due_v1()',
+            'opengeni_private.claim_session_system_update_outbox_v2(integer)'),
+          ('opengeni_private.session_list_snapshots_expired_v1()',
+            'opengeni_private.reap_expired_session_list_snapshots(integer)'),
+          ('opengeni_private.connected_command_reconciliation_due_v1()',
+            'opengeni_private.claim_connected_machine_background_commands(uuid,integer,bigint,timestamp with time zone)'),
+          ('opengeni_private.connected_command_output_release_due_v1()',
+            'opengeni_private.claim_connected_command_output_releases(uuid,integer,bigint,timestamp with time zone)'),
+          ('opengeni_private.terminal_retained_processes_due_v1()',
+            'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)'),
+          ('opengeni_private.sandbox_ended_epoch_blockers_due_v1()',
+            'opengeni_private.list_sandbox_ended_epoch_blockers(integer)'),
+          ('opengeni_private.sandbox_checkpoint_artifact_gc_due_v1(bigint)',
+            'opengeni_private.claim_sandbox_checkpoint_artifacts(uuid,integer,bigint)')
+        ) AS probes(signature, claim)
+      LOOP
+        IF to_regprocedure(work_probe.signature) IS NOT NULL
+          AND to_regprocedure(work_probe.claim) IS NOT NULL THEN
+          EXECUTE format('ALTER FUNCTION %s OWNER TO %I', work_probe.signature,
+            (SELECT pg_get_userbyid(proowner) FROM pg_proc
+              WHERE oid = to_regprocedure(work_probe.claim)));
+          EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', work_probe.signature);
+          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', work_probe.signature, ${literal(role)});
+        END IF;
+      END LOOP;
+    END;
     IF to_regclass('opengeni_private.session_import_batches') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM %I', ${literal(role)});
       EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.session_import_batches FROM %I',

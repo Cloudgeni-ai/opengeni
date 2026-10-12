@@ -35,6 +35,7 @@ function fixture(fetchImpl: CodexFetch) {
     allowedModelIds: null,
     excludedModelIds: [],
     assignments: null,
+    pools: ["organization"],
     cooledDownModelIds: [],
   };
   type RequestDeps = NonNullable<Parameters<typeof realOperationFetch>[5]>;

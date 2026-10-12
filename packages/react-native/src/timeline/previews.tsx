@@ -24,7 +24,6 @@ import {
   AccessibilityInfo,
   Animated,
   Image,
-  Linking,
   Modal,
   Pressable,
   Text,
@@ -33,6 +32,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
+import { useOpenNativeLink } from "../environment";
 import { Icon } from "./icon";
 import { NativeImageViewer } from "./image-viewer";
 import type { NativeInteractiveBlock } from "./markdown";
@@ -235,10 +235,13 @@ function themeScript(scheme: "light" | "dark"): string {
 }
 
 /** Only the document itself loads in place; anything the reader taps opens outside. */
-function openExternally(request: { url: string; navigationType?: string }): boolean {
+function openExternally(
+  request: { url: string; navigationType?: string },
+  openLink: (url: string) => void,
+): boolean {
   if (request.url === "about:blank" || request.url.startsWith("about:")) return true;
   if (request.navigationType === "click" || /^(https?|mailto|tel):/i.test(request.url)) {
-    void Linking.openURL(request.url).catch(() => undefined);
+    openLink(request.url);
   }
   return false;
 }
@@ -259,6 +262,7 @@ function PreviewWebView({
   onFailed?: (() => void) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
+  const openLink = useOpenNativeLink();
   const ref = useRef<WebView>(null);
   useEffect(() => {
     ref.current?.injectJavaScript(themeScript(theme.scheme));
@@ -282,7 +286,7 @@ function PreviewWebView({
         onReady?.();
       }}
       onError={() => onFailed?.()}
-      onShouldStartLoadWithRequest={openExternally}
+      onShouldStartLoadWithRequest={(request) => openExternally(request, openLink)}
       setSupportMultipleWindows={false}
       allowFileAccess={false}
       allowsLinkPreview={false}

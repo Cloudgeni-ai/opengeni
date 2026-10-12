@@ -215,7 +215,12 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
       // before the connection's lock: the order a pin and placement use, so a
       // pin of this account never deadlocks with a request on it.
       const advancesClock = operationKind === "model" && Boolean(identity.sessionOwnerSubjectId);
-      if (advancesClock) await readSubscriptionSessionBinding(tx, { ...identity, forUpdate: true });
+      if (advancesClock)
+        await readSubscriptionSessionBinding(tx, {
+          ...identity,
+          provider: providerId,
+          forUpdate: true,
+        });
       await lockRequestSource(tx, identity.accountId, ref.connectionId);
       const [lease] = await rawRows<{ current: boolean }>(
         tx,

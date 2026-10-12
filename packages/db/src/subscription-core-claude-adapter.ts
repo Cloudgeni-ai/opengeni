@@ -35,6 +35,10 @@ import {
 } from "./claude-subscription-tokens";
 import { subscriptionCoreDefaultErrors } from "./subscription-core/errors";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
+import {
+  decodeSubscriptionCoreClaudeUsage,
+  fetchSubscriptionCoreClaudeUsage,
+} from "./subscription-core-claude-usage";
 
 /** Claude's provider id on the shared core and in the legacy tables. */
 export const SUBSCRIPTION_CORE_CLAUDE_PROVIDER = "claude";
@@ -138,7 +142,11 @@ export function subscriptionCoreClaudeAdapter(
       format === SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT ? capabilities : setupTokenCapabilities,
     credentialKind: "oauth",
     quotaKind: "usage_windows",
+    // Workspace model policy names Claude models by their scope-specific
+    // provider id; on the core a workspace-scoped model runs on organization
+    // connections, so it must be allowed under both identities.
     modelPolicyProviderId: SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0],
+    modelPolicyProviderIdsFor: subscriptionCoreClaudeModelPolicyProviderIds,
     cacheFacts: { kind: "exact_ttl", ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS },
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_CLAUDE_FORBIDDEN_QUARANTINE_MS,
@@ -174,12 +182,32 @@ export function subscriptionCoreClaudeAdapter(
       },
     },
     reloginText: (message) => (message.trim().length > 0 ? message : RELOGIN_TEXT),
+    // Usage reads and their decoding live in `subscription-core-claude-usage.ts` (C2a).
+    fetchUsage: (read) => fetchSubscriptionCoreClaudeUsage(read),
+    decodeQuota: (input) => decodeSubscriptionCoreClaudeUsage(input),
+    // A usage reading may omit a window that still runs: keep it (design 5.3).
+    usageReadingsComplete: false,
   };
 }
 
 /** The product model ids a Claude upstream model id is served as. */
 export function subscriptionCoreClaudeProductModelIds(upstreamModelId: string): string[] {
   return SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES.map((prefix) => `${prefix}/${upstreamModelId}`);
+}
+
+/**
+ * The workspace-policy provider ids a Claude product model must all be
+ * allowed under: its own prefix plus the organization id its connections
+ * carry (`workspace-claude-subscription` models need both), the
+ * organization id alone otherwise.
+ */
+export function subscriptionCoreClaudeModelPolicyProviderIds(modelId: string): readonly string[] {
+  const prefix = modelId.slice(0, Math.max(0, modelId.indexOf("/")));
+  const organization = SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0];
+  return prefix !== organization &&
+    (SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES as readonly string[]).includes(prefix)
+    ? [prefix, organization]
+    : [organization];
 }
 
 const ACCOUNT_WINDOWS = new Set(["five_hour", "seven_day"]);

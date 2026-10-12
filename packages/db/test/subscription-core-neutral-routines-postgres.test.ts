@@ -69,6 +69,8 @@ beforeAll(async () => {
     "0726_subscription_personal_acceptance_reads.sql",
     // 0728 adds a format-aware overload next to 0707's personal connect writer.
     "0728_subscription_core_personal_connect_format.sql",
+    // 0730 derives the personal version reader from 0707's owner reader.
+    "0730_subscription_core_personal_connection_versions.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -518,6 +520,54 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         expected = expected.replace(from, () => to);
       }
       expect(row!.formatted).toBe(expected);
+    },
+    180_000,
+  );
+
+  test.skipIf(!realDb)(
+    "the personal version reader is the live owner reader plus exactly 0730's changes",
+    async () => {
+      // 0730 builds its reader from the live owner reader (0707, as 0715
+      // rewrote it). A later fix to the owner reader's membership, writer
+      // context or kind rule must reach the version reader too: this compares
+      // the two live bodies after 0730's three substitutions.
+      const [row] = await database!.admin<{ base: string; versions: string }[]>`
+        select
+          pg_get_functiondef('opengeni_private.subscription_core_personal_connections(text,uuid,uuid,text)'::regprocedure) as base,
+          pg_get_functiondef('opengeni_private.subscription_core_personal_connection_versions(text,uuid,uuid,text)'::regprocedure) as versions`;
+      const substitutions: Array<[string, string]> = [
+        [
+          "FUNCTION opengeni_private.subscription_core_personal_connections(",
+          "FUNCTION opengeni_private.subscription_core_personal_connection_versions(",
+        ],
+        [
+          "RETURNS TABLE(id uuid, label text, account_email text, plan_type text, provider_account_id text, status text, last_error text, allocator_enabled boolean, allocator_version integer, allowed_model_ids text[], connected_by_subject_id text, expires_at timestamp with time zone, last_refresh_at timestamp with time zone, provider_state jsonb, updated_at timestamp with time zone, quota jsonb, quota_revision bigint, quota_observed_refresh_generation bigint, quota_updated_at timestamp with time zone, extra_credits_enabled boolean, extra_credits_version integer, extra_credits_updated_at timestamp with time zone)",
+          "RETURNS TABLE(id uuid, version integer)",
+        ],
+        [
+          [
+            "SELECT connection.id, connection.label, connection.account_email, connection.plan_type,",
+            "          connection.provider_account_id, connection.status, connection.last_error,",
+            "          connection.allocator_enabled, connection.allocator_version,",
+            "          connection.allowed_model_ids, connection.connected_by_subject_id,",
+            "          connection.expires_at, connection.last_refresh_at, connection.provider_state,",
+            "          connection.updated_at, quota.quota, quota.revision::bigint,",
+            "          quota.observed_refresh_generation, quota.updated_at,",
+            "          connection.extra_credits_enabled, connection.extra_credits_version,",
+            "          connection.extra_credits_updated_at\n",
+          ].join("\n"),
+          "SELECT connection.id, connection.version\n",
+        ],
+      ];
+      let expected = row!.base;
+      for (const [from, to] of substitutions) {
+        expect({ from, occurrences: expected.split(from).length - 1 }).toEqual({
+          from,
+          occurrences: 1,
+        });
+        expected = expected.replace(from, () => to);
+      }
+      expect(row!.versions).toBe(expected);
     },
     180_000,
   );

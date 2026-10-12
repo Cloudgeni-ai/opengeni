@@ -1,4 +1,5 @@
 export * from "./session-target";
+export * from "./turn-serving-policy";
 import { modelLogoUrl } from "./model-display";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
@@ -16,6 +17,7 @@ export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
+export * from "./model-account-choice";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
@@ -7748,7 +7750,15 @@ export const SessionAuthorizationOperation = z.enum([
   "session.archive.write",
   "session.retention.write",
   "session.delete",
+  /**
+   * @deprecated Older name of `session.model_account.write`. Still a valid
+   * host-boundary value by default for rolling compatibility. Hosts opt in
+   * to the neutral name through `SessionAuthorizationPort.capabilities`
+   * after migrating their policy keys.
+   */
   "session.codex_account.write",
+  /** Choose the model account a session uses (any provider), or return it to automatic. */
+  "session.model_account.write",
   "session.realtime.start",
   "session.realtime.control",
   "session.context.write",
@@ -7770,6 +7780,28 @@ export const SessionAuthorizationOperation = z.enum([
   "session.personal_resource.grant",
 ]);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
+
+/**
+ * Older session authorization operation names and the operation each one now
+ * means. Internal classification uses the canonical name; host delivery is
+ * capability-gated. Normalizing inputs also requires migrating policy keys.
+ */
+export const SESSION_AUTHORIZATION_OPERATION_ALIASES = {
+  "session.codex_account.write": "session.model_account.write",
+} as const satisfies Partial<Record<SessionAuthorizationOperation, SessionAuthorizationOperation>>;
+
+/** The canonical name of a session authorization operation (resolves older aliases). */
+export function canonicalSessionAuthorizationOperation(
+  operation: SessionAuthorizationOperation,
+): SessionAuthorizationOperation {
+  return (
+    (
+      SESSION_AUTHORIZATION_OPERATION_ALIASES as Partial<
+        Record<SessionAuthorizationOperation, SessionAuthorizationOperation>
+      >
+    )[operation] ?? operation
+  );
+}
 
 export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
   z.object({
@@ -7922,6 +7954,14 @@ export type ResolveSessionAuthorizationListScopeInput = {
 };
 
 export type SessionAuthorizationPort = {
+  capabilities?: {
+    /**
+     * Receive `session.model_account.write` instead of the legacy
+     * `session.codex_account.write`. Enable only after migrating policy keys;
+     * omitted or false preserves legacy host allow/deny behavior on both routes.
+     */
+    modelAccountOperation?: boolean;
+  };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
   /**
    * Return the complete current scope used inside Opengeni's cursor query.
@@ -14418,6 +14458,11 @@ export const SessionEventType = z.enum([
   // the in-session "Running on:" indicator's live flip.
   "codex.account.switched",
   "codex.account.selection.changed",
+  // A person chose the account a session runs on (any provider's shared
+  // connection or their own personal one), or returned it to automatic
+  // placement. Payload: provider, connectionId (null for automatic), choice,
+  // appliedTo, turnId and the choosing subject; never credential material.
+  "model_account.selection.changed",
   // credential allocator per-turn selection audit. Payload is metadata only: credential row
   // id, bounded strategy/reason, and pool counts — never token material.
   "codex.credential.selected",
@@ -14714,6 +14759,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "agent.model.usage",
     "codex.account.switched",
     "codex.account.selection.changed",
+    "model_account.selection.changed",
     "codex.credential.selected",
     "codex.capacity.waiting",
     "codex.capacity.resumed",

@@ -367,69 +367,78 @@ describe("intent-preserving failed-session retry", () => {
     ).toBe("accepted");
   });
 
-  test("exact capacity Retry replenishes only its budget and suppression; Pause, stale failure and replay cannot reset it", async () => {
-    const f = await fixture(false, "completed", "codex_capacity_recovery_exhausted");
-    const pinnedCredentialId = crypto.randomUUID();
-    const preserved = {
-      codexCredentialPolicyHash: "accepted-manual-policy",
-      codexCredentialPolicySnapshotV1: {
-        schemaVersion: 1,
-        source: "workspace",
-        activeCredentialId: null,
-        rotationEnabled: false,
-        rotationStrategy: "sharded",
-        pinnedCredentialId,
-        pinSource: "manual",
-        lastCredentialId: pinnedCredentialId,
-      },
-      codexCredentialFailedIds: [pinnedCredentialId],
-      codexCredentialFailovers: 2,
-      providerRecoveryCount: 3,
-    };
-    const budget = { falseResumptions: 10, resumeGeneration: null, retryNotBefore: null };
-    await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ ...preserved, [CODEX_CAPACITY_RECOVERY_KEY]: budget })}::jsonb where id = ${f.turnId}`;
-    await shared.admin`insert into session_goals (account_id, workspace_id, session_id, status, text, continuation_suppressed_turn_id) values (${f.grant.accountId}, ${f.workspaceId}, ${f.session.id}, 'active', 'finish', ${f.turnId})`;
-    const control = (action: "pause" | "resume") =>
-      f.scope((db) =>
-        mutateSessionControlInTransaction(db, {
-          accountId: f.grant.accountId,
-          workspaceId: f.workspaceId,
-          sessionId: f.session.id,
-          actor: { type: "human", subjectId: f.grant.subjectId },
-          operationKey: crypto.randomUUID(),
-          action,
-        }),
-      );
-    await control("pause");
-    await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_PAUSED" });
-    expect(
-      readCodexCapacityRecovery(
-        (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
-      ),
-    ).toEqual(budget);
-    await control("resume");
-    await expect(
-      f.retry({ clientEventId: crypto.randomUUID(), failureEventId: crypto.randomUUID() }),
-    ).rejects.toMatchObject({ code: "RETRY_STALE_FAILURE" });
-    expect(await f.retry()).toMatchObject({ outcome: "accepted", turnId: f.turnId });
-    const retried = await getSessionTurn(client.db, f.workspaceId, f.turnId);
-    expect(retried?.metadata).toMatchObject(preserved);
-    expect(retried?.metadata).not.toHaveProperty(CODEX_CAPACITY_RECOVERY_KEY);
-    const [goal] =
-      await shared.admin`select continuation_suppressed_turn_id from session_goals where session_id = ${f.session.id}`;
-    expect(goal!.continuation_suppressed_turn_id).toBeNull();
-    const claim = await f.claim();
-    expect(claim.action).toBe("claimed");
-    if (claim.action !== "claimed") throw new Error("expected same-turn retry");
-    expect(claim.turn.id).toBe(f.turnId);
-    await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { ...budget, falseResumptions: 1 } })}::jsonb where id = ${f.turnId}`;
-    expect(await f.retry()).toMatchObject({ outcome: "replayed", turnId: f.turnId });
-    expect(
-      readCodexCapacityRecovery(
-        (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
-      ).falseResumptions,
-    ).toBe(1);
-  });
+  // Every core waiter's breaker shares the same turn state: a SuperGrok core
+  // or Claude core turn's exhaustion is replenished exactly as a Codex one.
+  test.each([
+    "codex_capacity_recovery_exhausted",
+    "xai_capacity_recovery_exhausted",
+    "claude_capacity_recovery_exhausted",
+  ])(
+    "exact capacity Retry (%s) replenishes only its budget and suppression; Pause, stale failure and replay cannot reset it",
+    async (exhaustedCode) => {
+      const f = await fixture(false, "completed", exhaustedCode);
+      const pinnedCredentialId = crypto.randomUUID();
+      const preserved = {
+        codexCredentialPolicyHash: "accepted-manual-policy",
+        codexCredentialPolicySnapshotV1: {
+          schemaVersion: 1,
+          source: "workspace",
+          activeCredentialId: null,
+          rotationEnabled: false,
+          rotationStrategy: "sharded",
+          pinnedCredentialId,
+          pinSource: "manual",
+          lastCredentialId: pinnedCredentialId,
+        },
+        codexCredentialFailedIds: [pinnedCredentialId],
+        codexCredentialFailovers: 2,
+        providerRecoveryCount: 3,
+      };
+      const budget = { falseResumptions: 10, resumeGeneration: null, retryNotBefore: null };
+      await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ ...preserved, [CODEX_CAPACITY_RECOVERY_KEY]: budget })}::jsonb where id = ${f.turnId}`;
+      await shared.admin`insert into session_goals (account_id, workspace_id, session_id, status, text, continuation_suppressed_turn_id) values (${f.grant.accountId}, ${f.workspaceId}, ${f.session.id}, 'active', 'finish', ${f.turnId})`;
+      const control = (action: "pause" | "resume") =>
+        f.scope((db) =>
+          mutateSessionControlInTransaction(db, {
+            accountId: f.grant.accountId,
+            workspaceId: f.workspaceId,
+            sessionId: f.session.id,
+            actor: { type: "human", subjectId: f.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        );
+      await control("pause");
+      await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_PAUSED" });
+      expect(
+        readCodexCapacityRecovery(
+          (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
+        ),
+      ).toEqual(budget);
+      await control("resume");
+      await expect(
+        f.retry({ clientEventId: crypto.randomUUID(), failureEventId: crypto.randomUUID() }),
+      ).rejects.toMatchObject({ code: "RETRY_STALE_FAILURE" });
+      expect(await f.retry()).toMatchObject({ outcome: "accepted", turnId: f.turnId });
+      const retried = await getSessionTurn(client.db, f.workspaceId, f.turnId);
+      expect(retried?.metadata).toMatchObject(preserved);
+      expect(retried?.metadata).not.toHaveProperty(CODEX_CAPACITY_RECOVERY_KEY);
+      const [goal] =
+        await shared.admin`select continuation_suppressed_turn_id from session_goals where session_id = ${f.session.id}`;
+      expect(goal!.continuation_suppressed_turn_id).toBeNull();
+      const claim = await f.claim();
+      expect(claim.action).toBe("claimed");
+      if (claim.action !== "claimed") throw new Error("expected same-turn retry");
+      expect(claim.turn.id).toBe(f.turnId);
+      await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { ...budget, falseResumptions: 1 } })}::jsonb where id = ${f.turnId}`;
+      expect(await f.retry()).toMatchObject({ outcome: "replayed", turnId: f.turnId });
+      expect(
+        readCodexCapacityRecovery(
+          (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
+        ).falseResumptions,
+      ).toBe(1);
+    },
+  );
 
   test("an earlier committed retry receipt still replays after a later safety refusal", async () => {
     const f = await fixture();

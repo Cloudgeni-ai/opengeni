@@ -2322,6 +2322,9 @@ export const SESSION_EVENT_TYPES = [
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "codex.account.selection.changed",
+  // A person chose the session's account (any provider) or returned it to
+  // automatic placement.
+  "model_account.selection.changed",
   // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
   // Bounded, identity-free deterministic shadow/replay decision.
@@ -4181,6 +4184,100 @@ export type ModelAccountSettingsOverview = {
   organization: OrganizationModelAccountSettings;
   workspaces: (ModelAccountSettingsView & { workspaceId: string; name: string })[];
   nextCursor: string | null;
+};
+
+/** Why a listed model account cannot be chosen for this session. */
+export type ModelAccountChoiceRefusal =
+  | "inactive"
+  | "personal_not_allowed"
+  | "personal_not_owner_work"
+  | "session_has_no_owner";
+
+/**
+ * Cached usage, not a live check or a promise of available capacity. Source/time
+ * describe the snapshot, not each retained window. A past reset does not prove replenishment.
+ */
+export type ModelAccountUsageSnapshot = {
+  /** Snapshot-level time, not the observation time of every retained window. */
+  observedAt: string | null;
+  source: "usage_endpoint" | "response_headers" | "refusal" | null;
+  windows: Array<{
+    id: string;
+    /** Null means unknown; values over 100 can represent overage. */
+    usedPercent: number | null;
+    resetsAt: string | null;
+    status: "ok" | "warning" | "exhausted" | "unknown";
+  }>;
+  exhaustedUntil: string | null;
+  exhaustedKind: "quota" | "rate_limit" | null;
+};
+
+/** An already-visible account, with optional cached usage (never an eligibility decision). */
+export type ModelAccountChoiceOption = {
+  provider: string;
+  connectionId: string;
+  label: string | null;
+  accountEmail: string | null;
+  planType: string | null;
+  status: string;
+  personal: boolean;
+  source: "workspace" | "organization" | "personal";
+  allowedModelIds: string[] | null;
+  choosable: boolean;
+  refusal: ModelAccountChoiceRefusal | null;
+  /** Omitted on older servers; null means no decodable stored snapshot. Readings may be partial or stale. */
+  usage?: ModelAccountUsageSnapshot | null | undefined;
+};
+
+/** A session's current account, what it may switch to, and the effective personal settings. */
+export type SessionModelAccountChoiceResponse = {
+  /** The session's account when it has bindings for one provider only; else null (see `bindings`). */
+  binding: {
+    provider: string;
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+  } | null;
+  /** One binding per provider. */
+  bindings: {
+    provider: string;
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+  }[];
+  accounts: ModelAccountChoiceOption[];
+  personal: {
+    connectionsAllowed: boolean;
+    fallbackAllowed: boolean;
+    fallbackOptIn: boolean;
+  };
+};
+
+/**
+ * A connection becomes the choice for its provider; other providers' choices
+ * stay. `connectionId: null` returns `provider`'s choice to automatic, or
+ * every provider's when `provider` is omitted.
+ */
+export type SetSessionModelAccountChoiceRequest = {
+  connectionId: string | null;
+  provider?: string;
+};
+
+export type SetSessionModelAccountChoiceResponse = {
+  changed: boolean;
+  appliedTo: "waiting_turn" | "next_turn";
+  provider: string | null;
+  connectionId: string | null;
+  choice: "explicit" | "automatic";
+};
+
+/** The caller's own model-account preferences in an organization. */
+export type ModelAccountPreferences = {
+  personalFallbackOptIn: boolean;
+  version: number;
+};
+
+export type UpdateModelAccountPreferencesRequest = {
+  personalFallbackOptIn: boolean;
+  expectedVersion?: number;
 };
 
 /**

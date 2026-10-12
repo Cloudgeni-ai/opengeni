@@ -8,6 +8,7 @@ import {
   type World as ReferenceWorld,
 } from "@opengeni/testing/subscription-reference-model";
 import {
+  generateTieredReferenceWorld,
   generateReferenceWorld,
   REFERENCE_NOW,
   referenceRandom,
@@ -16,7 +17,9 @@ import {
 import {
   bindingStickiness,
   decidePlacement,
+  derivedFallbackOrder,
   effectiveSettings,
+  hasFallbackOrderEntry,
   SCALAR_SETTING_KEYS,
 } from "../src/index";
 import { toReferenceDecision } from "../src/reference";
@@ -182,6 +185,93 @@ describe("reference conformance over generated worlds", () => {
         if (violations.length > 0) disagreements.push({ seed, turn, violations });
         world = applyDecision(world, sessionId, expected, now);
         // Sometimes the account that just ran is exhausted by that turn.
+        if (expected.kind === "run" && rng.bool(0.4)) {
+          const resetsAt = now + rng.pick([20_000, 200_000, 2_000_000]);
+          world = {
+            ...world,
+            connections: world.connections.map((connection) =>
+              connection.id === expected.connectionId
+                ? { ...connection, quota: { kind: "exhausted", resetsAt } }
+                : connection,
+            ),
+          };
+        }
+        now += rng.pick([1_000, 60_000, 250_000, 400_000, 3_000_000]);
+      }
+    }
+    expect(disagreements.slice(0, 5)).toEqual([]);
+  });
+});
+
+describe("reference conformance over tiered generated worlds (D-35)", () => {
+  // The same seeds with declared tiers, most fallback entries missing and
+  // cross-provider failover usually on, so the derived order decides.
+  function tieredFindings(
+    judge: (world: ReferenceWorld, sessionId: string, now: number) => unknown,
+  ): Finding[] {
+    const findings: Finding[] = [];
+    for (const seed of SEEDS) {
+      const { world, sessionId } = generateTieredReferenceWorld(seed);
+      for (const offset of OFFSETS) {
+        const now = REFERENCE_NOW + offset;
+        const detail = judge(world, sessionId, now);
+        if (detail !== null) findings.push({ seed, now, detail });
+      }
+    }
+    return findings;
+  }
+
+  test("every production decision satisfies the contract invariants and equals the reference decision when the order is derived (SUB-FAIL-02, SUB-FAIL-03, SUB-FAIL-04, SUB-FAIL-05, SUB-WAIT-01, SUB-WAIT-02)", () => {
+    const findings = tieredFindings((world, sessionId, now) => {
+      const actual = production(world, sessionId, now);
+      const violations = checkDecision(world, sessionId, now, actual);
+      const expected = decide(world, sessionId, now);
+      return violations.length === 0 && Bun.deepEquals(actual, expected)
+        ? null
+        : { violations, production: actual, reference: expected };
+    });
+    expect(findings.slice(0, 5)).toEqual([]);
+    expect(findings.length).toBe(0);
+  });
+
+  test("tiered worlds reach the derived order: runs on derived models of another provider, explicit empty entries and untiered preferred models (SUB-FAIL-03)", () => {
+    let derivedRuns = 0;
+    let explicitEmpty = 0;
+    let untieredPreferred = 0;
+    tieredFindings((world, sessionId, now) => {
+      const input = toPlacementInput(world, sessionId, now);
+      const preferredId = input.session.preferredModelId;
+      if (!hasFallbackOrderEntry(input.settings, preferredId)) {
+        const decision = decidePlacement(input);
+        if (decision.kind === "run" && derivedFallbackOrder(input).includes(decision.modelId))
+          derivedRuns += 1;
+        const preferred = input.models.find((model) => model.id === preferredId);
+        if (input.settings.crossProviderFailover && !preferred?.tier) untieredPreferred += 1;
+      } else if (input.settings.fallbackOrder[preferredId]!.length === 0) {
+        explicitEmpty += 1;
+      }
+      return null;
+    });
+    expect(derivedRuns).toBeGreaterThan(100);
+    expect(explicitEmpty).toBeGreaterThan(100);
+    expect(untieredPreferred).toBeGreaterThan(100);
+  });
+
+  test("multi-turn trajectories over tiered worlds agree turn by turn (SUB-FAIL-03, SUB-FAIL-07)", () => {
+    const disagreements: unknown[] = [];
+    for (const seed of SEEDS.slice(0, 600)) {
+      const rng = referenceRandom(seed * 6_007);
+      let { world } = generateTieredReferenceWorld(seed);
+      const { sessionId } = generateTieredReferenceWorld(seed);
+      let now = REFERENCE_NOW;
+      for (let turn = 0; turn < 6; turn += 1) {
+        const expected = decide(world, sessionId, now);
+        const actual = production(world, sessionId, now);
+        if (!Bun.deepEquals(actual, expected)) {
+          disagreements.push({ seed, turn, production: actual, reference: expected });
+          break;
+        }
+        world = applyDecision(world, sessionId, expected, now);
         if (expected.kind === "run" && rng.bool(0.4)) {
           const resetsAt = now + rng.pick([20_000, 200_000, 2_000_000]);
           world = {

@@ -17,6 +17,7 @@ import {
   quotaCapacity,
   modelCooldownUntil,
   subscriptionCoreCredentialRefresher,
+  subscriptionCoreModelPolicyProviderIds,
 } from "@opengeni/subscriptions";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { ClaudeSubscriptionReconnectRequired } from "../src/claude-subscription-tokens";
@@ -28,6 +29,7 @@ import {
   SUBSCRIPTION_CORE_CLAUDE,
   SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT,
   SUBSCRIPTION_CORE_CLAUDE_SETUP_TOKEN_FORMAT,
+  subscriptionCoreClaudeModelPolicyProviderIds,
   subscriptionCoreClaudeProvider,
   type SubscriptionCoreClaudeCredential,
 } from "../src/subscription-core-claude-adapter";
@@ -120,6 +122,39 @@ describe("Claude adapter", () => {
       errors.requestOutcomeUnknown(),
     ])
       expect(error.message).toContain("Claude");
+  });
+
+  test("workspace model policy judges a Claude model under its own scope's id and the organization id", () => {
+    const { adapter } = SUBSCRIPTION_CORE_CLAUDE;
+    const organization = "organization-claude-subscription";
+    const workspace = "workspace-claude-subscription";
+    expect(subscriptionCoreClaudeModelPolicyProviderIds(`${organization}/claude-sonnet-5`)).toEqual(
+      [organization],
+    );
+    // On the core a workspace-scoped model runs on organization connections:
+    // both identities must be allowed, so this can only narrow access.
+    expect(subscriptionCoreModelPolicyProviderIds(adapter, `${workspace}/claude-sonnet-5`)).toEqual(
+      [workspace, organization],
+    );
+    // Any other id keeps the provider's declared identity.
+    for (const modelId of ["claude-sonnet-5", "anthropic/claude-sonnet-5", "/claude-sonnet-5"])
+      expect(subscriptionCoreModelPolicyProviderIds(adapter, modelId)).toEqual([
+        adapter.modelPolicyProviderId,
+      ]);
+    // A provider with a single identity declares no per-model mapping.
+    expect(
+      subscriptionCoreModelPolicyProviderIds(
+        { modelPolicyProviderId: "codex-subscription" },
+        "codex/gpt-6",
+      ),
+    ).toEqual(["codex-subscription"]);
+    // An empty declaration never removes the declared identity.
+    expect(
+      subscriptionCoreModelPolicyProviderIds(
+        { modelPolicyProviderId: "codex-subscription", modelPolicyProviderIdsFor: () => [] },
+        "codex/gpt-6",
+      ),
+    ).toEqual(["codex-subscription"]);
   });
 
   test("round-trips OAuth and setup-token credentials in the legacy secret format", () => {
@@ -895,6 +930,59 @@ describe("Claude usage in the shared quota model", () => {
     expect(quotaCapacity(stored, later.getTime() + 1_000)).toEqual({
       kind: "exhausted",
       resetsAt: at(3 * 86_400) * 1000,
+    });
+  });
+
+  // A Claude usage-endpoint reading is partial too: the adapter declares its
+  // usage readings incomplete, so a reading that omits a window that is
+  // still exhausted keeps the block until its reset, as today's merged
+  // reading does (design 5.3, Claude track, C2a).
+  test("a usage reading that omits an exhausted window keeps its block", () => {
+    const adapter = subscriptionCoreClaudeProvider().adapter;
+    expect(adapter.usageReadingsComplete).toBe(false);
+    const weeklyReset = at(3 * 86_400) * 1000;
+    const first = decode(
+      parseClaudeUsageResponse(
+        {
+          five_hour: { utilization: 20, resets_at: null },
+          seven_day: { utilization: 100, resets_at: new Date(weeklyReset).toISOString() },
+        },
+        now,
+      )!,
+    );
+    const later = new Date(now.getTime() + 600_000);
+    const second = decode(
+      parseClaudeUsageResponse({ five_hour: { utilization: 25, resets_at: null } }, later)!,
+    );
+    expect(second.source).toBe("usage_endpoint");
+    expect(second.windows.map((window) => window.id)).toEqual(["five_hour"]);
+    const stored = applyQuotaObservation(
+      { refreshGeneration: 4, quota: quota(first) },
+      quota(second),
+      { usageReadingsComplete: adapter.usageReadingsComplete === true },
+    );
+    expect(quotaCapacity(stored, later.getTime() + 1_000)).toEqual({
+      kind: "exhausted",
+      resetsAt: weeklyReset,
+    });
+    expect(quotaCapacity(stored, weeklyReset + 1_000)).not.toMatchObject({ kind: "exhausted" });
+    // A reading that reports the window again shows its early reset.
+    const third = decode(
+      parseClaudeUsageResponse(
+        {
+          five_hour: { utilization: 25, resets_at: null },
+          seven_day: { utilization: 10, resets_at: new Date(weeklyReset).toISOString() },
+        },
+        new Date(later.getTime() + 1_000),
+      )!,
+    );
+    const reset = applyQuotaObservation(
+      { refreshGeneration: 4, quota: { ...stored!, revision: 2 } },
+      quota(third),
+      { usageReadingsComplete: adapter.usageReadingsComplete === true },
+    );
+    expect(quotaCapacity(reset, later.getTime() + 2_000)).not.toMatchObject({
+      kind: "exhausted",
     });
   });
 

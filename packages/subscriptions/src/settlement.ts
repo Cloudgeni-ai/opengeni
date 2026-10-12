@@ -62,8 +62,9 @@ export type SubscriptionCoreRefusalPlan =
  *   authoritative. Without a known future reset, an exhausted window that
  *   resets after the adapter's `exhaustedFallbackMs` instead: placement
  *   retries the connection then even when no usage reading exists, and a
- *   later usage reading (which replaces windows but never shortens an
- *   exhaustion deadline) can show recovered capacity sooner;
+ *   later usage reading of an adapter that declares its readings complete
+ *   (which replaces windows but never shortens an exhaustion deadline) can
+ *   show recovered capacity sooner; a partial reading keeps the window;
  * - `entitlement_missing`: the model cools down for `entitlementCooldownMs`;
  * - `unauthorized` and `forbidden`: refresh and retry once when the credential
  *   renews and has not been refreshed for this refusal; otherwise
