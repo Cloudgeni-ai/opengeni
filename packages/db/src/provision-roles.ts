@@ -6,6 +6,8 @@ import {
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_READ_UPDATE_TABLES,
+  VAULT_RUNTIME_ROUTINES,
+  VAULT_TABLES,
   WORK_CLAIM_CAPABILITY_ROUTINES,
   SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES,
 } from "./runtime-posture";
@@ -352,7 +354,11 @@ END $$;
 const ROLE_CONVERGENCE_MAX_ATTEMPTS = 20;
 
 function isRetryableConcurrentRoleMutation(error: unknown): boolean {
-  const details = error as { code?: unknown; message?: unknown; routine?: unknown };
+  const details = error as {
+    code?: unknown;
+    message?: unknown;
+    routine?: unknown;
+  };
   return (
     (details.code === "XX000" &&
       details.message === "tuple concurrently updated" &&
@@ -1849,6 +1855,24 @@ BEGIN
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.workspace_variable_set_variables FROM %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
+      format('%I.list_vaults_for_subject(uuid,jsonb)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      -- Vaults (0738): the routines are the only way in; no table privileges.
+      DECLARE
+        vault_routine text;
+        vault_table text;
+      BEGIN
+        FOREACH vault_routine IN ARRAY ARRAY[${VAULT_RUNTIME_ROUTINES.map((routine) => literal(routine)).join(", ")}] LOOP
+          EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, vault_routine);
+          EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, vault_routine, ${literal(role)});
+        END LOOP;
+        FOREACH vault_table IN ARRAY ARRAY[${VAULT_TABLES.map((table) => literal(table)).join(", ")}] LOOP
+          EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', ${literal(schema)}, vault_table, ${literal(role)});
+        END LOOP;
+        EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE opengeni_private.vault_authority_capabilities FROM %I', ${literal(role)});
+      END;
+    END IF;
+    IF to_regprocedure(
       format('%I.create_scoped_rig(uuid,uuid,text,text,text,text,jsonb,boolean)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_scoped_rig(uuid, uuid, text, text, text, text, jsonb, boolean) TO %I', ${literal(schema)}, ${literal(role)});
@@ -2512,6 +2536,19 @@ BEGIN
       );
       EXECUTE format(
         'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.variable_set_authority_capabilities FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.vault_authority_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.vault_authority_capability_active(text)
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.vault_authority_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.vault_authority_capabilities FROM %I',
         ${literal(role)}
       );
     END IF;

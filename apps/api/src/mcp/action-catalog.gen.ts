@@ -1269,6 +1269,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "DELETE /v1/workspaces/:workspaceId/vaults/:vaultId",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
     "method": "DELETE",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
@@ -2087,6 +2101,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/sessions/:sessionId/secrets",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/secrets",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/slack-task-policy",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/slack-task-policy",
@@ -2123,6 +2144,41 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ]
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/versions",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/versions",
+    "request": [],
+    "response": []
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
@@ -4791,6 +4847,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "pausePrivateScheduledTask",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause",
@@ -5115,6 +5185,48 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/vaults",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/restore",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/restore",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/reveal",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/fields/:fieldId/reveal",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/move",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/move",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/restore",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/restore",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/grants",
     "method": "POST",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/grants",
@@ -5314,6 +5426,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/vault-policy",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/vault-policy",
     "request": [],
     "response": []
   },
