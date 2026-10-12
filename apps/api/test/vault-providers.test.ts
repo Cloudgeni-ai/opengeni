@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
+  buildCapabilityCatalog,
   createWorkspaceVaultProviderRegistry,
   ONEPASSWORD_CREDENTIAL_ROLE,
   ONEPASSWORD_PROVIDER_DOMAIN,
@@ -263,6 +264,29 @@ describe("POST /connections/1password/install", () => {
       }),
     });
     expect(response.status).toBe(422);
+  });
+});
+
+describe("api:1password capability tile", () => {
+  test("is disabled until a workspace 1Password connection is active", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const tile = async () =>
+      (
+        await buildCapabilityCatalog({
+          db: client.db,
+          workspaceId: workspace.workspaceId,
+          settings,
+          accountId: workspace.accountId,
+        })
+      ).items.find((item) => item.id === "api:1password");
+    expect(await tile()).toMatchObject({ enabled: false, surfaceType: "first_party_onepassword" });
+    await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace", planTier: "business" });
+    expect(await tile()).toMatchObject({
+      enabled: true,
+      enabledReason: "1Password connection active",
+      metadata: expect.objectContaining({ planTiers: ["business"] }),
+    });
   });
 });
 

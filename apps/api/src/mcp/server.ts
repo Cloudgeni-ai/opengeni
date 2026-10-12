@@ -6955,6 +6955,23 @@ async function capabilitySetupProjection(
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  if (item.surfaceType === "first_party_onepassword") {
+    // 1Password is connected and its vaults linked in Settings > Secrets; the
+    // agent reaches linked vaults through secret references, not tools.
+    return item.enabled
+      ? {
+          status: "ready",
+          action: null,
+          detail:
+            "1Password is connected. Its linked vaults are available through secret references and the secrets tools.",
+        }
+      : {
+          status: "unavailable",
+          action: null,
+          detail:
+            "1Password is not connected. Ask the user to connect a 1Password service account in Settings > Secrets.",
+        };
+  }
   if (item.surfaceType === "first_party_fiken") {
     if (!item.enabled || item.metadata.connectionStatus !== "active") {
       return {
