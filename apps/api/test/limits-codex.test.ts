@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import type { Settings } from "@opengeni/config";
-import { checkLimit, requireLimit } from "@opengeni/core";
+import { withClaudeConnectionCatalog, type Settings } from "@opengeni/config";
+import { checkLimit, coreRoutedSubscriptionFunding, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 
 const ACCOUNT = "acct-1";
@@ -106,6 +106,11 @@ describe("API edge credit gate — codex bypass", () => {
   test("a SuperGrok subscription model bypasses Opengeni credits through its synthetic catalog", async () => {
     const restoreBal = mockZeroBalance();
     const restoreCred = mockCodexBilled(false);
+    // The legacy SuperGrok route (no cutover receipt): one route read, then
+    // the static overlay answer exactly as before.
+    const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
+      route: "legacy",
+    });
     try {
       const settings = billedSettings({ supergrokSubscriptionEnabled: true });
       const decision = await checkLimit(deps(settings), {
@@ -123,7 +128,107 @@ describe("API edge credit gate — codex bypass", () => {
         quantity: 1,
         model: "supergrok/grok-4.7",
       });
+      expect(route).toHaveBeenCalledTimes(2);
+      expect(route.mock.calls[0]![1]).toEqual({
+        provider: "xai",
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        subjectId: null,
+        productModelId: "supergrok/grok-4.7",
+      });
     } finally {
+      route.mockRestore();
+      restoreCred();
+      restoreBal();
+    }
+  });
+
+  test.each([true, false])(
+    "on SuperGrok's core route the core's funding answer (%p) replaces the overlay",
+    async (funded) => {
+      const restoreBal = mockZeroBalance();
+      const restoreCred = mockCodexBilled(false);
+      const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
+        route: "core",
+        value: funded,
+      });
+      try {
+        const settings = billedSettings({ supergrokSubscriptionEnabled: true });
+        const decision = await checkLimit(deps(settings), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          initiatingHumanSubjectId: "user:human",
+          acceptedTurn: { sessionId: "session-1", turnId: "turn-1" },
+          action: "agent_run:create",
+          quantity: 1,
+          model: "supergrok/grok-4.7",
+        });
+        expect(decision.allowed).toBe(funded);
+        expect(route).toHaveBeenCalledWith(expect.anything(), {
+          provider: "xai",
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          subjectId: "user:human",
+          productModelId: "supergrok/grok-4.7",
+          acceptedTurn: { sessionId: "session-1", turnId: "turn-1" },
+        });
+      } finally {
+        route.mockRestore();
+        restoreCred();
+        restoreBal();
+      }
+    },
+  );
+
+  test("only an enabled SuperGrok reads its provider route for core funding", async () => {
+    const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding");
+    try {
+      // SuperGrok switched off on the deployment: no read, as its catalog readiness.
+      expect(
+        await coreRoutedSubscriptionFunding({} as opengeniDb.Database, billedSettings(), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          model: "supergrok/grok-4.7",
+          subjectId: null,
+        }),
+      ).toBeUndefined();
+      // Claude's funding moves onto the core in its own track step, not here.
+      const claude = withClaudeConnectionCatalog(
+        billedSettings({ claudeSubscriptionEnabled: true }),
+        {
+          claude_subscription: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+        },
+      );
+      expect(
+        await coreRoutedSubscriptionFunding({} as opengeniDb.Database, claude, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          model: "organization-claude-subscription/claude-opus-5-5",
+          subjectId: "user:human",
+        }),
+      ).toBeUndefined();
+      expect(route).not.toHaveBeenCalled();
+    } finally {
+      route.mockRestore();
+    }
+  });
+
+  test("a Codex model never reads a provider route for core funding", async () => {
+    const restoreBal = mockZeroBalance();
+    const restoreCred = mockCodexBilled(true);
+    const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding");
+    try {
+      const decision = await checkLimit(deps(billedSettings()), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "codex/gpt-5.6-sol",
+      });
+      expect(decision.allowed).toBe(true);
+      expect(route).not.toHaveBeenCalled();
+    } finally {
+      route.mockRestore();
       restoreCred();
       restoreBal();
     }

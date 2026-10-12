@@ -103,7 +103,9 @@ export const UpdateOrganizationModelAccountSettingsRequest = z
     fallbackOrder: ModelAccountFallbackOrder.optional(),
     personalConnectionsAllowed: z.boolean().optional(),
     personalFallbackAllowed: z.boolean().optional(),
-    rotation: z.record(ProviderId, z.object({ mode: ModelAccountRotationMode }).strict()).optional(),
+    rotation: z
+      .record(ProviderId, z.object({ mode: ModelAccountRotationMode }).strict())
+      .optional(),
     locked: z.array(ModelAccountSettingKey).max(MODEL_ACCOUNT_SETTING_KEYS.length).optional(),
     expectedVersion: z.number().int().nonnegative().optional(),
   })

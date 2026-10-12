@@ -1,7 +1,17 @@
 import { CODEX_CREDENTIAL_LEASE_TTL_MS } from "@opengeni/db";
 import type { WaitReason } from "@opengeni/subscriptions";
 
-/** Typed, user-readable failure for a Codex turn on the shared subscription core. */
+/*
+ * Failures of a chat turn on the shared subscription core, for any provider.
+ * The codes are provider-neutral; the copy names the provider, and every
+ * builder defaults to Codex, so Codex callers and texts are unchanged (M3
+ * shipped these as Codex failures). Other providers pass their display name.
+ */
+
+/** The provider name in failure copy when a caller passes none (M3's Codex texts). */
+const DEFAULT_DISPLAY_NAME = "Codex";
+
+/** Typed, user-readable failure for a turn on the shared subscription core. */
 export type SubscriptionCoreCodexFailurePayload = {
   error: string;
   code:
@@ -28,43 +38,50 @@ export type SubscriptionCoreCodexFailurePayload = {
   maxRefusals?: number;
 };
 
+/** The provider-neutral name of the core turn failure payload. */
+export type SubscriptionCoreFailurePayload = SubscriptionCoreCodexFailurePayload;
+
+/** A typed core turn failure (the class keeps its M3 name; it serves every provider). */
 export class SubscriptionCoreCodexTurnError extends Error {
   readonly code: SubscriptionCoreCodexFailurePayload["code"];
-  constructor(readonly payload: SubscriptionCoreCodexFailurePayload) {
+  /**
+   * The provider name its copy used. In-process only, never part of the
+   * payload, so a follow-up failure for the same turn (an exhausted lease-busy
+   * chain) names the same provider without the settlement naming providers.
+   */
+  readonly displayName: string;
+  constructor(
+    readonly payload: SubscriptionCoreCodexFailurePayload,
+    displayName: string = DEFAULT_DISPLAY_NAME,
+  ) {
     super(payload.error);
     this.name = "SubscriptionCoreCodexTurnError";
     this.code = payload.code;
+    this.displayName = displayName;
   }
 }
 
-const WAIT_COPY: Record<WaitReason, string> = {
-  pinned_account_unavailable:
-    "The Codex account chosen for this session is unavailable right now. Send a new message once it is available again, or switch the session back to automatic.",
-  pinned_account_ineligible:
-    "The Codex account chosen for this session can no longer serve this work. Choose another account or switch the session back to automatic.",
-  no_eligible_capacity:
-    "No Codex subscription has capacity for this turn right now. Send a new message once an account is available again.",
-  model_not_allowed: "This model is not allowed for the Codex subscriptions available here.",
+const WAIT_COPY = (name: string): Record<WaitReason, string> => ({
+  pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. Send a new message once it is available again, or switch the session back to automatic.`,
+  pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. Choose another account or switch the session back to automatic.`,
+  no_eligible_capacity: `No ${name} subscription has capacity for this turn right now. Send a new message once an account is available again.`,
+  model_not_allowed: `This model is not allowed for the ${name} subscriptions available here.`,
   compaction_provider_locked:
     "This session is tied to a provider that has no capacity right now. Send a new message once an account is available again.",
   accepted_authority_unavailable:
     "This work was accepted before the account move and its account access could not be carried. Send it again.",
-};
+});
 
-const WAITING_COPY: Record<WaitReason, string> = {
-  pinned_account_unavailable:
-    "The Codex account chosen for this session is unavailable right now. This turn continues automatically once it is available again.",
-  pinned_account_ineligible:
-    "The Codex account chosen for this session can no longer serve this work. This turn continues once another account is chosen or the session is switched back to automatic.",
-  no_eligible_capacity:
-    "No Codex subscription has capacity for this turn right now. It continues automatically when an account is available.",
-  model_not_allowed:
-    "This model is not allowed for the Codex subscriptions available here. This turn continues if that changes.",
+const WAITING_COPY = (name: string): Record<WaitReason, string> => ({
+  pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. This turn continues automatically once it is available again.`,
+  pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. This turn continues once another account is chosen or the session is switched back to automatic.`,
+  no_eligible_capacity: `No ${name} subscription has capacity for this turn right now. It continues automatically when an account is available.`,
+  model_not_allowed: `This model is not allowed for the ${name} subscriptions available here. This turn continues if that changes.`,
   compaction_provider_locked:
     "This session is tied to a provider that has no capacity right now. It continues automatically when an account is available.",
   accepted_authority_unavailable:
     "This work was accepted before the account move and its account access could not be carried. Send it again to continue.",
-};
+});
 
 /**
  * The `codex.capacity.waiting` payload for a turn parked on a core waiter
@@ -74,9 +91,10 @@ const WAITING_COPY: Record<WaitReason, string> = {
 export function subscriptionCoreCapacityWaitPayload(
   reason: WaitReason,
   earliestResetAt: Date | null,
+  displayName: string = DEFAULT_DISPLAY_NAME,
 ): Record<string, unknown> {
   return {
-    error: WAITING_COPY[reason],
+    error: WAITING_COPY(displayName)[reason],
     code: "subscription_capacity_unavailable",
     waitReason: reason,
     ...(earliestResetAt ? { resetsAt: earliestResetAt.toISOString() } : {}),
@@ -87,15 +105,18 @@ export function subscriptionCoreCapacityWaitPayload(
 export function subscriptionCoreFailoverExhaustedFailure(
   refusals: number,
   maxRefusals: number,
+  displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error:
-      "Codex accounts refused this turn too many times in a row. Send a new message after checking the accounts' health or capacity.",
-    code: "subscription_failover_exhausted",
-    retryable: false,
-    refusals,
-    maxRefusals,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `${displayName} accounts refused this turn too many times in a row. Send a new message after checking the accounts' health or capacity.`,
+      code: "subscription_failover_exhausted",
+      retryable: false,
+      refusals,
+      maxRefusals,
+    },
+    displayName,
+  );
 }
 
 /**
@@ -106,14 +127,18 @@ export function subscriptionCoreFailoverExhaustedFailure(
 export function subscriptionCoreCapacityFailure(
   reason: WaitReason,
   earliestResetAt: Date | null,
+  displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: WAIT_COPY[reason],
-    code: "subscription_capacity_unavailable",
-    retryable: false,
-    waitReason: reason,
-    ...(earliestResetAt ? { resetsAt: earliestResetAt.toISOString() } : {}),
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: WAIT_COPY(displayName)[reason],
+      code: "subscription_capacity_unavailable",
+      retryable: false,
+      waitReason: reason,
+      ...(earliestResetAt ? { resetsAt: earliestResetAt.toISOString() } : {}),
+    },
+    displayName,
+  );
 }
 
 /**
@@ -124,16 +149,20 @@ export function subscriptionCoreCapacityFailure(
 export function subscriptionCoreLeaseBusyFailure(
   leasedUntil: Date | null,
   cause?: "binding_conflict",
+  displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error:
-      cause === "binding_conflict"
-        ? "The session's Codex account changed while this turn was starting. The turn will retry."
-        : "A previous attempt of this turn still holds its Codex account. The turn will retry once that hold ends.",
-    code: "subscription_lease_busy",
-    retryable: true,
-    ...(leasedUntil ? { resetsAt: leasedUntil.toISOString() } : {}),
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error:
+        cause === "binding_conflict"
+          ? `The session's ${displayName} account changed while this turn was starting. The turn will retry.`
+          : `A previous attempt of this turn still holds its ${displayName} account. The turn will retry once that hold ends.`,
+      code: "subscription_lease_busy",
+      retryable: true,
+      ...(leasedUntil ? { resetsAt: leasedUntil.toISOString() } : {}),
+    },
+    displayName,
+  );
 }
 
 /** Most extra delay added after the older lease's expiry, so retries spread out. */
@@ -187,13 +216,17 @@ export function subscriptionCoreLeaseBusyChain(
 }
 
 /** The lease-busy chain lasted too long: stop with readable copy. */
-export function subscriptionCoreLeaseBusyExhaustedFailure(): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error:
-      "A previous attempt of this turn kept holding its Codex account, so the turn stopped. Send a new message to try again.",
-    code: "subscription_lease_busy",
-    retryable: false,
-  });
+export function subscriptionCoreLeaseBusyExhaustedFailure(
+  displayName: string = DEFAULT_DISPLAY_NAME,
+): SubscriptionCoreCodexTurnError {
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `A previous attempt of this turn kept holding its ${displayName} account, so the turn stopped. Send a new message to try again.`,
+      code: "subscription_lease_busy",
+      retryable: false,
+    },
+    displayName,
+  );
 }
 
 export type SubscriptionCoreAccountRefusal =
@@ -202,16 +235,12 @@ export type SubscriptionCoreAccountRefusal =
   | "entitlement"
   | "access_lost";
 
-const REFUSAL_COPY: Record<SubscriptionCoreAccountRefusal, string> = {
-  sign_in:
-    "The Codex account serving this session needs a new sign-in. Reconnect it or choose another account, then send a new message.",
-  forbidden:
-    "The Codex account serving this session refused this request. Check the account's access or choose another account, then send a new message.",
-  entitlement:
-    "The Codex account serving this session cannot use this model on its current plan. Choose another model or account, then send a new message.",
-  access_lost:
-    "This session lost access to the Codex account it was running on. Send a new message to continue on an account it can use.",
-};
+const REFUSAL_COPY = (name: string): Record<SubscriptionCoreAccountRefusal, string> => ({
+  sign_in: `The ${name} account serving this session needs a new sign-in. Reconnect it or choose another account, then send a new message.`,
+  forbidden: `The ${name} account serving this session refused this request. Check the account's access or choose another account, then send a new message.`,
+  entitlement: `The ${name} account serving this session cannot use this model on its current plan. Choose another model or account, then send a new message.`,
+  access_lost: `This session lost access to the ${name} account it was running on. Send a new message to continue on an account it can use.`,
+});
 
 /**
  * A definitive refusal from the leased account (revoked sign-in, 403, or a
@@ -221,31 +250,44 @@ const REFUSAL_COPY: Record<SubscriptionCoreAccountRefusal, string> = {
  */
 export function subscriptionCoreAccountRefusedFailure(
   refusal: SubscriptionCoreAccountRefusal,
+  displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: REFUSAL_COPY[refusal],
-    code: "subscription_account_refused",
-    retryable: false,
-    refusal,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: REFUSAL_COPY(displayName)[refusal],
+      code: "subscription_account_refused",
+      retryable: false,
+      refusal,
+    },
+    displayName,
+  );
 }
 
 /** A Codex consumer that has not moved to the core yet (PR 2) must not read legacy tables. */
 export function subscriptionCoreUnsupportedFailure(
   consumer: string,
+  displayName: string = DEFAULT_DISPLAY_NAME,
 ): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: `${consumer} is not available for Codex subscriptions on this deployment yet.`,
-    code: "subscription_core_unsupported",
-    retryable: false,
-  });
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `${consumer} is not available for ${displayName} subscriptions on this deployment yet.`,
+      code: "subscription_core_unsupported",
+      retryable: false,
+    },
+    displayName,
+  );
 }
 
-/** The organization's Codex cutover row exists but is switched off. */
-export function subscriptionCoreCutoverDisabledFailure(): SubscriptionCoreCodexTurnError {
-  return new SubscriptionCoreCodexTurnError({
-    error: "Codex subscriptions are paused for this organization during maintenance.",
-    code: "subscription_core_cutover_disabled",
-    retryable: false,
-  });
+/** The organization's cutover row for the provider exists but is switched off. */
+export function subscriptionCoreCutoverDisabledFailure(
+  displayName: string = DEFAULT_DISPLAY_NAME,
+): SubscriptionCoreCodexTurnError {
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error: `${displayName} subscriptions are paused for this organization during maintenance.`,
+      code: "subscription_core_cutover_disabled",
+      retryable: false,
+    },
+    displayName,
+  );
 }

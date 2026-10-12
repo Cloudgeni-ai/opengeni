@@ -60,6 +60,7 @@ import type {
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+import { subscriptionCoreTurnOf } from "./turn-context";
 
 export type RemoteCompactionPrefix = {
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]> | null;
@@ -275,7 +276,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       turnAttemptId: input.attemptId,
       servingCredentialId: providerTurn.effectiveCodexCredentialId,
       priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-      subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
+      subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
       emittedSourceKeys: emittedModelUsageSourceKeys,
       renewLease: () => leases.renewServing("model_usage"),
       leaseLost: leases.servingLost,
@@ -378,7 +379,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     if (events.some((event) => event.type === "session.context.compacted")) {
       // The summary and recovery reset already committed under the attempt
       // fence. Skipped compaction does not prove successful model progress.
-      await providerTurn.codexSubscriptionCore?.requests?.checkpoint();
+      await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
       attempt.providerRecoveryCount = 0;
       if (attempt.providerRecoveryObservation) {
         recordProviderRecoveryOutcome(observability, {

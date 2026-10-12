@@ -235,7 +235,8 @@ export function auditPublicText(file: string, source: string): Finding[] {
   HOME_PATH.lastIndex = 0;
   for (const match of source.matchAll(HOME_PATH)) {
     const account = match[1]?.toLowerCase();
-    if (!account || GENERIC_HOME_NAMES.has(account)) continue;
+    // Dot segments such as /Users/.. name no account.
+    if (!account || GENERIC_HOME_NAMES.has(account) || /^\.+$/.test(account)) continue;
     // A nested HTTP resource path containing a home directory segment is not
     // a machine filesystem root. Keep root paths, file URLs, and query values
     // subject to the normal check; do not exempt the surrounding line.

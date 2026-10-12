@@ -317,6 +317,43 @@ export * from "./subscription-core-codex-requests";
 export * from "./subscription-core-codex-connections";
 export * from "./subscription-core-codex-catalog";
 export * from "./subscription-settings";
+export {
+  readSubscriptionCoreProviderRoute,
+  readSubscriptionCoreProviderRouteForWorkspace,
+  type SubscriptionCoreProviderRoute,
+} from "./subscription-core/provider-route";
+export {
+  readSubscriptionCoreRouteFunding,
+  readSubscriptionCoreRouteReadiness,
+  type SubscriptionCoreRouteAnswer,
+} from "./subscription-core/route-readiness";
+// The provider-parameterized runtimes, reachable by provider binding (design
+// 5.3, SuperGrok track X1a; this supersedes 5.1.3's "the package index exports
+// none of the provider-parameterized entry points"). A binding of a provider
+// missing from the registry fails closed at every entry point.
+export {
+  subscriptionCoreTurns,
+  type SubscriptionCoreCredential,
+  type SubscriptionCoreLeaseRef,
+  type SubscriptionCorePlacement,
+  type SubscriptionCorePlacementRequest,
+} from "./subscription-core/turns";
+export {
+  subscriptionCoreRequests,
+  type SubscriptionCoreRequestOutcome,
+} from "./subscription-core/requests";
+export {
+  listSubscriptionCoreServingConnections,
+  subscriptionCoreConnectionAllowlist,
+  subscriptionCoreConnectionAllowsModel,
+  subscriptionCoreWorkspaceReady,
+  type SubscriptionCoreServingConnection,
+} from "./subscription-core/catalog";
+export { SubscriptionCoreError } from "./subscription-core/errors";
+export type { SubscriptionCoreProvider } from "./subscription-core/provider";
+export { buildSubscriptionCoreTurnTokenResolver } from "./subscription-core/turn-token-resolver";
+export * from "./subscription-core-xai-adapter";
+export * from "./subscription-core-xai";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,

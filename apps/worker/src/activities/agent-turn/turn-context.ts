@@ -185,16 +185,19 @@ export type WorkspaceRefState = {
   rigVersionId: string;
 };
 
-/** A Codex chat turn running on the shared subscription core. */
-export type CodexSubscriptionCoreTurn = {
+/** A chat turn placed by the shared subscription core, for any provider. */
+export type SubscriptionCoreTurn = {
   identity: SubscriptionCoreTurnIdentity;
   connectionId: string;
   /** Refresh generation of the connection when it was placed. */
   placedRefreshGeneration: number;
   personal: boolean;
-  requests?: ReturnType<typeof import("./codex-core-requests").createCoreCodexRequests>;
-  titleRequests?: ReturnType<typeof import("./codex-core-requests").createCoreCodexRequests>;
+  requests?: import("./subscription-core-requests").CoreSubscriptionRequests;
+  titleRequests?: import("./subscription-core-requests").CoreSubscriptionRequests;
 };
+
+/** A Codex chat turn running on the shared subscription core (M3 name). */
+export type CodexSubscriptionCoreTurn = SubscriptionCoreTurn;
 
 export type ProviderTurnState = {
   // The Codex account this turn runs on (pin > workspace active), resolved once
@@ -228,6 +231,13 @@ export type ProviderTurnState = {
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   xaiRequestContext: XaiSubscriptionRequestContext | null;
+  /**
+   * Set only when this SuperGrok turn was placed by the shared subscription
+   * core (the organization's SuperGrok cutover committed and is enabled).
+   * `effectiveXaiCredentialId` is then a core connection id: legacy SuperGrok
+   * tables must never receive it.
+   */
+  xaiSubscriptionCore: SubscriptionCoreTurn | null;
   xaiCredentialQuarantined: boolean;
   // The session's Codex credential BEFORE this turn resolved its own — captured
   // before recordSessionActiveCodexCredential overwrites the durable pointer, so
@@ -366,6 +376,7 @@ export function createTurnContext(input: {
       xaiRotationEnabled: false,
       xaiAuthoritySnapshot: null,
       xaiRequestContext: null,
+      xaiSubscriptionCore: null,
       xaiCredentialQuarantined: false,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
@@ -373,4 +384,11 @@ export function createTurnContext(input: {
       lastCodexRequestOpaqueArtifacts: [],
     },
   };
+}
+
+/** The turn's shared-core placement, whichever provider placed it (at most one does). */
+export function subscriptionCoreTurnOf(
+  providerTurn: Pick<ProviderTurnState, "codexSubscriptionCore" | "xaiSubscriptionCore">,
+): SubscriptionCoreTurn | null {
+  return providerTurn.codexSubscriptionCore ?? providerTurn.xaiSubscriptionCore ?? null;
 }

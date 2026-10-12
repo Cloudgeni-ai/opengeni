@@ -48,6 +48,7 @@ import {
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
+import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -162,11 +163,7 @@ export function codexCredentialLeaseHolderId(
   input: Pick<RunAgentTurnInput, "workflowId" | "attemptId">,
   turnId: string,
 ): string {
-  const parts = [input.workflowId, turnId, input.attemptId];
-  if (parts.some((part) => part.trim().length === 0)) {
-    throw new Error("Codex credential lease holder requires a complete turn attempt identity");
-  }
-  return `codex-turn:${parts.map((part) => encodeURIComponent(part)).join(":")}`;
+  return subscriptionTurnLeaseHolderId("codex", "Codex", input, turnId);
 }
 
 export type ClaimTurnOutcome = { exit: RunAgentTurnResult } | { ok: ClaimTurnOk };

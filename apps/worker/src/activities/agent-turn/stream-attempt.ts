@@ -112,10 +112,8 @@ import {
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 import { createModelCallAdmission } from "./model-call-admission";
-import {
-  assertCoreCodexSourceConnected,
-  isCoreCodexSourceDisconnectedError,
-} from "./codex-core-capacity";
+import { isCoreSourceDisconnectedError } from "./subscription-core-capacity";
+import { revalidatePlacedSubscriptionCore } from "./subscription-core-placed";
 
 import {
   assertWorkspaceHumanInputAllowed,
@@ -190,6 +188,7 @@ import type {
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
+import { subscriptionCoreTurnOf } from "./turn-context";
 
 export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;
@@ -449,7 +448,7 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-        subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
+        subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
         emittedSourceKeys: emittedModelUsageSourceKeys,
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
@@ -457,7 +456,7 @@ export async function runTurnStreamAttempt(
       });
     }
     if (!generated.title) {
-      await providerTurn.codexSubscriptionCore?.titleRequests?.checkpoint();
+      await subscriptionCoreTurnOf(providerTurn)?.titleRequests?.checkpoint();
       return;
     }
 
@@ -468,7 +467,7 @@ export async function runTurnStreamAttempt(
         title: generated.title,
         source: "agent",
       });
-      await providerTurn.codexSubscriptionCore?.titleRequests?.checkpoint();
+      await subscriptionCoreTurnOf(providerTurn)?.titleRequests?.checkpoint();
       if (result.events.length > 0) {
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
       }
@@ -662,11 +661,7 @@ export async function runTurnStreamAttempt(
   let finalReplyNudged = false;
   const revalidateModelCallAdmission = async () => {
     await historySink.reconcileConversationTruth({ requireDurable: true });
-    const core = providerTurn.codexSubscriptionCore;
-    if (core) {
-      await core.requests?.checkpoint();
-      await assertCoreCodexSourceConnected(db, core);
-    }
+    await revalidatePlacedSubscriptionCore(db, providerTurn);
     creditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
       modelId: resolvedModel?.configured.id ?? turn.model,
       settings,
@@ -1211,7 +1206,7 @@ export async function runTurnStreamAttempt(
           countsTowardTokenCap: billingState.countsTowardTokenCap,
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-          subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
+          subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
           emittedSourceKeys: emittedModelUsageSourceKeys,
           renewLease: () => leases.renewServing("model_usage"),
           leaseLost: leases.servingLost,
@@ -1780,7 +1775,8 @@ export async function runTurnStreamAttempt(
                 providerApi: aggregateProviderApi,
                 model: turn.model,
                 billing,
-                subscriptionConnectionId: providerTurn.codexSubscriptionCore?.connectionId ?? null,
+                subscriptionConnectionId:
+                  subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
                 contextContributions: eventing.companyBrainContextContributions,
               });
               recordAuthoritativeModelUsageMetrics({
@@ -1933,7 +1929,7 @@ export async function runTurnStreamAttempt(
         return claimedResult({ status: "cancelled" });
       }
       // History plus the exact approval suffix now own the complete response.
-      await providerTurn.codexSubscriptionCore?.requests?.checkpoint();
+      await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
       await finishParallelSessionTitle();
       if (
         !(await eventing.settle!({
@@ -2008,7 +2004,7 @@ export async function runTurnStreamAttempt(
       })
     ) {
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      await providerTurn.codexSubscriptionCore?.requests?.checkpoint();
+      await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
       // Consult retained truth, including inactive compacted rows, so an
       // attempt replacement or compaction cannot spend this bound again.
       if (
@@ -2070,7 +2066,7 @@ export async function runTurnStreamAttempt(
     // then wire final ack (licensing the runner to GC its retained
     // frames). Best-effort: a miss leaves the runner's retention TTL to
     // reap, never fails a completed turn.
-    await providerTurn.codexSubscriptionCore?.requests?.checkpoint();
+    await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
     await finalizeTurnOpStreamOps();
     await finishParallelSessionTitle();
     if (
@@ -2299,7 +2295,7 @@ export async function runTurnStreamAttempt(
           // empty summary and must not create a new goal continuation.
           if (
             shouldRecoverCompactionProviderFailure(compactError) ||
-            isCoreCodexSourceDisconnectedError(compactError)
+            isCoreSourceDisconnectedError(compactError)
           )
             throw compactError;
           if (compactError instanceof TurnAttemptFencedError) throw compactError;
@@ -2415,7 +2411,7 @@ export async function runTurnStreamAttempt(
   } catch (error) {
     // A lifecycle disconnect fences the next request, not the already admitted
     // title stream. Join and persist its bounded response before recovery.
-    if (isCoreCodexSourceDisconnectedError(error)) await finishParallelSessionTitle();
+    if (isCoreSourceDisconnectedError(error)) await finishParallelSessionTitle();
     throw error;
   } finally {
     await cancelParallelSessionTitle();
