@@ -26,6 +26,7 @@ import { Toolbar, ToolbarGroup, ToolbarSearch } from "@/components/ui/toolbar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 import {
+  expiryState,
   ITEM_TYPE_FILTERS,
   ITEM_TYPE_LABEL,
   itemSubtitle,
@@ -250,7 +251,7 @@ export function VaultPage({
             onValueChange={setQuery}
             placeholder={`Search ${itemsLabel(all.length)}`}
             aria-label={`Search items in ${vault.name}`}
-            wrapperClassName="min-w-0 flex-1 basis-56"
+            wrapperClassName="min-w-0 flex-1 basis-40"
           />
           {typeOptions.length > 2 ? (
             <ToolbarGroup align="end">
@@ -259,7 +260,7 @@ export function VaultPage({
                 options={typeOptions}
                 value={type}
                 onValueChange={(value) => setType(value as typeof type)}
-                className="w-36"
+                className="w-32 sm:w-36"
                 align="end"
               />
             </ToolbarGroup>
@@ -307,9 +308,9 @@ export function VaultPage({
                   status={
                     item.archivedAt ? (
                       <span className="text-xs text-fg-subtle">Archived</span>
-                    ) : (
+                    ) : expiryState(item.expiresAt) ? (
                       <ExpiryBadge expiresAt={item.expiresAt} />
-                    )
+                    ) : undefined
                   }
                   cells={{
                     used: item.lastUsedAt ? <RelativeTime date={item.lastUsedAt} /> : null,

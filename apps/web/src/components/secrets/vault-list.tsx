@@ -29,8 +29,8 @@ export const SECRETS_DESCRIPTION =
   "Logins, keys and files your agents can use without seeing them.";
 
 const COLUMNS: RowListColumn[] = [
-  { id: "items", label: "Items", width: 96, hideLabel: true },
-  { id: "updated", label: "Updated", width: 104, hideLabel: true },
+  { id: "items", label: "Items", width: 96, hideLabel: true, leadsWhenFolded: true },
+  { id: "updated", label: "Updated", width: 112 },
 ];
 
 export type SecretsListState = "loading" | "error" | "ready";
@@ -97,7 +97,7 @@ export function SecretsListPage({
       title={vault.name}
       titleAddon={<VaultChips vault={vault} />}
       description={vault.description || undefined}
-      status={<SyncStatus vault={vault} />}
+      status={vault.syncStatus === "ok" ? undefined : <SyncStatus vault={vault} />}
       cells={{
         items: itemsLabel(vault.itemCount),
         updated: <RelativeTime date={vault.updatedAt} />,

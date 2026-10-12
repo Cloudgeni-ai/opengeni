@@ -93,7 +93,7 @@ export const ITEM_TYPE_LABEL: Record<VaultItemType, string> = {
 };
 
 export const ITEM_TYPE_FILTERS: { value: "all" | VaultItemType; label: string }[] = [
-  { value: "all", label: "All" },
+  { value: "all", label: "All types" },
   { value: "login", label: "Logins" },
   { value: "api_key", label: "API keys" },
   { value: "note", label: "Notes" },
