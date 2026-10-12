@@ -82,7 +82,7 @@ e2e(
       expect(await activeTag()).toBe("INPUT");
 
       const button = { kind: "role", role: "button", name: "Card", exact: true } as const;
-      for (const key of ["Shift", "Mod", "Ctrl+F5"]) {
+      for (const key of ["Shift", "Mod", "Ctrl+F25", "Ctrl+Hyper+A", "NotAKey"]) {
         const refused = await controller.run(
           command(initial, { type: "press", locator: button, key }),
         );
@@ -99,6 +99,29 @@ e2e(
       expect(accepted.state).toBe("completed");
       expect(await activeTag()).toBe("BUTTON");
       expect(await evaluate("keys")).toEqual(["Escape"]);
+
+      // Function and navigation keys reach the page with their standard
+      // names, including the common short spellings.
+      await evaluate(
+        'globalThis.codes=[];document.addEventListener("keydown",e=>codes.push([e.key,e.code,e.keyCode,e.ctrlKey]))',
+      );
+      for (const key of ["F2", "f12", "Home", "End", "PageUp", "pgdn", "Insert", "Ctrl+F5"]) {
+        const pressed = await controller.run(
+          command(initial, { type: "press", locator: button, key }),
+        );
+        expect(pressed.state).toBe("completed");
+      }
+      expect(await evaluate("codes")).toEqual([
+        ["F2", "F2", 113, false],
+        ["F12", "F12", 123, false],
+        ["Home", "Home", 36, false],
+        ["End", "End", 35, false],
+        ["PageUp", "PageUp", 33, false],
+        ["PageDown", "PageDown", 34, false],
+        ["Insert", "Insert", 45, false],
+        ["F5", "F5", 116, true],
+      ]);
+      await evaluate("globalThis.keys=['Escape']");
 
       // The document node is focusable in the accessibility snapshot but is
       // not an Element, so Chromium refuses DOM.focus. That refusal must be a
