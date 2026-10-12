@@ -1,4 +1,5 @@
 import type {
+  ConnectionCredentialsPort,
   SecretMaterial,
   VaultFieldKind,
   VaultItemType,
@@ -121,6 +122,17 @@ export class VaultProviderError extends Error {
 export function isVaultProviderError(error: unknown): error is VaultProviderError {
   return error instanceof VaultProviderError;
 }
+
+/**
+ * The embedder's connection-credential port with its password-manager leg
+ * (dossier §10.9, OP-6). `@opengeni/contracts` cannot name `VaultProvider`
+ * (this package depends on it), so the leg is added here; core and worker
+ * dependencies use this type. A host provider is linked as a vault with
+ * `source: "host"` and resolved through `createVaultProviderRegistry({ host })`.
+ */
+export type VaultConnectionCredentialsPort = ConnectionCredentialsPort & {
+  vaultProvider?: VaultProvider | null;
+};
 
 export interface VaultProviderRegistry {
   /** onepassword: loads the connection credential and the SDK lazily; host: the embedder port; fake: tests/dev. */
