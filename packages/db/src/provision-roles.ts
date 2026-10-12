@@ -2136,6 +2136,7 @@ BEGIN
       'disconnect_subscription_core_connection(text,uuid,uuid,text,uuid)',
       'manage_subscription_core_personal(text,uuid,uuid,text,uuid,text,text,boolean,integer)',
       'subscription_core_personal_connections(text,uuid,uuid,text)',
+      'subscription_core_personal_connection_versions(text,uuid,uuid,text)',
       'subscription_core_reach(text,uuid,uuid)',
       'set_subscription_core_reach(text,uuid,uuid,boolean,boolean)',
       'set_subscription_core_reach_allocator(text,uuid,uuid,boolean)',

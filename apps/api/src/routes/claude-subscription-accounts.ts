@@ -46,6 +46,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
+import { claudeUsageRoute, coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
 
 function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: string | null) {
   return {
@@ -109,7 +110,7 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     c: Context,
     organization: boolean,
     mutation: boolean,
-  ): Promise<ClaudeAccountUsageAuthority> {
+  ): Promise<ClaudeAccountUsageAuthority | CoreClaudeUsageCaller> {
     c.header("cache-control", "private, no-store");
     if (!deps.settings.claudeSubscriptionEnabled)
       throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
@@ -121,6 +122,15 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     if (organization) {
       const organizationId = c.req.param("organizationId")!;
       const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      // Claude's provider route, read once (design 5.3, C2a).
+      if ((await claudeUsageRoute(deps, organizationId, null)) === "core")
+        return {
+          core: true,
+          accountId: organizationId,
+          workspaceId: null,
+          subjectId: human.subjectId,
+          accountIdParam: id,
+        };
       const { accounts } = await listOrganizationClaudeSubscriptions(deps.db, {
         organizationId,
         actorSubjectId: human.subjectId,
@@ -137,6 +147,14 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     }
     const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if ((await claudeUsageRoute(deps, grant.accountId, workspaceId)) === "core")
+      return {
+        core: true,
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        accountIdParam: id,
+      };
     const authoritySnapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
       workspaceId,
       subjectId: grant.subjectId,
@@ -167,6 +185,10 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       : "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage";
     app.get(path, async (c) => {
       const authority = await usageAuthority(c, organization, false);
+      if ("core" in authority)
+        return c.json(
+          ClaudeSubscriptionUsage.parse(await coreClaudeUsage(c, deps, authority, false)),
+        );
       const accounts = authority.workspaceId
         ? [
             await getClaudeSubscriptionAccountMetadata(deps.db, {
@@ -187,17 +209,16 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       if (!usage) throw new HTTPException(404, { message: "Claude account not found" });
       return c.json(ClaudeSubscriptionUsage.parse(usage));
     });
-    app.post(path + "/refresh", async (c) =>
-      c.json(
+    app.post(path + "/refresh", async (c) => {
+      const authority = await usageAuthority(c, organization, true);
+      return c.json(
         ClaudeSubscriptionUsage.parse(
-          await refreshClaudeAccountUsage(
-            deps.db,
-            deps.settings,
-            await usageAuthority(c, organization, true),
-          ),
+          "core" in authority
+            ? await coreClaudeUsage(c, deps, authority, true)
+            : await refreshClaudeAccountUsage(deps.db, deps.settings, authority),
         ),
-      ),
-    );
+      );
+    });
   }
 
   const setupRequest = ClaudeSubscriptionSetupTokenRequest;

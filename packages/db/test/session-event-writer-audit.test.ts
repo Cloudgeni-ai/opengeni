@@ -115,6 +115,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Provider-neutral account choice uses the same preference-write lock contract.
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce": {
+    inserts: 1,
+    contract: "canonical",
+  },
   // The shared-core Codex waiter (M3 PR 2a) mirrors the legacy Codex arm,
   // reconcile and supersession lock contracts exactly.
   "packages/db/src/index.ts#armSubscriptionCoreCodexCapacityWait": {
@@ -364,10 +369,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/session-tool-call-settlement.ts#closePendingSessionToolCallsInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
-  },
-  "packages/db/src/subscription-core/session-choice.ts#chooseOnce": {
-    inserts: 1,
-    contract: "canonical",
   },
 };
 

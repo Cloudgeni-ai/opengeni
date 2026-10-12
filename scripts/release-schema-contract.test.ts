@@ -2265,6 +2265,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0731_subscription_session_bindings_per_provider.sql",
+      "0730_subscription_core_personal_connection_versions.sql",
       "0729_subscription_person_preferences_owner.sql",
       "0728_subscription_core_personal_connect_format.sql",
       "0727_subscription_core_ownerless_video_operations.sql",

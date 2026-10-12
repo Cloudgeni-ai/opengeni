@@ -646,6 +646,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // the durable admission fence, an unsettled request, or a deterministic
   // provider terminal stays a terminal unknown-outcome failure, as does an
   // interruption combined with a lost lease or a disconnected source.
+  //
+  // The parallel session-title request never fences replay: it is a plain,
+  // tool-less request whose text only ever becomes the session title, and it
+  // is cancelled and joined before settlement. Its custody row keeps its
+  // outcome; the replacement attempt's new generation is admitted past it.
   const coreUnknownRecoveryFailure =
     coreCodex &&
     !leases.codex.lost &&
@@ -658,8 +663,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   const coreRequestOutcomeUnknown =
     !coreUnknownRecoveryFailure &&
     (hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
-      coreCodex?.requests?.hasUnknownOutcome() ||
-      coreCodex?.titleRequests?.hasUnknownOutcome())
+      coreCodex?.requests?.hasUnknownOutcome())
       ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
       : coreXai
         ? xaiCoreRequestOutcomeUnknown(error, coreXai)
@@ -679,9 +683,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
       await coreCodex.requests?.checkpoint();
-      coreCodexLeaseRecoverable =
-        (!coreCodex.requests || coreCodex.requests.canRecover()) &&
-        (!coreCodex.titleRequests || coreCodex.titleRequests.canRecover());
+      coreCodexLeaseRecoverable = !coreCodex.requests || coreCodex.requests.canRecover();
     } catch {
       coreLeaseCheckpointFailed = true;
       observability.incrementCounter({
@@ -1511,9 +1513,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !coreRequestOutcomeUnknown &&
     !coreLeaseCheckpointFailed &&
     coreLaneRecoverable(coreCodex?.requests) &&
-    coreLaneRecoverable(coreCodex?.titleRequests) &&
     coreLaneRecoverable(coreXai?.requests) &&
-    coreLaneRecoverable(coreXai?.titleRequests) &&
     (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
@@ -1772,16 +1772,13 @@ const INTERRUPTED_CODEX_RESPONSE_MESSAGE = "The Codex response was interrupted b
  */
 export function ownInterruptedCodexRequestRecovery(
   error: unknown,
-  core: Pick<CodexSubscriptionCoreTurn, "requests" | "titleRequests">,
+  core: Pick<CodexSubscriptionCoreTurn, "requests">,
   isCodexTurn: boolean,
 ): ReturnType<typeof agentRunFailurePayload> | null {
-  const lanes = [core.requests, core.titleRequests].filter(
-    (lane): lane is ReturnType<typeof createCoreCodexRequests> => !!lane,
-  );
-  const uncertain = lanes.filter((lane) => lane.hasUnknownOutcome());
-  if (uncertain.length === 0) return null;
-  if (lanes.some((lane) => lane.admissionRefused())) return null;
-  if (!uncertain.every((lane) => lane.unknownIsOwnAndSettled())) return null;
+  const lane = core.requests;
+  if (!lane?.hasUnknownOutcome()) return null;
+  if (lane.admissionRefused()) return null;
+  if (!lane.unknownIsOwnAndSettled()) return null;
   // A complete provider terminal that is incomplete (for example the output
   // token limit) would end the same way again.
   if (findInCauseChain(error, CodexStreamingTerminalError)?.code === "response_incomplete") {

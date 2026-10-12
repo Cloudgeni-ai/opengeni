@@ -50,6 +50,8 @@ const upstream = new ScriptedClaudeUpstream([
 describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   name: "Claude subscription (setup token)",
   databaseLabel: "subscription-core-claude-setup-token-conformance",
+  // The adapter's declared usage-reading completeness (asserted by the suite).
+  usageReadingsComplete: false,
   provider,
   models: [
     {

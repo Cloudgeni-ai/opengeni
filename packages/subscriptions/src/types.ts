@@ -9,11 +9,24 @@
 export type ProviderId = string;
 export type ModelId = string;
 
+/**
+ * A model's capability tier, declared by its provider's adapter
+ * (`SubscriptionCoreAdapter.modelTier`, D-35). A closed set that names no
+ * provider. Placement compares tiers for equality only: a derived fallback
+ * order never moves to a higher or a lower tier (Q-04).
+ */
+export type ModelTier = "frontier" | "standard" | "fast";
+
 /** A provider model and the reasoning levels it supports, lowest first. */
 export type ModelDescriptor = {
   id: ModelId;
   provider: ProviderId;
   reasoningLevels: readonly string[];
+  /**
+   * The tier the provider's adapter declares for the model (D-35). Absent or
+   * null: none, so no fallback order is derived for or to this model.
+   */
+  tier?: ModelTier | null;
 };
 
 // Connections and scope (design 3.1)

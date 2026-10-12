@@ -87,7 +87,17 @@ export type Workspace = {
 
 export type Person = { id: string; active: boolean; personalFallbackOptIn: boolean };
 
-export type Model = { id: ModelId; provider: ProviderId; reasoningLevels: readonly string[] };
+/** The contract's closed set of model tiers (D-35). Tiers compare by equality only. */
+export type Tier = "frontier" | "standard" | "fast";
+const TIERS: readonly string[] = ["frontier", "standard", "fast"];
+
+export type Model = {
+  id: ModelId;
+  provider: ProviderId;
+  reasoningLevels: readonly string[];
+  /** The tier its provider declares; absent or null when it declares none. */
+  tier?: Tier | null;
+};
 
 export type SessionBinding = { connectionId: string; modelId: ModelId; lastUsedAt: number };
 
@@ -453,15 +463,55 @@ export function nearestReasoningLevel(
   return levels[best]!;
 }
 
-/** Candidate models in failover order: the preferred model, then (if allowed) its fallbacks. */
+/**
+ * D-35: the fallback order of a preferred model the settings name no entry
+ * for. Only with cross-provider failover on, and only when the preferred
+ * model declares a tier: every model of another provider declaring exactly
+ * that tier (Q-04: never a lower or higher one), provider by provider in
+ * sorted id order, each provider's models in the world's order, at most 8.
+ * The preferred model's own provider contributes nothing (same-provider
+ * model fallback is explicit only).
+ */
+export function derivedFallbacks(
+  world: World,
+  settings: SubscriptionSettings,
+  preferredModelId: ModelId,
+): ModelId[] {
+  const preferred = byId(world.models, preferredModelId);
+  if (!settings.crossProviderFailover || !preferred) return [];
+  const tier = preferred.tier;
+  if (typeof tier !== "string" || !TIERS.includes(tier)) return [];
+  const otherProviders = [...new Set(world.models.map((model) => model.provider))]
+    .filter((provider) => provider !== preferred.provider)
+    .sort();
+  const derived: ModelId[] = [];
+  for (const provider of otherProviders) {
+    for (const model of world.models) {
+      if (model.provider !== provider || model.tier !== tier) continue;
+      if (model.id === preferredModelId || derived.includes(model.id)) continue;
+      derived.push(model.id);
+    }
+  }
+  return derived.slice(0, 8);
+}
+
+/**
+ * Candidate models in failover order: the preferred model, then (if allowed)
+ * its fallbacks. An explicit entry for the preferred model, even an empty
+ * list, is the order; only a missing entry derives one (D-35).
+ */
 export function candidateModels(world: World, session: Session): ModelId[] {
   const settings = effectiveSettings(world.settings, session.workspaceId).values;
   const preferred = session.preferredModelId;
   if (session.onlyThisModel || session.pinnedConnectionId) return [preferred];
   const preferredProvider = byId(world.models, preferred)?.provider;
+  const explicit = Object.prototype.hasOwnProperty.call(settings.fallbackOrder, preferred);
+  const order = explicit
+    ? (settings.fallbackOrder[preferred] ?? [])
+    : derivedFallbacks(world, settings, preferred);
   // Same-provider fallback models are always allowed; other providers only
   // when cross-provider failover is on (SUB-FAIL-02, SUB-FAIL-03).
-  const fallbacks = (settings.fallbackOrder[preferred] ?? []).filter(
+  const fallbacks = order.filter(
     (modelId, index, all) =>
       modelId !== preferred &&
       all.indexOf(modelId) === index &&

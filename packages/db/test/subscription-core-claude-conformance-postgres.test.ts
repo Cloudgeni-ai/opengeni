@@ -70,6 +70,8 @@ const accountUuid = (label: string) =>
 describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   name: "Claude subscription (OAuth)",
   databaseLabel: "subscription-core-claude-conformance",
+  // The adapter's declared usage-reading completeness (asserted by the suite).
+  usageReadingsComplete: false,
   provider,
   models: [
     {

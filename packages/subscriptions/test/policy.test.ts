@@ -1370,7 +1370,7 @@ describe("quota freshness and observations", () => {
     expect(quotaCapacity(later, NOW)).toEqual({ kind: "unknown" });
   });
 
-  test("SUB-ELIG-06: a header reading or refusal that omits a running exhausted window keeps it until its reset; a usage reading or one that reports it again replaces it", () => {
+  test("SUB-ELIG-06: a header reading, refusal or partial usage reading that omits a running exhausted window keeps it until its reset; a complete usage reading or one that reports it again replaces it", () => {
     const weekly = { id: "weekly", usedPercent: 100, resetsAt: NOW + 86_400_000 };
     // Omitted windows that are not carried: one that is not exhausted, and
     // an exhausted one that resets exactly when the new reading is made.
@@ -1410,11 +1410,62 @@ describe("quota freshness and observations", () => {
       kind: "exhausted",
       resetsAt: NOW + 86_400_000,
     });
-    // A usage-endpoint reading is complete: omitting the window ends it.
+    // A usage-endpoint reading of an adapter that declares its readings
+    // complete: omitting the window ends it.
     const usage = { ...partial, source: "usage_endpoint" as const };
-    expect(applyQuotaObservation({ refreshGeneration: 1, quota: current }, usage)!.windows).toEqual(
-      usage.windows,
-    );
+    expect(
+      applyQuotaObservation({ refreshGeneration: 1, quota: current }, usage, {
+        usageReadingsComplete: true,
+      })!.windows,
+    ).toEqual(usage.windows);
+    // Without that declaration (absent or false) a usage reading is partial
+    // and keeps the omitted block until its reset (fail closed).
+    for (const options of [undefined, { usageReadingsComplete: false }]) {
+      const partialUsage = applyQuotaObservation(
+        { refreshGeneration: 1, quota: current },
+        usage,
+        options,
+      )!;
+      expect(partialUsage.windows).toEqual([...usage.windows, { ...weekly, status: "exhausted" }]);
+      expect(quotaCapacity(partialUsage, NOW + 1_000)).toEqual({
+        kind: "exhausted",
+        resetsAt: NOW + 86_400_000,
+      });
+    }
+    // The declaration never changes a header reading: it stays partial.
+    expect(
+      applyQuotaObservation({ refreshGeneration: 1, quota: current }, partial, {
+        usageReadingsComplete: true,
+      })!.windows,
+    ).toEqual([...partial.windows, { ...weekly, status: "exhausted" }]);
+    // A refusal's fallback window (core-synthesized, no known provider reset)
+    // is replaced only by a complete usage reading.
+    const fallback = quota({
+      observedAt: NOW - 1_000,
+      source: "refusal",
+      windows: [
+        {
+          id: "exhausted_without_reset",
+          usedPercent: 100,
+          resetsAt: NOW + 60_000,
+          status: "exhausted",
+        },
+      ],
+    });
+    expect(
+      quotaCapacity(
+        applyQuotaObservation({ refreshGeneration: 1, quota: fallback }, usage, {
+          usageReadingsComplete: true,
+        })!,
+        NOW + 1_000,
+      ),
+    ).toEqual({ kind: "available" });
+    expect(
+      quotaCapacity(
+        applyQuotaObservation({ refreshGeneration: 1, quota: fallback }, usage)!,
+        NOW + 1_000,
+      ),
+    ).toEqual({ kind: "exhausted", resetsAt: NOW + 60_000 });
     // A reading that reports the window again shows an early reset.
     const reset = quota({
       observedAt: NOW + 2_000,

@@ -1509,7 +1509,9 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         for update`,
       );
       const current = row ? decodeSubscriptionQuota(row) : null;
-      const next = applyQuotaObservation({ refreshGeneration, quota: current }, observation);
+      const next = applyQuotaObservation({ refreshGeneration, quota: current }, observation, {
+        usageReadingsComplete: provider.adapter.usageReadingsComplete === true,
+      });
       if (!next || next === current) return { applied: false, recovered: false };
       const observedNow = observation.observedAt ?? Date.now();
       const recovered =
