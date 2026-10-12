@@ -71,6 +71,8 @@ beforeAll(async () => {
     "0728_subscription_core_personal_connect_format.sql",
     // 0730 derives the personal version reader from 0707's owner reader.
     "0730_subscription_core_personal_connection_versions.sql",
+    // Reads the registry/receipt and rewrites the admission guard withheld above.
+    "0736_subscription_failover_readiness_and_request_fence.sql",
   ];
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -427,10 +429,11 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
       expect(rows.length).toBe(
         SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES.length +
           SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length +
-          // 0715: the registered connection-kind lookup the routines call.
-          1,
+          // Registered kind lookup and B1's narrow kind/receipt reader.
+          2,
       );
       expect(rows.some((row) => row.name === "subscription_core_connection_kind")).toBe(true);
+      expect(rows.some((row) => row.name === "subscription_core_failover_readiness")).toBe(true);
       for (const row of rows) {
         expect({
           name: row.name,

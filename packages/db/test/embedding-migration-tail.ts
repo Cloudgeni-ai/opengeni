@@ -219,6 +219,8 @@ export const embeddingMigrationTail = [
   "0730_subscription_core_personal_connection_versions.sql",
   // Rekeys the session bindings table from withheld 0642.
   "0733_subscription_session_bindings_per_provider.sql",
+  // Reads withheld 0707/0712's registry/receipt and patches 0691's guard.
+  "0736_subscription_failover_readiness_and_request_fence.sql",
   // Reads the Knowledge claim installed by withheld 0461 (and the title/site
   // claims in historical lifecycle fixtures); preserve its full-name identity.
   "0730_maintenance_work_probes.sql",
