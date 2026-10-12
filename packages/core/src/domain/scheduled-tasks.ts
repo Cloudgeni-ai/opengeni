@@ -67,6 +67,7 @@ import {
   getScheduledScopedRigVersionMetadata,
   getScheduledTask,
   getScheduledTaskIncludingDeletedForUpdate,
+  getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getSandbox,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
@@ -1750,6 +1751,27 @@ export async function validatedScheduledTaskUpdate(input: {
       ),
     });
     if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
+  }
+  // A task accepted with a user-scoped SuperGrok v1 snapshot keeps its
+  // causal human: the scheduled dispatch and the deployed admission fence
+  // (`admit_scheduled_agent_run_execution`) still take the run's causal
+  // subject from that stored snapshot, so a material edit by anyone else
+  // would leave every later occurrence refused. Reading the stored value is
+  // not deriving it from live state; it retires with that fence.
+  const existingXaiAuthority = await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
+    input.db,
+    input.existing.workspaceId,
+    input.existing.id,
+  );
+  if (
+    existingXaiAuthority.scope === "user" &&
+    materialExecutionChange &&
+    (input.existing.createdBy.kind !== "subject" ||
+      input.existing.createdBy.subjectId !== input.grant.subjectId)
+  ) {
+    throw new HTTPException(409, {
+      message: "changing a user-scoped xAI scheduled task requires the same causal human",
+    });
   }
   if (materialExecutionChange) {
     await assertScheduledTaskMutationOwner(input.db, input.grant, input.existing.id);

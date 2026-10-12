@@ -4438,7 +4438,8 @@ connect writer gains `credentialFormat` and `personal`.
   the M1 shadow for `xai`. Shared factory code stays for Claude until C4.
   The v1 carrier columns are still written with their default and copied
   verbatim on derived rows (the 0608 and scheduled fences compare them);
-  nothing reads them to decide. X4 merges only with
+  no reader derives them from live state (the stored values that still
+  decide are listed under "X4 as delivered"). X4 merges only with
   `packages/db/test/subscription-core-xai-copy-paths-postgres.test.ts` (the
   `compat:dependent_sources_without_record` copy-path test) green at its
   head.
@@ -4486,7 +4487,21 @@ connect writer gains `credentialFormat` and `personal`.
     `ScopedSubscriptionTurnLease` are unchanged.
   - v1 carriers: SuperGrok's v1 value is written as the column default
     (`{ version: 1, scope: "workspace" }`) and copied verbatim on derived
-    rows; no reader derives it from live state or decides on it.
+    rows; no reader derives it from live state. Stored v1 values still
+    decide in these places, which retire only with a fence migration that
+    takes SuperGrok's causal subject from the owner and the v2 value: the
+    scheduled dispatch (`scheduled-tasks.ts` reads the task's snapshot,
+    refuses on it and takes the run's causal human from it) and the
+    deployed `admit_scheduled_agent_run_execution` and
+    `record_scheduled_task_revision_authority` routines; the API's 409 on
+    a material edit of a user-scoped SuperGrok task by anyone but its
+    creator (kept, so such an edit cannot leave every later occurrence
+    refused); the goal-continuation check, `subscriptionExecutionAuthorityFromTurn`
+    and the user-to-shared narrowing in `receiverSubscriptionAuthorityInTransaction`;
+    and `createSessionInTransaction`, which sets the creator's subject RLS
+    context when no snapshot is supplied. A cutover database holds only
+    workspace-scoped values for new work, so for it these reduce to the
+    shared case; tasks and turns accepted before the cutover keep theirs.
   - Kept, with reasons: the legacy secret decoder and the codec stage in
     `xai-subscription-core-cutover.ts` (the SuperGrok cutover migration
     still ships); the schema, posture inventory and routine signatures (forensic tables and their

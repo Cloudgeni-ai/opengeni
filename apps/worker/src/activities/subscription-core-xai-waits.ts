@@ -1,8 +1,8 @@
 /**
  * SuperGrok's binding of the provider-neutral core waits (SuperGrok track
- * X1b). Dormant: the SuperGrok binding is unregistered until the drained
- * cutover (X3), so every entry point here fails closed until then, and the
- * workflow reaches it only for a waiter the core holds.
+ * X1b). The only SuperGrok waits: the drained cutover moved every legacy
+ * waiter onto the core with its id and generation, and the workflow reaches
+ * this binding only for a waiter the core holds.
  */
 import {
   armSubscriptionCoreCapacityWait,

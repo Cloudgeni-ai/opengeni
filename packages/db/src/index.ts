@@ -31783,7 +31783,11 @@ async function createSessionInTransaction(
   const initialXaiProviderAccountAuthoritySnapshot =
     input.initialXaiProviderAccountAuthoritySnapshot ??
     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  // The creator's subject context, as the acceptance resolvers left it.
+  // The creator's subject RLS context, which the SuperGrok acceptance
+  // resolver used to set as a side effect when the caller supplied no
+  // accepted snapshot (a fresh session, not a copy of a parent's). The
+  // session insert below relies on it, so whoever retires this v1 input must
+  // keep setting the context for that same case.
   if (input.initialXaiProviderAccountAuthoritySnapshot === undefined && subjectCreatorId)
     await setSubjectRlsContext(tx, subjectCreatorId);
   let initialClaudeProviderAccountAuthoritySnapshot =
