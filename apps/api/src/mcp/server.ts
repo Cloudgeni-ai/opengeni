@@ -303,6 +303,7 @@ import {
   listFleet,
   provisionSandbox,
   runOnSandbox,
+  createRunOnSecretResolver,
   swapActiveSandbox,
   type FleetContext,
   type FleetServices,
@@ -4221,9 +4222,20 @@ function registerFleetTools(
     async ({ target, op }) => {
       const typedOp = op as RunOnOp;
       const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+      // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
+      const claims = exactAgentAttemptClaims(grant);
+      const secretResolver =
+        claims && claims.sessionId === sessionId && typedOp.kind !== "read"
+          ? await createRunOnSecretResolver(deps, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              ...claims,
+            })
+          : null;
       return json(
         await runOnSandbox(services, await fleetContext(), target, typedOp, {
           ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+          ...(secretResolver ? { secretResolver } : {}),
         }),
       );
     },

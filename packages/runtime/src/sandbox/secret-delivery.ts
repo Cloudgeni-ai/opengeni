@@ -345,6 +345,10 @@ export async function withSecretStdin<T>(args: T): Promise<T> {
   const chars = (args as { chars?: unknown }).chars;
   const carry = secretStdinCarryFor(chars);
   if (!carry) return args;
+  return { ...args, chars: await substituteLiteralCarry(carry) };
+}
+
+async function substituteLiteralCarry(carry: SecretStdinCarry): Promise<string> {
   let text = "";
   for (const token of carry.tokens) {
     if (token.type === "text") text += token.value;
@@ -352,7 +356,21 @@ export async function withSecretStdin<T>(args: T): Promise<T> {
       text += await textValue(requireValue(carry.values, referenceKey(token.reference)));
     } else text += token.raw;
   }
-  return { ...args, chars: text };
+  return text;
+}
+
+/**
+ * Resolve references in literal text (`run_on` write content) to their values
+ * now. `{{secretfile:…}}` is not allowed. Returns `text` unchanged when it has
+ * no reference or secrets are off. Throws SecretReferenceError.
+ */
+export async function resolveSecretLiteralText(
+  text: string,
+  options: { resolver: SecretResolver | null | undefined; use: SecretExecUse },
+): Promise<string> {
+  const prepared = await prepareSecretStdin(text, options);
+  if (!prepared) return text;
+  return prepared.carry ? await substituteLiteralCarry(prepared.carry) : prepared.text;
 }
 
 function safeFileStem(value: ResolvedSecretValue): string {

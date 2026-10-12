@@ -11,11 +11,17 @@
 // session group exists. `run_on` builds a one-off backend session and runs a
 // single op WITHOUT touching the active pointer.
 
-import type { Settings } from "@opengeni/config";
-import type { SandboxBackend } from "@opengeni/contracts";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  agentCapabilityEnabled,
+  referenceKey,
+  type SandboxBackend,
+  type SecretResolver,
+} from "@opengeni/contracts";
 import {
   authorizePersonalMachineForAttempt,
   getEnrollment,
+  getSession,
   getLiveEnrollmentConnection,
   getSandbox,
   listEnrollments,
@@ -34,6 +40,11 @@ import { HTTPException } from "hono/http-exception";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
+  prepareSecretExec,
+  resolveSecretLiteralText,
+  runWithSecretCarry,
+  secretFilePath,
+  type SecretExecCarry,
   selfhostedLiveness,
   SelfhostedSession,
   resolveConnectedMachineWorkspaceRoot,
@@ -47,6 +58,7 @@ import {
   type SelfhostedOperationResourcePolicy,
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "./routing";
+import { createSecretResolver } from "../domain/vaults/secret-resolver";
 import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "./runtime-settings";
 
 export type FleetServices = {
@@ -820,10 +832,45 @@ export type RunOnSelfhostedMachine = {
    * the active attempt that owns the one-off operation.
    */
   transientExecEnvironment?: Readonly<Record<string, string>>;
+  /**
+   * The calling attempt's secret resolver (W1, DL-9). exec splices
+   * `{{secret:…}}` / `{{secretfile:…}}` in the machine's dialect and delivers
+   * values in ExecRequest.env; write resolves its content; read resolves
+   * nothing. Absent: references pass through literally.
+   */
+  secretResolver?: SecretResolver | null;
 };
+
+/**
+ * The secret resolver for a `run_on` call made by an exact agent attempt (the
+ * MCP claims). Gated by the session's `secrets` capability (default on).
+ */
+export async function createRunOnSecretResolver(
+  services: Pick<FleetServices, "db" | "settings">,
+  attempt: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  },
+): Promise<SecretResolver> {
+  const session = await getSession(services.db, attempt.workspaceId, attempt.sessionId);
+  return createSecretResolver(
+    { db: services.db, encryptionKey: environmentsEncryptionKeyBytes(services.settings) ?? null },
+    { kind: "attempt", ...attempt },
+    {
+      capabilityEnabled: session?.agent
+        ? agentCapabilityEnabled(session.agent.capabilities, "secrets")
+        : true,
+    },
+  );
+}
 
 export type RunOnOptions = {
   transientExecEnvironment?: Readonly<Record<string, string>>;
+  secretResolver?: SecretResolver | null;
 };
 
 function runOnOperationAdmission(
@@ -851,6 +898,20 @@ function runOnOperationAdmission(
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
   };
+}
+
+function posixSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function runOnSecretFilePaths(carry: SecretExecCarry): string[] {
+  const paths = new Set<string>();
+  for (const token of carry.tokens) {
+    if (token.type !== "reference" || token.reference.kind !== "secretfile") continue;
+    const value = carry.values.get(referenceKey(token.reference));
+    if (value) paths.add(secretFilePath(carry.scope, value));
+  }
+  return [...paths];
 }
 
 /**
@@ -893,13 +954,37 @@ export async function executeRunOnSelfhostedMachine(
     ...(machine.opStream !== undefined ? { opStream: machine.opStream } : {}),
   });
 
+  const secretUse = { surface: "run_on" as const, toolName: "run_on" };
   try {
     if (op.kind === "exec") {
       const deadlineMs = session.effectiveExecDeadlineMs;
-      const res = await session.exec({
-        cmd: op.cmd,
-        ...(op.workdir ? { workdir: op.workdir } : {}),
+      // Resolve before dispatch (all-or-nothing); the machine adapter splices
+      // in its own dialect from the in-memory carry. `op.cmd` keeps references.
+      const prepared = await prepareSecretExec(op.cmd, {
+        resolver: machine.secretResolver,
+        dialect: null,
+        use: secretUse,
       });
+      let res: Awaited<ReturnType<typeof session.exec>>;
+      try {
+        res = await runWithSecretCarry(
+          prepared?.carry ?? null,
+          async () =>
+            await session.exec({
+              cmd: prepared?.text ?? op.cmd,
+              ...(op.workdir ? { workdir: op.workdir } : {}),
+            }),
+        );
+      } finally {
+        // A one-off has no attempt-end cleanup on this machine: remove the
+        // exact `secretfile` paths it wrote (SEC-4). Best effort.
+        const files = prepared?.carry ? runOnSecretFilePaths(prepared.carry) : [];
+        if (files.length > 0) {
+          await session
+            .exec({ cmd: `rm -f -- ${files.map(posixSingleQuote).join(" ")}` })
+            .catch(() => undefined);
+        }
+      }
       const timedOut = res.timedOut === true;
       const hasTerminalExit = res.exitCode !== null;
       return {
@@ -934,7 +1019,10 @@ export async function executeRunOnSelfhostedMachine(
     }
     const bytesWritten = await session.writeFile({
       path: op.path,
-      content: op.content,
+      content: await resolveSecretLiteralText(op.content, {
+        resolver: machine.secretResolver,
+        use: { ...secretUse, surface: "file_write" },
+      }),
     });
     return { target, kind: "write", ok: true, bytesWritten };
   } catch (error) {
@@ -1170,6 +1258,7 @@ export async function runOnSandbox(
       ...(options.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),
+      ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
       ...(services.settings.agentOpStreamEnabled === true &&
       enrollment.opStream === true &&
       services.bus?.getOpStreamConnection
