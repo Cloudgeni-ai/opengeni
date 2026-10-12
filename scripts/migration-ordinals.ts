@@ -164,12 +164,24 @@ export function findProtectedOrdinalCollisions(
     (files) => files.length > 1 && !coexists(files),
   );
   for (const base of bases) {
-    const found = findOrdinalCollisions(head, base.files);
-    for (const collision of found.collisions) {
-      // Pairwise witnesses can overlap without any base having published the
-      // whole group. Include every head member and the conflicting base name.
-      if (!coexists([...headGroups.get(collision.ordinal)!, collision.baseFile])) {
-        collisions.push({ ref: base.ref, ...collision });
+    const baseFiles = new Set(base.files.map((migration) => migration.file));
+    const baseGroups = new Map<string, string[]>();
+    for (const migration of base.files) {
+      const group = baseGroups.get(migration.ordinal) ?? [];
+      group.push(migration.file);
+      baseGroups.set(migration.ordinal, group);
+    }
+    for (const [ordinal, headGroup] of headGroups) {
+      const baseGroup = baseGroups.get(ordinal);
+      if (!baseGroup || coexists([...headGroup, ...baseGroup])) continue;
+      // Never collapse a base ordinal to one representative: an overlapping
+      // name can hide another base member that conflicts with the candidate.
+      // The exemption must witness the entire would-be merged group at once.
+      for (const headFile of headGroup) {
+        if (baseFiles.has(headFile)) continue;
+        for (const baseFile of baseGroup) {
+          collisions.push({ ref: base.ref, ordinal, headFile, baseFile });
+        }
       }
     }
   }

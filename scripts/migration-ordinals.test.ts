@@ -295,7 +295,7 @@ describe("migration ordinal helpers", () => {
       ],
     ]) {
       const result = findProtectedOrdinalCollisions(head, bases);
-      expect(result.collisions).toHaveLength(2);
+      expect(result.collisions).toHaveLength(4);
       expect(result.duplicates).toEqual([[a.file, b.file, z.file]]);
     }
     const custom = findProtectedOrdinalCollisions(
@@ -318,6 +318,60 @@ describe("migration ordinal helpers", () => {
         ],
       ).collisions,
     ).toHaveLength(1);
+  });
+
+  test("checks every base member, independently of ordering or partial overlap", () => {
+    const a = name("0730_a.sql"),
+      b = name("0730_b.sql"),
+      z = name("0730_z.sql");
+    for (const production of [
+      [b, z],
+      [z, b],
+    ]) {
+      const result = findProtectedOrdinalCollisions(
+        [a, z],
+        [
+          { ref: "origin/main", files: [a, z] },
+          { ref: "origin/production", files: production },
+        ],
+      );
+      expect(result.duplicates).toEqual([]);
+      expect(result.collisions).toContainEqual({
+        ref: "origin/production",
+        ordinal: "0730",
+        headFile: a.file,
+        baseFile: b.file,
+      });
+    }
+  });
+
+  test("exhausts three-name head, protected-base and custom-base allocations", () => {
+    const names = [name("0730_a.sql"), name("0730_b.sql"), name("0730_z.sql")];
+    const subsets = Array.from({ length: 8 }, (_, mask) => names.filter((_, i) => mask & (1 << i)));
+    for (const head of subsets)
+      for (const main of subsets)
+        for (const production of subsets) {
+          for (const custom of subsets) {
+            const contains = (whole: typeof names, part: typeof names) =>
+              part.every((name) => whole.includes(name));
+            const witnessed = (group: typeof names) =>
+              contains(main, group) || contains(production, group);
+            const expectedDuplicate = head.length > 1 && !witnessed(head);
+            const expectedCollision = [main, production, custom].some(
+              (base) =>
+                base.length > 0 &&
+                head.some((name) => !base.includes(name)) &&
+                !witnessed([...head, ...base]),
+            );
+            const result = findProtectedOrdinalCollisions(head, [
+              { ref: "origin/main", files: main },
+              { ref: "origin/production", files: production },
+              { ref: "custom", files: custom },
+            ]);
+            expect(result.duplicates.length > 0).toBe(expectedDuplicate);
+            expect(result.collisions.length > 0).toBe(expectedCollision);
+          }
+        }
   });
 
   test("rewrites the basename, companion slug, and bare ordinal without touching neighbours", () => {
