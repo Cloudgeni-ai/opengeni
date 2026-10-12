@@ -72,7 +72,8 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   },
   // Re-read billing for exhausted connections before placement trusts a
   // stored exhaustion, as the legacy path did (EP-N22): the shared pool, and
-  // the personal connections placement itself would let this exact turn use.
+  // the personal connections placement's personal authorization admits for
+  // this exact turn.
   beforePlacement: async ({ db, settings }, identity) => {
     await refreshExhaustedXaiCoreQuota({
       db,

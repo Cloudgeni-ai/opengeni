@@ -4650,8 +4650,13 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   does not set it. An at-limit reading (no known reset) is not below the
   limit and leaves the exhaustion and its deadline in place.
   The exact accepted turn also re-reads the personal connections that
-  placement itself would let it use, and no others, with the same 30-second
-  interval (`refreshExhaustedSubscriptionCoreTurnPersonalQuota`): inside the
+  placement's personal authorization admits for that turn, and no others,
+  with the same 30-second interval
+  (`refreshExhaustedSubscriptionCoreTurnPersonalQuota`). Placement's later
+  choice can still pass over such an account (outside the Personal workspace
+  it needs fallback consent or an explicit binding, and the provider switch
+  applies there); the re-read is then the owner's own billing read under the
+  0729 owner checks, which widens nothing. Inside the
   accepted turn, placement's own `authorizeSubscriptionCoreFrozenPersonal`
   (`authorize_subscription_personal_placement_access`) requires the turn's
   initiating human to be the session owner, a private session or the

@@ -18,7 +18,8 @@ const CORE_SUBSCRIPTION_SERVICE_SUBJECT = "service:subscription-core";
  * - Shared connections in this workspace's explicit context, as the core's
  *   service subject.
  * - With `personalTurn` (the exact accepted turn being placed or waiting):
- *   only the personal connections placement itself would let that turn use
+ *   only the personal connections placement's personal authorization admits
+ *   for that turn
  *   (its initiating human is the session owner, a private session or the
  *   owner's Personal workspace, the frozen v2 entry at the current
  *   authority generation, personal connections allowed), each read as the

@@ -6,7 +6,7 @@
  * - the stored status and quota, through the owner-only reader (0707), in
  *   the workspace the person views (no credential material);
  * - the live re-read of a stored exhaustion before an exact accepted turn
- *   is placed, only for the connections that turn's placement may use, and
+ *   is placed, only for the connections placement's personal authorization admits for that turn, and
  *   through the administered `personal_owner` probe in the owner's own
  *   Personal workspace.
  *
@@ -75,7 +75,7 @@ export const subscriptionCorePersonalConnections = memoByProvider((provider) => 
   }
 
   /**
-   * The personal connections an exact accepted turn's placement may use:
+   * The personal connections placement's personal authorization admits for an exact accepted turn:
    * placement's own authorization (the frozen v2 entry, minted per
    * connection at its current authority generation by
    * `authorize_subscription_personal_placement_access`), then the personal
@@ -121,7 +121,7 @@ export const subscriptionCorePersonalConnections = memoByProvider((provider) => 
   /**
    * Re-read live usage before a stored personal exhaustion is treated as
    * current for an exact accepted turn (design 5.3, EP-N22 for personal
-   * connections): of the connections that turn's placement may use (see
+   * connections): of the connections placement's personal authorization admits for that turn (see
    * `turnPersonalConnectionIds`), each active one whose stored quota is
    * exhausted now and was not observed within `minIntervalMs` is probed on
    * its own, as the owner in their own Personal workspace. Probe failures

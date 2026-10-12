@@ -4,7 +4,7 @@
  * the probe runs as the core's service subject in the turn's workspace, and
  * a recovery wakes the organization's SuperGrok core waiters. The exact
  * turn is also handed to the personal re-read, which reads only what
- * placement itself would let that turn use (proven on real PostgreSQL in
+ * placement's personal authorization admits for that turn (proven on real PostgreSQL in
  * apps/api/test/xai-core-personal-status-postgres.test.ts).
  */
 import { beforeEach, expect, mock, test } from "bun:test";

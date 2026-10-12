@@ -65,7 +65,9 @@ export type XaiStatusPayload<Model> = {
  * owner-only reader shows them. Only in the viewer's own Personal workspace,
  * only without a shared primary, and only for a caller who passes the
  * owner check of a private account (`ownerVerified`: the verified owning
- * person with `connections:write`, never a read-only key or an agent), is a
+ * person with `connections:write`, by browser sign-in or an agent acting
+ * with their full access; never a read-only agent, plain bearer or API
+ * key), is a
  * personal connection the effective account (legacy scope `user`),
  * validated by one live usage read as its owner there; that read also
  * applies the organization's personal-connections rule (0729). Any other
