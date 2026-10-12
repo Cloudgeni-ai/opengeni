@@ -333,13 +333,28 @@ export function fallbackOrderProblem(order: unknown): string | null {
  * The fallback models the effective settings name for a preferred model, in
  * order, before the placement-time filters (catalog, cross-provider switch,
  * restrictions; see `failoverCandidateModels`). The read the core uses for
- * the organization's fallback order.
+ * the organization's fallback order. Empty both for a missing entry and for
+ * an explicit empty one; `hasFallbackOrderEntry` tells them apart.
  */
 export function fallbackOrderFor(
   settings: SubscriptionSettingValues,
   preferredModelId: string,
 ): readonly string[] {
+  if (!hasFallbackOrderEntry(settings, preferredModelId)) return [];
   return settings.fallbackOrder[preferredModelId] ?? [];
+}
+
+/**
+ * Whether the effective settings carry a fallback entry for a preferred
+ * model, including an explicit empty list, which means "no fallback model"
+ * (D-35). Only a missing entry lets placement derive a default order. Only
+ * the map's own keys are entries, never an inherited object property.
+ */
+export function hasFallbackOrderEntry(
+  settings: SubscriptionSettingValues,
+  preferredModelId: string,
+): boolean {
+  return Object.hasOwn(settings.fallbackOrder, preferredModelId);
 }
 
 function mergeProviderSwitches(
