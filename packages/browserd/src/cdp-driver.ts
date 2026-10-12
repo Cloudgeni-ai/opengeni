@@ -1659,11 +1659,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         .send("Runtime.runIfWaitingForDebugger", {}, { sessionId, timeoutMs: 5_000 })
         .catch(() => undefined);
     };
-    const owned =
-      info.type === "page" &&
-      (this.browserContextId === undefined || info.browserContextId === this.browserContextId);
-    if (!owned) {
-      // Another controller's context (or a non-page target): never hold it.
+    // The page filter means every non-page attachment is our own explicit
+    // Target.attachToTarget (for example the hidden metadata target, which
+    // Chromium reports as "other"). That session belongs to its caller.
+    if (info.type !== "page") return;
+    if (this.browserContextId !== undefined && info.browserContextId !== this.browserContextId) {
+      // Another controller's context: never hold it.
       await resume();
       await connection
         .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 5_000 })
@@ -1673,7 +1674,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // Our own explicit Target.attachToTarget also reports an attachment. The
     // auto-attached session always arrives first; keep exactly one per target
     // (Chromium allows one internal virtual authenticator per target).
-    if (this.autoSessions.has(info.targetId)) return;
+    if (this.autoSessions.has(info.targetId)) {
+      await resume();
+      return;
+    }
     this.autoSessions.set(info.targetId, sessionId);
     // A new tab or popup may have taken the front.
     if (waiting) this.frontTargetId = null;
