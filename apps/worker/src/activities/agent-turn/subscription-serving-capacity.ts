@@ -14,6 +14,7 @@ import {
   type ServingAttempt,
 } from "./subscription-serving-claim";
 import { selectCoreSubscriptionTurnCapacity } from "./subscription-core-capacity";
+import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { subscriptionCoreUnsupportedFailure } from "./codex-core-errors";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 
@@ -31,7 +32,12 @@ export async function selectServingTurnCapacity(
   if (!provider)
     throw subscriptionCoreUnsupportedFailure("Serving provider runtime", "Model account");
   const lease = provider.lease(deps);
-  if (!lease.holderId) throw new Error("Serving lease holder not initialized");
+  lease.holderId ??= subscriptionTurnLeaseHolderId(
+    provider.id,
+    provider.displayName,
+    deps.input,
+    context.identity.turnId,
+  );
   await provider.recoverHealth(deps, context.identity);
   await provider.beforePlacement?.(deps, context.identity);
   const placement = await placeSubscriptionCoreTurnWithFailover(

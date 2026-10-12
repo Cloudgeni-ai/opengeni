@@ -209,80 +209,91 @@ test("SUB-FAIL-03 absent home readiness never enables the worker hook", async ()
   expect(record).not.toHaveBeenCalled();
 });
 
-test("SUB-FAIL-03 changed placement releases its lease before proposing recovery and never adopts credentials", async () => {
-  setup();
-  const order: string[] = [];
-  const provider = {
-    id: "codex",
-    displayName: "fixture",
-    leaseTtlMs: 60000,
-    lease: () => ({ holderId: "holder" }),
-    recoverHealth: async () => {},
-    adopt: () => {
-      throw new Error("must not adopt proposed target");
-    },
-  } as unknown as CoreTurnPlacementProvider;
-  spies.push(spyOn(registry, "servingTurnProviders").mockReturnValue([provider]));
-  spies.push(
-    spyOn(db, "placeSubscriptionCoreTurnWithFailover").mockImplementation(async () => {
-      order.push("placement committed");
-      return {
-        kind: "run",
+test.each(["holder", null])(
+  "SUB-FAIL-03 changed placement initializes or preserves holder %s, releases before recovery and never adopts credentials",
+  async (holderId) => {
+    setup();
+    const order: string[] = [];
+    const lease = { holderId };
+    const workflowId = "serving-fixture";
+    const expectedHolder =
+      holderId ?? `codex-turn:${workflowId}:${identity.turnId}:${base.attemptId}`;
+    const provider = {
+      id: "codex",
+      displayName: "fixture",
+      leaseTtlMs: 60000,
+      lease: () => lease,
+      recoverHealth: async () => {},
+      adopt: () => {
+        throw new Error("must not adopt proposed target");
+      },
+    } as unknown as CoreTurnPlacementProvider;
+    spies.push(spyOn(registry, "servingTurnProviders").mockReturnValue([provider]));
+    spies.push(
+      spyOn(db, "placeSubscriptionCoreTurnWithFailover").mockImplementation(
+        async (_db, _provider, input) => {
+          expect(input.holderId).toBe(expectedHolder);
+          expect(lease.holderId).toBe(expectedHolder);
+          order.push("placement committed");
+          return {
+            kind: "run",
+            provider: "codex",
+            modelId: targetPolicy.productModelId,
+            connectionId,
+            reasoningLevel: "high",
+            switch: "failover_same_provider",
+          } as never;
+        },
+      ),
+    );
+    spies.push(
+      spyOn(db, "releaseSubscriptionTurnLease").mockImplementation(async () => {
+        order.push("lease released");
+      }),
+    );
+    const recovery = spyOn(db, "requestSessionTurnRecovery").mockImplementation(async () => {
+      order.push("recovery committed");
+      return { action: "recovering", events: [] };
+    });
+    spies.push(recovery, spyOn(events, "publishDurableSessionEvents").mockResolvedValue(undefined));
+    const deps = {
+      input: { ...scope, workflowId, attemptId: base.attemptId },
+      settings,
+      db: base.db,
+      bus: {},
+      turnExecutionPolicy: policy,
+      attempt: { executionGeneration: 1 },
+      turn: { triggerEventId: crypto.randomUUID() },
+      control: {},
+      acknowledgeRecoveryQuiescence: () => order.push("quiescence"),
+      claimedResult: (value: unknown) => value,
+    } as unknown as CapacityPhaseDeps;
+    const result = await selectServingTurnCapacity(deps, {
+      identity,
+      acceptedPolicy: policy,
+      homeProviderId: "codex",
+      models: models.map((model) => ({
+        id: model.id,
         provider: "codex",
-        modelId: targetPolicy.productModelId,
+        upstreamModelId: model.upstreamModelId,
+        reasoningLevels: ["high"],
+      })),
+      revision: {
+        schemaVersion: 1,
+        policy,
+        executionGeneration: 1,
         connectionId,
-        reasoningLevel: "high",
-        switch: "failover_same_provider",
-      } as never;
-    }),
-  );
-  spies.push(
-    spyOn(db, "releaseSubscriptionTurnLease").mockImplementation(async () => {
-      order.push("lease released");
-    }),
-  );
-  const recovery = spyOn(db, "requestSessionTurnRecovery").mockImplementation(async () => {
-    order.push("recovery committed");
-    return { action: "recovering", events: [] };
-  });
-  spies.push(recovery, spyOn(events, "publishDurableSessionEvents").mockResolvedValue(undefined));
-  const deps = {
-    input: { ...scope, attemptId: base.attemptId },
-    settings,
-    db: base.db,
-    bus: {},
-    turnExecutionPolicy: policy,
-    attempt: { executionGeneration: 1 },
-    turn: { triggerEventId: crypto.randomUUID() },
-    control: {},
-    acknowledgeRecoveryQuiescence: () => order.push("quiescence"),
-    claimedResult: (value: unknown) => value,
-  } as unknown as CapacityPhaseDeps;
-  const result = await selectServingTurnCapacity(deps, {
-    identity,
-    acceptedPolicy: policy,
-    homeProviderId: "codex",
-    models: models.map((model) => ({
-      id: model.id,
-      provider: "codex",
-      upstreamModelId: model.upstreamModelId,
-      reasoningLevels: ["high"],
-    })),
-    revision: {
-      schemaVersion: 1,
-      policy,
-      executionGeneration: 1,
-      connectionId,
-      reason: "initial",
-      historyPosition: 0,
-    },
-  });
-  expect(result).toEqual({ exit: { status: "recovering" } });
-  expect(order).toEqual([
-    "placement committed",
-    "lease released",
-    "recovery committed",
-    "quiescence",
-  ]);
-  expect(recovery.mock.calls[0]![2].subscriptionServingTarget?.policy).toEqual(targetPolicy);
-});
+        reason: "initial",
+        historyPosition: 0,
+      },
+    });
+    expect(result).toEqual({ exit: { status: "recovering" } });
+    expect(order).toEqual([
+      "placement committed",
+      "lease released",
+      "recovery committed",
+      "quiescence",
+    ]);
+    expect(recovery.mock.calls[0]![2].subscriptionServingTarget?.policy).toEqual(targetPolicy);
+  },
+);
