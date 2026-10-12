@@ -17,6 +17,7 @@ import { mediaModule } from "./modules/media";
 import { rendererMarkdownModule } from "./modules/renderer-markdown";
 import { repositoriesModule } from "./modules/repositories";
 import { sandboxModule } from "./modules/sandbox";
+import { secretsModule } from "./modules/secrets";
 import { skillsModule } from "./modules/skills";
 import { subagentsModule } from "./modules/subagents";
 import type {
@@ -45,6 +46,7 @@ export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   subagentsModule,
   knowledgeModule,
   skillsModule,
+  secretsModule,
   adminModule,
   attachmentsModule,
 ];

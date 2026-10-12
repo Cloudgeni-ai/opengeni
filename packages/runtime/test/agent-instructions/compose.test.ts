@@ -87,6 +87,7 @@ const MARKERS: Record<string, RegExp> = {
   skills: /# Using skills|Skill index/u,
   media: /# Images and video|generate_image|generate_video|image_generation/u,
   sandbox: /apply_patch|exec_command|rg --files|mktemp|sandbox:\/workspace/u,
+  secrets: /# Secrets|\{\{secret:/u,
 };
 
 describe("modular composer: module selection (AC12)", () => {
@@ -106,7 +107,7 @@ describe("modular composer: module selection (AC12)", () => {
   });
 
   test("all + every resource includes every module", () => {
-    const result = compose(allAgentCapabilities(), ALL_RESOURCES);
+    const result = compose(allAgentCapabilities(), { ...ALL_RESOURCES, secretReferences: true });
     expect(moduleIds(result)).toEqual(
       AGENT_PROMPT_MODULE_IDS.filter((id) => id !== "renderer_markdown"),
     );
@@ -149,6 +150,21 @@ describe("modular composer: module selection (AC12)", () => {
       ]);
     });
   }
+
+  test("secrets needs the capability and runtime reference resolution", () => {
+    const wired = { ...NO_RESOURCES, secretReferences: true };
+    const on = { ...noneAgentCapabilities(), skills: false as const, secrets: true };
+    expect(moduleIds(compose(on, wired))).toEqual([
+      "base_behavior",
+      "runtime_mechanics",
+      "secrets",
+    ]);
+    expect(compose(on, NO_RESOURCES).composed).not.toMatch(MARKERS.secrets!);
+    const off = { ...allAgentCapabilities(), secrets: false };
+    expect(compose(off, { ...ALL_RESOURCES, secretReferences: true }).composed).not.toMatch(
+      MARKERS.secrets!,
+    );
+  });
 
   test("skills: read and manage include the skills module; false removes it", () => {
     for (const skills of ["read", "manage"] as const) {

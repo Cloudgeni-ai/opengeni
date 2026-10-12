@@ -2134,7 +2134,57 @@ export type SessionTurn = {
   updatedAt: string;
 };
 
-export type HumanInputQuestionKind = "text" | "single_select" | "multi_select";
+export type HumanInputQuestionKind = "text" | "single_select" | "multi_select" | "secret";
+
+/** Options for a generated password (see `@opengeni/contracts` GeneratePasswordSpec). */
+export type GeneratePasswordSpec = {
+  length?: number | undefined;
+  lowercase?: boolean | undefined;
+  uppercase?: boolean | undefined;
+  digits?: boolean | undefined;
+  symbols?: boolean | undefined;
+  symbolSet?: string | undefined;
+  excludeAmbiguous?: boolean | undefined;
+  requireEachClass?: boolean | undefined;
+};
+
+export type HumanInputSecretSaveTo = "user" | "task" | "workspace";
+
+/** A secret question's spec; the value is saved to a vault, never to the response. */
+export type HumanInputSecretSpec = {
+  item: string;
+  field?: string | undefined;
+  fieldKind?: "concealed" | "totp" | "text" | undefined;
+  itemType?: "login" | "api_key" | "note" | undefined;
+  username?: { prompt: string; value?: string | undefined } | undefined;
+  website?: string | undefined;
+  looksLike?: string | undefined;
+  pattern?: string | undefined;
+  saveTo?: HumanInputSecretSaveTo | undefined;
+  vault?: string | undefined;
+  allowGenerate?: boolean | undefined;
+  generate?: GeneratePasswordSpec | undefined;
+  autocomplete?: "current-password" | "new-password" | "one-time-code" | "off" | undefined;
+};
+
+/** Write-only secret value for one secret question: exactly one of `value` or `generate`. */
+export type HumanInputSecretAnswer = {
+  questionId: string;
+  value?: string | undefined;
+  generate?: GeneratePasswordSpec | undefined;
+  username?: string | undefined;
+  saveTo: HumanInputSecretSaveTo;
+  vaultId?: string | undefined;
+};
+
+/** What the agent and timeline see for an answered secret question. */
+export type HumanInputSecretAnswerResult = {
+  reference: string;
+  username: string | null;
+  vaultName: string;
+  itemName: string;
+  saveTo: HumanInputSecretSaveTo;
+};
 
 export type HumanInputOption = {
   id: string;
@@ -2159,6 +2209,8 @@ export type HumanInputQuestion = {
   label?: string | null | undefined;
   helpText?: string | null | undefined;
   options: HumanInputOption[];
+  /** Required exactly when `kind` is "secret". */
+  secret?: HumanInputSecretSpec | undefined;
   required: boolean;
   allowOther: boolean;
   validation?:
@@ -2174,6 +2226,8 @@ export type HumanInputAnswer = {
   questionId: string;
   values: string[];
   other?: string | null | undefined;
+  /** Secret questions: the saved reference, never the value. */
+  secret?: HumanInputSecretAnswerResult | undefined;
 };
 
 export type HumanInputResponse =
@@ -2181,7 +2235,12 @@ export type HumanInputResponse =
   | { outcome: "skipped" | "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
-  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | {
+      outcome: "answered";
+      answers: HumanInputAnswer[];
+      /** Write-only secret values; never echoed in events or responses. */
+      secretAnswers?: HumanInputSecretAnswer[] | undefined;
+    }
   | { outcome: "skipped" };
 
 export type SessionHumanInputRequest = {
@@ -3505,6 +3564,7 @@ export const KNOWN_PERMISSIONS = [
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "codemode:call",
   "goals:manage",
@@ -9922,6 +9982,7 @@ export type AgentCapabilityId =
   | "schedules"
   | "artifacts"
   | "browser"
+  | "secrets"
   | "media"
   | "workspaceFiles"
   | "workspaceConnectors"
@@ -9940,6 +10001,7 @@ export type AgentCapabilityToggles = {
   schedules?: boolean | undefined;
   artifacts?: boolean | undefined;
   browser?: boolean | undefined;
+  secrets?: boolean | undefined;
   media?: boolean | undefined;
   workspaceFiles?: boolean | undefined;
   workspaceConnectors?: boolean | undefined;
@@ -9964,7 +10026,12 @@ export type AgentConfigRequest = {
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;
   renderer?: AgentRenderer | undefined;
+  /** Vaults this session may use (input only); intersected with the parent's policy. */
+  vaultPolicy?: VaultPolicy | undefined;
 };
+
+/** Which vaults a session or schedule may use (see `@opengeni/contracts` VaultPolicy). */
+export type VaultPolicy = { mode: "all" } | { mode: "selected"; vaultIds: string[] };
 
 export type WorkspaceAgentDefaults = {
   capabilities?: AgentCapabilities | undefined;
@@ -9982,6 +10049,7 @@ export type ResolvedAgentCapabilities = {
   schedules: boolean;
   artifacts: boolean;
   browser: boolean;
+  secrets: boolean;
   media: boolean;
   workspaceFiles: boolean;
   workspaceConnectors: boolean;

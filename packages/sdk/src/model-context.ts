@@ -32,6 +32,7 @@ export type AgentPromptModuleId =
   | "subagents"
   | "knowledge"
   | "skills"
+  | "secrets"
   | "admin"
   | "attachments";
 
