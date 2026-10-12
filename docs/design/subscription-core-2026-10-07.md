@@ -4960,8 +4960,10 @@ unregistered until then.
   merged. Unreachable while dormant.
 - Materialization and refresh. The bearer comes from the shared turn token
   resolver under the exact accepted turn and the attempt's live core lease;
-  the decoded credential is bound into the capability settings with the
-  connection id and refresh generation, and the token scope follows the
+  the capability settings carry only the account identity, the connection
+  id and refresh generation with a placeholder token, and each request's
+  custody sets the live bearer (OAuth `authorization`, tested with the
+  production provider shape); the token scope follows the
   accepted product model's prefix. A 401 renews through one forced refresh
   per attempt (memoized, under the connection's refresh lock in the shared
   resolver) and retries the same request on the same connection, as a new

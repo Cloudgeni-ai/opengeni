@@ -878,15 +878,37 @@ describe("Claude custody edge paths on the core", () => {
     outputType: "text",
     tracing: false,
   } as never;
-  function model(placed: ReturnType<typeof placedCore>, responses: Array<() => Response>) {
+  // The production subscription provider: OAuth auth with the settings'
+  // placeholder bearer (`claudeCoreSettingsCredential`).
+  const oauthProvider: ResolvedModelProvider = {
+    ...claudeProvider,
+    apiKey: CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+    anthropic: {
+      auth: "oauth",
+      identity: { accountUuid: "10000000-0000-4000-8000-000000000001", deviceId: "a".repeat(64) },
+      cacheTtl: "5m",
+      maxOutputTokens: 32000,
+      streamIdleTimeoutMs: 600000,
+    },
+  };
+  function model(
+    placed: ReturnType<typeof placedCore>,
+    responses: Array<() => Response>,
+    provider: ResolvedModelProvider = claudeProvider,
+  ) {
     let call = 0;
     let sequence = 0;
-    const fetcher = instrumentedModelFetch(PROVIDER_ID, (async () => {
+    const sent: Headers[] = [];
+    const fetcher = instrumentedModelFetch(PROVIDER_ID, (async (
+      _url: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      sent.push(new Headers(init?.headers));
       const next = responses[call++];
       if (!next) throw new Error("unexpected provider call");
       return next();
     }) as typeof fetch);
-    const claude = new AnthropicMessagesModel(claudeProvider, "claude-sonnet-5", fetcher);
+    const claude = new AnthropicMessagesModel(provider, "claude-sonnet-5", fetcher);
     const custody = <T>(fn: () => Promise<T>) =>
       withClaudeUsageObserver(
         () => undefined,
@@ -899,8 +921,31 @@ describe("Claude custody edge paths on the core", () => {
           providerIds: new Set([PROVIDER_ID]),
         }),
       );
-    return { claude, custody, calls: () => call };
+    return { claude, custody, calls: () => call, sent };
   }
+
+  test("an OAuth subscription request and its continuation leave with the live bearer, never the placeholder", async () => {
+    const placed = placedCore();
+    const { claude, custody, calls, sent } = model(
+      placed,
+      [
+        () => Response.json(message("msg_1", "Searching.", "pause_turn")),
+        () => Response.json(message("msg_2", "Done.", "end_turn")),
+      ],
+      oauthProvider,
+    );
+    await custody(() => claude.getResponse(modelRequest));
+    expect(calls()).toBe(2);
+    expect(sent).toHaveLength(2);
+    for (const headers of sent) {
+      expect(headers.get("authorization")).toBe("Bearer sk-ant-oat01-core");
+      expect(headers.get("x-api-key")).toBeNull();
+      expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
+      expect([...headers.values()].join("\n")).not.toContain(
+        CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
+      );
+    }
+  });
 
   test("a paused search continues as its own reservation; both settle once at the checkpoint", async () => {
     const placed = placedCore();
