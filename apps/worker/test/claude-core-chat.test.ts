@@ -612,8 +612,8 @@ describe("Claude request custody on the core", () => {
     ]);
     expect(placed.core.titleRequests!.hasUnknownOutcome()).toBe(true);
     expect(placed.core.requests!.hasUnknownOutcome()).toBe(false);
-    // Either lane's unknown outcome ends the turn without a replay.
-    expect(claudeCoreRequestOutcomeUnknown(new Error("plain"), placed.core)).not.toBeNull();
+    // The tool-less title never enters history and cannot fence main recovery.
+    expect(claudeCoreRequestOutcomeUnknown(new Error("plain"), placed.core)).toBeNull();
   });
 
   test("a session-title request, even one renewed after a 401, never moves the main lane's refusal fence", async () => {
