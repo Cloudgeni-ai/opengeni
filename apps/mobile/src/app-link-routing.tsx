@@ -1,5 +1,5 @@
 import type { OpenGeniClient, Workspace } from "@opengeni/sdk";
-import { router } from "expo-router";
+import { router, usePathname } from "expo-router";
 import { useEffect, useRef } from "react";
 import { useAccount } from "@/account";
 import { openInBrowser, setAppLinkHandler } from "@/app-link-registry";
@@ -17,6 +17,9 @@ import { dismissToHome } from "@/navigation";
 
 /** A link waiting for its account to finish switching in (the switch remounts the app). */
 let pendingLink: { accountId: string; link: AppLink } | null = null;
+
+/** Sheets a conversation should not open inside; a link closes them first. */
+const SHEET_PATHS = new Set(["/add-account", "/workspaces"]);
 
 /** Which of the person's workspaces holds a session the link names without one. */
 async function findSessionWorkspace(
@@ -44,6 +47,8 @@ interface OpenContext {
   workspaces: readonly Workspace[];
   workspaceId: string | null;
   setWorkspaceId(id: string): void;
+  /** Close an open sheet, so the conversation opens on the main stack. */
+  closeSheet(): void;
 }
 
 /** Open a link in the account already in use. */
@@ -62,6 +67,7 @@ async function openHere(link: AppLink, context: OpenContext): Promise<void> {
               context.workspaceId,
             );
     if (!workspaceId) return openInBrowser(link.webUrl);
+    context.closeSheet();
     router.push(appSessionPath(link.sessionId, workspaceId, link.at));
     return;
   }
@@ -89,7 +95,21 @@ export function AppLinkRouting() {
     switchAccount,
     setWorkspaceId,
   } = useAccount();
-  const context: OpenContext = { client, workspaces, workspaceId, setWorkspaceId };
+  // The screen under the handoff screen, which steps back before routing.
+  const pathname = usePathname();
+  const screenRef = useRef(pathname);
+  if (pathname !== "/open") screenRef.current = pathname;
+  const context: OpenContext = {
+    client,
+    workspaces,
+    workspaceId,
+    setWorkspaceId,
+    closeSheet: () => {
+      if (!SHEET_PATHS.has(screenRef.current) || !router.canGoBack()) return;
+      screenRef.current = "";
+      router.back();
+    },
+  };
   const contextRef = useRef(context);
   contextRef.current = context;
   const ready = status === "ready" && accessContext !== null;
