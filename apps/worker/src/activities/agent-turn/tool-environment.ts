@@ -8,7 +8,6 @@ import {
   getWorkspaceVideoGenerationPolicy,
   listSkillDescriptors,
   completeConnectorActionExecution,
-  getScheduledVariableSetExpectedGenerationForAttempt,
   persistAttemptToolCatalog,
   requireWorkspace,
   prepareConnectorActionApproval,
@@ -59,8 +58,6 @@ import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { mergeResourceRefs } from "../common";
 import {
   workspaceSessionToolPolicyDefaultServerIds,
-  loadRigDefaultVariableSetEnvironment,
-  mergeRigDefaultVariableSetEnvironment,
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
@@ -73,7 +70,7 @@ import {
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
 } from "@opengeni/core";
-import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
+import type { WorkspaceEnvironmentForRun } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import {
@@ -219,14 +216,11 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   const {
     input,
     db,
-    cancellationSignal,
-    connectionCredentials,
     turn,
     session,
     fileAuthoritySubjectId,
     capabilitySettings,
     runSettings,
-    rigVersion,
     workspaceRefs,
   } = deps;
 
@@ -276,114 +270,16 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
   );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-  // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
-  // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
-  // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform
-  // no Variable Set work. Organization/workspace sets use the exact turn actor; personal sets
-  // additionally require the causal human frozen into the admitted turn.
+  // W1 (secrets delivery): the turn no longer loads or decrypts Variable Sets,
+  // and nothing user-defined is injected into the sandbox environment. User
+  // secrets reach a command only through `{{secret:…}}` references resolved at
+  // the exec boundary. Variable Sets stay readable elsewhere until W6 removes them.
   const connectionScope = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
   };
-  const rigDefaultVariableSetIds = rigVersion?.defaultVariableSetIds ?? [];
-  const sessionVariableSetIds = session.variableSetIds;
-  let workspaceVariableSet: Awaited<
-    ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>
-  > = null;
-  const explicitEnvironmentValues: Record<string, string> = {};
-  const rigDefaultEnvironmentValues: Record<string, string> = {};
-  if (sessionVariableSetIds.length > 0 || rigDefaultVariableSetIds.length > 0) {
-    const variableSetAuthority = {
-      sessionId: input.sessionId,
-      turnId: turn.id,
-      attemptId: input.attemptId,
-      executionGeneration: turn.executionGeneration,
-      initiator: turn.initiator,
-      initiatingHumanSubjectId: fileAuthoritySubjectId,
-    };
-    // A scheduled attempt may materialize only the exact generation frozen
-    // on its accepted occurrence; ordinary turns resolve to null.
-    const expectedVariableSetGeneration = async (
-      candidateVariableSetId: string,
-    ): Promise<number | null> =>
-      await getScheduledVariableSetExpectedGenerationForAttempt(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: fileAuthoritySubjectId ?? turn.initiator.subjectId,
-        initiatingHumanSubjectId: fileAuthoritySubjectId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-        variableSetId: candidateVariableSetId,
-      });
-    for (const variableSetId of sessionVariableSetIds) {
-      const selected = await waitForTurnOperation(
-        (async () =>
-          loadWorkspaceEnvironmentForRunWithCredentials(
-            db,
-            runSettings,
-            connectionScope,
-            variableSetId,
-            variableSetAuthority,
-            connectionCredentials?.sandboxSecrets,
-            connectionCredentials?.sandboxSecrets
-              ? { expectedGeneration: await expectedVariableSetGeneration(variableSetId) }
-              : {},
-          ))(),
-        cancellationSignal,
-        undefined,
-      );
-      if (!selected) continue;
-      Object.assign(explicitEnvironmentValues, selected.values);
-      // Preserve the legacy single-set metadata view as the final,
-      // highest-precedence explicit selection while its values represent the
-      // complete ordered explicit layer.
-      workspaceVariableSet = { ...selected, values: { ...explicitEnvironmentValues } };
-    }
-    // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
-    // variable sets and layer them BELOW the session's own set — the session's
-    // values WIN on any key collision. Loaded through the SAME host-secrets
-    // provider path as the session set (embedded-topology parity). Precedence
-    // WITHIN the rig defaults is listed order (a later set overrides an earlier
-    // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
-    // VERSION is frozen per session, so the SET of default variable sets is
-    // fixed for the session's life — the merged manifest env is therefore stable
-    // across the session's turns (the same guarantee the session's own variable
-    // set already relies on), keeping validateNoEnvironmentDelta empty.
-    Object.assign(
-      rigDefaultEnvironmentValues,
-      await loadRigDefaultVariableSetEnvironment(
-        rigDefaultVariableSetIds,
-        async (rigDefaultVariableSetId) =>
-          await waitForTurnOperation(
-            (async () =>
-              loadWorkspaceEnvironmentForRunWithCredentials(
-                db,
-                runSettings,
-                connectionScope,
-                rigDefaultVariableSetId,
-                variableSetAuthority,
-                connectionCredentials?.sandboxSecrets,
-                connectionCredentials?.sandboxSecrets
-                  ? {
-                      expectedGeneration:
-                        await expectedVariableSetGeneration(rigDefaultVariableSetId),
-                    }
-                  : {},
-              ))(),
-            cancellationSignal,
-            undefined,
-          ),
-      ),
-    );
-  }
-  workspaceRefs.variableSetId = workspaceVariableSet?.id ?? "";
-  // Session set wins collisions with the rig defaults (explicit precedence).
-  const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
-    rigDefaultEnvironmentValues,
-    explicitEnvironmentValues,
-  );
+  const workspaceVariableSet: WorkspaceEnvironmentForRun | null = null;
+  workspaceRefs.variableSetId = "";
   return {
     turnResources,
     runtimeResources,
@@ -391,7 +287,6 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     turnTools,
     connectionScope,
     workspaceVariableSet,
-    sandboxWorkspaceEnvironmentValues,
   };
 }
 

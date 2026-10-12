@@ -90,7 +90,6 @@ import {
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
-import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -155,11 +154,9 @@ export async function sessionAttachEnvironment(
    *  the materialization audit fact. Null records the legacy service sentinel. */
   attachSubjectId: string | null,
 ): Promise<Record<string, string>> {
-  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(
-    services.db,
-    services.settings,
-    { accountId: session.accountId, workspaceId, session, subjectId: attachSubjectId },
-  );
+  // The manifest carries deployment constants only (W1): user secrets are
+  // resolved per command from `{{secret:…}}` references, never seeded here.
+  void attachSubjectId;
   // Build the env with the SESSION's backend, not the deployment default: the
   // stable base is backend-aware (HOME = the descriptor workspaceRoot, and the
   // git token-file/askpass pointers derive from HOME), the box is established
@@ -172,11 +169,7 @@ export async function sessionAttachEnvironment(
     session.sandboxBackend !== services.settings.sandboxBackend
       ? { ...services.settings, sandboxBackend: session.sandboxBackend }
       : services.settings;
-  const environment = stableSandboxEnvironmentForRun(
-    settingsForSession,
-    workspaceEnvironmentValues,
-    { workspaceId },
-  );
+  const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
     applyGitAuthPointerEnvironment(
       environment,

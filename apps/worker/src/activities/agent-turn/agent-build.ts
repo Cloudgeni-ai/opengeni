@@ -77,10 +77,7 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
 import type { runtimeResourcesForTurn } from "./file-resources";
 import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
-import type {
-  loadWorkspaceEnvironmentForRunWithCredentials,
-  sandboxEnvironmentForRun,
-} from "../environment";
+import type { sandboxEnvironmentForRun, WorkspaceEnvironmentForRun } from "../environment";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -133,7 +130,7 @@ export type BuildTurnAgentDeps = {
   rigName: GovernanceModelOk["rigName"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
-  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
+  workspaceVariableSet: WorkspaceEnvironmentForRun | null;
   runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
   sandboxEnvironment: Record<string, string>;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;

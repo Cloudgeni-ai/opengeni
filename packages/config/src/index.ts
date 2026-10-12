@@ -8842,9 +8842,9 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * manifest lacks or carries a different value for).
  *
  * Precedence (lowest → highest): deployment allowlist (`collectSandboxEnvironment`)
- * < git identity (`collectGitIdentityEnvironment`) < the session's attached
- * workspace environment < the backend-aware HOME default. Reserved-name validation
- * at write time keeps workspace values from colliding with platform entries.
+ * < git identity (`collectGitIdentityEnvironment`) < the backend-aware HOME default.
+ * The manifest holds deployment constants only: user secrets never ride it.
+ * They are resolved per command from `{{secret:…}}` references (W1 delivery).
  *
  * DELIBERATELY EXCLUDES the per-run, ROTATING git provider token VALUES that
  * `sandboxEnvironmentForRun` mints when a repository resource is
@@ -8860,18 +8860,15 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * the platform never mints or seeds git provider tokens there. The attach
  * surfaces have only the `Session` (no repo resources) and so never seed a token,
  * but unwritten files simply yield no auth; the BLOCKING attach-vs-turn error
- * this helper fixes is for the common (no-repo) and workspace-environment-attached
- * provisioned-box cases.
+ * this helper fixes is for the common (no-repo) provisioned-box case.
  */
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
-  workspaceEnvironment: Record<string, string> = {},
   options: { workspaceId?: string } = {},
 ): Record<string, string> {
   const environment: Record<string, string> = {
     ...collectSandboxEnvironment(settings),
     ...collectGitIdentityEnvironment(settings),
-    ...workspaceEnvironment,
   };
   // Backend-aware HOME: a provisioned box (docker + every cloud provider) runs the
   // agent under the descriptor's workspaceRoot. `local` runs in-process as the host
