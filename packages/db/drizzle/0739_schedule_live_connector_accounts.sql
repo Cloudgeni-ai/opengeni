@@ -52,7 +52,7 @@ BEGIN
       scheduled_task_execution_digest(task)
   ) THEN
     RAISE EXCEPTION
-      '0738 cannot reproduce a stored scheduled-task execution digest'
+      '0739 cannot reproduce a stored scheduled-task execution digest'
       USING ERRCODE = '23514';
   END IF;
 END
@@ -155,7 +155,7 @@ BEGIN
         SELECT task.execution_digest FROM scheduled_tasks task WHERE task.id = migrated.id
       )
   ) THEN
-    RAISE EXCEPTION '0738 schedule connector account removal did not converge'
+    RAISE EXCEPTION '0739 schedule connector account removal did not converge'
       USING ERRCODE = '23514';
   END IF;
 END

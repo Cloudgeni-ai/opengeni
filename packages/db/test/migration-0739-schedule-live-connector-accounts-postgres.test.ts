@@ -1,7 +1,7 @@
-// Migration 0738: schedules resolve connector accounts live. Schedules saved
+// Migration 0739: schedules resolve connector accounts live. Schedules saved
 // before it carry a write-back snapshot of the accounts a save saw
 // (`connectionAccounts` + `connectionAccountsFrozen`). They are staged on a
-// database migrated without 0738, then 0738 is applied alone. Every snapshot
+// database migrated without 0739, then 0739 is applied alone. Every snapshot
 // is removed, nothing becomes a pin, the owner and authority revision stay,
 // and the current-revision authority that matched the old digest follows the
 // new one.
@@ -20,7 +20,7 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0738_schedule_live_connector_accounts.sql";
+const MIGRATION = "0739_schedule_live_connector_accounts.sql";
 
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -54,7 +54,7 @@ afterAll(async () => {
 });
 
 test.skipIf(!realDb)(
-  "0738 returns every stored account snapshot to the owner's current accounts",
+  "0739 returns every stored account snapshot to the owner's current accounts",
   async () => {
     const admin = database!.admin;
     const userId = `schedule-accounts-${crypto.randomUUID()}`;
