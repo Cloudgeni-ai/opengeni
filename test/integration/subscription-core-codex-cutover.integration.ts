@@ -55,7 +55,7 @@ const COMPAT = "0716_subscription_authority_compat.sql";
 const FENCES = "0717_subscription_authority_fences.sql";
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
-const PERSONAL_CONNECTION_VERSIONS = "0720_subscription_core_personal_connection_versions.sql";
+const PERSONAL_CONNECTION_VERSIONS = "0728_subscription_core_personal_connection_versions.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;

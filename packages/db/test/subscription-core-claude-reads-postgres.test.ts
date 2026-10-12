@@ -45,6 +45,7 @@ const {
   bootstrapWorkspace,
   createDb,
   createOrganizationModelProviderCustomModel,
+  createScheduledTask,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   readSubscriptionCoreClaudeCatalogReadiness,
   readSubscriptionCoreClaudeOrganizationUsageRow,
@@ -55,8 +56,13 @@ const {
   subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization,
   upsertOrganizationClaudeSubscription,
 } = await import("../src");
-const { rawRows, withRlsContext, withSessionActivityRlsContext, withWorkspaceSubjectRls } =
-  await import("../src/database");
+const {
+  rawRows,
+  withRlsContext,
+  withSessionActivityRlsContext,
+  withSessionRlsActorContext,
+  withWorkspaceSubjectRls,
+} = await import("../src/database");
 type DbClient = Awaited<ReturnType<typeof createDb>>;
 
 const key = Buffer.alloc(32, 53);
@@ -270,52 +276,100 @@ async function session(org: Org, options: { turn?: boolean } = {}) {
   return { sessionId, turnId };
 }
 
+type CompatCarrier = {
+  kind: "session_initial" | "session_turn" | "scheduled_task";
+  id: string;
+};
+
 /**
- * A stand-in for PR 0b's `read_subscription_authority_compat` (0716 is not
- * on this stack): answers per carrier from a table and records each call.
- * Removed by the returned function.
+ * Fixtures for the real accepted-authority reader (0716's
+ * `read_subscription_authority_compat`). The carrier slots are server-owned,
+ * so these write as the owner: a compatibility record for a carrier (a shared
+ * pool, no personal entry), a frozen v2 snapshot with a Claude entry on a
+ * turn, and a carrier accepted before Claude's receipt (replica writes, as the
+ * insertion marker is immutable).
  */
-async function installCompatReader() {
-  await shared.admin.unsafe(`
-    create table public.claude_reads_compat_answers (
-      carrier_kind text not null, carrier_id uuid not null, answer jsonb,
-      primary key (carrier_kind, carrier_id));
-    create table public.claude_reads_compat_calls (
-      provider text, carrier_kind text, carrier_id uuid, at timestamptz default clock_timestamp());
-    create function opengeni_private.read_subscription_authority_compat(
-      p_provider text, p_carrier_kind text, p_workspace_id uuid, p_carrier_id uuid,
-      p_task_authority_revision bigint)
-    returns jsonb language plpgsql security definer set search_path = public, pg_temp as $body$
-    begin
-      insert into public.claude_reads_compat_calls (provider, carrier_kind, carrier_id)
-      values (p_provider, p_carrier_kind, p_carrier_id);
-      return (select answer from public.claude_reads_compat_answers
-        where carrier_kind = p_carrier_kind and carrier_id = p_carrier_id);
-    end $body$;
-    grant execute on function opengeni_private.read_subscription_authority_compat(
-      text, text, uuid, uuid, bigint) to public;`);
-  return {
-    answer: async (kind: string, id: string, answer: Record<string, unknown>) => {
-      await shared.admin`
-        insert into public.claude_reads_compat_answers (carrier_kind, carrier_id, answer)
-        values (${kind}, ${id}::uuid, ${shared.admin.json(answer as never)}::jsonb)
-        on conflict (carrier_kind, carrier_id) do update set answer = excluded.answer`;
+async function compatRecord(
+  org: Org,
+  carrier: CompatCarrier,
+  sharedPool: "workspace" | "organization",
+): Promise<void> {
+  const column =
+    carrier.kind === "session_initial"
+      ? "session_id"
+      : carrier.kind === "session_turn"
+        ? "turn_id"
+        : "scheduled_task_id";
+  await shared.admin.unsafe(
+    `insert into opengeni_private.subscription_authority_compat (
+      account_id, workspace_id, provider, carrier_kind, ${column}, personal, shared_pool,
+      legacy_scope
+    ) values ($1::uuid, $2::uuid, 'claude', $3, $4::uuid, '[]'::jsonb, $5, $5)`,
+    [org.accountId, org.workspaceId, carrier.kind, carrier.id, sharedPool],
+  );
+}
+
+async function freezeClaudeV2(org: Org, turnId: string): Promise<void> {
+  const snapshot = JSON.stringify({
+    version: 2,
+    personal: [
+      { provider: "claude", ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
+    ],
+  });
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update session_turns set subscription_authority = ${snapshot}::text::jsonb
+      where id = ${turnId}::uuid`;
+  });
+}
+
+async function acceptedBeforeReceipt(sessionId: string): Promise<void> {
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update sessions set authority_inserted_at = '-infinity'
+      where id = ${sessionId}::uuid`;
+  });
+}
+
+/** The reader's answer for a carrier, as the app role in `org`'s workspace. */
+async function readCompat(
+  org: Org,
+  carrier: CompatCarrier,
+  workspaceId = org.workspaceId,
+): Promise<unknown> {
+  return await withRlsContext(
+    client.db,
+    { accountId: org.accountId, workspaceId: org.workspaceId },
+    async (tx) => {
+      const [row] = await rawRows<{ authority: unknown }>(
+        tx,
+        sql`select opengeni_private.read_subscription_authority_compat(
+          'claude', ${carrier.kind}, ${workspaceId}::uuid, ${carrier.id}::uuid, null
+        ) as authority`,
+      );
+      return row?.authority ?? null;
     },
-    lastCall: async () => {
-      const [call] = await shared.admin<
-        { provider: string; carrier_kind: string; carrier_id: string }[]
-      >`select provider, carrier_kind, carrier_id::text as carrier_id
-        from public.claude_reads_compat_calls order by at desc limit 1`;
-      return call ?? null;
-    },
-    remove: async () => {
-      await shared.admin.unsafe(`
-        drop function opengeni_private.read_subscription_authority_compat(
-          text, text, uuid, uuid, bigint);
-        drop table public.claude_reads_compat_answers;
-        drop table public.claude_reads_compat_calls;`);
-    },
-  };
+  );
+}
+
+/** A scheduled task of `org`'s shared workspace, created by its owner. */
+async function scheduledTask(org: Org): Promise<string> {
+  const task = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+    createScheduledTask(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      name: "claude carried authority",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
+      metadata: {},
+      createdBy: { kind: "subject" as const, subjectId: org.ownerSubjectId },
+    }),
+  );
+  return task.id;
 }
 
 async function personalConnection(org: Org, label: string): Promise<string> {
@@ -924,79 +978,84 @@ describe("on the Claude core route", () => {
     const org = await organization();
     await setCutover(org, true);
     await sharedConnection(org, "carried");
-    const compat = await installCompatReader();
-    try {
-      // A new session: its initial authority.
-      const created = await session(org);
-      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBeNull();
-      expect(await compat.lastCall()).toEqual({
-        provider: "claude",
-        carrier_kind: "session_initial",
-        carrier_id: created.sessionId,
-      });
-      await compat.answer("session_initial", created.sessionId, { authority: "none" });
-      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBe(org.opus);
-      await compat.answer("session_initial", created.sessionId, {
-        authority: "record",
-        sharedPool: "workspace",
-        personal: [],
-      });
-      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBeNull();
-      await compat.answer("session_initial", created.sessionId, {
-        authority: "record",
-        sharedPool: "organization",
-        personal: [],
-      });
-      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBe(org.opus);
-      // An edit: its source turn's authority, whatever the copied snapshot says.
-      const edited = await session(org, { turn: true });
-      await compat.answer("session_turn", edited.turnId!, {
-        authority: "record",
-        sharedPool: "workspace",
-        personal: [],
-      });
-      const edit = {
-        ...organizationSnapshot,
-        acceptedSource: { kind: "session_turn" as const, turnId: edited.turnId! },
-      };
-      expect(await admit(org, org.opus, edit)).toBeNull();
-      await compat.answer("session_turn", edited.turnId!, { authority: "v2" });
-      expect(await admit(org, org.opus, edit)).toBe(org.opus);
-      // Agent work: the receiving session's latest accepted turn, else its
-      // initial authority.
-      const receiving = (sessionId: string) => ({
-        ...organizationSnapshot,
-        acceptedSource: { kind: "receiving_session" as const, sessionId },
-      });
-      expect(await admit(org, org.opus, receiving(edited.sessionId))).toBe(org.opus);
-      expect(await compat.lastCall()).toMatchObject({
-        carrier_kind: "session_turn",
-        carrier_id: edited.turnId,
-      });
-      const fresh = await session(org);
-      expect(await admit(org, org.opus, receiving(fresh.sessionId))).toBeNull();
-      expect(await compat.lastCall()).toMatchObject({
-        carrier_kind: "session_initial",
-        carrier_id: fresh.sessionId,
-      });
-      // A session this workspace cannot see admits nothing (no reader call).
-      expect(await admit(org, org.opus, receiving(crypto.randomUUID()))).toBeNull();
-      // A scheduled task's record.
-      const taskId = crypto.randomUUID();
-      await compat.answer("scheduled_task", taskId, {
-        authority: "record",
-        sharedPool: "organization",
-        personal: [],
-      });
-      expect(await admit(org, org.opus, { ...organizationSnapshot, scheduledTaskId: taskId })).toBe(
-        org.opus,
-      );
-      // A carrier that admits still needs the current source and a live connection.
-      await setSource(org, "workspace");
-      expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBeNull();
-    } finally {
-      await compat.remove();
-    }
+    const initial = (sessionId: string): CompatCarrier => ({
+      kind: "session_initial",
+      id: sessionId,
+    });
+    // A session accepted after Claude's receipt without a record: `none`
+    // follows the source rule of new work.
+    const created = await session(org);
+    expect(await readCompat(org, initial(created.sessionId))).toEqual({ authority: "none" });
+    expect(await admit(org, org.opus, { sessionId: created.sessionId })).toBe(org.opus);
+    // A compatibility record admits only when its shared pool is the organization's.
+    const workspaceRecord = await session(org);
+    await compatRecord(org, initial(workspaceRecord.sessionId), "workspace");
+    expect(await readCompat(org, initial(workspaceRecord.sessionId))).toMatchObject({
+      authority: "record",
+      sharedPool: "workspace",
+      personal: [],
+    });
+    expect(await admit(org, org.opus, { sessionId: workspaceRecord.sessionId })).toBeNull();
+    const organizationRecord = await session(org);
+    await compatRecord(org, initial(organizationRecord.sessionId), "organization");
+    expect(await admit(org, org.opus, { sessionId: organizationRecord.sessionId })).toBe(org.opus);
+    // Accepted before the receipt without a record: `missing` admits nothing.
+    const before = await session(org);
+    await acceptedBeforeReceipt(before.sessionId);
+    expect(await readCompat(org, initial(before.sessionId))).toEqual({
+      authority: "missing",
+      personal: [],
+      sharedPool: "none",
+    });
+    expect(await admit(org, org.opus, { sessionId: before.sessionId })).toBeNull();
+    // Another organization's carrier is not visible: the reader answers
+    // nothing even when named with its own workspace, and nothing is admitted.
+    const other = await organization();
+    const foreign = await session(other);
+    expect(await readCompat(org, initial(foreign.sessionId), other.workspaceId)).toBeNull();
+    expect(await admit(org, org.opus, { sessionId: foreign.sessionId })).toBeNull();
+
+    // An edit: its source turn's authority, whatever the copied snapshot says.
+    const edited = await session(org, { turn: true });
+    const edit = (turnId: string) => ({
+      ...organizationSnapshot,
+      acceptedSource: { kind: "session_turn" as const, turnId },
+    });
+    expect(await admit(org, org.opus, edit(edited.turnId!))).toBe(org.opus);
+    await compatRecord(org, { kind: "session_turn", id: edited.turnId! }, "workspace");
+    expect(await admit(org, org.opus, edit(edited.turnId!))).toBeNull();
+    // A turn that froze a v2 entry for Claude: `v2` follows the source rule.
+    const frozen = await session(org, { turn: true });
+    await freezeClaudeV2(org, frozen.turnId!);
+    expect(await readCompat(org, { kind: "session_turn", id: frozen.turnId! })).toEqual({
+      authority: "v2",
+    });
+    expect(await admit(org, org.opus, edit(frozen.turnId!))).toBe(org.opus);
+
+    // Agent work: the receiving session's latest accepted turn (here its
+    // workspace record, though its initial authority is `none`), else its
+    // initial authority.
+    const receiving = (sessionId: string) => ({
+      ...organizationSnapshot,
+      acceptedSource: { kind: "receiving_session" as const, sessionId },
+    });
+    expect(await admit(org, org.opus, receiving(edited.sessionId))).toBeNull();
+    expect(await admit(org, org.opus, receiving(workspaceRecord.sessionId))).toBeNull();
+    expect(await admit(org, org.opus, receiving(organizationRecord.sessionId))).toBe(org.opus);
+    expect(await admit(org, org.opus, receiving(before.sessionId))).toBeNull();
+    expect(await admit(org, org.opus, receiving(foreign.sessionId))).toBeNull();
+    expect(await admit(org, org.opus, receiving(crypto.randomUUID()))).toBeNull();
+
+    // A scheduled task: `none` until it holds a workspace record.
+    const taskId = await scheduledTask(org);
+    const task = { ...organizationSnapshot, scheduledTaskId: taskId };
+    expect(await admit(org, org.opus, task)).toBe(org.opus);
+    await compatRecord(org, { kind: "scheduled_task", id: taskId }, "workspace");
+    expect(await admit(org, org.opus, task)).toBeNull();
+
+    // A carrier that admits still needs the current source and a live connection.
+    await setSource(org, "workspace");
+    expect(await admit(org, org.opus, { sessionId: organizationRecord.sessionId })).toBeNull();
   });
 
   test("which accepted authority admits an organization model", () => {
