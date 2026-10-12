@@ -472,6 +472,14 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
               throw new Error("The connection changed before its provider read");
             controller.signal.throwIfAborted();
             let complete = false;
+            let teardown: Promise<void> = Promise.resolve();
+            const onAbort = () => {
+              teardown = Promise.resolve().then(() => abortAndJoin?.(controller.signal));
+              // Observe immediately, but keep the original promise: rejection
+              // is not quiescence and must reach the awaited custody exit.
+              void teardown.catch(() => undefined);
+            };
+            controller.signal.addEventListener("abort", onAbort, { once: true });
             try {
               const response = await fetchImpl(url, {
                 ...init,
@@ -491,7 +499,11 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
                   controller.abort(new Error("The provider read did not complete"));
                 // The transaction ends only after an injected transport has
                 // joined its local work for this request.
-                await abortAndJoin?.(controller.signal).catch(() => undefined);
+              }
+              try {
+                await teardown;
+              } finally {
+                controller.signal.removeEventListener("abort", onAbort);
               }
             }
           });

@@ -365,61 +365,85 @@ describe("the test registration", () => {
 });
 
 describe("the owner-only routines' predicates (0731)", () => {
-  test("state the live 0707 owner, authority and personal-connections predicates, so the two cannot drift apart", async () => {
-    const rows = await shared.admin<{ name: string; definition: string }[]>`
-      select proc.proname as name, pg_get_functiondef(proc.oid) as definition
+  // Exact full-body baselines, not a bag of authorization fragments. This
+  // deliberately rejects even a connector-only change, an added overload or
+  // a moved check. Any change requires re-review against the behavioral
+  // settings/context matrix below before updating these fingerprints.
+  // Sources: live 0707 routines (including their 0715/0727 repairs and both
+  // 0728 connect overloads), and the three routines introduced by 0731.
+  const expectedBodies: Record<string, string> = {
+    "opengeni_private.begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)":
+      "ae583ca6bf31f1ef2ac97f8be27bfde5daec12c7cd16fba9d5e5d2507926585d",
+    "opengeni_private.begin_subscription_core_refresh(text, uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)":
+      "5a29f278a4dfe1f8cf96afe72692d3fcb2aee14b4f43c52706ba25311b9067dd",
+    "opengeni_private.connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)":
+      "26f859c3d1bf85c7793cf94754823129951408b7baace816c712e37dae837442",
+    "opengeni_private.connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)":
+      "b26a9716de2154cdb0f41f8a84951a390f5ddda08e779c9c4b3e7e1e5ce93e84",
+    "opengeni_private.manage_subscription_core_personal(text, uuid, uuid, text, uuid, text, text, boolean, integer)":
+      "a38170ff55a80dd2cb7e2bce62c99e9dba02ce35805e3bd9ae17d03aca49fa2e",
+    "opengeni_private.read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)":
+      "b0c1bcfe4b5749e4cf3bffda07c4406db582ec575bc2c75db064785d33652919",
+    "opengeni_private.record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)":
+      "dadb5ac909e2986a96f665f317f3c41f576e3b38c2b2ca4216162d12ffd86b2f",
+    "opengeni_private.subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)":
+      "61e579c35f316116337f5efdd5c673e413fde7cc0102b12b8187f80fcf10ad2e",
+    "opengeni_subscription_internal.subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)":
+      "91fd89de0908ef747007c9213dfc9e7939ece79261527e03e4176b8a9e8c1235",
+  };
+  type Routine = { identity: string; name: string; body: string };
+  const liveRoutines = () => shared.admin<Routine[]>`
+      select namespace.nspname || '.' || proc.proname || '(' ||
+        pg_catalog.oidvectortypes(proc.proargtypes) || ')' as identity,
+        proc.proname as name, proc.prosrc as body
       from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
       where namespace.nspname in ('opengeni_private', 'opengeni_subscription_internal')
-        and proc.proname like '%subscription_core%'`;
-    const bodies = new Map(rows.map((row) => [row.name, row.definition.replace(/\s+/g, "")]));
-    const compact = (fragment: string) => fragment.replace(/\s+/g, "");
-    // Each predicate, and the live routines that state it.
-    const predicates: Array<[string, string[]]> = [
-      [
-        `coalesce((subscription_effective_settings(p_account_id, p_workspace_id)
-          #>> '{values,personalConnectionsAllowed}')::boolean, false)`,
-        [
-          "subscription_core_connection_target",
-          "begin_subscription_core_refresh",
-          "connect_subscription_core_personal",
-        ],
-      ],
-      [
-        "membership.status = 'active' AND membership.revoked_at IS NULL",
-        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
-      ],
-      [
-        "membership.personal_workspace_id = p_workspace_id",
-        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
-      ],
-      [
-        "authority.status = 'active' AND authority.revoked_at IS NULL",
-        ["subscription_core_acceptance_authority_v2"],
-      ],
-      [
-        "authority.resource_kind = 'subscription_connection'",
-        ["subscription_core_acceptance_authority_v2"],
-      ],
-      [
-        "opengeni_subscription_internal.subscription_core_writer_context(",
-        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
-      ],
-      [
-        "opengeni_private.subscription_core_connection_kind(p_provider)",
-        ["connect_subscription_core_personal", "manage_subscription_core_personal"],
-      ],
-    ];
-    const owned = [
-      "read_subscription_core_owned_connection_credential",
-      "begin_subscription_core_owned_connection_refresh",
-      "record_subscription_core_owned_connection_quota",
-    ];
-    const missing: string[] = [];
-    for (const [fragment, live] of predicates)
-      for (const name of [...live, ...owned])
-        if (!bodies.get(name)?.includes(compact(fragment)))
-          missing.push(`${name}: ${fragment.replace(/\s+/g, " ")}`);
-    expect(missing).toEqual([]);
+        and proc.proname in ('subscription_core_connection_target',
+          'begin_subscription_core_refresh', 'connect_subscription_core_personal',
+          'manage_subscription_core_personal', 'subscription_core_acceptance_authority_v2',
+          'read_subscription_core_owned_connection_credential',
+          'begin_subscription_core_owned_connection_refresh',
+          'record_subscription_core_owned_connection_quota')
+      order by identity`;
+  const drift = (rows: Routine[]) => {
+    const bodies = new Map(
+      rows.map((row) => [
+        row.identity,
+        new Bun.CryptoHasher("sha256").update(row.body).digest("hex"),
+      ]),
+    );
+    return [...new Set([...Object.keys(expectedBodies), ...bodies.keys()])].filter(
+      (identity) => bodies.get(identity) !== expectedBodies[identity],
+    );
+  };
+
+  test("pins complete live authorization bodies by schema and identity arguments, including both connect overloads", async () => {
+    const rows = await liveRoutines();
+    expect(rows).toHaveLength(9);
+    expect(rows.filter((row) => row.name === "connect_subscription_core_personal")).toHaveLength(2);
+    expect(drift(rows)).toEqual([]);
+  });
+
+  test("the exact drift guard rejects AND-to-OR bypasses in every owner routine and both connect overloads", async () => {
+    const rows = await liveRoutines();
+    expect(drift(rows)).toEqual([]);
+    const targets = rows.filter(
+      (row) =>
+        row.name.includes("owned_connection") || row.name === "connect_subscription_core_personal",
+    );
+    expect(targets).toHaveLength(5);
+    for (const target of targets) {
+      const body = target.name.includes("owned_connection")
+        ? target.body.replace("owned := FOUND AND", "owned := FOUND OR")
+        : target.body.replace(
+            "membership.status = 'active' AND",
+            "membership.status = 'active' OR",
+          );
+      expect(body).not.toBe(target.body);
+      expect(
+        drift(rows.map((row) => (row.identity === target.identity ? { ...row, body } : row))),
+      ).toEqual([target.identity]);
+    }
   });
 });
 
@@ -991,6 +1015,102 @@ describe("refresh writers and request custody of both scopes", () => {
     expect(stall.joined.every((signal) => signal.aborted)).toBe(true);
     expect(await storedQuota(sharedId)).toBeNull();
     expect(await storedQuota(personal)).toBeNull();
+  });
+
+  test("abort starts the injected join at the deadline and custody awaits that exact teardown", async () => {
+    const org = await organization();
+    const sharedId = await sharedConnection(org, "join-only-org");
+    const personal = await personalConnection(org, "join-only-own");
+    for (const [connectionId, deadline, probe] of [
+      [
+        sharedId,
+        5_000,
+        (transport: typeof fetch) =>
+          orgProbe(org.accountId, org.ownerSubjectId, sharedId, transport),
+      ],
+      [
+        personal,
+        10_000,
+        (transport: typeof fetch) =>
+          ownerProbe(
+            org.accountId,
+            org.personalWorkspaceId,
+            org.ownerSubjectId,
+            personal,
+            transport,
+          ),
+      ],
+    ] as const) {
+      const request = Promise.withResolvers<Response>();
+      const joined = Promise.withResolvers<AbortSignal>();
+      const teardown = Promise.withResolvers<void>();
+      let joinCalls = 0;
+      // No signal listener: only abortAndJoin can release this fetch.
+      const transport = Object.assign(() => request.promise, {
+        abortAndJoin(signal: AbortSignal) {
+          joinCalls++;
+          joined.resolve(signal);
+          request.reject(signal.reason);
+          return teardown.promise;
+        },
+      }) as unknown as typeof fetch;
+      let settled = false;
+      const started = performance.now();
+      const result = probe(transport).finally(() => {
+        settled = true;
+      });
+      const watchdog = setTimeout(
+        () => joined.reject(new Error("join never started at abort")),
+        deadline + 3_000,
+      );
+      try {
+        const signal = await joined.promise;
+        expect(signal.aborted).toBe(true);
+        expect(performance.now() - started).toBeLessThan(deadline + 3_000);
+        expect(joinCalls).toBe(1);
+        // Fetch has rejected, but the exact join promise is still pending.
+        const [held] = await shared.admin<{ acquired: boolean }[]>`
+          select pg_try_advisory_xact_lock(hashtextextended(
+            ${`subscription-refresh:${connectionId}`}, 0)) as acquired`;
+        expect(held!.acquired).toBe(false);
+        expect(settled).toBe(false);
+        teardown.resolve();
+        expect((await result).kind).toBe("fetch_error");
+        const [released] = await shared.admin<{ acquired: boolean }[]>`
+          select pg_try_advisory_xact_lock(hashtextextended(
+            ${`subscription-refresh:${connectionId}`}, 0)) as acquired`;
+        expect(released!.acquired).toBe(true);
+        expect(await storedQuota(connectionId)).toBeNull();
+      } finally {
+        clearTimeout(watchdog);
+        // Always release the fixture, even if a regression delays abortAndJoin.
+        request.reject(new Error("fixture cleanup"));
+        teardown.resolve();
+        await result;
+      }
+    }
+  });
+
+  test("a rejected injected teardown is observed and reported, not swallowed as quiescence", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "rejected-join");
+    const cleanupError = new Error("injected teardown failed");
+    let joins = 0;
+    const transport = Object.assign(
+      async () => {
+        throw new Error("request failed");
+      },
+      {
+        abortAndJoin: () => {
+          joins++;
+          return Promise.reject(cleanupError);
+        },
+      },
+    ) as unknown as typeof fetch;
+    const result = await orgProbe(org.accountId, org.ownerSubjectId, connectionId, transport);
+    expect(result).toEqual({ kind: "fetch_error", error: cleanupError });
+    expect(joins).toBe(1);
+    expect(await storedQuota(connectionId)).toBeNull();
   });
 
   test("an owner's request whose generation moves or whose authority is revoked mid-request is not applied", async () => {
