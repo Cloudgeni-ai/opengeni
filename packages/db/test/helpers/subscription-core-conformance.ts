@@ -613,6 +613,24 @@ export function describeSubscriptionCoreConformance<Credential>(
     return row ?? null;
   }
 
+  /** Another human member of the organization and of its shared workspace. */
+  async function workspaceMember(org: Org): Promise<string> {
+    const subjectId = `user:conformance-member-${crypto.randomUUID()}`;
+    const [personalWorkspace] = await admin()<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${org.accountId}::uuid, 'Conformance member Personal') returning id::text as id`;
+    await admin()`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (
+        ${org.accountId}::uuid, ${subjectId}, 'member', 'active', ${personalWorkspace!.id}::uuid
+      )`;
+    await admin()`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${subjectId}, 'member')`;
+    return subjectId;
+  }
+
   type Turn = {
     identity: SubscriptionCoreTurnIdentity;
     triggerEventId: string;
@@ -629,7 +647,8 @@ export function describeSubscriptionCoreConformance<Credential>(
       workspaceId?: string;
       visibility?: "user_private" | "workspace_shared";
       owner?: "owner" | "none";
-      initiator?: "owner" | "service";
+      /** Who sends the turn: the owner, a service, or another human member. */
+      initiator?: "owner" | "service" | { subjectId: string };
       /** The frozen personal entry: current generation (true), none (false), or a given generation. */
       personalAuthority?: boolean | { authorityGeneration: number };
       /** The membership the frozen personal entry names (default: the owner's). */
@@ -670,11 +689,13 @@ export function describeSubscriptionCoreConformance<Credential>(
           ? await createSessionCall()
           : await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, createSessionCall);
     const service = input.initiator === "service" || ownerless;
+    const sender =
+      typeof input.initiator === "object" ? input.initiator.subjectId : org.ownerSubjectId;
     // A service turn in an owned session is accepted in the owner's session
     // context (it sees the session) with no initiating human.
     const actor = ownerless
       ? { subjectId: "service:subscription-core", initiatingHumanSubjectId: null }
-      : { subjectId: org.ownerSubjectId };
+      : { subjectId: service ? org.ownerSubjectId : sender };
     const triggerEventId = crypto.randomUUID();
     const turn = await withSessionRlsActorContext(actor, () =>
       enqueueSessionTurn(db(), {
@@ -693,7 +714,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         metadata: {},
         initiator: service
           ? { kind: "service", subjectId: "service:subscription-core" }
-          : { kind: "subject", subjectId: org.ownerSubjectId },
+          : { kind: "subject", subjectId: sender },
       }),
     );
     const attemptId = crypto.randomUUID();
@@ -769,8 +790,12 @@ export function describeSubscriptionCoreConformance<Credential>(
     };
   }
 
-  function place(turn: Turn, options: { now?: Date; holderId?: string } = {}) {
-    return runtime().placeSubscriptionCoreTurn(db(), {
+  function place(
+    turn: Turn,
+    options: { now?: Date; holderId?: string; provider?: SubscriptionCoreProvider } = {},
+  ) {
+    const turns = options.provider ? subscriptionCoreTurns(options.provider) : runtime();
+    return turns.placeSubscriptionCoreTurn(db(), {
       identity: turn.identity,
       attemptId: turn.attemptId,
       executionGeneration: turn.executionGeneration,
@@ -795,7 +820,7 @@ export function describeSubscriptionCoreConformance<Credential>(
     org: Org,
     previous: Turn,
     next: {
-      initiator?: "owner" | "service";
+      initiator?: "owner" | "service" | { subjectId: string };
       model?: { productModelId: string; upstreamModelId: string };
       personalAuthority?: boolean;
       /** Runs while the session is idle between the two turns. */
@@ -1559,6 +1584,41 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(await bindingOf(fourth)).toMatchObject({ connectionId: preferred, clock: cold });
     });
 
+    test("SUB-STICK-01: another human member sending the warm turn keeps the session's account", async () => {
+      const org = await organization();
+      const a = await sharedConnection(org, `sender-a-${crypto.randomUUID()}`);
+      const b = await sharedConnection(org, `sender-b-${crypto.randomUUID()}`);
+      const member = await workspaceMember(org);
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const preferred = bound.connectionId;
+      const other = preferred === a ? b : a;
+      // Bind the session to the account selection does not rank first, so
+      // only the session's binding can keep it there.
+      await admin()`update subscription_connections set allocator_enabled = false
+        where id = ${preferred}::uuid`;
+      const second = await nextTurn(org, first);
+      expect(await placeChecked(second)).toMatchObject({ kind: "run", connectionId: other });
+      await admin()`update subscription_connections set allocator_enabled = true
+        where id = ${preferred}::uuid`;
+      // The other member sends the next turn while the cache is warm.
+      const third = await nextTurn(org, second, { initiator: { subjectId: member } });
+      expect(third.identity).toMatchObject({
+        sessionOwnerSubjectId: org.ownerSubjectId,
+        initiatingHumanSubjectId: member,
+      });
+      expect(await placeChecked(third)).toMatchObject({
+        kind: "run",
+        connectionId: other,
+        switch: "sticky",
+        previousConnectionId: other,
+        reselection: null,
+      });
+      expect(await stickLeaseOf(third)).toBe(other);
+      expect(await bindingOf(third)).toMatchObject({ connectionId: other, choice: "automatic" });
+    });
+
     test("SUB-STICK-03, SUB-STICK-07: a warm account is left only when forced (limited, refused, switched off, disconnected, out of scope)", async () => {
       type Forced = {
         name: string;
@@ -1757,6 +1817,49 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect((await bindingOf(turn))!.clock).toBe(exact ? placedAt : completedAt.getTime());
     });
 
+    test("SUB-STICK-04: an adapter whose declared cache lifetime is unusable fails placement closed", async () => {
+      const org = await organization();
+      await sharedConnection(org, `lifetime-a-${crypto.randomUUID()}`);
+      await sharedConnection(org, `lifetime-b-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const second = await nextTurn(org, first);
+      const before = await bindingOf(second);
+      const declared = provider.adapter.cacheFacts;
+      // Each would otherwise read as always cold (zero, negative, NaN) or
+      // always warm (Infinity) instead of the provider's real lifetime.
+      for (const lifetime of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        const misdeclared: SubscriptionCoreProvider = {
+          ...provider,
+          adapter: {
+            ...provider.adapter,
+            cacheFacts:
+              declared.kind === "exact_ttl"
+                ? { kind: "exact_ttl", ttlMs: lifetime }
+                : { kind: "measured_idle_cutoff", cutoffMs: lifetime },
+          },
+        };
+        const outcome = await place(second, { provider: misdeclared }).then(
+          (placed) => ({ lifetime, placed: placed.kind }),
+          (error: unknown) => ({ lifetime, failed: (error as Error).message }),
+        );
+        expect(outcome).toEqual({
+          lifetime,
+          failed: "A provider adapter must declare a positive whole-millisecond cache lifetime",
+        });
+        // Nothing was leased or bound.
+        expect(await stickLeaseOf(second)).toBeNull();
+        expect(await bindingOf(second)).toEqual(before);
+      }
+      // The adapter's real declaration places the same turn.
+      expect(await placeChecked(second)).toMatchObject({
+        kind: "run",
+        connectionId: bound.connectionId,
+        switch: "sticky",
+      });
+    });
+
     test("SUB-STICK-07: a session shared while warm on its owner's personal account leaves it at once", async () => {
       const org = await organization();
       const personal = await personalConnection(org, `stick-personal-${crypto.randomUUID()}`);
@@ -1889,7 +1992,10 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
     });
 
-    test("SUB-STICK-02: parallel placements of one session's work never split its account", async () => {
+    // A smoke test only: the racers place one turn, so its lease serializes
+    // them even without the binding row lock. The two deterministic race
+    // tests below are the ones that fail without that protection.
+    test("smoke: parallel placements of one turn around its cache lifetime agree on one account", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `parallel-a-${crypto.randomUUID()}`);
       const b = await sharedConnection(org, `parallel-b-${crypto.randomUUID()}`);
@@ -2175,6 +2281,53 @@ export function describeSubscriptionCoreConformance<Credential>(
         reusedLease: true,
       });
       expect((await bindingOf(first))!.clock).toBeNull();
+      const second = await nextTurn(org, first);
+      const placedAt = Date.now();
+      expect(await placeChecked(second, new Date(placedAt))).toMatchObject({
+        kind: "run",
+        explicit: false,
+        reselection: { reason: "cache_cold" },
+      });
+      expect((await bindingOf(second))!.clock).toBe(placedAt);
+    });
+
+    test("SUB-STICK-05: a retried attempt whose binding moved to another account mid-turn rebinds to its kept lease cold, so the next turn re-selects", async () => {
+      const org = await organization();
+      const a = await sharedConnection(org, `retry-moved-a-${crypto.randomUUID()}`);
+      const b = await sharedConnection(org, `retry-moved-b-${crypto.randomUUID()}`);
+      const first = await runningTurn(org);
+      const bound = await placeChecked(first);
+      if (bound.kind !== "run") throw new Error("expected a run");
+      const leased = bound.connectionId;
+      const other = leased === a ? b : a;
+      // While the turn runs on its lease, a person pins the other account and
+      // then removes the pin: the binding names the other account, cold.
+      for (const choice of ["explicit", "automatic"] as const) {
+        const pin = stickPausedPin(org, first, other, choice);
+        await pin.locked;
+        pin.proceed();
+        expect(await pin.done).toBe("pin committed (1)");
+      }
+      expect(await bindingOf(first)).toMatchObject({
+        connectionId: other,
+        choice: "automatic",
+        clock: null,
+      });
+      // A retry of the same attempt keeps its lease and makes no new
+      // selection: the binding follows the lease's account with no clock.
+      expect(await place(first)).toMatchObject({
+        kind: "run",
+        connectionId: leased,
+        reusedLease: true,
+        previousConnectionId: other,
+      });
+      expect(await stickLeaseOf(first)).toBe(leased);
+      expect(await bindingOf(first)).toMatchObject({
+        connectionId: leased,
+        choice: "automatic",
+        clock: null,
+      });
+      // So the next turn runs normal selection instead of keeping it as warm.
       const second = await nextTurn(org, first);
       const placedAt = Date.now();
       expect(await placeChecked(second, new Date(placedAt))).toMatchObject({

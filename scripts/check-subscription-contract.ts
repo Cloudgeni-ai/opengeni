@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 import { parseSync } from "oxc-parser";
 
@@ -81,6 +81,30 @@ function isTestFile(path: string): boolean {
     UNIT_TEST_PATTERN.test(path) ||
     INTEGRATION_TEST_PATTERN.test(path) ||
     E2E_TEST_PATTERN.test(path)
+  );
+}
+
+/** A shared suite module: tests defined in a `test/helpers/` file that test files run. */
+const SHARED_SUITE_PATTERN = /(?:^|\/)test\/helpers\/[^/]+\.tsx?$/;
+/** Relative module specifiers in a test file's source (static and dynamic imports). */
+const RELATIVE_SPECIFIER = /["'`](\.{1,2}\/[^"'`\s]+)["'`]/g;
+
+function withoutExtension(path: string): string {
+  return path.replace(/\.tsx?$/, "");
+}
+
+/**
+ * Whether a cited `test/helpers/` module defines tests that some discovered
+ * test file runs: one of them imports it by a relative specifier. Its titles
+ * then verify a requirement exactly as a test file's do.
+ */
+function isRunSharedSuite(root: string, path: string, testFiles: readonly string[]): boolean {
+  if (!SHARED_SUITE_PATTERN.test(path) || !existsSync(join(root, path))) return false;
+  const target = withoutExtension(posix.normalize(path));
+  return testFiles.some((testFile) =>
+    [...readFileSync(join(root, testFile), "utf8").matchAll(RELATIVE_SPECIFIER)].some(
+      (match) => withoutExtension(posix.join(posix.dirname(testFile), match[1]!)) === target,
+    ),
   );
 }
 
@@ -198,6 +222,8 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
   }
   const defined = new Map<string, ContractRequirement>();
   const titleCache = new Map<string, string[]>();
+  const testFiles = listTestFiles(root);
+  const sharedSuites = new Set<string>();
   const titlesOf = (path: string) => {
     let titles = titleCache.get(path);
     if (!titles) {
@@ -239,11 +265,15 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
     }
     for (const path of requirement.verification.paths) {
       const testFile = join(root, path);
-      if (!isTestFile(path) || !existsSync(testFile)) {
+      const sharedSuite = !isTestFile(path) && isRunSharedSuite(root, path, testFiles);
+      if (sharedSuite) sharedSuites.add(path);
+      if (!sharedSuite && (!isTestFile(path) || !existsSync(testFile))) {
         findings.push({
           file: CONTRACT_PATH,
           line: requirement.line,
-          message: requirement.id + " names a test file that does not exist: " + path,
+          message: SHARED_SUITE_PATTERN.test(path)
+            ? requirement.id + " names a shared suite no test file runs: " + path
+            : requirement.id + " names a test file that does not exist: " + path,
         });
       } else if (!titlesName(titlesOf(path), requirement.id)) {
         findings.push({
@@ -254,7 +284,7 @@ export function checkSubscriptionContract(root: string): ContractFinding[] {
       }
     }
   }
-  for (const path of listTestFiles(root)) {
+  for (const path of [...testFiles, ...sharedSuites]) {
     if (path === SELF_TEST) continue;
     const lines = readFileSync(join(root, path), "utf8").split("\n");
     lines.forEach((line, index) => {
