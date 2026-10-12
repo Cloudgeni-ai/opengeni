@@ -478,6 +478,10 @@ const SettingsSchema = z.object({
     .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   environmentsEncryptionKey: z.string().optional(),
+  // Dev/seed only: accept the `ops_fake_healthy` / `ops_fake_sync_error`
+  // 1Password tokens, backed by the in-memory fake provider. The managed
+  // product posture refuses to start with it set (OP-7).
+  onePasswordFakeTokens: EnvBoolean.default(false),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsOauthShortStateEnabled: EnvBoolean.default(false),
@@ -4489,6 +4493,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
+    onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsOauthShortStateEnabled: optional("OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED"),
@@ -9692,6 +9697,11 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   if (settings.productAccessMode === "managed") {
+    if (settings.onePasswordFakeTokens && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_ONEPASSWORD_FAKE_TOKENS is a local development switch and is refused by the managed runtime",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",
