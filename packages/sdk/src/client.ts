@@ -241,6 +241,8 @@ import type {
   CapabilityCatalogResponse,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
   CapabilityInstallation,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
@@ -8052,6 +8054,44 @@ export class OpenGeniClient {
     return await this.requestJson(
       "PATCH",
       `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /**
+   * Read the workspace's saved Allow/Ask/Block rules for a session MCP server
+   * this host attaches (same `id` and exact `url` as in `mcpServers`).
+   */
+  async getSessionMcpToolPermissions(
+    workspaceId: string,
+    server: { serverId: string; url: string },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SessionMcpToolPermissionsResponse> {
+    const query = new URLSearchParams({ serverId: server.serverId, url: server.url });
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/session-mcp-tool-permissions?${query}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /**
+   * Set or reset Allow/Ask/Block for a session MCP server's default or named
+   * tools. Requires `capabilities:manage`; agents and service principals are
+   * refused. Rules apply from each session's next attempt.
+   */
+  async updateSessionMcpToolPermissions(
+    workspaceId: string,
+    request: UpdateSessionMcpToolPermissionsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ saved: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/session-mcp-tool-permissions`,
       request,
       {},
       options,

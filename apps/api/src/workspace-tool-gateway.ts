@@ -7,6 +7,7 @@ import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { recordToolApproval } from "@opengeni/observability";
+import { sessionMcpApprovalConnectionId } from "@opengeni/runtime";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -756,7 +757,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           connectionId:
             binding?.connectionId ??
             config.connectionRef?.connectionId ??
-            `session-mcp:${config.id}:${createHash("sha256").update(config.url, "utf8").digest("hex")}`,
+            sessionMcpApprovalConnectionId(config.id, config.url),
           serverId: binding?.canonicalServerId ?? config.id,
         },
       ] as const;
