@@ -99,6 +99,8 @@ function parse(snapshot: NativeBrokerInputSnapshot): NativeBrokerInputSnapshot {
   }
   return state;
 }
+
+export const validateNativeBrokerInputSnapshot = parse;
 function writer(state: NativeBrokerInputSnapshot, expectedWriterEpoch: number): void {
   if (expectedWriterEpoch !== state.writerEpoch) invalid();
 }

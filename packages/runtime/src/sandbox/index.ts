@@ -3,6 +3,14 @@ export type {
   ProviderCommandSession,
 } from "./provider-command-session";
 export {
+  durableNativeBrokerTransport,
+  initialNativeBrokerTransportState,
+} from "./providers/native-command-broker-transport";
+export type {
+  NativeBrokerTransportPort,
+  NativeBrokerTransportState,
+} from "./providers/native-command-broker-transport";
+export {
   ProviderCommandStartOutcomeUnknownError,
   ProviderCommandInputOutcomeUnknownError,
   ProviderCommandObservationUnavailableError,

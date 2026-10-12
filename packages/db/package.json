@@ -19,6 +19,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./native-command-broker-transport": {
+      "types": "./src/native-command-broker-transport.ts",
+      "default": "./src/native-command-broker-transport.ts"
+    },
     "./connect-attempts": {
       "types": "./src/connect-attempts.ts",
       "default": "./src/connect-attempts.ts"

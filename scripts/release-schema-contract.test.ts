@@ -225,6 +225,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers native broker transport as an additive rolling migration", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0738_native_command_broker_transport.sql",
+      ),
+    ).toMatchObject({
+      path: "0738_native_command_broker_transport.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("installs the workspace activity initializer before its conflict-safe backfill", async () => {
     const migration = await readFile(
       join(import.meta.dir, "../packages/db/drizzle/0214_session_activity_commit_gate.sql"),
@@ -2718,6 +2730,7 @@ describe("release schema contract", () => {
       "0687_human_wait_command_containment.sql",
       "0730_native_pty_command_supervision.sql",
       "0731_native_command_qualification.sql",
+      "0738_native_command_broker_transport.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

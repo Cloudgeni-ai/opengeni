@@ -1629,6 +1629,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0738 adds one mutable transport head and one append-only inbox/outbox.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 2
+            : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+              ? 1
+              : 0) +
           // 0725 adds organization privacy preferences with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -1728,7 +1734,14 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
+      expect(RUNTIME_TABLE_PRIVILEGES.native_command_broker_entries).toEqual(["SELECT", "INSERT"]);
+      expect(RUNTIME_TABLE_PRIVILEGES.native_command_broker_transports).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+      ]);
       const tableCount =
+        2 + // 0738 encrypted native broker head and append-only receipts.
         (hasCurrentMainActivityLedger ? 341 : 218) +
         9 +
         12 +

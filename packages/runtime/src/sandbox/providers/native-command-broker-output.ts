@@ -94,6 +94,8 @@ function parse(snapshot: NativeBrokerOutputSnapshot): NativeBrokerOutputSnapshot
   return state;
 }
 
+export const validateNativeBrokerOutputSnapshot = parse;
+
 export function initialNativeBrokerOutput(input: {
   brokerId: string;
   sandboxId: string;

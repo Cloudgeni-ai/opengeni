@@ -55,6 +55,14 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
+The in-progress native command broker transport journal is separate from
+command admission: `packages/db/src/native-command-broker-transport.ts` owns
+scoped encrypted input/output custody, while the runtime's broker transport
+coordinator applies framing/replay rules and core composes the two packages.
+It is not wired into live command execution. See
+[`native-command-broker.md`](design/native-command-broker.md) for its remaining
+qualification, lifecycle and activation requirements.
+
 `session_event_cursors` transactionally verifies appends/monotonic sequencing/public
 `lastSequence`; `sessions.last_sequence` is compatibility-only. Semantic writers
 lock sessions for atomic state/events. Exact-attempt raw batches fence attempts,

@@ -1,0 +1,370 @@
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { sql } from "drizzle-orm";
+import { z } from "zod";
+import { canonicalModalCheckpointProviderBinding } from "@opengeni/contracts";
+import { rawRows, withRlsContext, isTransactionHandle, type Database } from "./database";
+import { encryptEnvironmentValue, decryptEnvironmentValue } from "./environment-crypto";
+
+const uuid = z.uuid();
+const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const bindingSchema = z
+  .object({
+    version: z.literal(1),
+    brokerId: uuid,
+    accountId: uuid,
+    workspaceId: uuid,
+    leaseId: uuid,
+    sandboxGroupId: uuid,
+    createOperationId: z.string().min(1).max(200),
+    createEpoch: z.number().int().nonnegative().safe(),
+    sandboxId: z.string().regex(/^sb-[A-Za-z0-9_-]{1,200}$/),
+    taskId: z.string().min(1).max(200),
+    providerBindingKey: z
+      .string()
+      .min(1)
+      .max(1024)
+      .refine((value) => {
+        try {
+          return canonicalModalCheckpointProviderBinding(JSON.parse(value))?.key === value;
+        } catch {
+          return false;
+        }
+      }),
+    sourceSha: z.string().regex(/^[a-f0-9]{40}$/),
+    artifactSha256: digest,
+    bootstrapEvidenceSha256: digest,
+  })
+  .strict();
+export type NativeBrokerTransportBinding = z.infer<typeof bindingSchema>;
+export type NativeBrokerEntryKind = "request" | "frame" | "page" | "eof";
+export type NativeBrokerStoredEntry = {
+  kind: NativeBrokerEntryKind;
+  key: string;
+  sequence: number | null;
+  sha256: string;
+  value: string;
+};
+export type NativeBrokerWriter = { id: string | null; epoch: number; live: boolean };
+export type NativeBrokerTransportTransaction = {
+  state: unknown;
+  writer: NativeBrokerWriter;
+  /** Only a physical-identity fact, never user command/release authority. */
+  currentInstance: boolean;
+  read(kind: NativeBrokerEntryKind, key: string): Promise<NativeBrokerStoredEntry | null>;
+  insert(entry: Omit<NativeBrokerStoredEntry, "sha256">): Promise<NativeBrokerStoredEntry>;
+  /** The callback must apply the corresponding pure writer-epoch transition. */
+  claimWriter(id: string): NativeBrokerWriter;
+  requireWriter(id: string, epoch: number): void;
+  save(state: unknown): void;
+};
+export type NativeBrokerTransportStore = {
+  transaction<T>(operation: (tx: NativeBrokerTransportTransaction) => Promise<T>): Promise<T>;
+};
+const TTL_SECONDS = 30;
+const MAX_VALUE_BYTES = 2 * 1024 * 1024;
+
+function fenced(): never {
+  throw new Error("Native broker transport binding, writer or receipt is fenced");
+}
+function sha(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+function validateValue(value: string): void {
+  if (typeof value !== "string" || Buffer.byteLength(value) > MAX_VALUE_BYTES) fenced();
+}
+function serialize(state: unknown): string {
+  const value = JSON.stringify(state);
+  validateValue(value);
+  return value;
+}
+function seal(
+  key: Uint8Array,
+  binding: NativeBrokerTransportBinding,
+  purpose: string,
+  value: string,
+) {
+  validateValue(value);
+  // The encrypted envelope binds ciphertext to the complete physical scope;
+  // copying ciphertext between brokers or receipt keys is not a valid replay.
+  return encryptEnvironmentValue(key, JSON.stringify({ binding, purpose, value }));
+}
+function unseal(
+  key: Uint8Array,
+  binding: NativeBrokerTransportBinding,
+  purpose: string,
+  value: string,
+): string {
+  const decoded = JSON.parse(decryptEnvironmentValue(key, value));
+  if (!isDeepStrictEqual(decoded.binding, binding) || decoded.purpose !== purpose) fenced();
+  validateValue(decoded.value);
+  return decoded.value;
+}
+function scoped(binding: NativeBrokerTransportBinding) {
+  return sql`account_id = ${binding.accountId}::uuid AND workspace_id = ${binding.workspaceId}::uuid`;
+}
+async function lockLease(db: Database, binding: NativeBrokerTransportBinding) {
+  const rows = (await rawRows(
+    db,
+    sql`SELECT instance_id, liveness, lease_epoch,
+    provider_create_attempt FROM sandbox_leases WHERE id = ${binding.leaseId}::uuid
+    AND ${scoped(binding)} AND sandbox_group_id = ${binding.sandboxGroupId}::uuid
+    AND backend = 'modal' FOR SHARE`,
+  )) as {
+    instance_id: string | null;
+    liveness: string;
+    lease_epoch: number;
+    provider_create_attempt: {
+      operationId?: string;
+      leaseEpoch?: number;
+      instanceId?: string;
+      providerBindingKey?: string;
+    } | null;
+  }[];
+  if (rows.length !== 1) fenced();
+  return rows[0]!;
+}
+
+/** Internal transport storage, not a public API or an admission capability.
+ * The trusted caller first authenticates the initial-process bootstrap against
+ * its independently selected artifact. Registration checks exact attributed
+ * creation, but does not certify that bootstrap evidence or enroll the group.
+ */
+export async function registerNativeBrokerTransport(
+  db: Database,
+  encryptionKey: Uint8Array,
+  input: NativeBrokerTransportBinding,
+  initialState: unknown,
+): Promise<void> {
+  if (isTransactionHandle(db))
+    throw new Error("Native broker transport requires an outer commit boundary");
+  const binding = bindingSchema.parse(input);
+  const plaintext = serialize(initialState);
+  const encrypted = seal(encryptionKey, binding, "state", plaintext);
+  await withRlsContext(db, binding, async (tx) => {
+    const lease = await lockLease(tx, binding);
+    const existing = (await rawRows(
+      tx,
+      sql`SELECT binding, initial_state_sha256 FROM native_command_broker_transports
+      WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)} FOR UPDATE`,
+    )) as { binding: unknown; initial_state_sha256: string }[];
+    if (existing.length) {
+      // Replay after an unknown registration must not rewind progressed state.
+      if (
+        !isDeepStrictEqual(existing[0]!.binding, binding) ||
+        existing[0]!.initial_state_sha256 !== sha(plaintext)
+      )
+        fenced();
+      return;
+    }
+    if (
+      lease.instance_id !== binding.sandboxId ||
+      lease.liveness !== "warming" ||
+      lease.lease_epoch !== binding.createEpoch ||
+      lease.provider_create_attempt?.operationId !== binding.createOperationId ||
+      lease.provider_create_attempt?.leaseEpoch !== binding.createEpoch ||
+      lease.provider_create_attempt?.providerBindingKey !== binding.providerBindingKey ||
+      lease.provider_create_attempt?.instanceId !== binding.sandboxId
+    )
+      fenced();
+    await tx.execute(sql`INSERT INTO native_command_broker_transports
+      (id,account_id,workspace_id,lease_id,sandbox_group_id,binding,initial_state_sha256,state_encrypted)
+      VALUES (${binding.brokerId}::uuid,${binding.accountId}::uuid,${binding.workspaceId}::uuid,
+        ${binding.leaseId}::uuid,${binding.sandboxGroupId}::uuid,${JSON.stringify(binding)}::jsonb,${sha(plaintext)},${encrypted})
+      ON CONFLICT DO NOTHING`);
+    const committed = await rawRows(
+      tx,
+      sql`SELECT binding, initial_state_sha256 FROM native_command_broker_transports
+      WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)}`,
+    );
+    if (
+      committed.length !== 1 ||
+      !isDeepStrictEqual(committed[0]!.binding, binding) ||
+      committed[0]!.initial_state_sha256 !== sha(plaintext)
+    )
+      fenced();
+  });
+}
+
+/** All callbacks are DB-only. Never perform provider I/O while holding this
+ * transaction. A returned dispatch value is usable only AFTER this promise
+ * commits. Expired writer leases never settle commands or discard requests.
+ */
+export function nativeBrokerTransportStore(
+  db: Database,
+  encryptionKey: Uint8Array,
+  input: NativeBrokerTransportBinding,
+): NativeBrokerTransportStore {
+  if (isTransactionHandle(db))
+    throw new Error("Native broker transport requires an outer commit boundary");
+  const binding = bindingSchema.parse(input);
+  return {
+    transaction: async (operation) =>
+      withRlsContext(db, binding, async (dbtx) => {
+        // Consistent order: scoped workspace fence -> lease -> broker. Late output
+        // remains capturable after physical replacement, but no input is allowed.
+        const lease = await lockLease(dbtx, binding);
+        const rows = (await rawRows(
+          dbtx,
+          sql`SELECT binding, revision::text, writer_id,
+      writer_epoch::text, writer_until > clock_timestamp() AS writer_live, state_encrypted
+      FROM native_command_broker_transports WHERE id = ${binding.brokerId}::uuid
+      AND ${scoped(binding)} FOR UPDATE`,
+        )) as {
+          binding: unknown;
+          revision: string;
+          writer_id: string | null;
+          writer_epoch: string;
+          writer_live: boolean | null;
+          state_encrypted: string;
+        }[];
+        const row = rows[0];
+        if (rows.length !== 1 || !row || !isDeepStrictEqual(row.binding, binding)) fenced();
+        const revision = Number(row.revision),
+          epoch = Number(row.writer_epoch);
+        if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(epoch)) fenced();
+        let state = JSON.parse(unseal(encryptionKey, binding, "state", row.state_encrypted));
+        const writer = { id: row.writer_id, epoch, live: row.writer_live === true };
+        let changed = false,
+          renew = false,
+          requireLiveAtCommit = false;
+        const currentInstance =
+          lease.instance_id === binding.sandboxId &&
+          ["warming", "warm", "draining"].includes(lease.liveness);
+        const tx: NativeBrokerTransportTransaction = {
+          state,
+          writer: { ...writer },
+          currentInstance,
+          async read(kind, key) {
+            validateEntryIdentity(kind, key, null, false);
+            const found = (await rawRows(
+              dbtx,
+              sql`SELECT sequence::text, sha256, value_encrypted
+          FROM native_command_broker_entries WHERE broker_id = ${binding.brokerId}::uuid
+          AND ${scoped(binding)} AND kind = ${kind} AND entry_key = ${key}`,
+            )) as {
+              sequence: string | null;
+              sha256: string;
+              value_encrypted: string;
+            }[];
+            if (!found.length) return null;
+            const value = unseal(
+              encryptionKey,
+              binding,
+              `${kind}:${key}`,
+              found[0]!.value_encrypted,
+            );
+            if (sha(value) !== found[0]!.sha256) fenced();
+            return {
+              kind,
+              key,
+              sequence: found[0]!.sequence === null ? null : Number(found[0]!.sequence),
+              sha256: found[0]!.sha256,
+              value,
+            };
+          },
+          async insert(entry) {
+            validateEntryIdentity(entry.kind, entry.key, entry.sequence, true);
+            validateValue(entry.value);
+            const old = await tx.read(entry.kind, entry.key);
+            const complete = { ...entry, sha256: sha(entry.value) };
+            if (old) {
+              if (!isDeepStrictEqual(old, complete)) fenced();
+              return old;
+            }
+            await dbtx.execute(sql`INSERT INTO native_command_broker_entries
+          (broker_id,account_id,workspace_id,kind,entry_key,sequence,sha256,value_encrypted)
+          VALUES (${binding.brokerId}::uuid,${binding.accountId}::uuid,${binding.workspaceId}::uuid,
+            ${entry.kind},${entry.key},${entry.sequence},${complete.sha256},
+            ${seal(encryptionKey, binding, `${entry.kind}:${entry.key}`, entry.value)})`);
+            return complete;
+          },
+          claimWriter(id) {
+            if (
+              !uuid.safeParse(id).success ||
+              !currentInstance ||
+              (writer.live && writer.id !== id)
+            )
+              fenced();
+            if (writer.live) requireLiveAtCommit = true;
+            if (writer.id !== null && !writer.live) {
+              if (writer.epoch === Number.MAX_SAFE_INTEGER) fenced();
+              writer.epoch += 1;
+            }
+            writer.id = id;
+            writer.live = true;
+            changed = renew = true;
+            return { ...writer };
+          },
+          requireWriter(id, expectedEpoch) {
+            if (
+              !currentInstance ||
+              !writer.live ||
+              writer.id !== id ||
+              writer.epoch !== expectedEpoch
+            )
+              fenced();
+            // A writer first claimed in this transaction has no persisted deadline
+            // yet. Existing claims must also be live at commit, not just at read.
+            if (row.writer_live === true) requireLiveAtCommit = true;
+          },
+          save(next) {
+            serialize(next);
+            state = next;
+            changed = true;
+          },
+        };
+        const result = await operation(tx);
+        if (requireLiveAtCommit) {
+          const live = await rawRows(
+            dbtx,
+            sql`SELECT id FROM native_command_broker_transports
+        WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)} AND writer_until > clock_timestamp()`,
+          );
+          if (live.length !== 1) fenced();
+        }
+        if (changed) {
+          if (revision === Number.MAX_SAFE_INTEGER) fenced();
+          const updated = await rawRows(
+            dbtx,
+            sql`UPDATE native_command_broker_transports SET
+        revision = revision + 1, writer_id = ${writer.id}::uuid, writer_epoch = ${writer.epoch},
+        writer_until = CASE WHEN ${renew} THEN clock_timestamp() + ${TTL_SECONDS} * interval '1 second' ELSE writer_until END,
+        state_encrypted = ${seal(encryptionKey, binding, "state", serialize(state))}
+        WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)} AND revision = ${revision}
+        RETURNING id`,
+          );
+          if (updated.length !== 1) fenced();
+        }
+        return result;
+      }),
+  };
+}
+
+function validateEntryIdentity(
+  kind: NativeBrokerEntryKind,
+  key: string,
+  sequence: number | null,
+  write: boolean,
+) {
+  if (
+    !["request", "frame", "page", "eof"].includes(kind) ||
+    typeof key !== "string" ||
+    Buffer.byteLength(key) < 1 ||
+    Buffer.byteLength(key) > 200
+  )
+    fenced();
+  if (kind === "request" && !uuid.safeParse(key).success) fenced();
+  if (kind === "frame" && !/^[1-9][0-9]*$/.test(key)) fenced();
+  if (!write) return;
+  if (kind === "request" || kind === "frame") {
+    if (
+      sequence === null ||
+      !Number.isSafeInteger(sequence) ||
+      sequence < 1 ||
+      (kind === "request" && sequence > 0xffffffff) ||
+      (kind === "frame" && String(sequence) !== key)
+    )
+      fenced();
+  } else if (sequence !== null) fenced();
+}

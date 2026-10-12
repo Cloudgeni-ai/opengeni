@@ -117,11 +117,35 @@ from command settlement. Real Modal V1 cursor-less EOF batches preserve the
 last data cursor and gain a separate observation. The independently read initial
 stderr stream cannot advance that cursor or claim its EOF.
 
-Neither module persists data or grants writer authority. Their integration
-requires scoped transactional row locks/CAS, an immutable unique-request
-outbox, an immutable frame/page inbox, and the existing admission and lease
-fences. Their unit fixtures are not proof that those database or provider
-integration obligations have been satisfied.
+The database adapter in `packages/db/src/native-command-broker-transport.ts`
+and runtime coordinator in `native-command-broker-transport.ts` implement the
+transactional transport journal. The core composition keeps the runtime package
+independent of the database package. Registration requires the exact attributed
+warming lease, creation operation, provider namespace and physical instance;
+the initial state hash and binding cannot be changed by registration replay.
+Neither registration nor a supplied bootstrap-evidence hash certifies the
+bootstrap or grants command authority.
+
+Each database operation locks the lease before the scoped broker row. Input
+reservations, immutable unique request receipts and state changes commit
+together; frame/page receipts, partial suffix, shared cursor and matching input
+acceptance also commit together. Rows use FORCE RLS, entries are append-only,
+and the deployment's existing environment-encryption key encrypts state and
+receipt contents with a scope-bound envelope. Indexed hashes remain content
+integrity checks, not authentication. The journal refuses transaction/savepoint
+handles: a dispatch result must follow an actual outer commit.
+
+A thirty-second database writer lease elects the transport writer, not command
+lifetime. Expiry preserves pending writes and requires a higher writer epoch;
+it never settles a process. Old physical-instance output remains collectible
+after replacement, but new input is refused. Initial-process EOF also fences
+input without converting it into a command exit. The current PostgreSQL
+integration tests exercise races, rollback, restart replay, exact scopes and
+partial-frame capture with the non-owner app role. No live command or provider
+adapter invokes this journal yet. Canonical command admissions, bootstrap
+binding, retention/purge lifecycle, and physical broker control remain required
+before activation; an unresolved journal must not be deleted to unblock a lease
+or workspace teardown.
 
 Before any physical write, the control plane must persist the exact broker,
 physical instance, writer epoch, request ID, provider input index, body and
