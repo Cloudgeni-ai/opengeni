@@ -33,17 +33,75 @@ export const KNOWLEDGE_GUIDANCE_TOOLS = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 /**
+ * Opt-in prompt variant (OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE) for
+ * A/B evaluation: retrieval before workspace-specific answers, corrections and
+ * forget requests; corrections update and forget archives the existing entry;
+ * standing response preferences are saved in the same turn.
+ */
+export type KnowledgeGuidanceOptions = {
+  retrievalExperiment?: boolean | undefined;
+  /** skill_save may be available (Skills capability "manage"). */
+  skillSave?: boolean | undefined;
+};
+
+/** Tools named only by the retrieval experiment. */
+export const KNOWLEDGE_GUIDANCE_EXPERIMENT_TOOLS = [
+  ...KNOWLEDGE_GUIDANCE_TOOLS,
+  "knowledge_archive",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+const EXPERIMENT_RETRIEVAL_SCOPE =
+  "before answering about this workspace's own projects, systems, people, hosts, ports or policies, before acting on a correction or forget request, and before work that depends on prior decisions or requirements; skip general-knowledge questions.";
+
+function standingPreferenceSentence(
+  skillSave: boolean,
+  instructionSave: boolean,
+): string | undefined {
+  const destination =
+    skillSave && instructionSave
+      ? "with skill_save, or instruction_policy_save for a workspace rule"
+      : skillSave
+        ? "with skill_save"
+        : instructionSave
+          ? "with instruction_policy_save"
+          : undefined;
+  return (
+    destination &&
+    `A "from now on" or "always" request about how to respond is a standing preference: save it in the same turn ${destination}, without asking first; Review first saves it as pending.`
+  );
+}
+
+function correctionSentence(save: boolean, archive: boolean): string | undefined {
+  if (save && archive)
+    return "A correction updates the matching entry; a forget request archives it with knowledge_archive, never blanks it.";
+  if (save) return "A correction updates the matching entry.";
+  if (archive) return "A forget request archives the matching entry with knowledge_archive.";
+  return undefined;
+}
+
+/**
  * `KNOWLEDGE_GUIDANCE` with each clause that names a tool kept only while that
  * tool may be available. With every tool available it equals the shared
  * constant sentence for sentence (pinned by tests); general learning policy,
  * grounding and authority rules never depend on availability.
  */
-export function knowledgeGuidance(has: (name: FirstPartyMcpToolName) => boolean): string[] {
+export function knowledgeGuidance(
+  has: (name: FirstPartyMcpToolName) => boolean,
+  options: KnowledgeGuidanceOptions = {},
+): string[] {
+  const experiment = options.retrievalExperiment === true;
   const search = has("knowledge_search");
   const get = has("knowledge_get");
   const save = has("knowledge_save");
-  const retrieval =
-    search && get
+  const retrieval = experiment
+    ? search && get
+      ? `Use knowledge_search and knowledge_get ${EXPERIMENT_RETRIEVAL_SCOPE}`
+      : search
+        ? `Use knowledge_search ${EXPERIMENT_RETRIEVAL_SCOPE}`
+        : get
+          ? `Use knowledge_get ${EXPERIMENT_RETRIEVAL_SCOPE}`
+          : undefined
+    : search && get
       ? "Use knowledge_search and knowledge_get before work that depends on prior decisions or requirements; skip unrelated searches."
       : search
         ? "Use knowledge_search before work that depends on prior decisions or requirements; skip unrelated searches."
@@ -56,6 +114,8 @@ export function knowledgeGuidance(has: (name: FirstPartyMcpToolName) => boolean)
         ? "Choose durable storage by purpose: Knowledge for reusable facts and decisions, Instructions for short workspace rules, Skills for procedures and behavioral preferences, task_note_save for temporary coordination."
         : "Choose durable storage by purpose: Knowledge for reusable facts and decisions, Instructions for short workspace rules, Skills for procedures and behavioral preferences.",
       "Do not save behavioral preferences as Knowledge or widen personal guidance to the workspace.",
+      experiment &&
+        standingPreferenceSentence(options.skillSave === true, has("instruction_policy_save")),
       "A Skill description should say when it applies.",
       "Do not promise future behavior from a Knowledge save.",
     ),
@@ -68,6 +128,7 @@ export function knowledgeGuidance(has: (name: FirstPartyMcpToolName) => boolean)
       save &&
         "Save useful lasting findings with knowledge_save during ordinary work; the user need not say remember.",
       "Learn from user corrections, adopted choices, constraints and their reasons, not unaccepted assistant proposals as adopted decisions or tweaks only for the current task.",
+      experiment && correctionSentence(save, has("knowledge_archive")),
       "Respect requests not to remember.",
       "Follow applicable learning Skills.",
       "Prefer settled incident lessons and one updated conclusion per experiment over chatter, live status and interim rounds.",
@@ -99,7 +160,27 @@ export function knowledgeGuidance(has: (name: FirstPartyMcpToolName) => boolean)
   ].filter((paragraph): paragraph is string => typeof paragraph === "string" && paragraph !== "");
 }
 
+/** The experiment variant with every tool available. */
+export const KNOWLEDGE_GUIDANCE_RETRIEVAL_EXPERIMENT: readonly string[] = knowledgeGuidance(
+  () => true,
+  { retrievalExperiment: true, skillSave: true },
+);
+
+/** Legacy (null agent config) composition: every tool counts as available. */
+export function sharedKnowledgeGuidance(retrievalExperiment = false): readonly string[] {
+  return retrievalExperiment ? KNOWLEDGE_GUIDANCE_RETRIEVAL_EXPERIMENT : KNOWLEDGE_GUIDANCE;
+}
+
 function modularKnowledgeGuidance(context: AgentPromptContext): readonly string[] {
+  if (context.experiments?.knowledgeRetrievalGuidance === true) {
+    const skillSave = context.capabilities.skills === "manage";
+    return skillSave && toolsAvailable(context, KNOWLEDGE_GUIDANCE_EXPERIMENT_TOOLS)
+      ? KNOWLEDGE_GUIDANCE_RETRIEVAL_EXPERIMENT
+      : knowledgeGuidance((name) => toolAvailable(context, name), {
+          retrievalExperiment: true,
+          skillSave,
+        });
+  }
   return toolsAvailable(context, KNOWLEDGE_GUIDANCE_TOOLS)
     ? KNOWLEDGE_GUIDANCE
     : knowledgeGuidance((name) => toolAvailable(context, name));
