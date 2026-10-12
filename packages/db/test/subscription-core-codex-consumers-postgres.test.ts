@@ -1126,9 +1126,6 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
   });
 
   test("a Codex pin sits beside another provider's pin; Codex 'auto' never touches it (D-32)", async () => {
-    // The rolling window of 0729 is closed (the next drained provider
-    // cutover drops this index): a session holds one binding per provider.
-    await shared!.admin`drop index if exists subscription_session_bindings_rolling_session_idx`;
     const org = await organization();
     await setCutover(org.accountId, true);
     const sessionId = await ownedSession(org, org.sharedWorkspaceId);
@@ -1175,51 +1172,66 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         subjectId: org.ownerSubjectId,
         connectionId,
       });
-    // No Codex binding yet: "auto" changes nothing, the other pin included.
-    expect((await pin(null)).result.changed).toBe(true);
+    // While 0729's rolling index exists (production until the next drained
+    // provider cutover drops it), a first Codex pin meets it the way a racing
+    // first binding does: the pin reports it unchanged, never an error.
+    expect((await pin(codex)).result.changed).toBe(false);
     expect(await stored()).toEqual([foreignPin]);
-    // The Codex projection never shows another provider's choice.
-    expect(
-      (
-        await getSubscriptionCoreCodexSessionPointers(client!.db, {
-          accountId: org.accountId,
-          workspaceId: org.sharedWorkspaceId,
-          sessionIds: [sessionId],
-        })
-      ).get(sessionId),
-    ).toEqual({ pinnedCredentialId: null, lastCredentialId: null });
+    // The rolling window closed: a session holds one binding per provider.
+    // Restored below so the later tests run on the rolling-window schema.
+    await shared!.admin`drop index subscription_session_bindings_rolling_session_idx`;
+    try {
+      // No Codex binding yet: "auto" changes nothing, the other pin included.
+      expect((await pin(null)).result.changed).toBe(true);
+      expect(await stored()).toEqual([foreignPin]);
+      // The Codex projection never shows another provider's choice.
+      expect(
+        (
+          await getSubscriptionCoreCodexSessionPointers(client!.db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            sessionIds: [sessionId],
+          })
+        ).get(sessionId),
+      ).toEqual({ pinnedCredentialId: null, lastCredentialId: null });
 
-    // A Codex pin is its own row; the other provider's pin stays as stored.
-    expect((await pin(codex)).result.changed).toBe(true);
-    expect(await stored()).toEqual([
-      { provider: "codex", connection_id: codex, choice: "explicit", version: 1 },
-      foreignPin,
-    ]);
-    expect(
-      (
-        await getSubscriptionCoreCodexSessionPointers(client!.db, {
-          accountId: org.accountId,
-          workspaceId: org.sharedWorkspaceId,
-          sessionIds: [sessionId],
-        })
-      ).get(sessionId),
-    ).toEqual({ pinnedCredentialId: codex, lastCredentialId: codex });
+      // A Codex pin is its own row; the other provider's pin stays as stored.
+      expect((await pin(codex)).result.changed).toBe(true);
+      expect(await stored()).toEqual([
+        { provider: "codex", connection_id: codex, choice: "explicit", version: 1 },
+        foreignPin,
+      ]);
+      expect(
+        (
+          await getSubscriptionCoreCodexSessionPointers(client!.db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            sessionIds: [sessionId],
+          })
+        ).get(sessionId),
+      ).toEqual({ pinnedCredentialId: codex, lastCredentialId: codex });
 
-    // "auto" returns only the Codex binding to automatic.
-    expect((await pin(null)).result.changed).toBe(true);
-    expect(await stored()).toEqual([
-      { provider: "codex", connection_id: codex, choice: "automatic", version: 2 },
-      foreignPin,
-    ]);
-    expect(
-      (
-        await getSubscriptionCoreCodexSessionPointers(client!.db, {
-          accountId: org.accountId,
-          workspaceId: org.sharedWorkspaceId,
-          sessionIds: [sessionId],
-        })
-      ).get(sessionId),
-    ).toEqual({ pinnedCredentialId: null, lastCredentialId: codex });
+      // "auto" returns only the Codex binding to automatic.
+      expect((await pin(null)).result.changed).toBe(true);
+      expect(await stored()).toEqual([
+        { provider: "codex", connection_id: codex, choice: "automatic", version: 2 },
+        foreignPin,
+      ]);
+      expect(
+        (
+          await getSubscriptionCoreCodexSessionPointers(client!.db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            sessionIds: [sessionId],
+          })
+        ).get(sessionId),
+      ).toEqual({ pinnedCredentialId: null, lastCredentialId: codex });
+    } finally {
+      await shared!.admin`delete from subscription_session_bindings
+        where session_id = ${sessionId}::uuid`;
+      await shared!.admin`create unique index subscription_session_bindings_rolling_session_idx
+        on subscription_session_bindings (workspace_id, session_id)`;
+    }
   });
 
   test("Codex 'auto' clears a pin whose account was deleted (D-24's way out)", async () => {

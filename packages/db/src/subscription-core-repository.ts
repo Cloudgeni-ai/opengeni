@@ -460,9 +460,31 @@ export async function readSubscriptionSessionBinding(
   };
 }
 
+const ROLLING_SESSION_BINDING_INDEX = "subscription_session_bindings_rolling_session_idx";
+
+/**
+ * Whether an error is a concurrent first binding of the session meeting 0729's
+ * rolling `(workspace_id, session_id)` index. That index is not the conflict
+ * target of `writeSubscriptionSessionBinding`, so two first bindings of one
+ * session can race on it as a unique violation instead of a lost
+ * compare-and-swap. Callers treat it as the lost compare-and-swap; the
+ * transaction (or savepoint) is aborted and must be retried in a new one.
+ */
+export function isSubscriptionSessionBindingRollingConflict(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 4; depth += 1) {
+    const fields = current as { code?: unknown; constraint_name?: unknown; cause?: unknown };
+    if (fields.code === "23505" && fields.constraint_name === ROLLING_SESSION_BINDING_INDEX)
+      return true;
+    current = fields.cause;
+  }
+  return false;
+}
+
 /**
  * Inserts the provider's binding once or compare-and-swaps its version. A
- * binding never changes provider (the 0729 trigger refuses it).
+ * binding never changes provider (the 0729 trigger refuses it). While 0729's
+ * rolling index exists a racing first binding can fail with
+ * `isSubscriptionSessionBindingRollingConflict`.
  */
 export async function writeSubscriptionSessionBinding(
   db: Database,

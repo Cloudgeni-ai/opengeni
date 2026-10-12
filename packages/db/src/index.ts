@@ -429,6 +429,7 @@ import {
 import {
   readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
   readSubscriptionSessionBinding as readCoreSessionBinding,
+  isSubscriptionSessionBindingRollingConflict,
   resolveSubscriptionConnectionId as resolveCoreConnectionId,
   writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
@@ -29145,6 +29146,9 @@ export async function pinSubscriptionCoreSessionCodexAccount(
           (error as { cause?: { code?: unknown } } | null)?.cause?.code;
         // The guard refuses a connection this session may not use.
         if (code === "42501") return unchanged;
+        // A racing first binding of the session met 0729's rolling index (a
+        // lost compare-and-swap); the savepoint rolled it back.
+        if (isSubscriptionSessionBindingRollingConflict(error)) return unchanged;
         throw error;
       }
       const appliedTo: "waiting_turn" | "next_turn" =

@@ -14,16 +14,28 @@
 -- session still holds at most one binding row, exactly as before; today only
 -- Codex writes core bindings. The drained cutover of the next provider to
 -- join the core drops the index, after its preflight refuses every other
--- runtime login, so no binary that writes with the old conflict target is
--- left.
+-- runtime login and before it writes any binding of its own. Dropping it is
+-- safe only once no previous binary can run at all: only the previous upsert
+-- fails (42P10) without the index; the previous binary's binding reads and its
+-- Codex pin's UPDATE by (workspace_id, session_id, version) carry no provider
+-- and would read or rewrite another provider's row.
 --
 -- A binding row never changes provider: each provider writes only its own
--- row. The trigger below refuses a provider change from any writer, so a
--- previous binary's upsert (which sets provider = excluded.provider) can
--- never turn one provider's binding into another's.
+-- row. The trigger below refuses a provider change from any runtime writer,
+-- so a previous binary's upsert (which sets provider = excluded.provider) can
+-- never turn one provider's binding into another's. A drained cutover that
+-- disables this table's triggers for its bulk move keeps this one enabled
+-- (a move never changes a row's provider) or asserts afterwards that no
+-- pre-existing row changed provider.
 --
--- Existing rows keep every value; only the key changes.
+-- Existing rows keep every value; only the key changes. The whole lock set is
+-- taken first: building the index takes SHARE and replacing the key ACCESS
+-- EXCLUSIVE, and upgrading between them would deadlock with a live binding
+-- writer (it reads its row FOR UPDATE, then writes it).
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '5min';
+
+LOCK TABLE subscription_session_bindings IN ACCESS EXCLUSIVE MODE;
 
 CREATE UNIQUE INDEX subscription_session_bindings_rolling_session_idx
   ON subscription_session_bindings (workspace_id, session_id);

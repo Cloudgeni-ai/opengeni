@@ -57,6 +57,7 @@ import {
   advanceSubscriptionBindingCacheClock,
   assertSubscriptionTurnLeaseCurrent,
   decodeSubscriptionQuota,
+  isSubscriptionSessionBindingRollingConflict,
   persistSubscriptionCoreRefreshWithPlan,
   readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
@@ -1109,8 +1110,9 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
    * the binding under its row lock, so no pin or other placement of the
    * session changed it since the decision; the comparison below is defense
    * in depth, and the only race left is two first placements of a session
-   * that has no binding row yet (the insert's compare-and-swap refuses the
-   * second, which retries). Placing a turn uses the account: the clock moves
+   * that has no binding row yet (the insert's compare-and-swap, or while it
+   * exists 0729's rolling index, refuses the second, which retries). Placing
+   * a turn uses the account: the clock moves
    * to the placement time, so a placement that waited for the row lock finds
    * the account warm and keeps it. A cache clock never carries to another
    * account or model (the database trigger
@@ -1156,9 +1158,9 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             : (seen.lastModelCallAt?.getTime() ?? 0) >= decided.lastModelCallAt);
     if (!unchanged) throw new SubscriptionBindingConflict();
     // Placement never replaces a choice of a deleted connection (placeOnce
-    // waits on it instead).
+    // waits on it instead); a retry re-reads it under the lock and waits.
     if (current?.choice === "explicit" && current.connectionId === null)
-      throw new Error("Core placement may not replace an explicit choice it cannot serve");
+      throw new SubscriptionBindingConflict();
     if (current && current.connectionId === next.connectionId && current.modelId === next.modelId) {
       await advanceSubscriptionBindingCacheClock(tx, {
         workspaceId: identity.workspaceId,
@@ -1170,25 +1172,34 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       });
       return;
     }
-    const written = await writeSubscriptionSessionBinding(tx, {
-      accountId: identity.accountId,
-      workspaceId: identity.workspaceId,
-      sessionId: identity.sessionId,
-      provider: providerId,
-      connectionId: next.connectionId,
-      modelId: next.modelId,
-      // A person's explicit choice is changed only by that person.
-      choice: current?.choice ?? "automatic",
-      onlyThisModel: current?.onlyThisModel ?? false,
-      // The clock starts on the new account or model at this placement, or
-      // cold when the placement made no new selection.
-      lastModelCallAt: next.restartClock ? next.now : null,
-      lastSwitchReason: bindingSwitchReason(
-        next.placementSwitch,
-        current?.lastSwitchReason ?? null,
-      ),
-      expectedVersion: current?.version ?? null,
-    });
+    let written: number | null;
+    try {
+      written = await writeSubscriptionSessionBinding(tx, {
+        accountId: identity.accountId,
+        workspaceId: identity.workspaceId,
+        sessionId: identity.sessionId,
+        provider: providerId,
+        connectionId: next.connectionId,
+        modelId: next.modelId,
+        // A person's explicit choice is changed only by that person.
+        choice: current?.choice ?? "automatic",
+        onlyThisModel: current?.onlyThisModel ?? false,
+        // The clock starts on the new account or model at this placement, or
+        // cold when the placement made no new selection.
+        lastModelCallAt: next.restartClock ? next.now : null,
+        lastSwitchReason: bindingSwitchReason(
+          next.placementSwitch,
+          current?.lastSwitchReason ?? null,
+        ),
+        expectedVersion: current?.version ?? null,
+      });
+    } catch (error) {
+      // A racing first binding of the session met 0729's rolling index: a lost
+      // compare-and-swap, retried in a new transaction.
+      if (isSubscriptionSessionBindingRollingConflict(error))
+        throw new SubscriptionBindingConflict();
+      throw error;
+    }
     if (written === null) throw new SubscriptionBindingConflict();
   }
 

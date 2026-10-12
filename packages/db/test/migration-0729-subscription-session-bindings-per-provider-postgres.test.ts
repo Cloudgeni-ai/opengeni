@@ -7,8 +7,9 @@
 // provider) against the new key, and the new writer (conflict target
 // (workspace_id, session_id, provider)) against rows the previous binary
 // wrote. While the rolling index exists a session still holds at most one
-// binding row; once the next drained provider cutover drops it, providers
-// coexist and the previous binary's conflict target fails closed.
+// binding row; once the next drained provider cutover drops it (with every
+// previous binary gone), providers coexist and the previous upsert fails. A
+// live binding writer that overlaps 0729 must not deadlock with it.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,6 +32,7 @@ import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import {
+  isSubscriptionSessionBindingRollingConflict,
   readSubscriptionSessionBinding,
   writeSubscriptionSessionBinding,
 } from "../src/subscription-core-repository";
@@ -51,6 +53,8 @@ let org: Org | null = null;
 /** Sessions whose bindings were written before 0729, and their rows then. */
 let staged: { sessions: string[]; rows: StoredRow[] } | null = null;
 let posture: { unprovisioned: string[]; provisioned: string[] } | null = null;
+/** How a live binding writer and 0729 ended when they overlapped. */
+let overlap: { writer: string | null; migration: string | null } | null = null;
 
 async function stageOrganization(): Promise<Org> {
   const admin = database!.admin;
@@ -212,6 +216,20 @@ async function rollingIndexExists(): Promise<boolean> {
   return row!.present;
 }
 
+/** Waits until some transaction queues for a lock on the bindings table. */
+async function bindingLockWaiter(): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const [row] = await database!.admin<{ waiting: number }[]>`
+      select count(*)::int as waiting
+      from pg_locks l join pg_class c on c.oid = l.relation
+      where c.relname = 'subscription_session_bindings' and not l.granted`;
+    if (row!.waiting > 0) return;
+    await Bun.sleep(25);
+  }
+  throw new Error("0729 never queued for the bindings table");
+}
+
 beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-session-bindings-per-provider");
@@ -287,7 +305,30 @@ beforeAll(async () => {
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await applying`delete from schema_migrations where name = ${MIGRATION}`;
-    await migrate(database.ownerUrl);
+    // A live binding writer overlaps 0729: it reads its row FOR UPDATE, 0729
+    // starts and queues behind it, then the writer writes the row and commits,
+    // as a placement, a pin or a request's cache clock does. Neither may fail.
+    let migrating = null as Promise<string | null> | null;
+    const writer = await sqlState(() =>
+      asApp(async (db) => {
+        const locked = await rawRows<{ version: number | string }>(
+          db,
+          sql`select version from subscription_session_bindings
+            where workspace_id = ${org!.workspaceId}::uuid and session_id = ${pinned}::uuid
+            for update`,
+        );
+        if (locked.length !== 1) throw new Error("the live writer did not lock its binding");
+        migrating = sqlState(() => migrate(database!.ownerUrl));
+        await bindingLockWaiter();
+        await rawRows(
+          db,
+          sql`update subscription_session_bindings set only_this_model = only_this_model
+            where workspace_id = ${org!.workspaceId}::uuid and session_id = ${pinned}::uuid`,
+        );
+      }),
+    );
+    overlap = { writer, migration: migrating ? await migrating : "migration never started" };
+    if (overlap.migration !== null) await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${MIGRATION}`;
     if (applied?.count !== 1) throw new Error("0729 was not applied by the second migrate");
@@ -342,6 +383,12 @@ describe.skipIf(!realDb)("0729 per-provider session bindings", () => {
       ]),
     );
     expect(await rows(staged!.sessions)).toEqual(staged!.rows);
+  });
+
+  test("a live binding writer and 0729 overlap without a deadlock", async () => {
+    // 0729 takes its whole lock set first, so it waits for the writer that
+    // locked its row, and the writer's write is not blocked by a SHARE lock.
+    expect(overlap).toEqual({ writer: null, migration: null });
   });
 
   test("the key, the rolling index, the provider trigger and its grants", async () => {
@@ -490,10 +537,28 @@ describe.skipIf(!realDb)("0729 per-provider session bindings", () => {
         currentWrite({ sessionId: fresh, provider: "xai", connectionId: xai, choice: "automatic" }),
       ),
     ).toBe("23505");
+    // That violation is how a racing first binding meets the rolling index;
+    // placement and the pin recognize it as a lost compare-and-swap.
+    let violation: unknown = null;
+    try {
+      await currentWrite({
+        sessionId: fresh,
+        provider: "xai",
+        connectionId: xai,
+        choice: "automatic",
+      });
+    } catch (error) {
+      violation = error;
+    }
+    expect(isSubscriptionSessionBindingRollingConflict(violation)).toBe(true);
+    expect(isSubscriptionSessionBindingRollingConflict(new Error("other"))).toBe(false);
     expect(await rows([fresh, pinned])).toEqual(snapshot);
   });
 
-  test("after the drained cutover drops the rolling index, providers coexist and the old target fails closed", async () => {
+  // Only the previous upsert fails without the index; the previous binary's
+  // reads and Codex pin UPDATE carry no provider, so the drop needs every
+  // previous binary gone (the drained cutover's preflight), not this 42P10.
+  test("after the drained cutover drops the rolling index, providers coexist and the previous upsert fails", async () => {
     // What the next drained provider cutover does, after its preflight.
     await database!.admin.unsafe(`DROP INDEX ${ROLLING_INDEX}`);
     const [pinned] = staged!.sessions as [string, string, string];
