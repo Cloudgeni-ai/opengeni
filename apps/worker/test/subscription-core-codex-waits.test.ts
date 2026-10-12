@@ -511,13 +511,25 @@ describe("capacity activities accept both waiter shapes", () => {
     provider: "xai" as const,
   };
 
-  test("a SuperGrok core waiter re-reads billing before its reconcile evaluates, at the woken revision", async () => {
+  const parkedTurn: db.SubscriptionCoreTurnIdentity = {
+    accountId: "account-1",
+    workspaceId: "workspace-1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    sessionOwnerSubjectId: "user:owner",
+    sessionOwnerMembershipId: "00000000-0000-4000-8000-000000000001",
+    initiatingHumanSubjectId: "user:owner",
+    acceptedAuthorityV2: { version: 2, personal: [] },
+  };
+
+  test("a SuperGrok core waiter re-reads billing under the parked turn's identity before its reconcile evaluates, at the woken revision", async () => {
     const read = spy(db, "getSubscriptionCoreCapacityWaitById")
       .mockResolvedValueOnce(xaiWaiter)
       .mockResolvedValueOnce({ ...xaiWaiter, wakeRevision: 6 });
     outbox([]);
     const refresh = spy(xaiQuota, "refreshExhaustedXaiCoreQuota").mockResolvedValue(undefined);
-    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(null);
+    const identityRead = spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(parkedTurn);
+    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue(null);
     const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
       action: "superseded",
       events: [],
@@ -526,6 +538,15 @@ describe("capacity activities accept both waiter shapes", () => {
     expect(await activities().reconcileCodexCapacityWait(xaiReconcile)).toEqual({
       action: "superseded",
     });
+    expect(identityRead).toHaveBeenCalledWith(
+      {},
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+      },
+    );
     expect(refresh).toHaveBeenCalledWith({
       db: {},
       settings: {},
@@ -535,7 +556,11 @@ describe("capacity activities accept both waiter shapes", () => {
     expect(read).toHaveBeenCalledTimes(2);
     expect(reconcile).toHaveBeenCalledWith(
       {},
-      expect.objectContaining({ provider: "xai", evaluatedWakeRevision: 6 }),
+      expect.objectContaining({
+        provider: "xai",
+        evaluatedWakeRevision: 6,
+        evaluation: { kind: "revoked" },
+      }),
     );
   });
 
@@ -544,6 +569,8 @@ describe("capacity activities accept both waiter shapes", () => {
       .mockResolvedValueOnce(xaiWaiter)
       .mockResolvedValueOnce(null);
     outbox([]);
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(parkedTurn);
+    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue(null);
     const refresh = spy(xaiQuota, "refreshExhaustedXaiCoreQuota").mockResolvedValue(undefined);
     const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
     expect(await activities().reconcileCodexCapacityWait(xaiReconcile)).toEqual({
@@ -554,12 +581,32 @@ describe("capacity activities accept both waiter shapes", () => {
 
     spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(xaiWaiter);
     refresh.mockRejectedValue(new Error("billing unavailable"));
-    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(null);
     reconcile.mockResolvedValue({ action: "superseded", events: [] });
     spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
     expect(await activities().reconcileCodexCapacityWait(xaiReconcile)).toEqual({
       action: "superseded",
     });
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  test("a SuperGrok waiter whose turn has no accepted identity re-reads nothing and is revoked", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(xaiWaiter);
+    outbox([]);
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(null);
+    const refresh = spy(xaiQuota, "refreshExhaustedXaiCoreQuota").mockResolvedValue(undefined);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "superseded",
+      events: [],
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await activities().reconcileCodexCapacityWait(xaiReconcile)).toEqual({
+      action: "superseded",
+    });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ evaluation: { kind: "revoked" } }),
+    );
   });
 
   test("only a provider whose billing read ends an exhaustion re-reads before reconcile", () => {
@@ -589,6 +636,16 @@ describe("core waiter recheck schedule", () => {
       nextCheckAt: at(30_000),
       resetKind: "authoritative",
     });
+    // A quarantine that ends sooner than the bounded check moves it earlier.
+    expect(
+      db.subscriptionCoreCodexNextCheckAt({
+        earliestResetAt: resetAt,
+        healthRetryAt: at(90_000),
+        refreshAttempt: 9,
+        now,
+        rechecksBeforeReset: true,
+      }),
+    ).toEqual({ nextCheckAt: at(90_000), resetKind: "bounded_refresh" });
   });
 
   test("any other provider sleeps until its reset, unchanged", () => {

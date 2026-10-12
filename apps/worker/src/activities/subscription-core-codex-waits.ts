@@ -80,12 +80,14 @@ export type CoreWaitBinding = {
   /**
    * Re-read the provider's usage before a timed or woken reconcile evaluates
    * placement, for a provider whose usage read can end an exhaustion before
-   * its stored reset (its waiters then recheck on a bounded backoff). Best
-   * effort: a failure leaves the stored state, and placement decides.
+   * its stored reset (its waiters then recheck on a bounded backoff), under
+   * the parked turn's exact accepted identity (the same read placement
+   * evaluation uses; never called without one). Best effort: a failure
+   * leaves the stored state, and placement decides.
    */
   refreshBeforeReconcile?: (
     services: { db: Database; settings: Settings },
-    scope: { accountId: string; workspaceId: string },
+    turn: SubscriptionCoreTurnIdentity,
   ) => Promise<void>;
 };
 
@@ -329,12 +331,18 @@ export async function reconcileCoreCapacityWait(
     return { action: "stale" };
   }
   if (binding.refreshBeforeReconcile && services.settings && waiter.blockedTurnLive !== false) {
-    await binding
-      .refreshBeforeReconcile(
-        { db: services.db, settings: services.settings },
-        { accountId: input.accountId, workspaceId: input.workspaceId },
-      )
-      .catch(() => undefined);
+    const turn = await readSubscriptionCoreTurnIdentity(services.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: waiter.blockedTurnId,
+    });
+    // Without the exact accepted identity the evaluation below revokes.
+    if (turn) {
+      await binding
+        .refreshBeforeReconcile({ db: services.db, settings: services.settings }, turn)
+        .catch(() => undefined);
+    }
     // A recovery the re-read found woke this waiter: evaluate at that revision.
     waiter = await binding.getWaiterById(services.db, input);
     if (!waiter || waiter.accountId !== input.accountId || waiter.generation !== input.generation)

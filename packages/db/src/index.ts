@@ -25468,9 +25468,13 @@ export function subscriptionCoreCodexNextCheckAt(input: {
   rechecksBeforeReset?: boolean;
 }): { nextCheckAt: Date; resetKind: CodexCapacityResetKind } {
   const { now } = input;
+  const retryAt = input.healthRetryAt?.getTime();
+  const futureRetryAt = retryAt !== undefined && retryAt > now.getTime() ? retryAt : null;
   if (input.earliestResetAt && input.earliestResetAt.getTime() > now.getTime()) {
     if (input.rechecksBeforeReset === true) {
-      const bounded = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
+      // A quarantine that ends sooner than the bounded check moves it earlier.
+      const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
+      const bounded = futureRetryAt !== null ? Math.min(futureRetryAt, backoff) : backoff;
       if (bounded < input.earliestResetAt.getTime()) {
         return { nextCheckAt: new Date(bounded), resetKind: "bounded_refresh" };
       }
@@ -25478,11 +25482,8 @@ export function subscriptionCoreCodexNextCheckAt(input: {
     return { nextCheckAt: input.earliestResetAt, resetKind: "authoritative" };
   }
   const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
-  const retryAt = input.healthRetryAt?.getTime();
   return {
-    nextCheckAt: new Date(
-      retryAt !== undefined && retryAt > now.getTime() ? Math.min(retryAt, backoff) : backoff,
-    ),
+    nextCheckAt: new Date(futureRetryAt !== null ? Math.min(futureRetryAt, backoff) : backoff),
     resetKind: "mutation_only",
   };
 }

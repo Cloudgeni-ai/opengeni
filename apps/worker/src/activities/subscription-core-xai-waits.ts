@@ -37,6 +37,11 @@ export const XAI_CORE_WAIT_BINDING: CoreWaitBinding = {
   // A SuperGrok billing read can end an exhaustion before its stored reset, so
   // a parked turn re-reads billing (shared connections only, as the core's
   // service subject) at each bounded recheck, as the legacy waiter did.
-  refreshBeforeReconcile: ({ db, settings }, scope) =>
-    refreshExhaustedXaiCoreQuota({ db, settings, ...scope }),
+  refreshBeforeReconcile: ({ db, settings }, turn) =>
+    refreshExhaustedXaiCoreQuota({
+      db,
+      settings,
+      accountId: turn.accountId,
+      workspaceId: turn.workspaceId,
+    }),
 };

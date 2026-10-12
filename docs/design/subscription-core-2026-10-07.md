@@ -4376,13 +4376,17 @@ SuperGrok on the core:
   quota exhaustion before its stored reset (the adapter's
   `usageReadEndsQuotaExhaustion`). Its core waiter therefore rechecks on the
   bounded control-plane backoff, 60 seconds doubling to 15 minutes and
-  capped at the reset (`reset_kind = bounded_refresh`), and its reconcile
+  capped at the reset and at a sooner quarantine end
+  (`reset_kind = bounded_refresh`). Its reconcile
   (`CoreWaitBinding.refreshBeforeReconcile`) re-reads billing for the
-  workspace's exhausted shared connections before placement evaluates, as
-  the legacy waiter re-read billing. Without this, a parked turn in a quiet
+  workspace's exhausted shared connections before placement evaluates,
+  under the parked turn's exact accepted identity
+  (`readSubscriptionCoreTurnIdentity`, never a synthetic one; without it the
+  evaluation revokes and nothing is read), as the legacy waiter re-read
+  billing. Without this, a parked turn in a quiet
   organization would sleep until the end of the credit period after credits
   were back. A personal connection is never probed out of turn (X2a, shared
-  only); its exhaustion ends at its reset or when a turn observes it. Codex
+  only); its exhaustion stands until its stored deadline (X2a). Codex
   waiters are unchanged: they sleep until an authoritative reset. The waiter
   vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
   conformance suite checks that the two agree.
