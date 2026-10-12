@@ -134,6 +134,14 @@ descendants, strict descriptor topology, real PTY job control and inherited
 signal/descriptor hygiene. These tests do not qualify the complete broker or a
 provider's command ownership contract.
 
+The in-progress broker's literal command-definition decoder lives beside this
+primitive. Its binary format and bounds are described in
+[the broker design](../../../docs/design/native-command-broker.md#literal-command-definitions).
+It is not a production CLI mode and starts no process. Native tests use a
+separate parser/round-trip executable, including malformed Unicode, length,
+environment and aggregate-bound cases. With Bun installed, the explicit
+`make test-definition-parity` target compares it against the real runtime codec.
+
 Run local native tests (Linux, C compiler, make, Python 3):
 
 ```sh

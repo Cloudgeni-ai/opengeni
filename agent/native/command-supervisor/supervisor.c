@@ -908,6 +908,143 @@ static int service(char **command) {
 #define BROKER_PROBE_MAX_BYTES (((ARTIFACT_MAX_BYTES + 2) / 3) * 4)
 #define BROKER_CHUNK_BYTES 8192
 
+#define BROKER_DEFINITION_MAX_BYTES (256 * 1024)
+#define BROKER_DEFINITION_MAX_ENTRIES 1024
+#define BROKER_DEFINITION_MAX_STRING (128 * 1024 - 1)
+
+/* Internal explicit command body, never a shell template or inherited env.
+ * This parser alone does not authorize or start a supervisor. External linkage
+ * keeps it independently exercisable by the native parity harness while the
+ * full broker is under construction; no provider/CLI route calls it yet. */
+struct broker_definition {
+    char *cwd, **argv, **env;
+    size_t argc, envc;
+    unsigned short rows, columns;
+    bool pty;
+};
+
+void broker_definition_free(struct broker_definition *definition) {
+    free(definition->cwd);
+    if (definition->argv)
+        for (size_t i = 0; i < definition->argc; i++) free(definition->argv[i]);
+    if (definition->env)
+        for (size_t i = 0; i < definition->envc; i++) free(definition->env[i]);
+    free(definition->argv);
+    free(definition->env);
+    memset(definition, 0, sizeof(*definition));
+}
+
+struct broker_definition_reader { const unsigned char *bytes; size_t size, offset; };
+
+static bool broker_definition_u32(struct broker_definition_reader *reader, uint32_t *value) {
+    if (reader->offset > reader->size || reader->size - reader->offset < 4) return false;
+    const unsigned char *p = reader->bytes + reader->offset;
+    *value = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+    reader->offset += 4;
+    return true;
+}
+
+static bool broker_definition_utf8(const unsigned char *bytes, size_t size) {
+    size_t i = 0;
+    while (i < size) {
+        unsigned int first = bytes[i++];
+        if (first == 0) return false;
+        if (first <= 0x7f) continue;
+        unsigned int code, minimum;
+        size_t following;
+        if (first >= 0xc2 && first <= 0xdf) { code = first & 0x1f; minimum = 0x80; following = 1; }
+        else if (first >= 0xe0 && first <= 0xef) { code = first & 0x0f; minimum = 0x800; following = 2; }
+        else if (first >= 0xf0 && first <= 0xf4) { code = first & 0x07; minimum = 0x10000; following = 3; }
+        else return false;
+        if (following > size - i) return false;
+        while (following--) {
+            unsigned int next = bytes[i++];
+            if ((next & 0xc0) != 0x80) return false;
+            code = (code << 6) | (next & 0x3f);
+        }
+        if (code < minimum || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return false;
+    }
+    return true;
+}
+
+static char *broker_definition_text(struct broker_definition_reader *reader) {
+    uint32_t count;
+    if (!broker_definition_u32(reader, &count) || count > BROKER_DEFINITION_MAX_STRING ||
+        count > reader->size - reader->offset ||
+        !broker_definition_utf8(reader->bytes + reader->offset, count)) return NULL;
+    char *text = malloc((size_t)count + 1);
+    if (!text) return NULL;
+    memcpy(text, reader->bytes + reader->offset, count);
+    text[count] = 0;
+    reader->offset += count;
+    return text;
+}
+
+static bool broker_environment_key(const char *key) {
+    for (size_t i = 0; key[i]; i++) {
+        unsigned char c = (unsigned char)key[i];
+        if (c != '_' && !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') &&
+            !(i && c >= '0' && c <= '9')) return false;
+    }
+    return *key != 0;
+}
+
+bool broker_definition_decode(const unsigned char *bytes, size_t size,
+                              struct broker_definition *definition) {
+    memset(definition, 0, sizeof(*definition));
+    if (size < 20 || size > BROKER_DEFINITION_MAX_BYTES || memcmp(bytes, "OGCD1\0", 6) ||
+        bytes[6] > 1 || bytes[7]) return false;
+    definition->pty = bytes[6] != 0;
+    definition->rows = (unsigned short)((unsigned int)bytes[8] << 8 | bytes[9]);
+    definition->columns = (unsigned short)((unsigned int)bytes[10] << 8 | bytes[11]);
+    if (definition->pty ? (!definition->rows || !definition->columns) :
+                          (definition->rows || definition->columns)) goto rejected;
+    struct broker_definition_reader reader = {.bytes = bytes, .size = size, .offset = 12};
+    uint32_t argc, envc;
+    if (!broker_definition_u32(&reader, &argc) || !broker_definition_u32(&reader, &envc) ||
+        !argc || argc > BROKER_DEFINITION_MAX_ENTRIES || envc > BROKER_DEFINITION_MAX_ENTRIES)
+        goto rejected;
+    definition->argc = argc;
+    definition->envc = envc;
+    definition->argv = calloc((size_t)argc + 1, sizeof(char *));
+    definition->env = calloc((size_t)envc + 1, sizeof(char *));
+    definition->cwd = broker_definition_text(&reader);
+    if (!definition->argv || !definition->env || !definition->cwd || definition->cwd[0] != '/')
+        goto rejected;
+    for (size_t i = 0; i < argc; i++) {
+        definition->argv[i] = broker_definition_text(&reader);
+        if (!definition->argv[i] || (!i && !definition->argv[i][0])) goto rejected;
+    }
+    for (size_t i = 0; i < envc; i++) {
+        char *key = broker_definition_text(&reader);
+        char *value = broker_definition_text(&reader);
+        if (!key || !value || !broker_environment_key(key)) {
+            free(key); free(value); goto rejected;
+        }
+        size_t length = strlen(key), value_length = strlen(value);
+        for (size_t j = 0; j < i; j++) {
+            if (!strncmp(definition->env[j], key, length) && definition->env[j][length] == '=') {
+                free(key); free(value); goto rejected;
+            }
+        }
+        if (length + 1 + value_length > BROKER_DEFINITION_MAX_STRING) {
+            free(key); free(value); goto rejected;
+        }
+        char *pair = malloc(length + 1 + value_length + 1);
+        if (!pair) { free(key); free(value); goto rejected; }
+        memcpy(pair, key, length);
+        pair[length] = '=';
+        memcpy(pair + length + 1, value, value_length + 1);
+        definition->env[i] = pair;
+        free(key); free(value);
+    }
+    if (reader.offset != size) goto rejected;
+    return true;
+rejected:
+    broker_definition_free(definition);
+    return false;
+}
+
 static size_t broker_base64(const unsigned char *input, size_t size, char *output) {
     static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t written = 0;
@@ -922,6 +1059,132 @@ static size_t broker_base64(const unsigned char *input, size_t size, char *outpu
     }
     output[written] = 0;
     return written;
+}
+
+#define BROKER_FRAME_MAX_BYTES (12 * 1024)
+#define BROKER_SAFE_INTEGER UINT64_C(9007199254740991)
+
+enum broker_request_kind {
+    BROKER_HELLO, BROKER_FENCE, BROKER_PREPARE, BROKER_DEFINITION, BROKER_LAUNCH,
+    BROKER_STDIN, BROKER_EOF, BROKER_RESIZE, BROKER_CONTROL, BROKER_ACK, BROKER_REPLAY
+};
+
+static const char *const broker_request_names[] = {
+    "hello", "fence", "prepare", "definition", "launch", "stdin", "eof", "resize",
+    "control", "ack", "replay"
+};
+
+struct broker_request {
+    char broker_id[37], request_id[37], command_id[37];
+    uint64_t epoch, sequence, offset;
+    enum broker_request_kind kind;
+    bool broker_level;
+    size_t size;
+    unsigned char payload[BROKER_CHUNK_BYTES];
+};
+
+static bool broker_uuid(const char *value) {
+    return uuid(value) && value[14] >= '1' && value[14] <= '8' &&
+        strchr("89ab", value[19]) != NULL;
+}
+
+static bool broker_decimal(const char *text, uint64_t minimum, uint64_t maximum, uint64_t *result) {
+    if (!text[0] || (text[0] == '0' && text[1])) return false;
+    uint64_t value = 0;
+    for (const char *p = text; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        uint64_t digit = (uint64_t)(*p - '0');
+        if (value > (maximum - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    if (value < minimum || value > maximum) return false;
+    *result = value;
+    return true;
+}
+
+static int broker_base64_digit(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    return c == '+' ? 62 : c == '/' ? 63 : -1;
+}
+
+static bool broker_unbase64(const char *encoded, size_t expected, unsigned char *output) {
+    size_t length = strlen(encoded), written = 0;
+    if (expected > BROKER_CHUNK_BYTES || length != ((expected + 2) / 3) * 4) return false;
+    for (size_t i = 0; i < length; i += 4) {
+        int a = broker_base64_digit((unsigned char)encoded[i]);
+        int b = broker_base64_digit((unsigned char)encoded[i + 1]);
+        int c = encoded[i + 2] == '=' ? 0 : broker_base64_digit((unsigned char)encoded[i + 2]);
+        int d = encoded[i + 3] == '=' ? 0 : broker_base64_digit((unsigned char)encoded[i + 3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0 || written >= expected) return false;
+        output[written++] = (unsigned char)((a << 2) | (b >> 4));
+        if (encoded[i + 2] == '=') {
+            if (encoded[i + 3] != '=' || (b & 15) || i + 4 != length || written != expected)
+                return false;
+            continue;
+        }
+        if (written >= expected) return false;
+        output[written++] = (unsigned char)((b << 4) | (c >> 2));
+        if (encoded[i + 3] == '=') {
+            if ((c & 3) || i + 4 != length || written != expected) return false;
+            continue;
+        }
+        if (written >= expected) return false;
+        output[written++] = (unsigned char)((c << 6) | d);
+    }
+    return written == expected;
+}
+
+/* Framing only, not authentication, ownership, semantic acceptance or replay.
+ * The caller must poison its stream on false, never scan for a later marker.
+ * Consume one complete LF-terminated request and keep no pointers into input.
+ * The broker state machine separately enforces the provider's uint32 sequence
+ * bound, writer fencing and operation-specific bodies before any side effect. */
+bool broker_request_decode(const unsigned char *bytes, size_t size, const char *broker_id,
+                           struct broker_request *request) {
+    memset(request, 0, sizeof(*request));
+    if (!broker_uuid(broker_id) || !size || size > BROKER_FRAME_MAX_BYTES || bytes[size - 1] != '\n')
+        return false;
+    char line[BROKER_FRAME_MAX_BYTES];
+    for (size_t i = 0; i < size - 1; i++) {
+        if (bytes[i] != '\t' && (bytes[i] < 32 || bytes[i] > 126)) return false;
+        line[i] = (char)bytes[i];
+    }
+    line[size - 1] = 0;
+    char *fields[12] = {0}, *position = line;
+    for (size_t i = 0; i < 12; i++) {
+        fields[i] = strsep(&position, "\t");
+        if (!fields[i]) goto rejected;
+    }
+    if (position || strcmp(fields[0], "OGB1") || strcmp(fields[1], "request") ||
+        strcmp(fields[2], broker_id) || !broker_uuid(fields[5]) ||
+        (strcmp(fields[6], "-") && !broker_uuid(fields[6])) || strcmp(fields[10], "base64"))
+        goto rejected;
+    bool found = false;
+    for (size_t i = 0; i < sizeof(broker_request_names) / sizeof(broker_request_names[0]); i++) {
+        if (!strcmp(fields[7], broker_request_names[i])) {
+            request->kind = (enum broker_request_kind)i;
+            found = true;
+            break;
+        }
+    }
+    uint64_t count;
+    if (!found || !broker_decimal(fields[3], 1, BROKER_SAFE_INTEGER, &request->epoch) ||
+        !broker_decimal(fields[4], 1, BROKER_SAFE_INTEGER, &request->sequence) ||
+        !broker_decimal(fields[8], 0, BROKER_SAFE_INTEGER, &request->offset) ||
+        !broker_decimal(fields[9], 0, BROKER_CHUNK_BYTES, &count) ||
+        request->offset > BROKER_SAFE_INTEGER - count ||
+        !broker_unbase64(fields[11], (size_t)count, request->payload)) goto rejected;
+    request->size = (size_t)count;
+    memcpy(request->broker_id, broker_id, 37);
+    memcpy(request->request_id, fields[5], 37);
+    request->broker_level = !strcmp(fields[6], "-");
+    if (!request->broker_level) memcpy(request->command_id, fields[6], 37);
+    return true;
+rejected:
+    memset(request, 0, sizeof(*request));
+    return false;
 }
 
 static void broker_probe_frame(const char *id, unsigned int sequence, const char *kind,

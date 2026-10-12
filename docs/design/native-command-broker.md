@@ -2,8 +2,9 @@
 
 Status: implementation in progress; not an admitted runtime capability. The
 current increments provide bounded framing, a native bootstrap preflight,
-input/output custody state machines, encrypted atomic transport storage and a
-private inherited supervisor channel. They do not
+input/output custody state machines, encrypted atomic transport storage, a
+private inherited supervisor channel and a strict command-definition codec.
+They do not
 enable new command starts, change a production protocol tuple, or qualify an
 existing sandbox. The existing [command supervision](../command-supervision.md)
 and [native keeper](../../agent/native/command-supervisor/README.md) contracts
@@ -109,6 +110,47 @@ framing only: it neither authorizes the operation nor interprets an output
 payload as a quiescence receipt. Request bodies still need operation-specific
 native validation. The decoder exposes replayed frames unchanged so the durable
 inbox, rather than an in-memory parser, decides whether they are exact duplicates.
+
+The native `broker_request_decode` implements the same closed one-frame request
+contract and canonical base64/decimal rules. It accepts no response kind, returns
+no pointer into caller input and clears partial results on rejection. It is a
+parser, not the input-stream state machine: its future caller must refuse gaps,
+poison malformed streams and enforce writer/request replay and the provider's
+uint32 input-index bound before any side effect. There is no live dispatch caller
+yet. `make test-broker-codec-parity` compares native framing and definition
+parsers against the real host codecs, including byte-mutated and truncated input.
+
+## Literal command definitions
+
+The internal host codec `native-command-broker-definition.ts` and native
+`broker_definition_decode` agree on a bounded binary definition. Neither
+accepting nor decoding a definition starts a command. This body will be carried
+by the offset-addressed `definition` chunks, separately from the later launch
+and release operations. There is no JSON coercion, shell interpolation, implicit
+environment inheritance, `runAs` fallback or version guessing.
+
+The 20-byte header is `OGCD1` followed by NUL, a mode byte (0 pipe or 1 PTY), a
+reserved zero byte, big-endian uint16 rows and columns, then big-endian uint32
+argument and environment-entry counts. Every subsequent string is prefixed by
+its big-endian uint32 byte length: absolute cwd, ordered arguments, then ordered
+environment key/value pairs. Strings must be canonical UTF-8 without NULs;
+invalid encodings, overlong sequences, Unicode surrogates, duplicate environment
+keys, unknown flags and trailing bytes are rejected. Environment keys use ASCII
+`[A-Za-z_][A-Za-z0-9_]*`; values and noninitial arguments may be empty.
+
+The body is at most 256 KiB, with 1–1024 arguments and 0–1024 environment pairs.
+Every string and complete `KEY=value` entry is at most 131071 bytes. Pipe mode
+requires zero dimensions; PTY mode requires dimensions from 1 to 65535. These
+are definition/transport bounds, not command lifetime or total-output limits.
+Oversized or unsupported requests must be refused explicitly before launch,
+not truncated, normalized or silently switched to another execution mode.
+
+The native decoder frees partially allocated state on every rejection. A
+test-only native harness reconstructs the actual parsed body without executing
+it. `make test-definition-parity` compares that harness against the real host
+codec over positive, truncated, byte-mutated and boundary fixtures. The harness
+is not a production subcommand, and this codec does not establish provider
+admission, custody or native cancellation.
 
 ## Durable transport obligations
 
