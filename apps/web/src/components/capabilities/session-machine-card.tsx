@@ -1,6 +1,6 @@
 import type { AuthNeededItem } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
-import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
+import { machineDisplayName, machineScopeLabel } from "@opengeni/react/sandbox-label-model";
 import { OPENGENI_BROWSER_EXTENSION_URL } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import {
@@ -16,7 +16,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { apiBaseUrl } from "@/api";
-import { MachineConnectCommand } from "@/components/machines/machine-connect-command";
+import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
 import { Button } from "@/components/ui/button";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
@@ -30,7 +30,7 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import type { ChatSendContext } from "./session-github-repositories";
 
-/** While a fresh command is out, look for the new machine every few seconds. */
+/** While the connect dialog is open, look for the new machine every few seconds. */
 const WATCH_POLL_MS = 3_000;
 /** After "Add to Chrome", how often to check whether the extension linked up. */
 const CHROME_POLL_MS = 5_000;
@@ -118,11 +118,8 @@ export function SessionMachineCapabilityCard({
     !accessKnown || hasWorkspacePermission(context.accessContext, workspaceId, "sessions:control");
 
   const [setupOpen, setSetupOpen] = useState(false);
-  const [hasCommand, setHasCommand] = useState(false);
-  // Each machine's reachability when the person asked for a command. A machine
-  // that is new, or was unreachable and is now reachable, is the one they connected.
-  const [watchRequested, setWatchRequested] = useState(false);
-  const [known, setKnown] = useState<ReadonlyMap<string, boolean> | null>(null);
+  // Reconnecting to turn screen control on starts with it already chosen.
+  const [setupScreenControl, setSetupScreenControl] = useState(false);
   const [justConnected, setJustConnected] = useState<string | null>(null);
   const [using, setUsing] = useState<string | null>(null);
   const [useError, setUseError] = useState<{ name: string; reason: string | null } | null>(null);
@@ -139,11 +136,10 @@ export function SessionMachineCapabilityCard({
     };
   }, []);
 
-  const watching = known !== null && justConnected === null;
   const fleet = useWorkspaceMachines({
     workspaceId,
     sessionId,
-    pollIntervalMs: watching ? WATCH_POLL_MS : MACHINES_SESSION_POLL_MS,
+    pollIntervalMs: setupOpen ? WATCH_POLL_MS : MACHINES_SESSION_POLL_MS,
   });
   const unavailableOnDeployment =
     fleet.error instanceof OpenGeniApiError && fleet.error.status === 404;
@@ -153,46 +149,19 @@ export function SessionMachineCapabilityCard({
   );
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const reachable = machines.filter((machine) => isMachineComputeSelectable(machine.state));
+  const personalWorkspace =
+    context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
 
-  // Snapshot the machines once the list has loaded.
-  useEffect(() => {
-    if (!watchRequested || known !== null || fleet.loading) return;
-    setKnown(
-      new Map(
-        machines.map((machine) => [machine.sandboxId, isMachineComputeSelectable(machine.state)]),
-      ),
-    );
-  }, [fleet.loading, known, machines, watchRequested]);
-
-  useEffect(() => {
-    if (!watching || !known) return;
-    const fresh = machines.find(
-      (machine) =>
-        isMachineComputeSelectable(machine.state) && known.get(machine.sandboxId) !== true,
-    );
-    if (!fresh) return;
-    setJustConnected(fresh.sandboxId);
-    setSetupOpen(false);
-    setHasCommand(false);
-    setAnnouncement(`${machineDisplayName(fresh)} connected.`);
-    focusIfIdle(cardRef.current);
-  }, [known, machines, watching]);
-
-  const openSetup = () => {
+  const openSetup = (allowScreenControl = false) => {
     const active = document.activeElement;
     setupOpener.current = active instanceof HTMLElement ? active : null;
-    setKnown(null);
     setJustConnected(null);
-    setHasCommand(false);
-    setWatchRequested(true);
+    setSetupScreenControl(allowScreenControl);
     setSetupOpen(true);
   };
-  const cancelSetup = () => {
-    // Stop watching entirely: fast polling ends and nothing can steal focus later.
+  const closeSetup = () => {
+    // Fast polling ends with the dialog; focus returns to what opened it.
     setSetupOpen(false);
-    setWatchRequested(false);
-    setKnown(null);
-    setHasCommand(false);
     const back = setupOpener.current?.isConnected ? setupOpener.current : opener.current;
     focusIfIdle(cardRef.current, back);
   };
@@ -290,143 +259,135 @@ export function SessionMachineCapabilityCard({
     ? "Connected Machines aren't available on this deployment."
     : !fleet.canRead
       ? "You don't have access to this workspace's machines."
-      : setupOpen
-        ? "Run the command below. This card updates when the machine connects."
-        : fresh && fleet.canAttach
-          ? `${machineDisplayName(fresh)} connected. Choose it below to use it here.`
-          : reachable.length > 0 && fleet.canAttach
-            ? "Choose where this chat runs."
-            : reachable.length > 0
-              ? "You can't change where this chat runs."
-              : fleet.canManage
-                ? null
-                : machines.length > 0
-                  ? "Turn on one of the machines below to use it here."
-                  : "Ask a workspace admin to connect a machine.";
-  const connectAnother =
-    fleet.canManage && !setupOpen && (reachable.length > 0 || activeMachine !== null);
+      : fresh && fleet.canAttach && !fresh.active
+        ? `${machineDisplayName(fresh)} connected. Choose it below to use it here.`
+        : reachable.length > 0 && fleet.canAttach
+          ? "Choose where this chat runs."
+          : reachable.length > 0
+            ? "You can't change where this chat runs."
+            : fleet.canManage
+              ? null
+              : machines.length > 0
+                ? "Turn on one of the machines below to use it here."
+                : "Ask a workspace admin to connect a machine.";
+  const connectAnother = fleet.canManage && (reachable.length > 0 || activeMachine !== null);
   const visibleDetails =
-    (setupOpen && fleet.canManage) ||
-    useError !== null ||
-    ordered.length > 0 ||
-    chromeMachine !== null ||
-    connectAnother;
+    useError !== null || ordered.length > 0 || chromeMachine !== null || connectAnother;
 
   return (
-    <SessionCapabilityFrame
-      name={recommendation.name || "Connected Machine"}
-      subtitle="Your computer or server"
-      logo={CONNECTED_MACHINE_LOGO}
-      typeLabel="Machine"
-      description={recommendation.rationale}
-      skill={false}
-      expanded={false}
-      complete={activeMachine !== null}
-      completeLabel={
-        activeMachine
-          ? outcome?.sandboxId === activeMachine.sandboxId
-            ? outcome.text
-            : `This chat runs on ${machineDisplayName(activeMachine)}`
-          : undefined
-      }
-      actionLabel="Connect a machine"
-      actionUnavailable={actionUnavailable}
-      opensDialog={false}
-      note={fleet.canManage ? "You can remove a connected machine anytime from Machines." : ""}
-      onOpen={openSetup}
-      onClose={cancelSetup}
-      opener={opener}
-      cardRef={cardRef}
-      details={
-        unavailableOnDeployment || !fleet.canRead ? null : (
-          <>
-            {/* Always mounted, so moves and new machines are announced. */}
-            <span className="sr-only" role="status" aria-live="polite">
-              {announcement}
-            </span>
-            {visibleDetails ? (
-              <div
-                data-slot="connected-machines"
-                className="space-y-3 border-t border-border px-[19px] pt-3 pb-4 max-[480px]:px-3.5"
-              >
-                {setupOpen && fleet.canManage ? (
-                  <div className="space-y-2">
-                    <MachineConnectCommand
+    <>
+      <SessionCapabilityFrame
+        name={recommendation.name || "Connected Machine"}
+        subtitle="Your computer or server"
+        logo={CONNECTED_MACHINE_LOGO}
+        typeLabel="Machine"
+        description={recommendation.rationale}
+        skill={false}
+        expanded={false}
+        complete={activeMachine !== null}
+        completeLabel={
+          activeMachine
+            ? outcome?.sandboxId === activeMachine.sandboxId
+              ? outcome.text
+              : `This chat runs on ${machineDisplayName(activeMachine)}`
+            : undefined
+        }
+        actionLabel="Connect a machine"
+        actionUnavailable={actionUnavailable}
+        opensDialog={false}
+        note={fleet.canManage ? "You can remove a connected machine anytime from Machines." : ""}
+        onOpen={() => openSetup()}
+        onClose={closeSetup}
+        opener={opener}
+        cardRef={cardRef}
+        details={
+          unavailableOnDeployment || !fleet.canRead ? null : (
+            <>
+              {/* Always mounted, so moves and new machines are announced. */}
+              <span className="sr-only" role="status" aria-live="polite">
+                {announcement}
+              </span>
+              {visibleDetails ? (
+                <div
+                  data-slot="connected-machines"
+                  className="space-y-3 border-t border-border px-[19px] pt-3 pb-4 max-[480px]:px-3.5"
+                >
+                  {useError ? (
+                    <Notice tone="failed" live="assertive" className="text-xs">
+                      {`Couldn't move this chat to ${useError.name}. ${
+                        useError.reason ??
+                        (fleet.mutationError
+                          ? userErrorText(fleet.mutationError, "Try again.")
+                          : "Try again.")
+                      }`}
+                    </Notice>
+                  ) : null}
+                  {ordered.length > 0 ? (
+                    <RowList label="Connected machines" flush>
+                      {ordered.map((machine) => (
+                        <MachineRow
+                          key={machine.sandboxId}
+                          machine={machine}
+                          primary={machine.sandboxId === justConnected || reachable.length === 1}
+                          canUse={fleet.canAttach}
+                          busy={using === machine.sandboxId}
+                          locked={using !== null || fleet.attaching}
+                          onUse={() => void use(machine)}
+                        />
+                      ))}
+                    </RowList>
+                  ) : null}
+                  {chromeMachine ? (
+                    <ScreenControlStep
+                      key={chromeMachine.sandboxId}
+                      machine={chromeMachine}
                       workspaceId={workspaceId}
-                      origin={origin}
-                      onMinted={() => setHasCommand(true)}
+                      canManage={fleet.canManage}
+                      refresh={fleet.refresh}
+                      onReconnect={() => openSetup(true)}
                     />
-                    <div className="flex items-center justify-between gap-3 text-2xs text-fg-muted">
-                      {hasCommand ? (
-                        <span className="inline-flex items-center gap-1.5">
-                          <Loader2Icon aria-hidden className="size-3 animate-spin" />
-                          Waiting for the machine…
-                        </span>
-                      ) : (
-                        <span />
-                      )}
-                      <Button type="button" variant="ghost" size="xs" onClick={cancelSetup}>
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-                {useError ? (
-                  <Notice tone="failed" live="assertive" className="text-xs">
-                    {`Couldn't move this chat to ${useError.name}. ${
-                      useError.reason ??
-                      (fleet.mutationError
-                        ? userErrorText(fleet.mutationError, "Try again.")
-                        : "Try again.")
-                    }`}
-                  </Notice>
-                ) : null}
-                {ordered.length > 0 ? (
-                  <RowList label="Connected machines" flush>
-                    {ordered.map((machine) => (
-                      <MachineRow
-                        key={machine.sandboxId}
-                        machine={machine}
-                        primary={machine.sandboxId === justConnected || reachable.length === 1}
-                        canUse={fleet.canAttach}
-                        busy={using === machine.sandboxId}
-                        locked={using !== null || fleet.attaching}
-                        onUse={() => void use(machine)}
-                      />
-                    ))}
-                  </RowList>
-                ) : null}
-                {chromeMachine ? (
-                  <ScreenControlStep
-                    key={chromeMachine.sandboxId}
-                    machine={chromeMachine}
-                    workspaceId={workspaceId}
-                    canManage={fleet.canManage}
-                    refresh={fleet.refresh}
-                    onReconnect={openSetup}
-                  />
-                ) : null}
-                {chromeMachine ? (
-                  <ChromeStep chrome={chrome} machineName={machineDisplayName(chromeMachine)} />
-                ) : null}
-                {connectAnother ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="-ml-2 text-fg-muted"
-                    onClick={openSetup}
-                  >
-                    <PlusIcon aria-hidden />
-                    Connect another machine
-                  </Button>
-                ) : null}
-              </div>
-            ) : null}
-          </>
-        )
-      }
-    />
+                  ) : null}
+                  {chromeMachine ? (
+                    <ChromeStep chrome={chrome} machineName={machineDisplayName(chromeMachine)} />
+                  ) : null}
+                  {connectAnother ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="-ml-2 text-fg-muted"
+                      onClick={() => openSetup()}
+                    >
+                      <PlusIcon aria-hidden />
+                      Connect another machine
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          )
+        }
+      />
+      {fleet.canManage && !unavailableOnDeployment ? (
+        <ConnectMachineDialog
+          open={setupOpen}
+          onOpenChange={(open) => {
+            if (!open) closeSetup();
+          }}
+          workspaceId={workspaceId}
+          origin={origin}
+          machines={fleet.machines}
+          machinesLoading={fleet.loading}
+          personalWorkspace={personalWorkspace}
+          defaultAllowScreenControl={setupScreenControl}
+          onConnected={(machine) => {
+            setJustConnected(machine.sandboxId);
+            setAnnouncement(`${machineDisplayName(machine)} connected.`);
+          }}
+          useInChat={{ canUse: fleet.canAttach, onUse: (machine) => void use(machine) }}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -451,7 +412,7 @@ function MachineRow({
   const common = {
     leading: <LogoTile icon={<Icon />} />,
     title: name,
-    meta: [stateLabel(machine)],
+    meta: [stateLabel(machine), machineScopeLabel(machine.scope)],
   };
   if (machine.active) {
     return (

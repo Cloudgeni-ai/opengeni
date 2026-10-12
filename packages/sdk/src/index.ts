@@ -1516,6 +1516,7 @@ export type {
   DeviceEnrollmentApproveResponse,
   DeviceEnrollmentDenyRequest,
   DeviceEnrollmentDenyResponse,
+  EnrollTokenScope,
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
   EnrollmentCredentials,

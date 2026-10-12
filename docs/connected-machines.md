@@ -36,7 +36,10 @@ The finalizer rereads exact active organization membership under that fence and
 retains workspace membership `FOR KEY SHARE` to exclude direct runtime DELETEs.
 Direct workspace-removal preparation takes the same early nonblocking fence before
 downstream rows; its command keeps the existing organization/tenancy prefix.
-Legacy token enrollment retains its existing workspace-owned authority contract.
+Workspace token enrollment retains its existing workspace-owned authority
+contract. A personal (`enroll_user`) token takes the same organization membership
+fence and `finalize_scoped_enrollment` path as a personal approval, with the
+token's signed owner as the transaction subject; see the zero-click token section.
 
 Known separate boundary: `scoped_compute_actor_membership` still uses an
 organization-membership `FOR SHARE` that can be blinded by FORCE-RLS under this
@@ -869,11 +872,20 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
   on a question is moved and keeps the question;
-- mints a single-use token in the person's browser on **Connect a machine**
-  (screen control is chosen before copying because it is baked into the token),
-  shows the matching Mac/Linux or PowerShell command, and polls until a new
-  machine, or a known one that was offline, comes online, then puts **Use in
-  this chat** first; Cancel stops the watch;
+- opens the shared **Connect a machine** dialog
+  (`apps/web/src/components/machines/connect-machine-dialog.tsx`, also used by
+  the Machines page). The person chooses **Who can use it?** (**Only me** by
+  default, or **This workspace**) and screen control (off by default); both are
+  baked into a single-use token minted in their browser for exactly that choice.
+  Mac, Linux and Windows tabs (the detected OS selected) show the matching
+  command. A slower response for an earlier choice never replaces the current
+  one, and the dialog checks the server's echo of the scope it granted, so a
+  server that cannot mint a personal token says so instead of silently sharing
+  the machine. Pairing with a code is a secondary disclosure. While the dialog
+  is open the list polls every three seconds; when a new machine, or a known one
+  that was offline, comes online the same dialog shows its name, **Connected**
+  and **Only me** or **Workspace**, with **Done** and, in a chat, **Use in this
+  chat** (the same attach path as the list). Closing the dialog stops the watch;
 - once a machine with a screen is reachable (the chat's own machine first),
   offers the
   [OpenGeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
@@ -943,6 +955,7 @@ Agents with the existing `enrollments:manage` permission can call the first-part
 It returns the same one-hour token and deployment-specific Unix/PowerShell install
 commands. `allowScreenControl` defaults to false. No additional approval flow is
 introduced. The workspace/account come from the caller's grant, not tool input.
+The tool always mints workspace-shared tokens.
 Run the command on the intended machine through an already-authorized execution
 path, then verify readiness with `sandboxes_list`. A token cannot execute the
 installer on a machine for which no access path exists.
@@ -963,6 +976,20 @@ fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
 expire an hour later. Expired redemptions are pruned per workspace during later
 exchanges.
 
+`scope` chooses who can use the machine: `"workspace"` (the default, shared with
+the workspace) or `"user"` (only the person who minted the token). A personal
+token can be minted only by an exact authenticated human session (never an API
+key, service, agent attempt or service-initiated grant; otherwise `422`), and
+its owner is always the caller's authenticated subject, never a request field.
+It is signed with a distinct `typ` (`enroll_user`) carrying that owner, so an
+API replica that predates personal tokens rejects it instead of creating a
+shared machine during a rolling deploy. The exchange re-checks, under the
+organization membership fence, that the owner is still an active member with
+access to the workspace; otherwise it answers `403` and claims nothing. Fence
+contention answers `503`; run the command again. The response echoes `scope`
+and `allowScreenControl`; clients should compare them with what they asked for,
+since an older server omits `scope` and always mints a workspace token.
+
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret**: anyone holding it can connect one machine until it expires.
 
@@ -970,6 +997,7 @@ is **secret**: anyone holding it can connect one machine until it expires.
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
   workspaceId,
   {
+    scope: "user", // only me; "workspace" (the default) shares it
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );

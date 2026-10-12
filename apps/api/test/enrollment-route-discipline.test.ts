@@ -140,6 +140,17 @@ describe("M5 enrollment route discipline", () => {
     expect(token).toContain('"enrollments:manage"');
   });
 
+  test("a personal token is only for an authenticated person, who is always its owner", () => {
+    const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
+    const check = token.indexOf("isPersonalConnectionOwnerPrincipal(authorization)");
+    const mint = token.indexOf("mintEnrollToken(");
+    expect(check, "the personal scope must check the principal").toBeGreaterThanOrEqual(0);
+    expect(check, "the principal check must precede minting").toBeLessThan(mint);
+    // The owner is the authenticated caller, never a request field.
+    expect(token).toContain("ownerSubjectId: grant.subjectId");
+    expect(token).not.toMatch(/ownerSubjectId:\s*parsed/);
+  });
+
   test("lookup is rate-limited + authorizes against the resolved workspace (enrollments:read)", () => {
     const body = handlerBody(routesSrc, LOOKUP_ROUTE.method, LOOKUP_ROUTE.path);
     expect(body).toContain("rateLimit(");

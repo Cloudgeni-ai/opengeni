@@ -9779,13 +9779,27 @@ export type DeviceEnrollmentDenyResponse = {
 /** POST /v1/workspaces/:ws/enrollments/token body. */
 export type MintEnrollTokenRequest = {
   allowScreenControl?: boolean;
+  /**
+   * Who can use the machine. `user` makes it the signed-in caller's own
+   * machine (requires an authenticated person, not an API key or agent);
+   * `workspace` shares it with this workspace's members. Omitted mints the
+   * original workspace-shared token.
+   */
+  scope?: EnrollTokenScope;
 };
+
+/** Who can use a machine connected with an enroll token. */
+export type EnrollTokenScope = "user" | "workspace";
 
 /** POST /v1/workspaces/:ws/enrollments/token response. The `token` is SECRET. */
 export type MintEnrollTokenResponse = {
   token: string;
   expiresAt: string;
   expiresInSeconds: number;
+  /** What the token grants. Absent from servers that predate scoped tokens,
+   *  which always mint workspace-shared tokens. */
+  scope?: EnrollTokenScope;
+  allowScreenControl?: boolean;
 };
 
 /** The credential payload the headless exchange returns (a subset of the agent's

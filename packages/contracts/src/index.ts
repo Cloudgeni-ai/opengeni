@@ -3512,10 +3512,16 @@ export async function verifyEnrollmentBearer(
 export const OPENGENI_BROWSER_EXTENSION_URL =
   "https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch";
 
-export const EnrollTokenPayload = z.object({
-  // Domain-separation claim — fixed "enroll" so an `oge_`/`ogd_`/`ogs_` payload (no
-  // typ, or a different typ) can never satisfy verifyEnrollToken even past the prefix.
-  typ: z.literal("enroll"),
+/**
+ * Who can use a machine connected with an enroll token. `user` makes it the
+ * minting person's own machine (it follows them across same-organization
+ * workspaces they can access; nobody else can use it). `workspace` shares it
+ * with the minting workspace's members.
+ */
+export const EnrollTokenScope = z.enum(["user", "workspace"]);
+export type EnrollTokenScope = z.infer<typeof EnrollTokenScope>;
+
+const enrollTokenClaims = {
   workspaceId: z.string().uuid(),
   accountId: z.string().uuid(),
   // The screen-control consent baked into the token at mint (the minting user's
@@ -3530,8 +3536,34 @@ export const EnrollTokenPayload = z.object({
     .string()
     .regex(/^[A-Za-z0-9_-]{16,128}$/)
     .optional(),
-});
+};
+
+// Two token kinds, separated by their domain claim. `enroll` is the original
+// workspace-shared token. `enroll_user` binds the authenticated human who
+// minted it as the machine's owner. A distinct typ (rather than an optional
+// claim) makes an API replica that predates personal tokens reject one as
+// invalid instead of stripping the owner and connecting a workspace machine.
+export const EnrollTokenPayload = z.discriminatedUnion("typ", [
+  z.object({
+    // Domain-separation claim — fixed "enroll" so an `oge_`/`ogd_`/`ogs_` payload (no
+    // typ, or a different typ) can never satisfy verifyEnrollToken even past the prefix.
+    typ: z.literal("enroll"),
+    ...enrollTokenClaims,
+  }),
+  z.object({
+    typ: z.literal("enroll_user"),
+    // The minting human's subject. Only the server signs it; the exchange
+    // rechecks this person's live organization membership and workspace access.
+    ownerSubjectId: z.string().min(1).max(512),
+    ...enrollTokenClaims,
+  }),
+]);
 export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
+
+/** Who can use the machine a verified enroll token connects. */
+export function enrollTokenScope(payload: EnrollTokenPayload): EnrollTokenScope {
+  return payload.typ === "enroll_user" ? "user" : "workspace";
+}
 
 export async function signEnrollToken(
   secret: string,
@@ -18308,8 +18340,12 @@ export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyRe
 // POST /v1/workspaces/:workspaceId/enrollments/token (USER-authenticated,
 // enrollments:manage). Mints the short-TTL headless enroll token (the `oget_`
 // token). allowScreenControl bakes the screen-control consent into the token.
+// `scope: "user"` makes the machine the caller's own; it requires an
+// authenticated person, never an API key, service or agent. Omitted keeps the
+// original workspace-shared token for existing integrations.
 export const MintEnrollTokenRequest = z.object({
   allowScreenControl: z.boolean().default(false),
+  scope: EnrollTokenScope.optional(),
 });
 export type MintEnrollTokenRequest = z.infer<typeof MintEnrollTokenRequest>;
 
@@ -18318,6 +18354,10 @@ export const MintEnrollTokenResponse = z.object({
   token: z.string(),
   expiresAt: z.string(),
   expiresInSeconds: z.number().int().positive(),
+  // What the token grants, echoed so a client only shows a command that
+  // matches the person's current choices.
+  scope: EnrollTokenScope,
+  allowScreenControl: z.boolean(),
 });
 export type MintEnrollTokenResponse = z.infer<typeof MintEnrollTokenResponse>;
 

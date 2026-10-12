@@ -52,6 +52,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
+import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -283,6 +284,18 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
             "this connect command was already used to connect another machine; create a new one for this machine",
         });
       }
+      if (result.reason === "owner_unavailable") {
+        // A personal command whose creator can no longer own a machine here.
+        throw new HTTPException(403, {
+          message:
+            "the person who created this connect command can no longer connect machines to this workspace; create a new command",
+        });
+      }
+      if (result.reason === "busy") {
+        throw new HTTPException(503, {
+          message: "workspace membership is changing; run the connect command again",
+        });
+      }
       // An invalid / expired / wrong-typ token — the token is the auth, so 401.
       throw new HTTPException(401, {
         message: "invalid or expired enroll token",
@@ -387,9 +400,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Mint a short-TTL headless enroll token. Mirrors approve (enrollments:manage,
   // requireAccessGrant BEFORE the parse). The accountId comes from the grant. No
   // signing secret → 503/disabled (mirror poll). The token is SECRET — never logged.
+  // `scope: "user"` signs the authenticated person as the machine's owner; only an
+  // exact authenticated human may ask for it (never an API key, service or agent),
+  // and the owner is always the caller, never a request field.
   app.post("/v1/workspaces/:workspaceId/enrollments/token", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const grant = authorization.grant;
+    requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
     // All fields are optional/defaulted, so an empty POST body is valid (default
     // allowScreenControl=false). Coalesce a missing/empty body to {} before parse.
@@ -399,12 +417,20 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid mint-enroll-token request",
       });
     }
+    const personal = parsed.data.scope === "user";
+    if (personal && !isPersonalConnectionOwnerPrincipal(authorization)) {
+      throw new HTTPException(422, {
+        message:
+          "only a signed-in person can connect a machine for themselves; API keys, services and agents can connect workspace machines",
+      });
+    }
     const minted = await mintEnrollToken(
       { db, settings },
       {
         accountId: grant.accountId,
         workspaceId,
         allowScreenControl: parsed.data.allowScreenControl,
+        ...(personal ? { ownerSubjectId: grant.subjectId } : {}),
       },
     );
     if (!minted) {

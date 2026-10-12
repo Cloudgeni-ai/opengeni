@@ -2,11 +2,14 @@ import { describe, expect, test } from "bun:test";
 import {
   EnrollTokenPayload,
   type EnrollTokenPayload as EnrollTokenPayloadType,
+  enrollTokenScope,
+  MintEnrollTokenRequest,
   signEnrollToken,
   signEnrollmentBearer,
   verifyEnrollToken,
   verifyEnrollmentBearer,
 } from "../src/index";
+import { z } from "zod";
 
 // Self-hosted enrollment UX §A2.1 — the headless `oget_` enroll token. The token
 // IS the grant (no human approve), so the sign/verify pair + its DOMAIN SEPARATION
@@ -130,5 +133,72 @@ describe("EnrollTokenPayload sign/verify", () => {
     // Ids are bounded and URL-safe so the redemption ledger key stays predictable.
     expect(() => payload({ jti: "short" })).toThrow();
     expect(() => payload({ jti: "has spaces and is long enough" })).toThrow();
+  });
+});
+
+describe("personal (user-owned) enroll tokens", () => {
+  const owner = "user:alice";
+  function personal(overrides: Record<string, unknown> = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    return EnrollTokenPayload.parse({
+      typ: "enroll_user",
+      ownerSubjectId: owner,
+      workspaceId: WORKSPACE_A,
+      accountId: ACCOUNT_A,
+      allowScreenControl: false,
+      iat: now,
+      exp: now + 3600,
+      jti: "AbCdEfGhIjKlMnOpQrStUvWx",
+      ...overrides,
+    });
+  }
+
+  test("the signed owner round-trips and names the user scope", async () => {
+    const claims = personal();
+    const verified = await verifyEnrollToken(SECRET, await signEnrollToken(SECRET, claims));
+    expect(verified).toEqual(claims);
+    expect(verified && enrollTokenScope(verified)).toBe("user");
+    expect(enrollTokenScope(payload())).toBe("workspace");
+  });
+
+  test("a personal token requires its owner, and the owner cannot be forged", async () => {
+    expect(() => personal({ ownerSubjectId: undefined })).toThrow();
+    expect(() => personal({ ownerSubjectId: "" })).toThrow();
+    const token = await signEnrollToken(SECRET, personal());
+    const [, signature] = token.slice("oget_".length).split(".");
+    const forged = Buffer.from(
+      JSON.stringify(personal({ ownerSubjectId: "user:mallory" })),
+      "utf8",
+    ).toString("base64url");
+    expect(await verifyEnrollToken(SECRET, `oget_${forged}.${signature}`)).toBeNull();
+  });
+
+  test("a verifier that predates personal tokens refuses one instead of sharing the machine", async () => {
+    // The previous schema: typ was the literal "enroll" and unknown keys were
+    // stripped. Parsing the personal token with it must fail, never yield a
+    // workspace-shared grant without the owner.
+    const previous = z.object({
+      typ: z.literal("enroll"),
+      workspaceId: z.string().uuid(),
+      accountId: z.string().uuid(),
+      allowScreenControl: z.boolean(),
+      iat: z.number().int().nonnegative(),
+      exp: z.number().int().positive(),
+      jti: z.string().optional(),
+    });
+    expect(previous.safeParse(personal()).success).toBe(false);
+  });
+
+  test("a workspace token cannot smuggle an owner claim", () => {
+    const parsed = payload({ ownerSubjectId: owner } as never);
+    expect("ownerSubjectId" in parsed).toBe(false);
+    expect(enrollTokenScope(parsed)).toBe("workspace");
+  });
+
+  test("mint requests accept only the two connect scopes", () => {
+    expect(MintEnrollTokenRequest.parse({}).scope).toBeUndefined();
+    expect(MintEnrollTokenRequest.parse({ scope: "user" }).scope).toBe("user");
+    expect(MintEnrollTokenRequest.parse({ scope: "workspace" }).scope).toBe("workspace");
+    expect(MintEnrollTokenRequest.safeParse({ scope: "organization" }).success).toBe(false);
   });
 });
