@@ -993,11 +993,14 @@ await runOpenGeniWorker({
 `runOpenGeniWorker` installs `SIGTERM`/`SIGINT` drain handlers, exposes `/healthz`,
 `/readyz`, and `/metrics`, runs engine-internal maintenance on the control role,
 and closes only the Temporal clients/listener it creates. The workflow-wake
-dispatcher, Knowledge indexing and site-auth maintenance run as work-checked
-cadences: each tick is one read-only check, and a workflow starts only when the
-job's claim could find work, so an idle deployment writes no Temporal history
-for them (`opengeni_maintenance_cadence_ticks_total{job,outcome}` counts idle
-and started ticks). It never
+dispatcher, Knowledge indexing, site-auth maintenance, the sandbox lease reaper
+and its maintenance pass, and the idle and browser checkpoint sweeps run as
+work-checked cadences: each tick is one read-only check, and a workflow starts
+only when the job's claim could find work, so an idle deployment writes no
+Temporal history for them (`opengeni_maintenance_cadence_ticks_total{job,outcome}`
+counts idle and started ticks). An idle reaper tick still refreshes the reaper's
+read-only gauges in the control worker, and with Modal configured it lists the
+provider app first, so a box running without a lease is still swept. It never
 closes the injected database or EventBus; the host closes those after the worker
 has drained. Pass `shutdownSignals: false` when a host process manager owns
 signals, and use `createOpenGeniWorkerService` for explicit `run`, `drain`,

@@ -137,12 +137,6 @@ export {
   type InternalMaintenanceJob,
 } from "./internal-maintenance";
 
-// The deterministic id of the ONE global reaper Schedule. A single id means
-// create() is idempotent across every worker in the pool: the first worker to
-// boot creates it, all others collide on this id (ScheduleAlreadyRunning) and
-// no-op — so the Schedule is registered EXACTLY ONCE per deployment regardless
-// of replica count.
-const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
 export const SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID = "opengeni-session-storage-maintenance";
@@ -607,98 +601,6 @@ export async function createWorkerWorkflowSignaler(
 }
 
 /**
- * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
- * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
- * sandbox ownership off the activity performs bounded DB outbox repair and
- * read-only observability projections; it never mutates or terminates sandbox leases.
- *
- * The Schedule permanently fires sandboxReaperWorkflow on the legacy/base queue
- * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
- * `reaperPeriod < viewerHolderTTL` and `reaperPeriod + idleGrace < providerLifetime`
- * validates in packages/config — wiring the schedule period to it). SKIP overlap means a slow
- * sweep never overlaps itself. Idempotent: a duplicate scheduleId across the
- * worker pool collides on ScheduleAlreadyRunning and reconciles the same
- * definition. New workers route onto the versioned lifecycle queue; old workers
- * can still run the legacy action during rollout or a full binary rollback.
- *
- * Returns a `close()` for the dedicated client connection (separate from the
- * worker's NativeConnection — the Schedule client is a @temporalio/client).
- */
-export async function registerSandboxReaperSchedule(
-  settings: Settings,
-  observability: Observability,
-): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  assertSandboxReaperActivityTimeout(settings);
-  const connection = await Connection.connect(temporalConnectionOptions(settings));
-  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
-  const spec = { intervals: [{ every: settings.sandboxLeaseReaperPeriodMs }] };
-  const action = {
-    type: "startWorkflow" as const,
-    workflowType: "sandboxReaperWorkflow",
-    taskQueue: settings.temporalTaskQueue,
-    args: [] as [],
-  };
-  const policies = {
-    overlap: ScheduleOverlapPolicy.SKIP,
-    catchupWindow: "1m",
-    pauseOnFailure: false,
-  } as const;
-  try {
-    await temporal.schedule.create({
-      scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
-      // @every-style interval: fire once per reaper period. The boot invariant
-      // guarantees reaperPeriod < viewerHolderTTL and
-      // reaperPeriod + idleGrace < providerLifetime.
-      spec,
-      action,
-      // The base workflow is a short router on new binaries; legacy binaries
-      // still execute the pre-refactor composite under this same overlap fence.
-      policies,
-    });
-    observability.info("Registered the global sandbox-lease reaper Schedule", {
-      scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
-      reaperPeriodMs: settings.sandboxLeaseReaperPeriodMs,
-    });
-    return {
-      registered: true,
-      close: async () => {
-        await connection.close();
-      },
-    };
-  } catch (error) {
-    if (error instanceof ScheduleAlreadyRunning) {
-      // Never move this action off the base queue: doing so would leave a full
-      // rollback with no worker polling the only reaper Schedule. The workflow
-      // implementation itself owns the forward-compatible queue handoff.
-      await temporal.schedule.getHandle(SANDBOX_REAPER_SCHEDULE_ID).update((previous) => ({
-        spec,
-        action,
-        policies,
-        state: {
-          paused: previous.state.paused,
-          ...(previous.state.note ? { note: previous.state.note } : {}),
-          ...(previous.state.remainingActions !== undefined
-            ? { remainingActions: previous.state.remainingActions }
-            : {}),
-        },
-      }));
-      observability.info("Reconciled the global sandbox-lease reaper Schedule", {
-        scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
-        temporalTaskQueue: action.taskQueue,
-      });
-      return {
-        registered: false,
-        close: async () => {
-          await connection.close();
-        },
-      };
-    }
-    await connection.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-/**
  * Register the one provider-neutral expired direct-upload cleanup Schedule.
  * Unlike sandbox GC this is always registered: file uploads can be enabled in
  * deployments where sandbox ownership is disabled. The activity is a cheap
@@ -960,13 +862,6 @@ export async function createOpenGeniWorkerService(
     }
 
     if (workerOwnsInternalSchedules(options.role, options.internalSchedules)) {
-      schedules.push(
-        await retryStartupDependency(
-          "Temporal schedule (sandbox reaper)",
-          () => registerSandboxReaperSchedule(settings, observability),
-          { ...retryOptions, onRetry },
-        ),
-      );
       schedules.push(
         await retryStartupDependency(
           "Temporal schedule (file upload reaper)",

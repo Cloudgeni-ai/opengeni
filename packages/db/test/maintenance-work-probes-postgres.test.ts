@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   automaticSessionTitleFanoutDue,
   bootstrapWorkspace,
+  browserDeadlineCheckpointDue,
   claimAutomaticSessionTitleFanout,
   claimKnowledgeIndexJobs,
   claimPendingSessionWorkflowWakes,
@@ -13,6 +14,11 @@ import {
   enqueueSessionWorkflowWake,
   initializeSessionStartAtomically,
   knowledgeIndexDue,
+  listIdleCheckpointCandidates,
+  reapExpiredSessionListSnapshots,
+  sandboxIdleCheckpointDue,
+  sandboxLeaseReaperDue,
+  sandboxMaintenanceDue,
   saveKnowledgeEntry,
   sessionWorkflowWakesDue,
   siteAuthMaintenanceDue,
@@ -37,6 +43,7 @@ afterAll(async () => {
 
 const embedding = { model: "test-embedding", dimensions: 3 };
 const SITE_AUTH_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
+const CHECKPOINT_ARTIFACT_CLAIM_TTL_MS = 15 * 60 * 1_000;
 
 async function allProbes() {
   return {
@@ -46,6 +53,12 @@ async function allProbes() {
     knowledge: await knowledgeIndexDue(client.db, embedding),
     siteAuth: await siteAuthMaintenanceDue(client.db, {
       claimTimeoutMs: SITE_AUTH_CLAIM_TIMEOUT_MS,
+    }),
+    sandboxLeaseReaper: await sandboxLeaseReaperDue(client.db),
+    sandboxIdleCheckpoint: await sandboxIdleCheckpointDue(client.db, { intervalMs: 1 }),
+    browserDeadlineCheckpoint: await browserDeadlineCheckpointDue(client.db),
+    sandboxMaintenance: await sandboxMaintenanceDue(client.db, {
+      checkpointArtifactClaimTtlMs: CHECKPOINT_ARTIFACT_CLAIM_TTL_MS,
     }),
   };
 }
@@ -104,7 +117,82 @@ describe("maintenance work probes", () => {
       pauseTimers: false,
       knowledge: false,
       siteAuth: false,
+      sandboxLeaseReaper: false,
+      sandboxIdleCheckpoint: false,
+      browserDeadlineCheckpoint: false,
+      sandboxMaintenance: false,
     });
+  });
+
+  test("a warm sandbox makes the reaper, its maintenance and the idle checkpoint due", async () => {
+    const scope = await sessionFixture();
+    await drainAll();
+    const instanceId = `box-${crypto.randomUUID()}`;
+    const [lease] = await shared.admin<{ id: string }[]>`
+      INSERT INTO sandbox_leases (account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch, resume_backend_id,
+        resume_state, expires_at)
+      VALUES (${scope.accountId}, ${scope.workspaceId}, ${crypto.randomUUID()}, 'warm', 1, 0, 1,
+        ${instanceId}, 'modal', 1, 'modal',
+        ${JSON.stringify({ backendId: "modal", sessionState: { providerState: { sandboxId: instanceId } } })}::text::jsonb,
+        now() + interval '10 minutes')
+      RETURNING id`;
+    try {
+      expect(await sandboxLeaseReaperDue(client.db)).toBe(true);
+      expect(
+        await sandboxMaintenanceDue(client.db, {
+          checkpointArtifactClaimTtlMs: CHECKPOINT_ARTIFACT_CLAIM_TTL_MS,
+        }),
+      ).toBe(true);
+      // Superset of the inventory it previews: whenever the inventory lists
+      // this box, the check said yes.
+      expect(await sandboxIdleCheckpointDue(client.db, { intervalMs: 1 })).toBe(true);
+      const listed = (await listIdleCheckpointCandidates(client.db, { limit: 10, intervalMs: 1 }))
+        .length;
+      if (listed > 0)
+        expect(await sandboxIdleCheckpointDue(client.db, { intervalMs: 1 })).toBe(true);
+      // Recently checkpointed: not due until the snapshot interval passes.
+      await shared.admin`UPDATE sandbox_leases SET idle_checkpoint_attempted_at = now()
+        WHERE id = ${lease!.id}`;
+      expect(await sandboxIdleCheckpointDue(client.db, { intervalMs: 3_600_000 })).toBe(false);
+      expect(
+        await listIdleCheckpointCandidates(client.db, { limit: 10, intervalMs: 3_600_000 }),
+      ).toEqual([]);
+      // No browser is held on the box, so the browser sweep has nothing to do.
+      expect(await browserDeadlineCheckpointDue(client.db)).toBe(false);
+      // A cold box with no holders is not the reaper's work.
+      await shared.admin`UPDATE sandbox_leases SET liveness = 'cold', refcount = 0,
+        viewer_holders = 0, instance_id = NULL WHERE id = ${lease!.id}`;
+      expect(await allProbes()).toMatchObject({
+        sandboxLeaseReaper: false,
+        sandboxIdleCheckpoint: false,
+        sandboxMaintenance: false,
+      });
+    } finally {
+      await shared.admin`DELETE FROM sandbox_leases WHERE id = ${lease!.id}`;
+    }
+  });
+
+  test("an expired session-list snapshot is maintenance work until it is reaped", async () => {
+    const scope = await sessionFixture();
+    await drainAll();
+    const due = () =>
+      sandboxMaintenanceDue(client.db, {
+        checkpointArtifactClaimTtlMs: CHECKPOINT_ARTIFACT_CLAIM_TTL_MS,
+      });
+    await shared.admin`INSERT INTO session_list_snapshots (account_id, workspace_id, subject_id,
+        expires_at) VALUES (${scope.accountId}, ${scope.workspaceId}, ${scope.actorSubjectId},
+        now() + interval '5 minutes')`;
+    expect(await due()).toBe(false);
+    await shared.admin`UPDATE session_list_snapshots SET expires_at = now() - interval '1 second'
+      WHERE workspace_id = ${scope.workspaceId}`;
+    expect(await due()).toBe(true);
+    expect(await reapExpiredSessionListSnapshots(client.db, 500)).toBeGreaterThan(0);
+    expect(await due()).toBe(false);
+    await expect(
+      sandboxMaintenanceDue(client.db, { checkpointArtifactClaimTtlMs: 10 }),
+    ).rejects.toThrow();
+    await expect(sandboxIdleCheckpointDue(client.db, { intervalMs: 0 })).rejects.toThrow();
   });
 
   test("a committed workflow wake is due until it is delivered or backing off", async () => {
@@ -275,12 +363,32 @@ describe("maintenance work probes", () => {
         ('opengeni_private.knowledge_index_due_v1(text,integer)',
           current_schema() || '.knowledge_index_claim(text,integer,integer)'),
         ('opengeni_private.site_auth_maintenance_due_v1(bigint)',
-          'opengeni_private.claim_site_auth_maintenance(bigint,integer)')
+          'opengeni_private.claim_site_auth_maintenance(bigint,integer)'),
+        ('opengeni_private.sandbox_lease_reaper_due_v1()',
+          'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'),
+        ('opengeni_private.sandbox_idle_checkpoint_due_v1(bigint)',
+          'opengeni_private.list_idle_checkpoint_candidates(integer,bigint)'),
+        ('opengeni_private.browser_deadline_checkpoint_due_v1()',
+          'opengeni_private.list_browser_deadline_checkpoints(integer)'),
+        ('opengeni_private.session_system_update_outbox_due_v1()',
+          'opengeni_private.claim_session_system_update_outbox_v2(integer)'),
+        ('opengeni_private.session_list_snapshots_expired_v1()',
+          'opengeni_private.reap_expired_session_list_snapshots(integer)'),
+        ('opengeni_private.connected_command_reconciliation_due_v1()',
+          'opengeni_private.claim_connected_machine_background_commands(uuid,integer,bigint,timestamp with time zone)'),
+        ('opengeni_private.connected_command_output_release_due_v1()',
+          'opengeni_private.claim_connected_command_output_releases(uuid,integer,bigint,timestamp with time zone)'),
+        ('opengeni_private.terminal_retained_processes_due_v1()',
+          'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)'),
+        ('opengeni_private.sandbox_ended_epoch_blockers_due_v1()',
+          'opengeni_private.list_sandbox_ended_epoch_blockers(integer)'),
+        ('opengeni_private.sandbox_checkpoint_artifact_gc_due_v1(bigint)',
+          'opengeni_private.claim_sandbox_checkpoint_artifacts(uuid,integer,bigint)')
       ) AS probe(signature, claim)
       JOIN pg_proc p ON p.oid = probe.signature::regprocedure
       JOIN pg_proc c ON c.oid = probe.claim::regprocedure
       ORDER BY probe.signature`;
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(14);
     for (const row of rows) {
       expect(row).toMatchObject({
         same_owner: true,
