@@ -1,5 +1,11 @@
 export * from "./session-target";
+export * from "./human-input-secret-answers";
 import { sessionRetentionFromRow } from "./session-archive";
+import {
+  applyPreparedSecretAnswersInTransaction,
+  type PreparedSecretAnswer,
+} from "./human-input-secret-answers";
+import type { VaultDbContext } from "./vaults";
 import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
 import {
   BrowserSessionNotFoundError,
@@ -51,6 +57,8 @@ export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
+  parseSecretReference,
+  type SecretReference,
   ToolReviewContext,
   WorkspaceModelCompactionThresholdsPatch,
   cleanStoredSessionTitle,
@@ -39788,9 +39796,26 @@ export async function listSessionHumanInputRequests(
 
 function validateAnsweredHumanInput(
   questions: HumanInputQuestion[],
-  answers: HumanInputAnswer[],
+  submittedAnswers: HumanInputAnswer[],
+  secretAnswerQuestionIds: ReadonlySet<string> = new Set(),
 ): HumanInputAnswer[] {
   const questionsById = new Map(questions.map((question) => [question.id, question]));
+  for (const questionId of secretAnswerQuestionIds) {
+    if (questionsById.get(questionId)?.kind !== "secret") {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `A secret answer was sent for ${questionId}, which is not a secret question`,
+      );
+    }
+  }
+  // `secret` on an answer is server-written (the saved reference); a client
+  // never supplies it. A secret answered by value may omit its answer entry.
+  const answers = submittedAnswers.map(({ secret: _serverOwned, ...answer }) => answer);
+  for (const questionId of secretAnswerQuestionIds) {
+    if (!answers.some((answer) => answer.questionId === questionId)) {
+      answers.push({ questionId, values: [] });
+    }
+  }
   const answersById = new Map<string, HumanInputAnswer>();
   for (const answer of answers) {
     if (!questionsById.has(answer.questionId)) {
@@ -39811,7 +39836,8 @@ function validateAnsweredHumanInput(
     const answer = answersById.get(question.id);
     const values = answer?.values ?? [];
     const other = answer?.other?.trim() ?? "";
-    const suppliedCount = values.length + (other ? 1 : 0);
+    const answeredByValue = secretAnswerQuestionIds.has(question.id);
+    const suppliedCount = values.length + (other ? 1 : 0) + (answeredByValue ? 1 : 0);
     if (question.required && suppliedCount === 0) {
       throw new HumanInputResponseValidationError(
         "INVALID_RESPONSE",
@@ -39824,6 +39850,10 @@ function validateAnsweredHumanInput(
         "INVALID_RESPONSE",
         `Question ${question.id} contains duplicate values`,
       );
+    }
+    if (question.kind === "secret") {
+      validateSecretHumanInputAnswer(question.id, values, other, answeredByValue);
+      continue;
     }
     if (question.kind === "text") {
       if (values.length > 1 || other) {
@@ -39870,11 +39900,62 @@ function validateAnsweredHumanInput(
   return answers;
 }
 
+/**
+ * A secret question is answered either by a value the API already moved into
+ * `secretAnswers` (values stay empty here) or, for agents and API callers
+ * relaying an existing secret, by exactly one secret reference (AC-7).
+ */
+function validateSecretHumanInputAnswer(
+  questionId: string,
+  values: string[],
+  other: string,
+  answeredByValue: boolean,
+): void {
+  if (other) {
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      `Secret question ${questionId} does not take free text`,
+    );
+  }
+  if (answeredByValue) {
+    if (values.length > 0) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Secret question ${questionId} was answered twice`,
+      );
+    }
+    return;
+  }
+  if (values.length === 0) return;
+  let reference: SecretReference | null = null;
+  if (values.length === 1) {
+    try {
+      reference = parseSecretReference(values[0]!.trim());
+    } catch {
+      reference = null;
+    }
+  }
+  if (!reference || reference.kind !== "secret") {
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      `Secret question ${questionId} accepts a secret value through secretAnswers or one {{secret:...}} reference, never a plain value`,
+    );
+  }
+}
+
 export function validateHumanInputResponse(
   request: Pick<SessionHumanInputRequest, "questions" | "allowSkip">,
   rawResponse: unknown,
+  secretAnswerQuestionIds: ReadonlySet<string> = new Set(),
 ): HumanInputResponse {
   const response = SubmitHumanInputResponseRequest.parse(rawResponse);
+  if (response.outcome === "answered" && response.secretAnswers?.length) {
+    // Values travel only through the caller's prepared, encrypted answers.
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      "secretAnswers must be submitted separately from the stored response",
+    );
+  }
   if (response.outcome === "skipped") {
     if (!request.allowSkip) {
       throw new HumanInputResponseValidationError(
@@ -39886,7 +39967,11 @@ export function validateHumanInputResponse(
   }
   return {
     outcome: "answered",
-    answers: validateAnsweredHumanInput(request.questions, response.answers),
+    answers: validateAnsweredHumanInput(
+      request.questions,
+      response.answers,
+      secretAnswerQuestionIds,
+    ),
   };
 }
 
@@ -40007,8 +40092,24 @@ export async function acceptSessionHumanInputResponse(
     expireOnly?: boolean;
     /** Validated/encrypted by the API; never copied into the response event. */
     mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
+    /**
+     * Secret ask-card answers, already generated and encrypted by the caller.
+     * They are written to vaults in this transaction; the stored response and
+     * event carry only the resulting references.
+     */
+    secretAnswers?: readonly PreparedSecretAnswer[];
+    /** Whose authority writes `secretAnswers` (the responding person or attempt). */
+    secretWriteContext?: VaultDbContext;
   },
 ): Promise<AcceptSessionHumanInputResponseResult> {
+  const secretAnswers = input.expireOnly ? [] : (input.secretAnswers ?? []);
+  const secretAnswerQuestionIds = new Set(secretAnswers.map((answer) => answer.questionId));
+  if (secretAnswerQuestionIds.size !== secretAnswers.length) {
+    throw new HumanInputResponseValidationError(
+      "INVALID_RESPONSE",
+      "Each secret question takes one secret answer",
+    );
+  }
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -40288,9 +40389,13 @@ export async function acceptSessionHumanInputResponse(
             workflowWakeRevision: null,
           } as const;
         }
-        const response: HumanInputResponse = expired
+        let response: HumanInputResponse = expired
           ? { outcome: "expired" }
-          : validateHumanInputResponse(mapSessionHumanInputRequest(request), input.response);
+          : validateHumanInputResponse(
+              mapSessionHumanInputRequest(request),
+              input.response,
+              secretAnswerQuestionIds,
+            );
         if (
           hasSkillReview &&
           !expired &&
@@ -40304,6 +40409,39 @@ export async function acceptSessionHumanInputResponse(
             "INVALID_RESPONSE",
             "Choose Save or Don't save for this Skill review.",
           );
+        }
+        if (response.outcome === "answered" && secretAnswers.length > 0) {
+          if (
+            secretAnswers.some((answer) => answer.saveTo === "user") &&
+            input.canonicalHumanSession !== true
+          ) {
+            throw new HumanInputResponseValidationError(
+              "HUMAN_AUTH_REQUIRED",
+              "Saving to Only me needs a person signed in.",
+            );
+          }
+          if (!input.secretWriteContext) {
+            throw new Error("Secret answers need the responder's vault write context");
+          }
+          // Written before the response row so a vault failure rolls back the
+          // whole answer; the stored response and event hold references only.
+          const saved = await applyPreparedSecretAnswersInTransaction(
+            tx as unknown as Database,
+            input.secretWriteContext,
+            {
+              sessionId: input.sessionId,
+              turnId: request.turnId,
+              questions: request.questions,
+              answers: secretAnswers,
+            },
+          );
+          response = {
+            ...response,
+            answers: response.answers.map((answer) => {
+              const secret = saved.get(answer.questionId);
+              return secret ? { ...answer, values: [secret.reference], secret } : answer;
+            }),
+          };
         }
         const [updated] = await tx
           .update(schema.sessionHumanInputRequests)
@@ -40325,6 +40463,12 @@ export async function acceptSessionHumanInputResponse(
           )
           .returning();
         if (!updated) {
+          if (secretAnswers.length > 0) {
+            // Unreachable under the row lock; never commit vault writes for a lost answer.
+            throw new SessionControlInvariantError(
+              `Human-input request ${request.id} changed while saving its secret answers`,
+            );
+          }
           return {
             action: "conflict",
             request: mapSessionHumanInputRequest(request),

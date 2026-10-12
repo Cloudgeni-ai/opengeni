@@ -3,6 +3,7 @@ import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-comma
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
@@ -135,6 +136,7 @@ import {
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
   type VaultApiError,
+  VAULT_ERROR_HTTP_STATUS,
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
@@ -344,6 +346,11 @@ import {
   relayConfigFromSettings,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
+import {
+  humanSecretWriteContext,
+  prepareSecretAnswers,
+  splitSecretAnswers,
+} from "../secret-answers";
 import { browserSseDeliveryOptions, sseSessionStream } from "../http/sse";
 import {
   serveWorkspaceCapture,
@@ -3962,14 +3969,32 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
 
     if (event.type === "user.humanInputResponse") {
+      // Secret values are write-only: split them off before anything else sees
+      // the response, generate/encrypt them, and let the accept transaction
+      // write them to vaults. The stored response and event get references.
+      const { response, secretAnswers: rawSecretAnswers } = splitSecretAnswers(
+        event.payload.response,
+        event.payload.secretAnswers,
+      );
       let accepted;
       try {
+        const secretAnswers = prepareSecretAnswers(settings, rawSecretAnswers, "human");
         accepted = await acceptSessionHumanInputResponse(db, {
           accountId: grant.accountId,
           workspaceId,
           sessionId,
           requestId: event.payload.requestId,
-          response: event.payload.response,
+          response,
+          ...(secretAnswers.length
+            ? {
+                secretAnswers,
+                secretWriteContext: humanSecretWriteContext({
+                  accountId: grant.accountId,
+                  workspaceId,
+                  subjectId: grant.subjectId,
+                }),
+              }
+            : {}),
           respondedBy: grant.subjectId,
           canonicalHumanSession:
             authorization.canonicalManagedHumanSession ||
@@ -4002,6 +4027,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               message: error.message,
             },
           );
+        }
+        const vaultError = isVaultError(error) ? error : vaultErrorFromDatabase(error);
+        if (vaultError) {
+          const body: VaultApiError = {
+            error: vaultError.code,
+            message: vaultError.message,
+            ...(vaultError.details ? { details: vaultError.details } : {}),
+          };
+          return c.json(body, VAULT_ERROR_HTTP_STATUS[vaultError.code] as ContentfulStatusCode);
         }
         throw error;
       }

@@ -183,6 +183,13 @@ import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import {
+  attemptSecretWriteContext,
+  prepareSecretAnswers,
+  SecretAnswerRejectedError,
+  splitSecretAnswers,
+} from "../secret-answers";
+import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
+import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
   type FirstPartyToolAuthorization,
 } from "./first-party-tool-permissions";
@@ -6035,15 +6042,40 @@ function registerWorkspaceOrchestrationTools(
         async ({ sessionId, requestId, response, idempotencyKey }) => {
           await authorizeFirstPartySession(deps, grant, sessionId, "session.human_input.write");
           const context = exactAgentCommandContext(grant, callerSessionId, "first_party_mcp");
-          const parsedResponse = SubmitHumanInputResponseRequest.parse(response);
+          // Secret questions take a {{secret:...}} reference in `values` or a
+          // generate spec in secretAnswers; a raw value is refused (AC-7).
+          const { response: parsedResponse, secretAnswers: rawSecretAnswers } = splitSecretAnswers(
+            SubmitHumanInputResponseRequest.parse(response),
+            undefined,
+          );
           let accepted: Awaited<ReturnType<typeof acceptSessionHumanInputResponse>>;
           try {
+            const secretAnswers = prepareSecretAnswers(deps.settings, rawSecretAnswers, "agent");
+            if (secretAnswers.some((answer) => answer.saveTo === "user")) {
+              throw new SecretAnswerRejectedError(
+                "An agent cannot save to Only me; use saveTo task or workspace.",
+              );
+            }
             accepted = await acceptSessionHumanInputResponse(deps.db, {
               accountId: grant.accountId,
               workspaceId: grant.workspaceId,
               sessionId,
               requestId,
               response: parsedResponse,
+              ...(secretAnswers.length
+                ? {
+                    secretAnswers,
+                    secretWriteContext: attemptSecretWriteContext({
+                      kind: "attempt",
+                      accountId: grant.accountId,
+                      workspaceId: grant.workspaceId,
+                      sessionId: context.callerSessionId,
+                      turnId: context.callerTurnId,
+                      attemptId: context.callerAttemptId,
+                      executionGeneration: context.callerExecutionGeneration,
+                    }),
+                  }
+                : {}),
               respondedBy: `agent_attempt:${context.callerAttemptId}`,
               respondedByKind: "agent_attempt",
               clientEventId: idempotencyKey,
@@ -6051,6 +6083,18 @@ function registerWorkspaceOrchestrationTools(
           } catch (error) {
             if (error instanceof HumanInputResponseValidationError) {
               throw new Error(`human-input response rejected: ${error.message}`, { cause: error });
+            }
+            if (error instanceof SecretAnswerRejectedError) {
+              throw new Error(`human-input response rejected: ${error.message}`, { cause: error });
+            }
+            const vaultError = isVaultError(error) ? error : vaultErrorFromDatabase(error);
+            if (vaultError) {
+              throw new Error(
+                `human-input response rejected: ${vaultError.code}: ${vaultError.message}`,
+                {
+                  cause: error,
+                },
+              );
             }
             throw error;
           }
