@@ -226,5 +226,5 @@ export const embeddingMigrationTail = [
   "0732_sandbox_maintenance_work_probes.sql",
   // Owner-only routines over the shared connection table from withheld 0642.
   "0735_subscription_core_owned_connection_usage.sql",
-  "0733_subscription_core_xai_cutover.sql",
+  "0734_subscription_core_xai_cutover.sql",
 ];

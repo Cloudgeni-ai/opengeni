@@ -34,10 +34,10 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const COMPAT = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines: withheld with it and applied by the same run.
 const FENCES = "0717_subscription_authority_fences.sql";
-const XAI_CUTOVER = "0733_subscription_core_xai_cutover.sql";
+const XAI_CUTOVER = "0734_subscription_core_xai_cutover.sql";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0733_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0734_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 const CORE_SUBJECT = "service:subscription-core";
 let database: OwnerMigratedTestDatabase | null = null;

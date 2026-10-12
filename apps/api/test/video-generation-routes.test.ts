@@ -28,7 +28,7 @@ let app: Hono;
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("video-generation-routes", {
     // Characterizes the legacy SuperGrok runtime before its drained cutover.
-    withheldMigrations: ["0733_subscription_core_xai_cutover.sql"],
+    withheldMigrations: ["0734_subscription_core_xai_cutover.sql"],
   });
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   client = createDb(shared.appUrl, { max: 2 });

@@ -31,7 +31,7 @@ const compat = "0716_subscription_authority_compat.sql";
 const fences = "0717_subscription_authority_fences.sql";
 // Built from the owner reader withheld 0715 rewrites; it follows 0715.
 const personalConnectionVersions = "0730_subscription_core_personal_connection_versions.sql";
-const xaiCutover = "0733_subscription_core_xai_cutover.sql";
+const xaiCutover = "0734_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;

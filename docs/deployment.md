@@ -5111,9 +5111,9 @@ unchanged on 0729. An opt-in a person turned on stays in effect after a
 rollback (placement already read it); dropping the four policies and two
 routines removes only the person's own access.
 
-### SuperGrok on the shared subscription core (0733)
+### SuperGrok on the shared subscription core (0734)
 
-Migration `0733_subscription_core_xai_cutover.sql` is a one-way maintenance
+Migration `0734_subscription_core_xai_cutover.sql` is a one-way maintenance
 cutover, the SuperGrok counterpart of 0689. It moves every organization's
 SuperGrok (`xai`) subscription state onto the shared subscription core,
 records the `xai` receipt and registry row, and enables the SuperGrok cutover
@@ -5274,7 +5274,7 @@ ownership ambiguity, named by content-free classes such as
 `personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
 session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
 waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
-pre-existing core SuperGrok state; or any parity mismatch (`0733 parity
+pre-existing core SuperGrok state; or any parity mismatch (`0734 parity
 mismatch (<metrics>)`). A database error while writing the core surfaces only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
 statement parameter, token, label or email leaves the migration. Fix the named
@@ -5377,19 +5377,19 @@ legacy tables and only their own provider's keys in shared relations, and
 each commits in its own transaction with its own parity. Either order of
 releases works:
 
-- Separately: deploy the release that carries 0733, run steps 1 to 6 in one
+- Separately: deploy the release that carries 0734, run steps 1 to 6 in one
   window, and run the Claude cutover's window with its later release.
 - In one window: deploy a release that carries both. Drain and back up once,
   take both inventories, and run the migrator once with the same roles and
-  key; it applies 0733 and then the Claude cutover in ledger order. If the
-  Claude cutover aborts, 0733 stays committed: fix the named Claude rows and
+  key; it applies 0734 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0734 stays committed: fix the named Claude rows and
   run the migrator again (it resumes at the Claude cutover). Start binaries
   only after both receipts exist; readiness refuses a database missing
-  either. Validate each provider's report rows separately. While only 0733
+  either. Validate each provider's report rows separately. While only 0734
   is committed no binary can start: this release needs both receipts and
-  the old release must not run after 0733. If the Claude rows cannot be
+  the old release must not run after 0734. If the Claude rows cannot be
   fixed within the window, restore the step 3 backup and use the separate
-  path, or deploy a release that carries 0733 but not the Claude cutover.
+  path, or deploy a release that carries 0734 but not the Claude cutover.
 
 ### Slack API pilot activation (0597)
 

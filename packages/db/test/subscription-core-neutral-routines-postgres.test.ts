@@ -34,7 +34,7 @@ let client: DbClient | null = null;
 let appConnectionUrl = "";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0733_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0734_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
@@ -80,7 +80,7 @@ beforeAll(async () => {
   ];
   // The drained SuperGrok cutover is maintenance-only: a rolling deployment
   // of 0707 never applies it, so it stays recorded and unapplied here.
-  const xaiCutover = "0733_subscription_core_xai_cutover.sql";
+  const xaiCutover = "0734_subscription_core_xai_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;

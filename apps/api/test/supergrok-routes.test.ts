@@ -155,7 +155,7 @@ beforeAll(async () => {
             await ledger`CREATE TABLE IF NOT EXISTS schema_migrations(
               name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
             await ledger`INSERT INTO schema_migrations(name)
-              VALUES ('0733_subscription_core_xai_cutover.sql')`;
+              VALUES ('0734_subscription_core_xai_cutover.sql')`;
           } finally {
             await ledger.end();
           }
