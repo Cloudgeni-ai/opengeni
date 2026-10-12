@@ -218,6 +218,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
     experimentSystemPromptCacheSplit: true,
+    experimentCutPolling: true,
+    experimentOutputCost: true,
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
     supergrokResponseStreamIdleTimeoutMs: 300_000,
