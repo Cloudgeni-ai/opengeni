@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -31,6 +30,7 @@ import type {
 import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { OpenGeniNativeSessionController } from "./use-native-session";
 import type { NativeFileAttachmentsResult } from "./attachments";
+import { useOpenNativeLink } from "./environment";
 import {
   DEFAULT_OPENGENI_NATIVE_LABELS,
   DEFAULT_OPENGENI_NATIVE_THEME,
@@ -952,6 +952,7 @@ function NoticeRow({
   theme: OpenGeniNativeTheme;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const openLink = useOpenNativeLink();
   const action = item.action;
   const failed = item.tone === "failed";
   const waiting = item.tone === "waiting" || item.tone === "input";
@@ -1000,7 +1001,7 @@ function NoticeRow({
       {action ? (
         <Pressable
           accessibilityRole="link"
-          onPress={() => void Linking.openURL(action.url)}
+          onPress={() => openLink(action.url)}
           style={styles.noticeLink}
         >
           <Text style={[styles.noticeAction, { color: foreground }]}>{action.label}</Text>

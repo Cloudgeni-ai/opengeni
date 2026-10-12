@@ -36,6 +36,7 @@ import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
+import { openLinkFromApp } from "@/app-link-registry";
 import { openOnWeb, webPaths } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
@@ -46,10 +47,17 @@ const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
 const MUTE_REPLIES_ACTION = "opengeni.mute-replies";
 
 export default function SessionScreen() {
-  const { id, at } = useLocalSearchParams<{ id: string; at?: string }>();
-  // Opened from the inbox or a notification: land on that moment.
+  const { id, at, workspace } = useLocalSearchParams<{
+    id: string;
+    at?: string;
+    workspace?: string;
+  }>();
+  // Opened from the inbox, a notification or a link: land on that moment.
   const focusSequence = at && /^[1-9][0-9]*$/u.test(at) ? Number(at) : undefined;
-  const { client, models, workspaceId } = useAccount();
+  const { client, models, workspaceId: currentWorkspaceId } = useAccount();
+  // A session opened from elsewhere names its own workspace, so the screens
+  // underneath keep theirs and Back returns to them unchanged.
+  const workspaceId = workspace || currentWorkspaceId;
   if (!workspaceId || !id) {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
@@ -124,6 +132,11 @@ function LiveSession(props: {
         );
     };
     return createWebMarkdownRenderer({
+      // Opengeni conversations open in the app; anything else in the browser.
+      onLinkPress: (url) => {
+        openLinkFromApp(url);
+        return false;
+      },
       onCopy: (text) => void copyText(text),
       onOpenGeniLink: openLink,
       ...createNativePreviewRenderers({
@@ -199,7 +212,7 @@ function LiveSession(props: {
               hitSlop={8}
               onPress={() => {
                 void Haptics.selectionAsync();
-                agentCall.callSession(props.sessionId);
+                agentCall.callSession(props.sessionId, workspaceId);
               }}
               style={({ pressed }) => ({
                 width: 36,
@@ -344,7 +357,7 @@ function LiveSession(props: {
             active: onCall,
             onPress: () => {
               void Haptics.selectionAsync();
-              agentCall.callSession(props.sessionId);
+              agentCall.callSession(props.sessionId, workspaceId);
             },
           },
           renderLeading: () => attachMenu,
