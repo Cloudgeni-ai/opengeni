@@ -40,10 +40,7 @@ import {
   totpCodeSync,
 } from "@opengeni/contracts";
 import { BrowserControlServer, BrowserSupervisor } from "@opengeni/browserd";
-import {
-  startFakeLoginServer,
-  type FakeLoginServer,
-} from "@opengeni/testing/fake-login";
+import { startFakeLoginServer, type FakeLoginServer } from "@opengeni/testing/fake-login";
 
 import {
   type InteractionPasskeyStore,
@@ -52,11 +49,7 @@ import {
   syncBrowserPasskeys,
 } from "../../apps/api/src/interaction-secrets";
 import { createStaticSecretResolver } from "../../packages/vaults/src/testing/static-resolver";
-import {
-  type Hit,
-  needlesFor,
-  scanBuffer,
-} from "../../scripts/verify/secrets-e2e/scan";
+import { type Hit, needlesFor, scanBuffer } from "../../scripts/verify/secrets-e2e/scan";
 
 const shotsDir = process.env.FAKE_LOGIN_SHOTS_DIR;
 const headed = process.env.FAKE_LOGIN_HEADED === "1";
@@ -126,10 +119,7 @@ class MemoryPasskeyStore implements InteractionPasskeyStore {
     }
   >();
   readonly signCountWrites: Array<{ itemId: string; signCount: number }> = [];
-  async lease(
-    _principal: unknown,
-    holder: string,
-  ): Promise<BrowserPasskeyCredential[]> {
+  async lease(_principal: unknown, holder: string): Promise<BrowserPasskeyCredential[]> {
     const out: BrowserPasskeyCredential[] = [];
     for (const item of this.items.values()) {
       if (item.holder !== null && item.holder !== holder) continue;
@@ -153,11 +143,7 @@ class MemoryPasskeyStore implements InteractionPasskeyStore {
     });
     return { itemId };
   }
-  async updateSignCount(
-    _principal: unknown,
-    itemId: string,
-    signCount: number,
-  ): Promise<void> {
+  async updateSignCount(_principal: unknown, itemId: string, signCount: number): Promise<void> {
     const item = this.items.get(itemId);
     if (!item) return;
     this.signCountWrites.push({ itemId, signCount });
@@ -167,15 +153,13 @@ class MemoryPasskeyStore implements InteractionPasskeyStore {
     };
   }
   async release(holder: string): Promise<void> {
-    for (const item of this.items.values())
-      if (item.holder === holder) item.holder = null;
+    for (const item of this.items.values()) if (item.holder === holder) item.holder = null;
   }
 }
 
 const passkeys = new MemoryPasskeyStore();
 const secretsPort: InteractionSecretsPort = {
-  resolverFor: async (principal) =>
-    createStaticSecretResolver(vault, { principal }),
+  resolverFor: async (principal) => createStaticSecretResolver(vault, { principal }),
   passkeys,
 };
 
@@ -188,19 +172,14 @@ const adminToken = `admin.${"a".repeat(48)}`;
 const responses: string[] = [];
 const opened: ProductBrowser[] = [];
 
-function flatten(
-  nodes: readonly InteractionSemanticNodeValue[],
-): InteractionSemanticNodeValue[] {
+function flatten(nodes: readonly InteractionSemanticNodeValue[]): InteractionSemanticNodeValue[] {
   return nodes.flatMap((node) => [node, ...flatten(node.children ?? [])]);
 }
 
 function texts(observation: BrowserObservation): string[] {
-  const roots =
-    observation.semantic?.kind === "snapshot" ? observation.semantic.roots : [];
+  const roots = observation.semantic?.kind === "snapshot" ? observation.semantic.roots : [];
   return flatten(roots).flatMap((node) =>
-    [node.name, node.value].filter(
-      (value): value is string => typeof value === "string",
-    ),
+    [node.name, node.value].filter((value): value is string => typeof value === "string"),
   );
 }
 
@@ -223,10 +202,7 @@ async function browserdRequest(
 async function data<T>(response: Response, label: string): Promise<T> {
   const text = await response.text();
   responses.push(text);
-  if (!response.ok)
-    throw new Error(
-      `${label} failed (${response.status}): ${text.slice(0, 600)}`,
-    );
+  if (!response.ok) throw new Error(`${label} failed (${response.status}): ${text.slice(0, 600)}`);
   return (JSON.parse(text) as { data: T }).data;
 }
 
@@ -274,9 +250,7 @@ class ProductBrowser {
     );
   }
 
-  async targets(): Promise<
-    Array<{ id: string; url?: string; [key: string]: unknown }>
-  > {
+  async targets(): Promise<Array<{ id: string; url?: string; [key: string]: unknown }>> {
     const listed = await data<{ targets: Array<{ id: string; url?: string }> }>(
       await browserdRequest("GET", `${this.base}/targets`, this.viewToken),
       "targets",
@@ -303,10 +277,7 @@ class ProductBrowser {
               status: response.status,
             });
           }
-          return await data<BrowserPasskeySyncResponse>(
-            response,
-            "passkey sync",
-          );
+          return await data<BrowserPasskeySyncResponse>(response, "passkey sync");
         },
       },
       log: () => {},
@@ -314,10 +285,7 @@ class ProductBrowser {
   }
 
   /** What the API Browser `/actions` route does for an agent attempt. */
-  async act(
-    action: BrowserAction,
-    targetId = this.targetId,
-  ): Promise<BrowserObservation> {
+  async act(action: BrowserAction, targetId = this.targetId): Promise<BrowserObservation> {
     const current = await this.observe(targetId);
     const secretValues = await resolveInteractionSecretValues({
       port: secretsPort,
@@ -346,12 +314,7 @@ class ProductBrowser {
     };
     try {
       const receipt = await data<{ observation: BrowserObservation | null }>(
-        await browserdRequest(
-          "POST",
-          `${this.base}/actions`,
-          this.controlToken,
-          command,
-        ),
+        await browserdRequest("POST", `${this.base}/actions`, this.controlToken, command),
         `action ${action.type}`,
       );
       return receipt.observation ?? (await this.observe(targetId));
@@ -377,9 +340,7 @@ class ProductBrowser {
       if (found !== undefined) return found;
       await Bun.sleep(150);
     }
-    throw new Error(
-      `text not found; last texts: ${JSON.stringify(last.slice(0, 60))}`,
-    );
+    throw new Error(`text not found; last texts: ${JSON.stringify(last.slice(0, 60))}`);
   }
 
   async shot(name: string, targetId = this.targetId): Promise<void> {
@@ -398,12 +359,7 @@ class ProductBrowser {
   }
 
   async end(): Promise<void> {
-    const response = await browserdRequest(
-      "POST",
-      `${this.base}/end`,
-      this.controlToken,
-      {},
-    );
+    const response = await browserdRequest("POST", `${this.base}/end`, this.controlToken, {});
     await response.text();
     await passkeys.release(this.browserSessionId);
   }
@@ -413,18 +369,12 @@ function css(selector: string) {
   return { kind: "css" as const, selector };
 }
 
-async function expectLoggedIn(
-  browser: ProductBrowser,
-  username: string,
-  flow: string,
-) {
+async function expectLoggedIn(browser: ProductBrowser, username: string, flow: string) {
   await browser.waitForText((text) => text === `Logged in as ${username}`);
   expect(
     site
       .state()
-      .successes.some(
-        (success) => success.username === username && success.flow === flow,
-      ),
+      .successes.some((success) => success.username === username && success.flow === flow),
   ).toBe(true);
 }
 
@@ -485,10 +435,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     await supervisor?.close();
     if (shotsDir && site) {
       mkdirSync(shotsDir, { recursive: true });
-      writeFileSync(
-        join(shotsDir, `${mode}-state.json`),
-        JSON.stringify(site.state(), null, 2),
-      );
+      writeFileSync(join(shotsDir, `${mode}-state.json`), JSON.stringify(site.state(), null, 2));
     }
     await site?.close();
     if (rootDirectory && process.env.FAKE_LOGIN_KEEP_ROOT !== "1") {
@@ -578,9 +525,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     await passwordLogin(browser, "alice", "{{secret:Fake Alice/password}}");
     await expectLoggedIn(browser, "alice", "password");
     await browser.goto("/totp/enroll");
-    const seedText = await browser.waitForText((text) =>
-      /\b[A-Z2-7]{32}\b/u.test(text),
-    );
+    const seedText = await browser.waitForText((text) => /\b[A-Z2-7]{32}\b/u.test(text));
     const seed = /\b([A-Z2-7]{32})\b/u.exec(seedText)![1]!;
     await browser.shot("totp-enroll");
     // The agent saves the setup key into the vault (secret_save in production).
@@ -598,12 +543,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     await browser.end();
 
     const login = await ProductBrowser.open(`${site.url}/totp/login`);
-    await passwordLogin(
-      login,
-      "totp-user",
-      "{{secret:Fake TOTP/password}}",
-      "/totp/login",
-    );
+    await passwordLogin(login, "totp-user", "{{secret:Fake TOTP/password}}", "/totp/login");
     await login.waitForText((text) => /code/iu.test(text));
     await login.shot("totp-login-code");
     await login.act({
@@ -618,9 +558,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     expect(code).toMatch(/^\d{6}$/u);
     const now = Date.now();
     expect(
-      [-30_000, 0, 30_000].map((skew) =>
-        totpCodeSync(parseTotpInput(TOTP_SEED), now + skew),
-      ),
+      [-30_000, 0, 30_000].map((skew) => totpCodeSync(parseTotpInput(TOTP_SEED), now + skew)),
     ).toContain(code!);
   }, 120_000);
 
@@ -633,14 +571,10 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     });
     await browser.act({ type: "click", locator: css("#send-code") });
     await browser.waitForText((text) => text.includes("alice@fake-login.test"));
-    const mail = (await (
-      await fetch(`${site.mailApiUrl}?to=alice@fake-login.test`)
-    ).json()) as {
+    const mail = (await (await fetch(`${site.mailApiUrl}?to=alice@fake-login.test`)).json()) as {
       messages: { body: string }[];
     };
-    const code = /sign-in code is (\d{6})/u.exec(
-      mail.messages.at(-1)!.body,
-    )![1]!;
+    const code = /sign-in code is (\d{6})/u.exec(mail.messages.at(-1)!.body)![1]!;
     // A one-time emailed code is not a vault secret; the agent types what it read.
     await browser.act({ type: "fill", locator: css("#code"), value: code });
     await browser.act({ type: "click", locator: css("#verify-code") });
@@ -651,19 +585,12 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
 
   test("split OTP boxes: insert mode is discarded, keys mode with a TOTP reference signs in", async () => {
     const browser = await ProductBrowser.open(`${site.url}/otp-split`);
-    await passwordLogin(
-      browser,
-      "totp-user",
-      "{{secret:Fake TOTP/password}}",
-      "/otp-split",
-    );
+    await passwordLogin(browser, "totp-user", "{{secret:Fake TOTP/password}}", "/otp-split");
     await browser.waitForText((text) => /digit|code/iu.test(text));
     await browser.act({ type: "click", locator: css("#otp-0") });
     await browser.act({ type: "type", text: "123456" });
     await browser.shot("otp-split-insert-rejected");
-    expect(
-      site.state().successes.some((success) => success.flow === "otp-split"),
-    ).toBe(false);
+    expect(site.state().successes.some((success) => success.flow === "otp-split")).toBe(false);
     await browser.act({ type: "click", locator: css("#otp-0") });
     await browser.act({
       type: "type",
@@ -680,9 +607,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
       <script>document.querySelector('input').addEventListener('input', (event) => {
         document.getElementById('echo').textContent = 'You typed ' + event.target.value;
       });</script>`;
-    const browser = await ProductBrowser.open(
-      `data:text/html,${encodeURIComponent(page)}`,
-    );
+    const browser = await ProductBrowser.open(`data:text/html,${encodeURIComponent(page)}`);
     const receipt = await browser.act({
       type: "fill",
       locator: { kind: "role", role: "textbox", name: "Field" },
@@ -708,9 +633,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
       }
     }
     expect(codes.size).toBe(3);
-    const needles = needlesFor(
-      [...plaintexts].map(([label, value]) => ({ label, value })),
-    );
+    const needles = needlesFor([...plaintexts].map(([label, value]) => ({ label, value })));
     const hits: Hit[] = [];
     const codeHits: Array<{ location: string; label: string }> = [];
     const scanCodes = (location: string, body: string) => {
@@ -729,22 +652,14 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     for (const path of journalFiles) {
       if (statSync(path).size > 64 * 1024 * 1024) continue;
       const bytes = readFileSync(path);
-      hits.push(
-        ...scanBuffer(path.slice(rootDirectory.length), bytes, needles),
-      );
+      hits.push(...scanBuffer(path.slice(rootDirectory.length), bytes, needles));
       scanCodes(path.slice(rootDirectory.length), bytes.toString("latin1"));
     }
     const profileHits: Hit[] = [];
-    for (const path of files.filter((candidate) =>
-      candidate.includes("/profile/"),
-    )) {
+    for (const path of files.filter((candidate) => candidate.includes("/profile/"))) {
       if (statSync(path).size > 64 * 1024 * 1024) continue;
       profileHits.push(
-        ...scanBuffer(
-          path.slice(rootDirectory.length),
-          readFileSync(path),
-          needles,
-        ),
+        ...scanBuffer(path.slice(rootDirectory.length), readFileSync(path), needles),
       );
     }
     const report = {
@@ -753,8 +668,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
       journalFilesScanned: journalFiles.length,
       // Replies where browserd replaced a side-map value with "[secret]"
       // (e.g. the TOTP code shown as the value of a text box).
-      redactedResponses: responses.filter((body) => body.includes("[secret]"))
-        .length,
+      redactedResponses: responses.filter((body) => body.includes("[secret]")).length,
       knownValues: [...plaintexts.keys(), ...codes.keys()],
       hits,
       codeHits,
@@ -764,10 +678,7 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     };
     if (shotsDir) {
       mkdirSync(shotsDir, { recursive: true });
-      writeFileSync(
-        join(shotsDir, `${mode}-leak-scan.json`),
-        JSON.stringify(report, null, 2),
-      );
+      writeFileSync(join(shotsDir, `${mode}-leak-scan.json`), JSON.stringify(report, null, 2));
     }
     expect(responses.length).toBeGreaterThan(20);
     expect(journalFiles.length).toBeGreaterThan(0);
