@@ -28,6 +28,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
       name: "opengeni-sites",
       include: () => tools.has("artifacts_create") && tools.has("artifacts_publish"),
     },
+    { name: "opengeni-secrets", include: () => tools.has("secret_search") },
     { name: "opengeni-video-generation", include: () => context.videoGenerationEnabled },
   ];
   return definitions
@@ -51,6 +52,7 @@ export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) 
       "opengeni-presentations",
     ].some((name) => names.has(name)),
     sites: names.has("opengeni-sites"),
+    secrets: names.has("opengeni-secrets"),
     videoGeneration: names.has("opengeni-video-generation"),
   });
   return [...artifacts, ...(names.has("opengeni-skills") ? [loadSkillManagementSkill()] : [])]

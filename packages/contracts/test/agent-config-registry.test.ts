@@ -68,7 +68,8 @@ describe("agent capability registry", () => {
       ) {
         expect(owner[tool]).toBe("knowledge");
       }
-      if (/^(variable_set_|environment_|capability_|connected_machine_|rig_|project_)/.test(tool)) {
+      if (/^(secret_|variable_set_|environment_)/.test(tool)) expect(owner[tool]).toBe("secrets");
+      if (/^(capability_|connected_machine_|rig_|project_)/.test(tool)) {
         expect(owner[tool]).toBe("workspaceAdmin");
       }
       if (/^(sessions_list|session_(?!set_project))/.test(tool)) {

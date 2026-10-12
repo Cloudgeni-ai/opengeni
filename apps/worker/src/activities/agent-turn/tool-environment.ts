@@ -128,6 +128,7 @@ import {
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
+import { attemptSecretResolver } from "./secret-resolver";
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -998,6 +999,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         attemptId: input.attemptId,
         executionGeneration: attempt.executionGeneration,
         subjectId: "worker:first-party-mcp",
+        secretResolver: attemptSecretResolver({
+          db,
+          settings: githubRestMcp.settings,
+          agentConfig: session.agent,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: attempt.executionGeneration,
+        }),
         subjectLabel: "Opengeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,

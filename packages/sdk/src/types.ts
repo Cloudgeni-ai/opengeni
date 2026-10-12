@@ -46,7 +46,8 @@ export type BundledSkillId =
   | "builtin:opengeni-spreadsheets"
   | "builtin:opengeni-presentations"
   | "builtin:opengeni-sites"
-  | "builtin:opengeni-video-generation";
+  | "builtin:opengeni-video-generation"
+  | "builtin:opengeni-secrets";
 
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
@@ -2156,14 +2157,14 @@ export type HumanInputSecretSpec = {
   field?: string | undefined;
   fieldKind?: "concealed" | "totp" | "text" | undefined;
   itemType?: "login" | "api_key" | "note" | undefined;
-  username?: { prompt: string; value?: string | undefined } | undefined;
-  website?: string | undefined;
-  looksLike?: string | undefined;
-  pattern?: string | undefined;
+  username?: { prompt: string; value?: string | null | undefined } | null | undefined;
+  website?: string | null | undefined;
+  looksLike?: string | null | undefined;
+  pattern?: string | null | undefined;
   saveTo?: HumanInputSecretSaveTo | undefined;
-  vault?: string | undefined;
+  vault?: string | null | undefined;
   allowGenerate?: boolean | undefined;
-  generate?: GeneratePasswordSpec | undefined;
+  generate?: GeneratePasswordSpec | null | undefined;
   autocomplete?: "current-password" | "new-password" | "one-time-code" | "off" | undefined;
 };
 
@@ -2209,8 +2210,8 @@ export type HumanInputQuestion = {
   label?: string | null | undefined;
   helpText?: string | null | undefined;
   options: HumanInputOption[];
-  /** Required exactly when `kind` is "secret". */
-  secret?: HumanInputSecretSpec | undefined;
+  /** Required exactly when `kind` is "secret"; null otherwise. */
+  secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
   allowOther: boolean;
   validation?:
@@ -3690,6 +3691,11 @@ export type FirstPartyMcpToolName =
   | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
+  | "secret_search"
+  | "secret_save"
+  | "secret_get"
+  | "secret_move"
+  | "secret_delete"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"

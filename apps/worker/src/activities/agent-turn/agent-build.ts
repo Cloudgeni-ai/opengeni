@@ -89,6 +89,7 @@ import { createAttemptSecretResolver } from "./secret-resolver";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
+import { attemptQuestionVaultValidator, secretsCapabilityEnabled } from "./secret-resolver";
 
 export type BuildTurnAgentDeps = {
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
@@ -806,6 +807,19 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        secrets: {
+          referencesEnabled: secretsCapabilityEnabled(session.agent),
+          hasActingHuman: Boolean(turn.initiatingHumanSubjectId),
+          validateQuestionVault: attemptQuestionVaultValidator({
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+          }),
+        },
         missingSessionTitleHint,
         sandboxEnvironment,
         ...(preparedTools.attemptToolCatalog

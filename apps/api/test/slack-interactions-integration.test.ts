@@ -4938,6 +4938,121 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     ]);
   }, 60_000);
 
+  test("refuses a thread reply while a secret question is pending (AC-5)", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const rootTimestamp = "1712600000.000001";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DM_SECRET_ROOT_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_SECRET_REPLY",
+            ts: rootTimestamp,
+            text: "Sign in to the CRM for me",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [interaction] = await interactions(value.owner.workspaceId);
+    if (!interaction) throw new Error("Slack route was not created");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: interaction.session_id,
+      workflowId: `session-${interaction.session_id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`not claimable: ${claimed.reason}`);
+    const requestId = crypto.randomUUID();
+    const questions: HumanInputQuestion[] = [
+      {
+        id: "secret_1",
+        kind: "secret",
+        prompt: "Enter the password for CRM.",
+        options: [],
+        required: true,
+        allowOther: false,
+        secret: { item: "CRM", field: "password", saveTo: "user" },
+      } as HumanInputQuestion,
+    ];
+    const settled = await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+      sessionId: interaction.session_id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [],
+        humanInputRequests: [
+          {
+            id: requestId,
+            toolCallId: "slack-secret",
+            questions,
+            allowSkip: true,
+            expiresAt: null,
+          },
+        ],
+      },
+      events: [
+        {
+          type: "session.humanInput.requested",
+          payload: { request: { id: requestId, questions, allowSkip: true, expiresAt: null } },
+        },
+        { type: "session.status.changed", payload: { status: "requires_action" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+    await drainAll(value.deps);
+    const card = value.slack.postAttempts.find((post) => post.text.includes("Enter the password"));
+    expect(card?.text).toContain("Answer in Opengeni");
+    expect(card?.text).not.toContain("Reply in this thread");
+
+    const pasted = "canary-slack-pasted-9d1e";
+    const replyEventId = `E_DM_SECRET_REPLY_${crypto.randomUUID()}`;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: replyEventId,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: "D_SECRET_REPLY",
+            ts: "1712600000.000002",
+            thread_ts: rootTimestamp,
+            text: pasted,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const leaked = await shared!.admin<Array<{ type: string }>>`
+      select type from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${interaction.session_id}
+        and payload::text like ${`%${pasted}%`}`;
+    expect(leaked).toEqual([]);
+    const [request] = await shared!.admin<Array<{ status: string }>>`
+      select status from session_human_input_requests where id = ${requestId}`;
+    expect(request?.status).toBe("pending");
+    const refusal = value.slack.postAttempts.at(-1)!;
+    expect(refusal.threadTimestamp).toBe(rootTimestamp);
+    expect(refusal.text).toContain("can only be answered in Opengeni");
+    expect(refusal.text).not.toContain(pasted);
+  }, 60_000);
+
   test("ordinary Slack triggers retain sessions:create-only authorization", async () => {
     if (!available) return;
     const value = await fixture({

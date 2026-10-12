@@ -1,4 +1,4 @@
-import type { RigInstructionsContext, WorkspaceEnvironmentContext } from "../types";
+import type { RigInstructionsContext } from "../types";
 import { blocks, sentences, toolAvailable, type AgentPromptModule } from "../types";
 
 /**
@@ -12,34 +12,6 @@ export function rigInstructions(rig: RigInstructionsContext): string[] {
     "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
   ];
 }
-
-/** Workspace environment lines (metadata only). Shared with the legacy CORE. */
-export function workspaceEnvironmentInstructions(
-  environment: WorkspaceEnvironmentContext,
-): string[] {
-  const lines = [
-    `A workspace environment named "${environment.name}" is attached to this session; its variables are exported in the sandbox shell environment.`,
-  ];
-  const variableNames = (environment.variableNames ?? []).filter((name) => name.length > 0);
-  if (variableNames.length > 0) {
-    lines.push(`Exported environment variables: ${[...variableNames].sort().join(", ")}.`);
-  }
-  const description = environment.description?.trim();
-  if (description) {
-    lines.push(`Environment notes from the operator: ${description}`);
-  }
-  return lines;
-}
-
-export const workspaceEnvironmentModule: AgentPromptModule = {
-  id: "workspace_environment",
-  applies: (context) => context.resources.workspaceEnvironment !== undefined,
-  render: (context) =>
-    blocks(
-      "# Workspace environment",
-      sentences(...workspaceEnvironmentInstructions(context.resources.workspaceEnvironment!)),
-    ),
-};
 
 /**
  * The rig lines naming rig tools appear only when workspace admin tools are

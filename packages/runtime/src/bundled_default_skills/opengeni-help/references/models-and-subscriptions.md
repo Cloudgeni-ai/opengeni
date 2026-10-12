@@ -88,7 +88,10 @@ Connecting accounts:
 - Codex and SuperGrok use device sign-in. Start it with the account's connect
   start action, give the person the code and the link, and poll the matching
   action until it reports connected or expired. The person signs in with their
-  own provider account; never ask for a password.
+  own provider account. Never ask for their model-provider password or keys;
+  they enter provider API keys and setup tokens in the settings page
+  themselves. For credentials to other services, follow the `opengeni-secrets`
+  Skill when it is available.
 - Claude sign-in is tied to the person's browser. Send them to the Claude
   account page, or use a setup token they create and paste in themselves.
 

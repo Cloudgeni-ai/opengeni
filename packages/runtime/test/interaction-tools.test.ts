@@ -52,6 +52,30 @@ describe("interaction attempt tools", () => {
     expect(act.description).toContain("artifact.artifactId returned by sandbox_file_publish");
   });
 
+  test("login tools tell the model to sign in itself and hand off only physical steps", () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_auth", "interaction_request_human"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({}),
+    });
+    const description = (name: string) =>
+      definitions.find((definition) => definition.modelName === `interaction__${name}`)!
+        .description;
+    const auth = description("browser_auth");
+    expect(auth).toContain("Reuse a saved sign-in, the first rung of the login ladder");
+    expect(auth).toContain("sign in yourself");
+    expect(auth).toContain("solve CAPTCHAs yourself");
+    expect(auth).not.toContain(
+      "If an operation returns needs_human, call interaction_request_human",
+    );
+    const human = description("interaction_request_human");
+    expect(human).toContain("a push approval on their phone, a hardware security key");
+    expect(human).toContain("never hand over a CAPTCHA or a step you can do");
+    expect(human).not.toContain("login/MFA handoffs");
+  });
+
   test("native platform alternatives admit Linux arguments and retain the session boundary", async () => {
     let calls = 0;
     const definitions = createInteractionAttemptToolDefinitions({

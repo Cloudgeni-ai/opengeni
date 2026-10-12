@@ -24,6 +24,7 @@ import {
   ToolGatewayApprovalResponse,
   ToolGatewayDeclarationsResponse,
   toolPolicyActionName,
+  isSecretReferenceError,
   type AccessGrant,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
@@ -98,6 +99,10 @@ import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
+import {
+  withSiteSecretContext,
+  workspaceGatewaySecretArguments,
+} from "./workspace-tool-gateway-secrets";
 import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
 import {
   digestWorkspaceToolGatewayCatalogEntry,
@@ -935,6 +940,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       localMcpServers,
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {
+        resolveArguments: workspaceGatewaySecretArguments({
+          db: routeDeps.db,
+          settings: gatewaySettings,
+          grant,
+        }),
         mapDefinition: (definition) => {
           // Raw/local providers have no native credential revision. The legacy
           // gateway fallback binds the whole public catalog, including Ask/Allow
@@ -1267,9 +1277,13 @@ export async function callWorkspaceToolGateway(
         ? await resolveOrigin(db, grant, siteContext.siteArtifactId, siteContext.siteVersionId)
         : null;
     await prepared.reauthorize?.();
-    const result = await (origin
-      ? withSiteSessionOrigin(origin, () => preparedCall.execute())
-      : preparedCall.execute());
+    // Secret references in a Site call resolve with the viewer's reach.
+    const secretContext = siteContext
+      ? { siteId: siteContext.siteArtifactId, siteVersion: siteContext.siteVersionId }
+      : null;
+    const result = await withSiteSecretContext(secretContext, () =>
+      origin ? withSiteSessionOrigin(origin, () => preparedCall.execute()) : preparedCall.execute(),
+    );
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,
@@ -1401,6 +1415,23 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   }
   if (error instanceof ToolGatewayBlockedError) {
     throw new HTTPException(403, { message: error.code, cause: error });
+  }
+  if (isSecretReferenceError(error)) {
+    // Nothing ran. The failures name references, never values.
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      retryable: false,
+      details: {
+        code: error.code,
+        failures: error.failures.map((failure) => ({
+          raw: failure.raw,
+          code: failure.code,
+          message: failure.message,
+          ...(failure.candidates ? { candidates: failure.candidates } : {}),
+        })),
+      },
+    });
   }
   if (error instanceof IntegrationInvocationError && error.outcome === "unknown") {
     throw new ApiHttpError(502, {

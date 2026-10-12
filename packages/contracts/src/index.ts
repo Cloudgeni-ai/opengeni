@@ -983,6 +983,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "secret_search",
+  "secret_save",
+  "secret_get",
+  "secret_move",
+  "secret_delete",
   "variable_set_list",
   "environment_list",
   "variable_set_get_variable",
@@ -1126,6 +1131,27 @@ export const RETIRED_AGENT_LEARNING_TOOL_NAMES = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredLearningTools = new Set<FirstPartyMcpToolName>(RETIRED_AGENT_LEARNING_TOOL_NAMES);
 
+/**
+ * Variable-set tools replaced by the `secret_*` tools (vaults). Stored tool
+ * selections naming them still parse and select their successor; the remote
+ * server never registers them.
+ */
+export const RETIRED_SECRET_TOOL_NAMES = [
+  "variable_set_list",
+  "environment_list",
+  "variable_set_get_variable",
+  "variable_set_set_variable",
+  "environment_set_variable",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredSecretTools = new Set<FirstPartyMcpToolName>(RETIRED_SECRET_TOOL_NAMES);
+const RETIRED_SECRET_TOOL_SUCCESSORS = {
+  variable_set_list: "secret_search",
+  environment_list: "secret_search",
+  variable_set_get_variable: "secret_get",
+  variable_set_set_variable: "secret_save",
+  environment_set_variable: "secret_save",
+} as const satisfies Record<(typeof RETIRED_SECRET_TOOL_NAMES)[number], FirstPartyMcpToolName>;
+
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
   names: readonly FirstPartyMcpToolName[],
@@ -1148,10 +1174,15 @@ export function currentAgentLearningToolSelection(
     selected.add("instruction_policy_save");
     selected.add("instruction_policy_get");
   }
+  for (const [retired, successor] of Object.entries(RETIRED_SECRET_TOOL_SUCCESSORS)) {
+    if (selected.has(retired as FirstPartyMcpToolName)) selected.add(successor);
+  }
   // Only already-selected legacy confirmations survive for paused turn recovery.
   // New defaults never advertise this tool and it cannot create proposals.
   return [...selected].filter(
-    (name) => name === "remember_confirm" || !retiredLearningTools.has(name),
+    (name) =>
+      name === "remember_confirm" ||
+      (!retiredLearningTools.has(name) && !retiredSecretTools.has(name)),
   );
 }
 
@@ -1162,6 +1193,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "atlassian_search",
   "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
+  ...RETIRED_SECRET_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1226,6 +1258,7 @@ export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<s
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     !retiredLearningTools.has(name) &&
+    !retiredSecretTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -17342,18 +17375,19 @@ export const HumanInputSecretSpec = z
     fieldKind: z.enum(["concealed", "totp", "text"]).default("concealed"),
     itemType: z.enum(["login", "api_key", "note"]).default("login"),
     username: z
-      .object({ prompt: z.string().max(200), value: z.string().max(512).optional() })
+      .object({ prompt: z.string().max(200), value: z.string().max(512).nullable().optional() })
       .strict()
+      .nullable()
       .optional(),
-    website: z.string().max(2_048).optional(),
-    looksLike: z.string().max(80).optional(),
+    website: z.string().max(2_048).nullable().optional(),
+    looksLike: z.string().max(80).nullable().optional(),
     /** Soft client-side warning only. */
-    pattern: z.string().max(200).optional(),
+    pattern: z.string().max(200).nullable().optional(),
     saveTo: z.enum(["user", "task", "workspace"]).default("user"),
     /** Hosted vault in the saveTo scope (Q-05). */
-    vault: VaultName.optional(),
+    vault: VaultName.nullable().optional(),
     allowGenerate: z.boolean().default(false),
-    generate: GeneratePasswordSpec.optional(),
+    generate: GeneratePasswordSpec.nullable().optional(),
     autocomplete: z
       .enum(["current-password", "new-password", "one-time-code", "off"])
       .default("current-password"),
@@ -17406,8 +17440,8 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
       // A real review reference still requires every authority-bearing field.
       skillReview: SkillReviewReference.nullable().optional(),
       options: z.array(HumanInputOption).max(20).default([]),
-      /** Required exactly when `kind` is "secret". */
-      secret: HumanInputSecretSpec.optional(),
+      /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
+      secret: HumanInputSecretSpec.nullable().optional(),
       required: z.boolean().default(true),
       // Retained on the wire for older hosts. Opengeni's stock runtime and
       // surfaces always expose Other for choice questions, including requests
@@ -17433,28 +17467,18 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
         });
       }
       if (question.kind === "secret") {
-        if (question.secret === undefined) {
+        if (question.secret == null) {
           ctx.addIssue({
             code: "custom",
             path: ["secret"],
             message: "secret questions require a secret spec",
           });
         }
-        if (question.options.length > 0) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["options"],
-            message: "secret questions cannot have options",
-          });
-        }
-        if (question.allowOther) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["allowOther"],
-            message: "secret questions do not use Other",
-          });
-        }
-      } else if (question.secret !== undefined) {
+        // Options and Other mean nothing for a secret. Strict tool schemas make
+        // models send them anyway, so they are tolerated here and dropped when
+        // the request is persisted (`normalizeSecretQuestion`), never failing
+        // the turn.
+      } else if (question.secret != null) {
         ctx.addIssue({
           code: "custom",
           path: ["secret"],
@@ -17559,6 +17583,13 @@ export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSch
   }),
 );
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
+
+/** Secret questions never carry options or Other; drop what a model sent. */
+export function normalizeSecretQuestion<
+  T extends { kind: string; options: unknown[]; allowOther: boolean },
+>(question: T): T {
+  return question.kind === "secret" ? { ...question, options: [], allowOther: false } : question;
+}
 
 export const HumanInputAnswer = z.object({
   questionId: z.string().min(1).max(64),

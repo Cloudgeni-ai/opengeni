@@ -43,7 +43,7 @@ are outside it, so the agent uses the shell and filesystem directly.
 
 With `capabilities: "all"`, renderer `opengeni`, and every resource present
 (managed sandbox, Connected Machine, repositories, Git credentials, attachments,
-workspace environment, rig), the modular text says exactly what the legacy
+workspace environment, rig, secret references), the modular text says exactly what the legacy
 contract, default template, and CORE say, sentence for sentence, except for the
 edits listed in the `diff` blocks below. `test/agent-instructions/prompt-legacy-diff.test.ts`
 splits both texts into sentences (headings and list markers are layout, not
@@ -72,9 +72,10 @@ Composition order (each part separated by a blank line):
      Connected Machine is attached, because `command_read`/`command_wait` are
      withheld from a turn without compute.
    - Conditional modules, in this order: `renderer_markdown`, `sandbox`,
-     `connected_machine`, `repositories`, `workspace_environment`, `rig`,
-     `artifacts`, `media`, `goals`, `subagents`, `knowledge`, `skills`, `admin`,
-     `attachments` (last because it varies per turn).
+     `connected_machine`, `repositories`, `rig`, `artifacts`, `media`, `goals`,
+     `subagents`, `knowledge`, `skills`, `secrets`, `admin`, `attachments`
+     (last because it varies per turn). The `workspace_environment` id stays in
+     the contracts so stored inspector snapshots parse, but nothing renders it.
 3. Attempt directives, unchanged text: Codemode, code search, Git credential
    bindings.
 4. Skill index (only when it is not delivered in history).
@@ -107,8 +108,9 @@ Headings that moved or were added (layout only, not diffed):
 - The default template's lines moved to their modules: identity, final answer,
   `# Working in the sandbox`, `# Repositories and Git`, `# Attached files`,
   `# Using skills`.
-- CORE's environment and rig blocks became `# Workspace environment` and
-  `# Sandbox environment`.
+- CORE's rig block became `# Sandbox environment`. CORE's workspace
+  environment block has no modular counterpart (see "Workspace environment
+  retired").
 
 ## Sentence edits (modular "all" vs legacy)
 
@@ -202,6 +204,61 @@ result.
 + Do not resend pending work or mistake acceptance for completion.
 ```
 
+Variable sets retired. Secrets now live in vaults and are used by reference
+from any session, so there is nothing to attach and no `variable_set_list`
+tool. Integration setup discovery starts at the capability catalog, and the
+child-session Variable Set workaround is gone. The legacy prompt is locked and
+keeps its text.
+
+```diff
+- If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.
+- A session cannot gain a Variable Set while it works, so when even a short step needs one from `variable_set_list` that this session lacks and the request calls for it, run that step in a child created with those `variableSetIds` instead of asking the user to attach it.
++ If access is missing, search `capability_catalog_search`.
+```
+
+Workspace environment retired. Vaults replace variable sets and environment
+export is gone: secrets are written as references where they are used, so no
+variables are exported into the shell and the modular prompt no longer names an
+attached environment, its variable names, or its operator notes. The
+`workspace_environment` module is deleted; `workspaceEnvironmentInstructions`
+survives only for the locked legacy CORE (`legacy-environment.ts`).
+
+```diff
+- A workspace environment named "prod" is attached to this session; its variables are exported in the sandbox shell environment.
+- Exported environment variables: API_URL, DEPLOY_KEY.
+- Environment notes from the operator: Use DEPLOY_KEY for deploys.
+```
+
+Secrets. New `secrets` module (capability `secrets`, rendered only once the
+runtime resolves references for the attempt). Models are naturally cautious
+with credentials and stall on logins, so the block explicitly grants autonomy:
+use references everywhere they execute, follow the login ladder (saved
+session, saved login plus TOTP, enroll the agent's own 2FA, email or SMS codes
+through connected tools, create the account with a generated password when
+account creation is allowed), always solve CAPTCHAs, never ask for secret
+values in chat, use the ready ask card from a missing-secret error, and hand
+the browser over only for push approvals or hardware keys. It is at most six
+lines under its heading; playbooks live in the `opengeni-secrets` Skill. Clause
+gating: the `secret_search` sentence and the Skill pointer need
+`secret_search` (the Skill pointer also needs Skills); the 2FA-enrollment and
+account-creation rungs need `secret_save`; the ask-card sentence needs the
+`humanInput` capability; the handoff line needs `interaction_request_human`.
+Integration setup gains one sentence, with `secrets` and `humanInput` both on,
+so "never request credentials in chat" comes with the supported alternative.
+
+```diff
++ Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).
++ Write them directly in shell commands, browser typing, files and tool calls; they resolve only where they execute and stay references everywhere else, so use them freely.
++ Find saved items and their ready references with `secret_search`.
++ Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.
++ Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.
++ Never ask for passwords, keys or codes in chat or in a plain text question.
++ Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.
++ Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.
++ For playbooks, read the `opengeni-secrets` skill.
++ For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.
+```
+
 ## Conditional variants (capability or resource absent)
 
 These sentences replace or drop a legacy sentence only when the named
@@ -218,8 +275,8 @@ unchanged.
   sentence and the goal document-deliverable bullet are omitted.
 - `subagents` off: in-flight examples read "(a command or a timed recheck)";
   Integration setup drops "(see Session coordination)".
-- `workspaceAdmin` off: the child Variable Set sentence and the rig
-  `rig_propose_change`/`rig_get` sentences are omitted.
+- `workspaceAdmin` off: the rig `rig_propose_change`/`rig_get` sentences are
+  omitted.
 - Managed sandbox only: "Use the active workspace path exactly as exposed to
   you. Managed sandboxes normally use `/workspace`."
 - Connected Machine only: "… A Connected Machine uses its host-native workspace
@@ -269,12 +326,11 @@ When a named tool is proven absent, only the clauses naming it change:
   or `instruction_policy_save` is narrowed or dropped; the "Before saving"
   paragraph and "Save a separate finding" need `knowledge_save`. Storage
   purpose, grounding, pending-entry, learning-mode, and authority rules stay.
-- Integration setup: the `variable_set_list`/`capability_catalog_search`
-  discovery sentence names what remains; the two setup-card sentences and the
+- Integration setup: the `capability_catalog_search` discovery sentence
+  needs its tool; the two setup-card sentences and the
   card follow-ups need their tools.
 - Session coordination: the `session_events` paragraph, the
-  `session_send_message` follow-up clause, the child Variable Set sentence
-  (`variable_set_list`, `session_create`), the `wait_for_input` long-wait and
+  `session_send_message` follow-up clause, the `wait_for_input` long-wait and
   `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
   and the `session_get` contrasts each need their tools.
 - Runtime mechanics and base behavior: without `wait_for_input` the in-flight
@@ -289,6 +345,11 @@ When a named tool is proven absent, only the clauses naming it change:
   an inline image source."
 - Sandbox environment: the `rig_propose_change` and `rig_get` sentences need
   their tools.
+- Secrets: the `secret_search` sentence and the Skill pointer need
+  `secret_search`; the 2FA-enrollment and account-creation rungs of the login
+  ladder need `secret_save`; the push-approval and hardware-key handoff line
+  needs `interaction_request_human`. The reference, CAPTCHA and never-ask
+  rules stay.
 
 Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
 continuation input, and the Codemode/code-search/Git-binding attempt
@@ -315,7 +376,7 @@ preferences are saved in the same turn with `skill_save` or
 `instruction_policy_save` without an approval question. Each clause renders
 only while its tool may be available. Off, every prompt is byte-identical.
 Opt-in experiment `OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT` (default off):
-the workspace environment, sandbox environment and attachment modules render
+the sandbox environment and attachment modules render
 after every other contract module, so the session-independent prefix (identity,
 contract, Codemode/code-search directives) is shared across workspaces. Turning
 it on changes live sessions' prompt order once (one cache miss each). Off, every

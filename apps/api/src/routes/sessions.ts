@@ -3,6 +3,7 @@ import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-comma
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
@@ -102,7 +103,6 @@ import {
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
-  UpdateSessionVariableSetsRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
@@ -135,7 +135,8 @@ import {
   type TerminalPtyExitedPayload,
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
-  type VariableSet,
+  type VaultApiError,
+  VAULT_ERROR_HTTP_STATUS,
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
@@ -179,7 +180,6 @@ import {
   recordStreamAcknowledgment,
   requestSessionCompaction,
   setSessionChannel,
-  updateSessionVariableSets,
   ChannelNotFoundError,
   setSessionAttention,
   setSessionArchive,
@@ -344,9 +344,13 @@ import {
   workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyContext,
   relayConfigFromSettings,
-  validateVariableSetAttachment,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
+import {
+  humanSecretWriteContext,
+  prepareSecretAnswers,
+  splitSecretAnswers,
+} from "../secret-answers";
 import { browserSseDeliveryOptions, sseSessionStream } from "../http/sse";
 import {
   serveWorkspaceCapture,
@@ -686,6 +690,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
+      const legacyFields = legacyVariableSetFields(payload);
+      if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
+      payload = withoutEmptyLegacyVariableSetFields(payload);
       CreateSessionRequest.parse(payload);
       const origin = await measureSessionCreatePhase(deps.observability, "site_origin", () =>
         resolveSiteSessionOrigin(
@@ -2468,89 +2475,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
-  // Replace the complete ordered Variable Set selection. The DB mutation
-  // serializes with turn claim, rejects live/shared sandbox use, and requests a
-  // cold rotation before the new environment can be materialized.
+  // Variable Sets were replaced by vaults. The route answers 410 so old
+  // clients learn where secrets moved instead of silently doing nothing.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    try {
-      await requireSessionAuthorization(deps, grant, {
-        sessionId,
-        operation: "session.variable_sets.write",
-        surface: "http",
-      });
-    } catch (error) {
-      throw sessionAuthorizationHttpError(error);
-    }
-    // Detach still requires attach authority: it changes which protected
-    // resources the session may materialize. Non-empty selections additionally
-    // require use authority through validateVariableSetAttachment.
-    requirePermission(grant, "variable-sets:attach");
-    const parsed = UpdateSessionVariableSetsRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new ApiHttpError(422, {
-        code: "validation_failed",
-        message: "Invalid session Variable Set request.",
-        retryable: false,
-        details: { fields: zodErrorFields(parsed.error) },
-      });
-    }
-    const variableSets: VariableSet[] = [];
-    for (const variableSetId of parsed.data.variableSetIds) {
-      variableSets.push(
-        await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
-      );
-    }
-    const result = await updateSessionVariableSets(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-      subjectId: grant.subjectId,
-      variableSets: variableSets.map((variableSet) => ({
-        id: variableSet.id,
-        name: variableSet.name,
-        scope: variableSet.scope,
-      })),
-    });
-    if (result.status === "not_found") {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    if (result.status === "invalid_variable_sets") {
-      throw new ApiHttpError(422, {
-        code: "validation_failed",
-        message: "One or more selected Variable Sets are no longer available.",
-        retryable: false,
-        outcomeUnknown: false,
-        details: { variableSetIds: result.variableSetIds },
-      });
-    }
-    if (result.status === "blocked") {
-      const messages = {
-        turn_in_flight:
-          "Variable Sets can be changed only when the session has no accepted, queued, claimed, or pending work.",
-        shared_sandbox_group:
-          "Variable Sets cannot be changed while this session shares a sandbox; fork it into a separate session first.",
-        live_sandbox_holders:
-          "Close active terminal, desktop, and sandbox operations before changing Variable Sets.",
-      } as const;
-      throw new HTTPException(409, { message: messages[result.reason] });
-    }
-    if (result.status === "updated") {
-      await publishDurableSessionEvents(bus, workspaceId, sessionId, [result.event]);
-    }
-    const session = await getSessionForSubject(
-      db,
-      workspaceId,
-      sessionId,
-      grant.subjectId,
-      relatedSessionAccessFor(c),
-    );
-    if (!session) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    return variableSetsRemovedResponse(c, 410);
   });
 
   // Manual rename. A user-set title is permanent: the db write is
@@ -4039,14 +3969,32 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
 
     if (event.type === "user.humanInputResponse") {
+      // Secret values are write-only: split them off before anything else sees
+      // the response, generate/encrypt them, and let the accept transaction
+      // write them to vaults. The stored response and event get references.
+      const { response, secretAnswers: rawSecretAnswers } = splitSecretAnswers(
+        event.payload.response,
+        event.payload.secretAnswers,
+      );
       let accepted;
       try {
+        const secretAnswers = prepareSecretAnswers(settings, rawSecretAnswers, "human");
         accepted = await acceptSessionHumanInputResponse(db, {
           accountId: grant.accountId,
           workspaceId,
           sessionId,
           requestId: event.payload.requestId,
-          response: event.payload.response,
+          response,
+          ...(secretAnswers.length
+            ? {
+                secretAnswers,
+                secretWriteContext: humanSecretWriteContext({
+                  accountId: grant.accountId,
+                  workspaceId,
+                  subjectId: grant.subjectId,
+                }),
+              }
+            : {}),
           respondedBy: grant.subjectId,
           canonicalHumanSession:
             authorization.canonicalManagedHumanSession ||
@@ -4079,6 +4027,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               message: error.message,
             },
           );
+        }
+        const vaultError = isVaultError(error) ? error : vaultErrorFromDatabase(error);
+        if (vaultError) {
+          const body: VaultApiError = {
+            error: vaultError.code,
+            message: vaultError.message,
+            ...(vaultError.details ? { details: vaultError.details } : {}),
+          };
+          return c.json(body, VAULT_ERROR_HTTP_STATUS[vaultError.code] as ContentfulStatusCode);
         }
         throw error;
       }
@@ -6188,6 +6145,56 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
     return undefined;
   }
   return Math.floor(sequence);
+}
+
+const VARIABLE_SETS_REMOVED_MESSAGE =
+  "Variable Sets were replaced by vaults. Save secrets with /v1/workspaces/{workspaceId}/vaults and choose a session's vaults with PUT /sessions/{sessionId}/vault-policy.";
+
+/** The RM-1 answer for legacy Variable Set routes (410) and fields (422). */
+function variableSetsRemovedResponse(
+  c: Context,
+  status: 410 | 422,
+  fields?: readonly string[],
+): Response {
+  const body: VaultApiError = {
+    error: "variable_sets_removed",
+    message: VARIABLE_SETS_REMOVED_MESSAGE,
+    details: { vaultsPath: "/vaults", ...(fields?.length ? { fields: [...fields] } : {}) },
+  };
+  return c.json(body, status);
+}
+
+/**
+ * Legacy selection fields that still carry a choice. Empty arrays and null
+ * mean "no Variable Sets" and stay accepted so old clients keep working.
+ */
+export function legacyVariableSetFields(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const record = payload as Record<string, unknown>;
+  const fields: string[] = [];
+  const ids = record.variableSetIds;
+  if (ids !== undefined && ids !== null && !(Array.isArray(ids) && ids.length === 0)) {
+    fields.push("variableSetIds");
+  }
+  for (const field of ["variableSetId", "environmentId"] as const) {
+    if (record[field] !== undefined && record[field] !== null) fields.push(field);
+  }
+  return fields;
+}
+
+/**
+ * Old clients send `variableSetId: null` / `environmentId: null` to mean "no
+ * Variable Sets". The create schema only takes the array form, so translate the
+ * accepted empty legacy fields to it. Call after {@link legacyVariableSetFields}.
+ */
+export function withoutEmptyLegacyVariableSetFields(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const record = payload as Record<string, unknown>;
+  if (!Object.hasOwn(record, "variableSetId") && !Object.hasOwn(record, "environmentId")) {
+    return payload;
+  }
+  const { variableSetId: _variableSetId, environmentId: _environmentId, ...rest } = record;
+  return { ...rest, variableSetIds: rest.variableSetIds ?? [] };
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
