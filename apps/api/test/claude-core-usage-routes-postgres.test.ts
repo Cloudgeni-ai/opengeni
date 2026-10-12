@@ -39,8 +39,14 @@ const CLAUDE = subscriptionCoreClaudeProvider({
 for (const [specifier, factory] of testSubscriptionCoreProviderModules(CLAUDE))
   mock.module(specifier, factory);
 
-const { createDb, bootstrapWorkspace, createManagedOrganization, createOrganizationWorkspace } =
-  await import("@opengeni/db");
+const {
+  createDb,
+  bootstrapWorkspace,
+  createManagedOrganization,
+  createOrganizationWorkspace,
+  createOrganizationInvitation,
+  acceptOrganizationInvitation,
+} = await import("@opengeni/db");
 const { stampDelegatedHumanAuthorization } = await import("@opengeni/core");
 const { createApp } = await import("../src/app");
 type DbClient = Awaited<ReturnType<typeof createDb>>;
@@ -431,8 +437,8 @@ describe("the owner's personal connection on the core route", () => {
     } as never);
   }
 
-  /** A person signed in through the browser, owning a new organization. */
-  async function signedInOwner(api: ReturnType<typeof managedApp>) {
+  /** A person signed up and signed in through the browser. */
+  async function signedInPerson(api: ReturnType<typeof managedApp>) {
     const email = `claude-usage-${crypto.randomUUID()}@example.test`;
     const password = "password1234";
     await api.request("/v1/auth/sign-up/email", {
@@ -452,7 +458,12 @@ describe("the owner's personal connection on the core route", () => {
       .split(";", 1)[0]!;
     const [user] = await shared.admin<{ id: string }[]>`
       select id from auth_users where email = ${email}`;
-    const subjectId = `user:${user!.id}`;
+    return { email, cookie, subjectId: `user:${user!.id}` };
+  }
+
+  /** A person signed in through the browser, owning a new organization. */
+  async function signedInOwner(api: ReturnType<typeof managedApp>) {
+    const { email, cookie, subjectId } = await signedInPerson(api);
     const created = await createManagedOrganization(client.db, {
       subjectId,
       subjectLabel: email,
@@ -515,17 +526,64 @@ describe("the owner's personal connection on the core route", () => {
       );
       expect(response.status).toBe(404);
     }
-    // Another organization's signed-in owner cannot reach it.
-    const stranger = await signedInOwner(api);
-    for (const method of ["GET", "POST"] as const) {
+    const refusal = async (
+      method: "GET" | "POST",
+      headers: Record<string, string>,
+    ): Promise<{ status: number; message: string | undefined }> => {
       const response = await api.request(
         `${usagePath(org.personalWorkspaceId)}${method === "POST" ? "/refresh" : ""}`,
-        method === "POST"
-          ? { method, headers: { ...browser, cookie: stranger.cookie }, body: "{}" }
-          : { headers: { ...browser, cookie: stranger.cookie } },
+        method === "POST" ? { method, headers, body: "{}" } : { headers },
       );
-      expect(response.status).toBeGreaterThanOrEqual(403);
-      expect(response.status).toBeLessThan(500);
+      const body = (await response.json()) as { error?: { message?: string } };
+      return { status: response.status, message: body.error?.message };
+    };
+    // Another organization's signed-in owner cannot reach it.
+    const stranger = await signedInOwner(api);
+    // A signed-in member of the same organization cannot reach it either.
+    const member = await signedInPerson(api);
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.ownerSubjectId,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: member.subjectId,
+      targetEmail: member.email,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    await acceptOrganizationInvitation(client.db, {
+      organizationId: org.accountId,
+      actorSubjectId: member.subjectId,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: invitation.revision,
+    });
+    // A plain signed bearer naming the owner is not a verified owning user.
+    const ownerBearer = await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId: org.accountId,
+      workspaceId: org.personalWorkspaceId,
+      subjectId: org.ownerSubjectId,
+      permissions: adminPermissions,
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    for (const method of ["GET", "POST"] as const) {
+      expect(await refusal(method, { ...browser, cookie: stranger.cookie })).toEqual({
+        status: 403,
+        message: "workspace access denied",
+      });
+      expect(await refusal(method, { ...browser, cookie: member.cookie })).toEqual({
+        status: 403,
+        message: "workspace access denied",
+      });
+      expect(
+        await refusal(method, {
+          authorization: `Bearer ${ownerBearer}`,
+          "content-type": "application/json",
+        }),
+      ).toEqual({
+        status: 403,
+        message: "Private Claude accounts require a verified owning user",
+      });
     }
 
     // The owner, in their own Personal workspace: GET projects the stored

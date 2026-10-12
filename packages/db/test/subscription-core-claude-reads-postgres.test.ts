@@ -696,6 +696,57 @@ describe("on the Claude core route", () => {
     expect(down.calls).toHaveLength(3);
   });
 
+  test("past 30 seconds on the injected clock the provider is read again", async () => {
+    resetSubscriptionCoreClaudeUsageThrottle();
+    const org = await organization();
+    await setCutover(org, true);
+    const scope = {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const clock = { at: Date.now() };
+    const refresh = async (connectionId: string, fetchImpl: typeof fetch) =>
+      (
+        await refreshSubscriptionCoreClaudeWorkspaceUsage(
+          client.db,
+          settings,
+          {
+            ...scope,
+            target: (await readSubscriptionCoreClaudeWorkspaceUsageTarget(client.db, {
+              ...scope,
+              accountIdParam: connectionId,
+            }))!,
+          },
+          { fetchImpl, now: () => clock.at },
+        )
+      ).usage;
+
+    // After a remembered failure.
+    const down = scriptedUsage(() => new Response("down", { status: 503 }));
+    const failing = await sharedConnection(org, "clock-failing");
+    expect((await refresh(failing, down.fetchImpl)).refreshStatus).toBe("unavailable");
+    clock.at += 29_000;
+    expect((await refresh(failing, down.fetchImpl)).refreshStatus).toBe("unavailable");
+    expect(down.calls).toHaveLength(1);
+    clock.at += 2_000;
+    expect((await refresh(failing, down.fetchImpl)).refreshStatus).toBe("unavailable");
+    expect(down.calls).toHaveLength(2);
+
+    // After a stored reading: its freshness is the stored observation time
+    // (the real clock) against the injected one.
+    clock.at = Date.now();
+    const upstream = scriptedUsage(() => Response.json({ five_hour: { utilization: 20 } }));
+    const reading = await sharedConnection(org, "clock-reading");
+    expect((await refresh(reading, upstream.fetchImpl)).refreshStatus).toBe("available");
+    expect((await refresh(reading, upstream.fetchImpl)).refreshStatus).toBe("available");
+    expect(upstream.calls).toHaveLength(1);
+    clock.at = Date.now() + 31_000;
+    const later = await refresh(reading, upstream.fetchImpl);
+    expect(upstream.calls).toHaveLength(2);
+    expect(later.refreshStatus).toBe("available");
+  });
+
   test("a reading the core did not record is reported unavailable", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();

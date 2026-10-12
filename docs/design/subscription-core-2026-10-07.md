@@ -4866,9 +4866,16 @@ core read before C3 fails closed in the registry.
   marks it exhausted), where legacy showed null for every usage-endpoint
   window. A reconnect keeps the stored windows, now under the new
   `credentialVersion` (the row version moves on reconnect), until the next
-  reading: a reconnect cannot change the connection's provider identity,
-  so those windows still describe the same account. All four are
-  display-only and fail toward showing a newer check or a stricter state.
+  reading. For a verified identity (an account uuid) a reconnect cannot
+  change the connection's provider identity, so those windows still
+  describe the same account. For an unverified identity (`setup:` or
+  `oauth:` without an account uuid, which C2b's reconnect identity keeps
+  unchanged) a setup-token reconnect may bring another account's token, so
+  the stored windows may describe the previous token's account until the
+  next reading, which then comes from response headers (setup tokens never
+  read the usage endpoint). Keeping them is still accepted: it is
+  display-only and the stricter choice. All four are display-only and fail
+  toward showing a newer check or a stricter state.
 - Visibility. Account ids resolve through the cutover aliases: shared ids
   through the generic resolver, personal ids only through the owner
   routine's `resolve` action (`manage_subscription_core_personal`, called
