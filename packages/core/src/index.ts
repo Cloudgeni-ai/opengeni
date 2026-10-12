@@ -111,7 +111,7 @@ export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";
 export * from "./domain/github-skill-source";
-export * from "./domain/environments";
+export * from "./domain/encryption-key";
 export * from "./domain/vaults";
 export * from "./rigs";
 export * from "./domain/automations";

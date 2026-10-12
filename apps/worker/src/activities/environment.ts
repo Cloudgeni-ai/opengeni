@@ -20,11 +20,7 @@ import {
 } from "@opengeni/contracts";
 import { personalGitHubRepositoryResources } from "@opengeni/core";
 import { mintSandboxCodemodeToken, type SandboxCodemodeAuthority } from "@opengeni/runtime/sandbox";
-import type { VariableSetForRun as WorkspaceEnvironmentForRun } from "@opengeni/db";
 import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
-
-// Variable Set metadata type, kept for the instruction view until W6 removes sets.
-export type { WorkspaceEnvironmentForRun };
 
 // §7.6 connection-credential provider — the run's workspace identity, threaded so the connection-credential
 // provider can be called with the run's tenant context AND so the workspace-scope cross-check

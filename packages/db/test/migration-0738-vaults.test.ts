@@ -1,3 +1,4 @@
+import { listLegacyVariableSets } from "./helpers/legacy-variable-sets";
 // Migration 0738: vaults. Variable sets of every scope (with renamed names,
 // collisions, revoked sets and a version-5 token) are staged on a database
 // migrated without 0738, then 0738 is applied alone. Every active set must
@@ -17,7 +18,6 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   ensureManagedAccessForUser,
-  listVariableSets,
   readVaultFieldCiphertext,
   resolveSecretReferenceCandidates,
   listVaultsForSubject,
@@ -227,7 +227,7 @@ test.skipIf(!realDb)(
     where variable.account_id = ${seeded.accountId}::uuid and variable_set.status = 'active'
     order by variable.id`;
     expect(before).toHaveLength(9);
-    const beforeSets = await listVariableSets(client!.db, {
+    const beforeSets = await listLegacyVariableSets(client!.db, {
       accountId: seeded.accountId,
       workspaceId: seeded.workspaceId,
       subjectId: seeded.member,
@@ -349,7 +349,7 @@ test.skipIf(!realDb)(
     });
 
     // Variable sets keep working alongside vaults.
-    const afterSets = await listVariableSets(client!.db, {
+    const afterSets = await listLegacyVariableSets(client!.db, {
       accountId: seeded.accountId,
       workspaceId: seeded.workspaceId,
       subjectId: seeded.member,

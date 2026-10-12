@@ -1,3 +1,9 @@
+import {
+  legacyVariableSetFields,
+  rejectLegacyVariableSetFields,
+  variableSetsRemovedResponse,
+  withoutEmptyLegacyVariableSetFields,
+} from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
@@ -1344,7 +1350,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const parsed = ForkSessionRequest.safeParse(await c.req.json().catch(() => null));
+    const forkLegacy = rejectLegacyVariableSetFields(c, await c.req.json().catch(() => null));
+    if ("response" in forkLegacy) return forkLegacy.response;
+    const parsed = ForkSessionRequest.safeParse(forkLegacy.payload);
     if (!parsed.success) {
       throw new ApiHttpError(422, {
         code: "validation_failed",
@@ -6145,56 +6153,6 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
     return undefined;
   }
   return Math.floor(sequence);
-}
-
-const VARIABLE_SETS_REMOVED_MESSAGE =
-  "Variable Sets were replaced by vaults. Save secrets with /v1/workspaces/{workspaceId}/vaults and choose a session's vaults with PUT /sessions/{sessionId}/vault-policy.";
-
-/** The RM-1 answer for legacy Variable Set routes (410) and fields (422). */
-function variableSetsRemovedResponse(
-  c: Context,
-  status: 410 | 422,
-  fields?: readonly string[],
-): Response {
-  const body: VaultApiError = {
-    error: "variable_sets_removed",
-    message: VARIABLE_SETS_REMOVED_MESSAGE,
-    details: { vaultsPath: "/vaults", ...(fields?.length ? { fields: [...fields] } : {}) },
-  };
-  return c.json(body, status);
-}
-
-/**
- * Legacy selection fields that still carry a choice. Empty arrays and null
- * mean "no Variable Sets" and stay accepted so old clients keep working.
- */
-export function legacyVariableSetFields(payload: unknown): string[] {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
-  const record = payload as Record<string, unknown>;
-  const fields: string[] = [];
-  const ids = record.variableSetIds;
-  if (ids !== undefined && ids !== null && !(Array.isArray(ids) && ids.length === 0)) {
-    fields.push("variableSetIds");
-  }
-  for (const field of ["variableSetId", "environmentId"] as const) {
-    if (record[field] !== undefined && record[field] !== null) fields.push(field);
-  }
-  return fields;
-}
-
-/**
- * Old clients send `variableSetId: null` / `environmentId: null` to mean "no
- * Variable Sets". The create schema only takes the array form, so translate the
- * accepted empty legacy fields to it. Call after {@link legacyVariableSetFields}.
- */
-export function withoutEmptyLegacyVariableSetFields(payload: unknown): unknown {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
-  const record = payload as Record<string, unknown>;
-  if (!Object.hasOwn(record, "variableSetId") && !Object.hasOwn(record, "environmentId")) {
-    return payload;
-  }
-  const { variableSetId: _variableSetId, environmentId: _environmentId, ...rest } = record;
-  return { ...rest, variableSetIds: rest.variableSetIds ?? [] };
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */

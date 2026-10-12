@@ -1,3 +1,4 @@
+import { rejectLegacyVariableSetFields } from "../http/variable-sets-removed";
 import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
@@ -197,7 +198,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const rawPayload = await readRequestJson(c);
+    const legacy = rejectLegacyVariableSetFields(c, await readRequestJson(c));
+    if ("response" in legacy) return legacy.response;
+    const rawPayload = legacy.payload;
     const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
     if (!parsedPayload.success) {
       throw new HTTPException(400, {
@@ -370,7 +373,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const taskId = c.req.param("taskId");
     const existing = await requireVisibleScheduledTask(db, grant, taskId);
     const previous = await captureScheduledTaskRestoreState(db, existing);
-    const rawPayload = await readRequestJson(c);
+    const legacy = rejectLegacyVariableSetFields(c, await readRequestJson(c));
+    if ("response" in legacy) return legacy.response;
+    const rawPayload = legacy.payload;
     const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
     if (!parsedPayload.success) {
       throw new HTTPException(400, {

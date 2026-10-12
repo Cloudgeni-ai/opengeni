@@ -1,3 +1,4 @@
+import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -23,7 +24,6 @@ import {
   configureChildLifecycleNotices,
   createDb,
   createSession,
-  createVariableSet,
   enqueueSessionTurn,
   ensureManagedAccessForUserWithOrganizationMemberships,
   failSessionWorkBeforeAttemptClaim,
@@ -94,7 +94,7 @@ async function managedWorkspaceWithPersonalVariableSet(): Promise<{
       ${membership.organizationId}, 1, ${"e".repeat(64)}, ${"f".repeat(64)},
       'child-read-acknowledgment'
     ) on conflict (account_id) do nothing`;
-  const variableSet = await createVariableSet(client.db, {
+  const variableSet = await createLegacyVariableSet(client.db, {
     accountId: membership.organizationId,
     workspaceId: membership.personalWorkspaceId,
     scope: "user",

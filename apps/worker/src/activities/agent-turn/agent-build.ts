@@ -77,7 +77,7 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
 import type { runtimeResourcesForTurn } from "./file-resources";
 import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
-import type { sandboxEnvironmentForRun, WorkspaceEnvironmentForRun } from "../environment";
+import type { sandboxEnvironmentForRun } from "../environment";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -138,7 +138,6 @@ export type BuildTurnAgentDeps = {
   rigName: GovernanceModelOk["rigName"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
-  workspaceVariableSet: WorkspaceEnvironmentForRun | null;
   runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
   sandboxEnvironment: Record<string, string>;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -206,7 +205,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     rigName,
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
-    workspaceVariableSet,
     runtimeResources,
     sandboxEnvironment,
     sandboxArtifactRuntime,
@@ -252,23 +250,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // resolved ONCE at turn start (above) via resolveActiveSandboxBackend (the
   // tested gate) and is reused here — resolving once is correct because the
   // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
-  // buildAgent's option key is `workspaceEnvironment` (internal runtime
-  // symbol; the product concept is a variable set). Built as a TYPED const —
-  // a direct literal assignment to Pick<BuildAgentOptions,...> IS excess-
-  // property-checked, so a wrong key fails tsc. A bare conditional spread
-  // inside the options literal is NOT checked, which is exactly how the M1
-  // key regression (workspaceVariableSet vs workspaceEnvironment) slipped
-  // through and silently dropped the variable-set instructions block.
-  const workspaceEnvironmentOption: Pick<BuildAgentOptions, "workspaceEnvironment"> =
-    workspaceVariableSet
-      ? {
-          workspaceEnvironment: {
-            name: workspaceVariableSet.name,
-            description: workspaceVariableSet.description,
-            variableNames: Object.keys(workspaceVariableSet.values),
-          },
-        }
-      : {};
   // Fallback mode (the default) keeps hosted search exactly as resolved; the
   // operator's `replace` mode withholds it in favour of provider tools.
   const hostedWebSearch = turnWebSearchPlan(
@@ -957,7 +938,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
         ...(sessionInstructions ? { sessionInstructions } : {}),
-        ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
         // hooks. All absent for a rig-less turn (byte-for-byte today).

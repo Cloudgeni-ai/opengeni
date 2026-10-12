@@ -64,7 +64,6 @@ import {
   getKnowledgeSourceForSyncAuthority,
   getNestedAgentDepthDeploymentPolicy,
   getRig,
-  getScheduledScopedRigVersionMetadata,
   getScheduledTask,
   getScheduledTaskIncludingDeletedForUpdate,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
@@ -121,7 +120,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIds,
 } from "./session-tool-policy";
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
-import { validateVariableSetAttachment } from "./environments";
+import { variableSetsRemovedError } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
@@ -315,6 +314,8 @@ export async function createValidatedScheduledTask(input: {
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<ScheduledTask> {
+  // Variable Sets were replaced by vaults (RM-1).
+  if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
   if (input.payload.runMode === "existing_session") {
     const target = await validateScheduledTaskTarget({
       ...input,
@@ -328,21 +329,11 @@ export async function createValidatedScheduledTask(input: {
       throw new HTTPException(422, {
         message: "Source ingestion requires a separate scheduled agent",
       });
-    if (input.payload.variableSetId && input.payload.variableSetId !== target?.variableSetId)
-      throw new HTTPException(422, {
-        message:
-          "Existing-chat schedules use the chat's Variable Sets. Change the chat's attachments separately.",
-      });
     if (input.payload.rigId && input.payload.rigId !== target?.rigId)
       throw new HTTPException(422, {
         message:
           "Existing-chat schedules use the chat's environment. Change the chat's attachments separately.",
       });
-    await requireScheduledMessageVariableSetUse({
-      db: input.db,
-      grant: input.grant,
-      target,
-    });
     input = {
       ...input,
       payload: {
@@ -444,23 +435,12 @@ export async function createValidatedScheduledTask(input: {
           : "workspace_shared",
     });
   }
-  if (input.payload.variableSetId) {
-    await validateVariableSetAttachment(
-      { settings: input.settings, db: input.db },
-      input.grant,
-      input.grant.workspaceId,
-      input.payload.variableSetId,
-    );
-  }
   // The rig is stored on the task and resolved to its ACTIVE version per fire
   // (at dispatch), so validate only that the id names a rig in the workspace —
   // NOT that it has an active version now (that is a fire-time concern). RLS
   // makes a cross-workspace id indistinguishable from missing → both 422.
-  // A generated session binds the environment and its default Variable Sets,
-  // so an explicit choice needs the same attachment authority as session
-  // create; an existing-session task only matches its target's environment.
   if (!knowledgeAction && input.payload.rigId) {
-    const rig = await requireScheduledTaskRig(
+    await requireScheduledTaskRig(
       input.db,
       {
         accountId: input.grant.accountId,
@@ -469,15 +449,6 @@ export async function createValidatedScheduledTask(input: {
       },
       input.payload.rigId,
     );
-    if (input.payload.runMode !== "existing_session") {
-      await requireScheduledTaskRigVariableSetAttachments({
-        settings: input.settings,
-        db: input.db,
-        grant: input.grant,
-        workspaceId: input.grant.workspaceId,
-        rig,
-      });
-    }
   }
   const rigId = knowledgeAction
     ? (input.payload.rigId ?? null)
@@ -1252,82 +1223,10 @@ async function resolveScheduledTaskCreateRigId(input: {
     defaultRigId,
   );
   if (!rig?.activeVersion) return null;
-  await requireScheduledTaskRigVariableSetAttachments({
-    settings: input.settings,
-    db: input.db,
-    grant: input.grant,
-    workspaceId: input.grant.workspaceId,
-    rig,
-  });
   return rig.id;
 }
 
 type ScheduledTaskRig = NonNullable<Awaited<ReturnType<typeof getRig>>>;
-
-/**
- * Binding a Sandbox Environment to generated sessions layers its active
- * version's default Variable Sets into every turn, so the task writer must be
- * allowed to attach each of them, exactly as session create requires. An
- * environment without an active version has nothing to check yet.
- */
-async function requireScheduledTaskRigVariableSetAttachments(input: {
-  settings: Settings;
-  db: Database;
-  grant: AccessGrant;
-  workspaceId: string;
-  rig: ScheduledTaskRig;
-}): Promise<void> {
-  for (const variableSetId of new Set(input.rig.activeVersion?.defaultVariableSetIds ?? [])) {
-    await validateVariableSetAttachment(
-      { settings: input.settings, db: input.db },
-      input.grant,
-      input.workspaceId,
-      variableSetId,
-    );
-  }
-}
-
-/** Message authority covers both direct sets and the environment's defaults. */
-async function requireScheduledMessageVariableSetUse(input: {
-  db: Database;
-  grant: AccessGrant;
-  target?: Session | null;
-  variableSetId?: string | null;
-  rigId?: string | null;
-}): Promise<void> {
-  if (hasPermission(input.grant.permissions, "variable-sets:use", input.grant.permissionMode))
-    return;
-  const directSets = input.target
-    ? Boolean(input.target.variableSetId || input.target.variableSetIds?.length)
-    : Boolean(input.variableSetId);
-  if (directSets) requirePermission(input.grant, "variable-sets:use");
-  const rigId = input.target ? input.target.rigId : input.rigId;
-  if (!rigId) return;
-  const access = {
-    accountId: input.grant.accountId,
-    workspaceId: input.grant.workspaceId,
-    subjectId: input.grant.subjectId,
-  };
-  let defaultVariableSetIds: string[];
-  if (input.target) {
-    // A chat rides its exact retained version. The rig's active version only
-    // determines defaults for newly generated chats.
-    if (!input.target.rigVersionId) return;
-    const pinned = await getScheduledScopedRigVersionMetadata(
-      input.db,
-      access,
-      rigId,
-      input.target.rigVersionId,
-    );
-    if (!pinned)
-      throw new HTTPException(409, { message: "Scheduled task chat environment is unavailable" });
-    defaultVariableSetIds = pinned.version.defaultVariableSetIds;
-  } else {
-    const rig = await requireScheduledTaskRig(input.db, access, rigId);
-    defaultVariableSetIds = rig.activeVersion?.defaultVariableSetIds ?? [];
-  }
-  if (defaultVariableSetIds.length) requirePermission(input.grant, "variable-sets:use");
-}
 
 // Validate a scheduled task's rig reference: it must name a rig in the
 // workspace. A missing/cross-workspace id is a 422 (RLS-invisible == missing).
@@ -1443,16 +1342,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       rigId: null,
       agentConfig: scheduledSessionMessageConfig(config),
     });
-    if (
-      input.payload.variableSetId &&
-      ![target?.variableSetId, ...(target?.variableSetIds ?? [])].includes(
-        input.payload.variableSetId,
-      )
-    )
-      throw new HTTPException(422, {
-        message:
-          "Existing-chat schedules use the chat's Variable Sets. Change the chat's attachments separately.",
-      });
     if (input.payload.rigId && input.payload.rigId !== target?.rigId)
       throw new HTTPException(422, {
         message:
@@ -1479,21 +1368,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
             agentConfig: scheduledSessionMessageConfig(input.existing.agentConfig),
           })
         : null;
-    const previousVariableSets = previousTarget
-      ? [
-          ...new Set(
-            [previousTarget.variableSetId, ...(previousTarget.variableSetIds ?? [])].filter(
-              (id): id is string => Boolean(id),
-            ),
-          ),
-        ]
-      : input.existing.variableSetId
-        ? [input.existing.variableSetId]
-        : [];
-    const targetVariableSets = new Set([target?.variableSetId, ...(target?.variableSetIds ?? [])]);
-    const removedVariableSetIds = retargeting
-      ? previousVariableSets.filter((id) => !targetVariableSets.has(id))
-      : [];
+    // Variable Sets were replaced by vaults; only an environment change needs review.
+    const removedVariableSetIds: string[] = [];
     const previousRigId = previousTarget ? previousTarget.rigId : input.existing.rigId;
     const changedRig = retargeting && previousRigId && previousRigId !== target?.rigId;
     if ((removedVariableSetIds.length || changedRig) && !input.payload.adoptSessionSettings) {
@@ -1512,8 +1388,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
         cause: detail,
       });
     }
-    if (input.payload.agentConfig || input.payload.agentConfigPatch || retargeting)
-      await requireScheduledMessageVariableSetUse({ db: input.db, grant: input.grant, target });
     // Server-side normalization preserves exact message fields and authority choices;
     // callers never reconstruct an incomplete get projection to remove old settings.
     input = {
@@ -1639,34 +1513,9 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   if (input.payload.vaultPolicy !== undefined) {
     update.vaultPolicy = scheduledVaultPolicy(input.payload.vaultPolicy);
   }
-  if (input.payload.variableSetId !== undefined) {
-    const nextVariableSetId = input.payload.variableSetId;
-    if (
-      (input.existing.variableSetId ?? null) !== (nextVariableSetId ?? null) &&
-      materializedReusable
-    ) {
-      throw new HTTPException(409, {
-        message:
-          "cannot change variableSet of a task with a live reusable session; recreate the task",
-      });
-    }
-    if (nextVariableSetId === null) {
-      if (input.existing.variableSetId !== null && nextRunMode !== "existing_session") {
-        // Detaching is also an attachment change: it strips the secrets a
-        // task's instructions were designed around.
-        requirePermission(input.grant, "variable-sets:attach");
-      }
-      update.variableSetId = null;
-    } else {
-      await validateVariableSetAttachment(
-        { settings: input.settings, db: input.db },
-        input.grant,
-        input.existing.workspaceId,
-        nextVariableSetId,
-      );
-      update.variableSetId = nextVariableSetId;
-    }
-  }
+  if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
+  // Clearing a legacy selection stays allowed.
+  if (input.payload.variableSetId === null) update.variableSetId = null;
   if (input.payload.rigId !== undefined) {
     if (materializedReusable && input.payload.rigId !== input.existing.rigId) {
       throw new HTTPException(409, {
@@ -1686,37 +1535,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     }
     update.rigId = input.payload.rigId;
   }
-  // An edit that newly binds an environment to generated sessions needs the
-  // same Variable Set attachment authority as create: a changed rigId, or a
-  // switch away from an existing-session target that keeps the environment
-  // the task adopted from that session.
-  const nextRigId = input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId;
-  if (
-    nextRigId !== null &&
-    !knowledgeSource &&
-    nextRunMode !== "existing_session" &&
-    (nextRigId !== input.existing.rigId || input.existing.runMode === "existing_session")
-  ) {
-    await requireScheduledTaskRigVariableSetAttachments({
-      settings: input.settings,
-      db: input.db,
-      grant: input.grant,
-      workspaceId: input.existing.workspaceId,
-      rig: await requireScheduledTaskRig(
-        input.db,
-        {
-          accountId: input.existing.accountId,
-          workspaceId: input.existing.workspaceId,
-          subjectId: input.grant.subjectId,
-        },
-        nextRigId,
-      ),
-    });
-  }
   if (input.payload.agentConfig !== undefined || input.payload.agentConfigPatch !== undefined) {
-    // Editing the instructions of a task that injects workspace secrets is
-    // equivalent to attaching those secrets to new instructions, so it
-    // requires variable-sets:use even though plain task edits do not.
+    // A materialized reusable chat must still exist to take new instructions.
     if (materializedReusable) {
       reusableTarget = await getSession(
         input.db,
@@ -1726,20 +1546,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       if (!reusableTarget || reusableTarget.accountId !== input.existing.accountId)
         throw new HTTPException(409, { message: "Scheduled task chat is unavailable" });
     }
-    // Existing-chat targets were checked above. A materialized reusable chat
-    // likewise owns its live attachments; obsolete creation defaults do not
-    // determine whether editing its scheduled message needs secret-use access.
-    if (nextRunMode !== "existing_session")
-      await requireScheduledMessageVariableSetUse({
-        db: input.db,
-        grant: input.grant,
-        target: reusableTarget,
-        variableSetId:
-          input.payload.variableSetId !== undefined
-            ? input.payload.variableSetId
-            : input.existing.variableSetId,
-        rigId: nextRigId,
-      });
   }
   if (input.payload.agentConfigPatch) {
     const patch = input.payload.agentConfigPatch;

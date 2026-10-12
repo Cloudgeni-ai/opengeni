@@ -25,7 +25,6 @@ import {
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
-  type WorkspaceEnvironmentForRun,
 } from "../environment";
 import type { mergeResourceRefs } from "../common";
 import type { withFirstPartyTools } from "../goals";
@@ -95,7 +94,6 @@ export type PrepareRunCredentialsDeps = {
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
-  workspaceVariableSet: WorkspaceEnvironmentForRun | null;
   turnResources: ReturnType<typeof mergeResourceRefs>;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
@@ -133,7 +131,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     turnExecutionPolicy,
     fileAuthoritySubjectId,
     runSettings,
-    workspaceVariableSet,
     turnResources,
     requiredGeneratedVideoFiles,
     machinePrimary,
@@ -183,12 +180,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
             turn,
             attemptId: input.attemptId,
             effectiveSandboxBackend: effectiveRunCredentialBackend,
-            variableSet: workspaceVariableSet
-              ? {
-                  id: workspaceVariableSet.id,
-                  name: workspaceVariableSet.name,
-                }
-              : null,
+            variableSet: null,
           }),
           cancellationSignal,
           undefined,

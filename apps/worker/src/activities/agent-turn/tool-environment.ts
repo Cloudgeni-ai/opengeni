@@ -70,7 +70,6 @@ import {
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
 } from "@opengeni/core";
-import type { WorkspaceEnvironmentForRun } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import {
@@ -280,7 +279,6 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
   };
-  const workspaceVariableSet: WorkspaceEnvironmentForRun | null = null;
   workspaceRefs.variableSetId = "";
   return {
     turnResources,
@@ -288,7 +286,6 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     mcpAvailabilityNote,
     turnTools,
     connectionScope,
-    workspaceVariableSet,
   };
 }
 

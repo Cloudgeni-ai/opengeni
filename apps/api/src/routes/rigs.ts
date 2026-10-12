@@ -1,4 +1,8 @@
 import {
+  legacyVariableSetFields,
+  variableSetsRemovedResponse,
+} from "../http/variable-sets-removed";
+import {
   CreateRigRequest,
   ProposeRigChangeRequest,
   RigDefinitionEditPayload,
@@ -42,6 +46,16 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
     bodyRecord?.payload && typeof bodyRecord.payload === "object"
       ? (bodyRecord.payload as Record<string, unknown>)
       : null;
+  // RM-1: rig default Variable Sets were removed with Variable Sets.
+  const legacyFields = [
+    ...legacyVariableSetFields(bodyRecord),
+    ...legacyVariableSetFields(payloadRecord).map((field) => `payload.${field}`),
+  ];
+  if (legacyFields.length > 0) {
+    throw new HTTPException(422, { res: variableSetsRemovedResponse(c, 422, legacyFields) });
+  }
+  if (bodyRecord) delete bodyRecord.defaultVariableSetIds;
+  if (payloadRecord) delete payloadRecord.defaultVariableSetIds;
   const imageOverrideUnsupported = Boolean(
     (bodyRecord && Object.hasOwn(bodyRecord, "image")) ||
     (payloadRecord && Object.hasOwn(payloadRecord, "image")),

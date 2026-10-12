@@ -252,7 +252,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIdsFor,
 } from "./session-tool-policy";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
-import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
+import { requireEnvironmentEncryption, variableSetsRemovedError } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
@@ -703,7 +703,7 @@ function validateSessionMcpServersForCreate(
   }
   requirePermission(grant, "mcp_servers:attach");
   const encryptionKey = servers.some((server) => Object.keys(server.headers ?? {}).length > 0)
-    ? requireVariableSetEncryption(settings)
+    ? requireEnvironmentEncryption(settings)
     : null;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
@@ -808,7 +808,7 @@ export function validateSessionMcpCredentialUpdates(input: {
     return [];
   }
   requirePermission(input.grant, "mcp_servers:attach");
-  const encryptionKey = requireVariableSetEncryption(input.settings);
+  const encryptionKey = requireEnvironmentEncryption(input.settings);
   const knownIds = new Set(input.session.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const encryptedUpdates = input.updates.map((update) => {
@@ -3114,16 +3114,9 @@ async function createSessionForRequestInFileScope(
         resources,
         ownerContext,
       );
-      // Every selected Variable Set is independently authorized. Scope does not
-      // affect precedence: explicit order is low-to-high and later sets win name
-      // collisions.
-      const validatedVariableSets: VariableSet[] = [];
-      for (const variableSetId of payload.variableSetIds ?? []) {
-        validatedVariableSets.push(
-          await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
-        );
-      }
-      return { attachmentOwnerContext: ownerContext, variableSets: validatedVariableSets };
+      // Variable Sets were replaced by vaults (RM-1); a session never selects one.
+      if (payload.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
+      return { attachmentOwnerContext: ownerContext, variableSets: [] as VariableSet[] };
     },
   );
   const attachmentOwner =
@@ -3159,14 +3152,6 @@ async function createSessionForRequestInFileScope(
         }
         // else: workspace-default fallback that no longer resolves → rig-less.
         return { frozenRigId: null, frozenRigVersionId: null };
-      }
-      for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
-        await validateVariableSetAttachment(
-          { settings, db },
-          grant,
-          workspaceId,
-          defaultVariableSetId,
-        );
       }
       return {
         frozenRigId: rig.id as string | null,

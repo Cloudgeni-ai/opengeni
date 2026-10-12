@@ -640,7 +640,12 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
           .strict()
           .optional(),
       })
-      .omit({ agentLearning: true, connectionAuthorities: true })
+      .omit({
+        agentLearning: true,
+        connectionAuthorities: true,
+        variableSetId: true,
+        environmentId: true,
+      })
       .strict(),
     UpdateScheduledTaskRequest,
   ),
@@ -1781,7 +1786,6 @@ export function buildOpenGeniMcpServer(
       },
       async (args) => {
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
-        requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         await requireLimit(deps, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
@@ -1840,7 +1844,6 @@ export function buildOpenGeniMcpServer(
                 "The task uses an existing session, whose model and reasoning are unchanged. Change that session separately if intended.",
               ]
             : [];
-        requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         const updateOrError = await validatedScheduledTaskUpdate({
           settings: deps.settings,
           db: deps.db,
@@ -7040,25 +7043,6 @@ function registerGitHubConnectTool(
       });
     },
   );
-}
-
-// Defense-in-depth for invariant "agents cannot self-attach": the worker's
-// first-party delegated token must carry both exact attachment and use
-// permissions, so a token narrowed to only one cannot attach a variable set.
-// agents calling these MCP tools cannot attach a variable set.
-// Explicit detach (variableSetId: null) is also an attachment change and is
-// blocked the same way.
-function requireVariableSetsUseForMcpAttachment(
-  grant: AccessGrant,
-  variableSetId: string | null | undefined,
-): void {
-  if (variableSetId === undefined) return;
-  if (!hasPermission(grant.permissions, "variable-sets:attach")) {
-    throw new Error("missing permission: variable-sets:attach");
-  }
-  if (variableSetId !== null && !hasPermission(grant.permissions, "variable-sets:use")) {
-    throw new Error("missing permission: variable-sets:use");
-  }
 }
 
 /**
