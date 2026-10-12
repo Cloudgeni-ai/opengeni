@@ -76,7 +76,7 @@ e2e(
         (
           await cdp!.send<{ result: { value: unknown } }>(
             "Runtime.evaluate",
-            { expression, returnByValue: true },
+            { expression, returnByValue: true, awaitPromise: true },
             { sessionId: attached.sessionId },
           )
         ).result.value;
