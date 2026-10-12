@@ -516,6 +516,13 @@ and `user_private` owner checks also run before the host; the host may narrow
 further and cannot grant those sessions. Cross-session agent access keeps
 exact-target projection even when the host returns `relatedSessionAccess: "root"`.
 
+Choosing a session's model account (any provider) is
+`session.model_account.write`. Its older name, `session.codex_account.write`,
+remains a valid `SessionAuthorizationOperation` value so existing hosts keep
+compiling, but Opengeni no longer sends it. A host that matched the older name
+should match the new one, or normalize every operation with
+`canonicalSessionAuthorizationOperation` from `@opengeni/contracts`.
+
 An allowed decision may set `relatedSessionAccess: "root"` when the principal
 may see the target's full tree. The fail-closed default is `"target"`: detail,
 lineage, control, parent, and tree-stat projections remove information derived

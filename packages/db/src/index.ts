@@ -29252,6 +29252,7 @@ export async function deliverSubscriptionCoreWake(
         reason: wake.reason,
         ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
         ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
+        ...(wake.ownerMembershipId ? { ownerMembershipId: wake.ownerMembershipId } : {}),
       },
       enqueueSessionWorkflowWakeInTransaction,
     );
@@ -29262,6 +29263,7 @@ export async function deliverSubscriptionCoreWake(
       reason: wake.reason,
       workspaceIds: wake.workspaceIds ?? null,
       sessionIds: wake.sessionIds ?? null,
+      ownerMembershipId: wake.ownerMembershipId ?? null,
       error: error instanceof Error ? error.name : typeof error,
       code:
         (error as { code?: unknown } | null)?.code ??
