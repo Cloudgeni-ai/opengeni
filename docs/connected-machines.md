@@ -922,7 +922,13 @@ Otherwise it is `status: "pending"` with a `reason`:
 - `renewal_failed`: retry the request.
 - `reconnect_required`: the machine's connection predates in-place renewal
   (for example a legacy-origin connection file). Run the connect command on it
-  again with screen control on.
+  again with screen control on. The chat card's **Connect again** opens the
+  connect dialog with screen control on and the machine's current access
+  chosen (**Only me** for a personal machine, otherwise **This workspace**), so
+  following the defaults reconnects the same machine without changing who can
+  use it. The command cannot carry organization access, so an organization
+  machine reconnected this way connects as a workspace machine; pair it with a
+  code instead to keep organization access.
 
 The Hello-time path is the same request: when a Hello shows the row allows
 screen control but the credentials do not, the API asks that exact process to
@@ -978,9 +984,12 @@ exchanges.
 
 `scope` chooses who can use the machine: `"workspace"` (the default, shared with
 the workspace) or `"user"` (only the person who minted the token). A personal
-token can be minted only by an exact authenticated human session (never an API
-key, service, agent attempt or service-initiated grant; otherwise `422`), and
-its owner is always the caller's authenticated subject, never a request field.
+token can be minted only for a verified person: a signed-in human session, or an
+organization key acting `asUser` for that person (the same canonical-actor rule
+as personal connections). An API key acting as itself, a service, an agent
+attempt or a service-initiated grant gets `422`. The owner is always the
+caller's authenticated subject, never a request field, and a personal token
+always carries a `jti`, so it is single-use.
 It is signed with a distinct `typ` (`enroll_user`) carrying that owner, so an
 API replica that predates personal tokens rejects it instead of creating a
 shared machine during a rolling deploy. The exchange re-checks, under the

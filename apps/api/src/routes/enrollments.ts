@@ -400,14 +400,21 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Mint a short-TTL headless enroll token. Mirrors approve (enrollments:manage,
   // requireAccessGrant BEFORE the parse). The accountId comes from the grant. No
   // signing secret → 503/disabled (mirror poll). The token is SECRET — never logged.
-  // `scope: "user"` signs the authenticated person as the machine's owner; only an
-  // exact authenticated human may ask for it (never an API key, service or agent),
+  // `scope: "user"` signs the authenticated person as the machine's owner; only a
+  // verified person may ask for it (a signed-in human, or an organization key
+  // acting as that person; never a key acting as itself, a service or an agent),
   // and the owner is always the caller, never a request field.
   app.post("/v1/workspaces/:workspaceId/enrollments/token", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    // The permission is part of the authorization, so a request that lacks it
+    // is refused before any first-use workspace membership is provisioned.
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
     const grant = authorization.grant;
-    requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
     // All fields are optional/defaulted, so an empty POST body is valid (default
     // allowScreenControl=false). Coalesce a missing/empty body to {} before parse.

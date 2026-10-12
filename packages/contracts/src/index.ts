@@ -3521,6 +3521,8 @@ export const OPENGENI_BROWSER_EXTENSION_URL =
 export const EnrollTokenScope = z.enum(["user", "workspace"]);
 export type EnrollTokenScope = z.infer<typeof EnrollTokenScope>;
 
+const enrollTokenId = z.string().regex(/^[A-Za-z0-9_-]{16,128}$/);
+
 const enrollTokenClaims = {
   workspaceId: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -3532,10 +3534,7 @@ const enrollTokenClaims = {
   // Unique token id. The exchange records it so one token connects one machine;
   // the same machine (same public key) may retry. Optional only for tokens minted
   // before single-use redemption shipped; those still expire after one hour.
-  jti: z
-    .string()
-    .regex(/^[A-Za-z0-9_-]{16,128}$/)
-    .optional(),
+  jti: enrollTokenId.optional(),
 };
 
 // Two token kinds, separated by their domain claim. `enroll` is the original
@@ -3556,6 +3555,8 @@ export const EnrollTokenPayload = z.discriminatedUnion("typ", [
     // rechecks this person's live organization membership and workspace access.
     ownerSubjectId: z.string().min(1).max(512),
     ...enrollTokenClaims,
+    // Personal tokens were single-use from the start, so the id is required.
+    jti: enrollTokenId,
   }),
 ]);
 export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
@@ -3577,8 +3578,9 @@ export async function signEnrollToken(
 /**
  * Verify an enroll token: rejects (returns null) on a bad prefix (NOT `oget_`),
  * a malformed envelope, a bad HMAC signature (constant-time), schema-invalid
- * claims (which includes `typ !== "enroll"` — the `z.literal` rejects it), or an
- * expired token (`exp < now`). Mirrors verifyEnrollmentBearer exactly. An `oge_`
+ * claims (which includes a `typ` other than `enroll` / `enroll_user`, and a
+ * personal token without its owner or id), or an expired token (`exp < now`).
+ * Mirrors verifyEnrollmentBearer exactly. An `oge_`
  * bearer fails the prefix gate; a same-secret token that lacks the typ claim fails
  * the schema gate — both halves of the domain separation are enforced here.
  */
@@ -18340,8 +18342,9 @@ export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyRe
 // POST /v1/workspaces/:workspaceId/enrollments/token (USER-authenticated,
 // enrollments:manage). Mints the short-TTL headless enroll token (the `oget_`
 // token). allowScreenControl bakes the screen-control consent into the token.
-// `scope: "user"` makes the machine the caller's own; it requires an
-// authenticated person, never an API key, service or agent. Omitted keeps the
+// `scope: "user"` makes the machine the caller's own; it requires a verified
+// person (a signed-in human, or an organization key acting as that person),
+// never a key acting as itself, a service or an agent. Omitted keeps the
 // original workspace-shared token for existing integrations.
 export const MintEnrollTokenRequest = z.object({
   allowScreenControl: z.boolean().default(false),

@@ -138,6 +138,11 @@ describe("M5 enrollment route discipline", () => {
     expect(deny).toContain('"enrollments:manage"');
     const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
     expect(token).toContain('"enrollments:manage"');
+    // The permission is checked inside the authorization itself, so a request
+    // that lacks it never provisions a first-use membership before its 403.
+    expect(token).toMatch(
+      /requireAccessGrantAuthorization\(\s*c,\s*deps,\s*workspaceId,\s*"enrollments:manage",?\s*\)/,
+    );
   });
 
   test("a personal token is only for an authenticated person, who is always its owner", () => {

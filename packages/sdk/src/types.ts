@@ -9781,9 +9781,10 @@ export type MintEnrollTokenRequest = {
   allowScreenControl?: boolean;
   /**
    * Who can use the machine. `user` makes it the signed-in caller's own
-   * machine (requires an authenticated person, not an API key or agent);
-   * `workspace` shares it with this workspace's members. Omitted mints the
-   * original workspace-shared token.
+   * machine (requires a verified person: a signed-in user, or an organization
+   * key acting `asUser`; a key acting as itself, a service or an agent gets
+   * 422); `workspace` shares it with this workspace's members. Omitted mints
+   * the original workspace-shared token.
    */
   scope?: EnrollTokenScope;
 };

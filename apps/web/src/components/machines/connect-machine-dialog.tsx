@@ -42,10 +42,21 @@ import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 /** Who can use the machine: the person connecting it, or the whole workspace. */
 export type ConnectMachineScope = "user" | "workspace";
 
+/**
+ * The choice that reconnects a machine without changing who can use it. A
+ * command cannot carry organization access, so an organization machine maps to
+ * This workspace (pairing with a code is the way to keep organization access).
+ */
+export function connectScopeFor(machine: Pick<MachineView, "scope">): ConnectMachineScope {
+  return machine.scope === "user" ? "user" : "workspace";
+}
+
 /** The choices a connect command is minted for. Both are baked into the token. */
 export type ConnectChoice = { scope: ConnectMachineScope; allowScreenControl: boolean };
 
 export type MintedConnectToken = ConnectChoice & {
+  /** The workspace it was minted for; a command is never shown for another. */
+  workspaceId: string;
   value: string;
   expiresAt: string;
   expiresInSeconds: number;
@@ -111,6 +122,7 @@ export function useConnectToken(workspaceId: string, choice: ConnectChoice) {
         }
         setToken({
           ...granted,
+          workspaceId,
           value: result.token,
           expiresAt: result.expiresAt,
           expiresInSeconds: result.expiresInSeconds,
@@ -128,7 +140,10 @@ export function useConnectToken(workspaceId: string, choice: ConnectChoice) {
     };
   }, [workspaceId, scope, allowScreenControl, attempt]);
 
-  const matching = token && sameChoice(token, choice) && pending === null ? token : null;
+  const matching =
+    token && token.workspaceId === workspaceId && sameChoice(token, choice) && pending === null
+      ? token
+      : null;
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
   return { token: matching, minting: pending !== null, error, retry };
 }
@@ -152,11 +167,14 @@ function connectableMachines(machines: readonly MachineView[]): MachineView[] {
 /**
  * The machine that came online while the dialog was open: one that is new, or
  * was unreachable when the dialog opened. A machine with the chosen access wins
- * when several qualify. The first one found stays the answer.
+ * when several qualify. The first one found stays the answer. The baseline is
+ * the first list that actually loaded: a failed load shows no machines, and
+ * every existing machine would otherwise look new once a later load succeeds.
  */
 function useNewlyConnectedMachine(
   machines: readonly MachineView[],
   loading: boolean,
+  loadFailed: boolean,
   scope: ConnectMachineScope,
 ): MachineView | null {
   const fleet = useMemo(() => connectableMachines(machines), [machines]);
@@ -164,13 +182,13 @@ function useNewlyConnectedMachine(
   const [connectedId, setConnectedId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (known !== null || loading) return;
+    if (known !== null || loading || loadFailed) return;
     setKnown(
       new Map(
         fleet.map((machine) => [machine.sandboxId, isMachineComputeSelectable(machine.state)]),
       ),
     );
-  }, [fleet, known, loading]);
+  }, [fleet, known, loading, loadFailed]);
 
   useEffect(() => {
     if (!known || connectedId !== null) return;
@@ -194,8 +212,12 @@ export type ConnectMachineDialogProps = {
   /** The workspace's machines, polled by the host while the dialog is open. */
   machines: readonly MachineView[];
   machinesLoading: boolean;
+  /** The latest machines load failure, if any. Success waits for a good load. */
+  machinesError?: unknown;
   /** A personal workspace: "This workspace" is still only its owner. */
   personalWorkspace?: boolean;
+  /** Who can use it, to start with (a reconnect keeps the machine's access). */
+  defaultScope?: ConnectMachineScope;
   /** Screen control's starting value (on when reconnecting to turn it on). */
   defaultAllowScreenControl?: boolean;
   /** Called once when a machine comes online while the dialog is open. */
@@ -228,15 +250,22 @@ function ConnectMachineBody({
   origin,
   machines,
   machinesLoading,
+  machinesError = null,
   personalWorkspace = false,
+  defaultScope = "user",
   defaultAllowScreenControl = false,
   onConnected,
   useInChat,
   onClose,
 }: Omit<ConnectMachineDialogProps, "open" | "onOpenChange"> & { onClose: () => void }) {
-  const [scope, setScope] = useState<ConnectMachineScope>("user");
+  const [scope, setScope] = useState<ConnectMachineScope>(defaultScope);
   const [allowScreenControl, setAllowScreenControl] = useState(defaultAllowScreenControl);
-  const connected = useNewlyConnectedMachine(machines, machinesLoading, scope);
+  const connected = useNewlyConnectedMachine(
+    machines,
+    machinesLoading,
+    machinesError !== null && machinesError !== undefined,
+    scope,
+  );
   const onConnectedRef = useRef(onConnected);
   onConnectedRef.current = onConnected;
   const reported = useRef<string | null>(null);
@@ -293,23 +322,22 @@ function ConnectSetup({
   );
   const screenControlId = useId();
   const screenControlHintId = useId();
-  const [copied, setCopied] = useState(false);
-  const [copyFailed, setCopyFailed] = useState(false);
   const choice = useMemo(() => ({ scope, allowScreenControl }), [scope, allowScreenControl]);
   const { token, minting, error, retry } = useConnectToken(workspaceId, choice);
   const command = token ? installCommandFor(os, origin, { enrollToken: token.value }) : "";
-
-  // A copied command belongs to the choices it was copied with.
-  useEffect(() => {
-    setCopied(false);
-    setCopyFailed(false);
-  }, [token?.value, os]);
+  // A copy result belongs to the exact command copied. A later command (other
+  // choices, OS or token) never shows as copied, even when the clipboard
+  // answers after the change.
+  const [copyResult, setCopyResult] = useState<{ command: string; ok: boolean } | null>(null);
+  const shownCopy = command !== "" && copyResult?.command === command ? copyResult : null;
+  const copied = shownCopy?.ok === true;
+  const copyFailed = shownCopy?.ok === false;
 
   async function copy() {
-    if (!command) return;
-    const ok = await copyTextToClipboard(command);
-    setCopied(ok);
-    setCopyFailed(!ok);
+    const copying = command;
+    if (!copying) return;
+    const ok = await copyTextToClipboard(copying);
+    setCopyResult({ command: copying, ok });
   }
 
   return (
@@ -462,8 +490,10 @@ function ManualPairing({
 }) {
   const command = installCommandFor(os, origin, { workspaceId });
   const verificationUri = deviceVerificationUri(origin);
-  const [copied, setCopied] = useState(false);
-  useEffect(() => setCopied(false), [command]);
+  // Copied only while the copied command is the one shown (a late clipboard
+  // answer for another OS never marks this one).
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  const copied = copiedCommand === command;
   return (
     <Disclosure
       title="Pair with a code instead"
@@ -485,7 +515,14 @@ function ManualPairing({
               variant="ghost"
               size="icon-xs"
               aria-label={copied ? "Copied" : "Copy pairing command"}
-              onClick={() => void copyTextToClipboard(command).then(setCopied)}
+              onClick={() => {
+                const copying = command;
+                void copyTextToClipboard(copying).then((ok) =>
+                  setCopiedCommand((previous) =>
+                    ok ? copying : previous === copying ? null : previous,
+                  ),
+                );
+              }}
             >
               {copied ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}
             </Button>

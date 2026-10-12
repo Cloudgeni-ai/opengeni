@@ -531,15 +531,59 @@ describe("Connected Machine conversation card", () => {
       await h.rerender();
       expect(h.text()).toContain("Needs a fresh connection");
       await click(h.button("Connect again"));
-      // Reconnecting to turn screen control on starts with it chosen.
+      // Reconnecting to turn screen control on starts with it chosen, and with
+      // the machine's own access: a workspace machine stays a workspace machine.
       expect(h.command()).toContain("oget_token1.sig");
       expect(mintEnrollToken.mock.calls[0]).toEqual([
         "workspace",
-        { scope: "user", allowScreenControl: true },
+        { scope: "workspace", allowScreenControl: true },
       ]);
       expect(h.dialog()?.querySelector('button[role="switch"]')?.getAttribute("aria-checked")).toBe(
         "true",
       );
+      const thisWorkspace = [
+        ...(h.dialog()?.querySelectorAll<HTMLElement>('[role="radio"]') ?? []),
+      ].find((radio) => radio.textContent?.startsWith("This workspace"));
+      expect(thisWorkspace?.getAttribute("aria-checked")).toBe("true");
+      // A plain Connect another machine afterwards starts from the defaults.
+      await click(h.dialogButton("Close"));
+      await click(h.button("Connect another machine"));
+      expect(mintEnrollToken.mock.calls.at(-1)).toEqual([
+        "workspace",
+        { scope: "user", allowScreenControl: false },
+      ]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("reconnecting a personal machine keeps it Only me", async () => {
+    enableResult = {
+      status: "pending",
+      reason: "reconnect_required",
+      message: "Run the connect command on the machine again with screen control on.",
+    };
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { scope: "user", runtime: runtime(false) }),
+    ];
+    const h = await render();
+    try {
+      await click(h.button("Turn on"));
+      fleet.machines = [
+        sessionBox,
+        machine("mac", "Studio Mac", {
+          scope: "user",
+          allowScreenControl: true,
+          runtime: runtime(false),
+        }),
+      ];
+      await h.rerender();
+      await click(h.button("Connect again"));
+      expect(mintEnrollToken.mock.calls[0]).toEqual([
+        "workspace",
+        { scope: "user", allowScreenControl: true },
+      ]);
     } finally {
       await h.close();
     }

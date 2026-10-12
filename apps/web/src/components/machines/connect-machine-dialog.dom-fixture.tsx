@@ -85,7 +85,9 @@ beforeEach(() => {
 type Props = {
   machines?: MachineView[];
   loading?: boolean;
+  error?: unknown;
   personalWorkspace?: boolean;
+  defaultScope?: "user" | "workspace";
   useInChat?: { canUse: boolean; onUse: (machine: MachineView) => void };
 };
 
@@ -111,7 +113,9 @@ async function render(initial: Props = {}) {
           origin="https://app.example.test"
           machines={props.machines ?? []}
           machinesLoading={props.loading ?? false}
+          machinesError={props.error ?? null}
           personalWorkspace={props.personalWorkspace}
+          defaultScope={props.defaultScope}
           onConnected={onConnected}
           useInChat={props.useInChat}
         />,
@@ -240,6 +244,46 @@ describe("Connect a machine dialog", () => {
     }
   });
 
+  test("a copy that finishes after the choice changed never marks the new command copied", async () => {
+    const clipboard = deferred<boolean>();
+    copyTextToClipboard.mockImplementationOnce(async () => await clipboard.promise);
+    const h = await render();
+    try {
+      expect(h.command()).toContain("oget_preview1.sig");
+      await click(h.button("Copy command"));
+      expect(copyTextToClipboard.mock.calls.at(-1)![0]).toContain("oget_preview1.sig");
+      // The person switches to This workspace before the clipboard answers.
+      await click(h.radio("This workspace"));
+      expect(h.command()).toContain("oget_preview2.sig");
+      await act(async () => {
+        clipboard.resolve(true);
+        await settle();
+      });
+      expect(h.button("Copied")).toBeNull();
+      expect(h.button("Copy command")).not.toBeNull();
+      expect(h.text()).not.toContain("Waiting for the machine to connect");
+      // Copying the command that is shown marks it.
+      await click(h.button("Copy command"));
+      expect(copyTextToClipboard.mock.calls.at(-1)![0]).toContain("oget_preview2.sig");
+      expect(h.button("Copied")).not.toBeNull();
+      expect(h.text()).toContain("Waiting for the machine to connect");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("can start from This workspace", async () => {
+    const h = await render({ defaultScope: "workspace" });
+    try {
+      expect(h.radio("This workspace")?.getAttribute("aria-checked")).toBe("true");
+      expect(mintEnrollToken.mock.calls).toEqual([
+        ["workspace", { scope: "workspace", allowScreenControl: false }],
+      ]);
+    } finally {
+      await h.close();
+    }
+  });
+
   test("a server that cannot mint a personal command says so instead of sharing", async () => {
     // An older server ignores the scope and echoes nothing: a workspace token.
     mintImpl = async () => ({
@@ -343,6 +387,25 @@ describe("Connect a machine dialog", () => {
       await click(h.button("Done"));
       expect(h.onOpenChange).toHaveBeenCalledWith(false);
       expect(h.dialog()).toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a failed first load is no baseline: machines online all along never count", async () => {
+    const existing = machine("old", "Old laptop", { scope: "workspace" });
+    const h = await render({ machines: [], loading: true });
+    try {
+      // The first load fails, so the host has no machines to show.
+      await h.update({ loading: false, error: new Error("Network unavailable") });
+      // The next load succeeds with a machine that was online all along.
+      await h.update({ error: null, machines: [existing] });
+      expect(h.text()).not.toContain("Machine connected");
+      expect(h.onConnected).not.toHaveBeenCalled();
+      // A machine that really comes online afterwards still finishes.
+      await h.update({ machines: [existing, machine("mac", "Studio Mac")] });
+      expect(h.text()).toContain("Machine connected");
+      expect(h.text()).toContain("Studio Mac");
     } finally {
       await h.close();
     }

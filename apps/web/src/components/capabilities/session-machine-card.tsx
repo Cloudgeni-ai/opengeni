@@ -16,7 +16,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { apiBaseUrl } from "@/api";
-import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
+import {
+  ConnectMachineDialog,
+  connectScopeFor,
+  type ConnectMachineScope,
+} from "@/components/machines/connect-machine-dialog";
 import { Button } from "@/components/ui/button";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
@@ -118,8 +122,10 @@ export function SessionMachineCapabilityCard({
     !accessKnown || hasWorkspacePermission(context.accessContext, workspaceId, "sessions:control");
 
   const [setupOpen, setSetupOpen] = useState(false);
-  // Reconnecting to turn screen control on starts with it already chosen.
+  // Reconnecting to turn screen control on starts with it already chosen, and
+  // with the machine's own access so the same machine reconnects as it was.
   const [setupScreenControl, setSetupScreenControl] = useState(false);
+  const [setupScope, setSetupScope] = useState<ConnectMachineScope>("user");
   const [justConnected, setJustConnected] = useState<string | null>(null);
   const [using, setUsing] = useState<string | null>(null);
   const [useError, setUseError] = useState<{ name: string; reason: string | null } | null>(null);
@@ -152,11 +158,12 @@ export function SessionMachineCapabilityCard({
   const personalWorkspace =
     context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
 
-  const openSetup = (allowScreenControl = false) => {
+  const openSetup = (reconnect?: MachineView) => {
     const active = document.activeElement;
     setupOpener.current = active instanceof HTMLElement ? active : null;
     setJustConnected(null);
-    setSetupScreenControl(allowScreenControl);
+    setSetupScreenControl(reconnect !== undefined);
+    setSetupScope(reconnect ? connectScopeFor(reconnect) : "user");
     setSetupOpen(true);
   };
   const closeSetup = () => {
@@ -344,7 +351,7 @@ export function SessionMachineCapabilityCard({
                       workspaceId={workspaceId}
                       canManage={fleet.canManage}
                       refresh={fleet.refresh}
-                      onReconnect={() => openSetup(true)}
+                      onReconnect={() => openSetup(chromeMachine)}
                     />
                   ) : null}
                   {chromeMachine ? (
@@ -378,7 +385,9 @@ export function SessionMachineCapabilityCard({
           origin={origin}
           machines={fleet.machines}
           machinesLoading={fleet.loading}
+          machinesError={fleet.error}
           personalWorkspace={personalWorkspace}
+          defaultScope={setupScope}
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {
             setJustConnected(machine.sandboxId);

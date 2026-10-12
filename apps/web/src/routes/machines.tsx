@@ -307,6 +307,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           origin={origin}
           machines={machines.machines}
           machinesLoading={machines.loading}
+          machinesError={machines.error}
           personalWorkspace={personalWorkspace}
         />
       ) : null}

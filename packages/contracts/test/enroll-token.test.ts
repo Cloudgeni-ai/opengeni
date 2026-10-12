@@ -173,6 +173,26 @@ describe("personal (user-owned) enroll tokens", () => {
     expect(await verifyEnrollToken(SECRET, `oget_${forged}.${signature}`)).toBeNull();
   });
 
+  test("a personal token is always single-use: a signed one without an id is refused", async () => {
+    expect(() => personal({ jti: undefined })).toThrow();
+    expect(() => personal({ jti: "short" })).toThrow();
+    // Correctly signed with the shared secret, but missing its id: never verifies.
+    const now = Math.floor(Date.now() / 1000);
+    const claims = {
+      typ: "enroll_user",
+      ownerSubjectId: owner,
+      workspaceId: WORKSPACE_A,
+      accountId: ACCOUNT_A,
+      allowScreenControl: false,
+      iat: now,
+      exp: now + 3600,
+    };
+    const encoded = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
+    const { createHmac } = await import("node:crypto");
+    const signature = createHmac("sha256", SECRET).update(encoded).digest("base64url");
+    expect(await verifyEnrollToken(SECRET, `oget_${encoded}.${signature}`)).toBeNull();
+  });
+
   test("a verifier that predates personal tokens refuses one instead of sharing the machine", async () => {
     // The previous schema: typ was the literal "enroll" and unknown keys were
     // stripped. Parsing the personal token with it must fail, never yield a
