@@ -28,7 +28,8 @@ export type VaultCallerAuthority = {
 };
 
 export function vaultCanWrite(row: VaultRow, authority: VaultCallerAuthority): boolean {
-  if (row.source !== "opengeni" || row.mode !== "read_write" || !authority.write) return false;
+  // Read-write connected vaults are edited through their provider (W5, OP-3).
+  if (row.mode !== "read_write" || !authority.write) return false;
   if (row.ownerKind === "user") return row.ownedByCaller;
   return true;
 }

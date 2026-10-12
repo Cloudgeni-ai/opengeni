@@ -224,7 +224,12 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
       const { workspaceId, actor } = await authorize(c, "secrets:write");
       const payload = await parseRequestJson(c, CreateVaultItemRequest);
       return c.json(
-        await vaults().createItem(actor, workspaceId, c.req.param("vaultId")!, payload),
+        await vaultsWithProviders(actor, workspaceId).createItem(
+          actor,
+          workspaceId,
+          c.req.param("vaultId")!,
+          payload,
+        ),
         201,
       );
     }),
@@ -245,7 +250,14 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
       const payload = await parseRequestJson(c, UpdateVaultItemRequest);
       const itemId = c.req.param("itemId")!;
       await itemInVault(actor, workspaceId, c.req.param("vaultId")!, itemId);
-      return c.json(await vaults().updateItem(actor, workspaceId, itemId, payload));
+      return c.json(
+        await vaultsWithProviders(actor, workspaceId).updateItem(
+          actor,
+          workspaceId,
+          itemId,
+          payload,
+        ),
+      );
     }),
   );
 
@@ -257,7 +269,7 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (c.req.query("permanent") === "true") {
         await vaults().deleteItemPermanently(actor, workspaceId, itemId);
       } else {
-        await vaults().archiveItem(actor, workspaceId, itemId);
+        await vaultsWithProviders(actor, workspaceId).archiveItem(actor, workspaceId, itemId);
       }
       return c.body(null, 204);
     }),

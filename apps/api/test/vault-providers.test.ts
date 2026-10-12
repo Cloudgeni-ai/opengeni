@@ -369,7 +369,7 @@ async function call(
     status: response.status,
     headers: response.headers,
     text,
-    body: JSON.parse(text) as Record<string, any>,
+    body: (text ? JSON.parse(text) : {}) as Record<string, any>,
   };
 }
 
@@ -538,6 +538,103 @@ describe("provider vault link, sync and managed vaults", () => {
       itemCount: 0,
     });
     await resetOnePasswordFakeProvidersForTests();
+  });
+
+  test("edits in a read-write 1Password vault write through to the provider", async () => {
+    if (!available) return;
+    await resetOnePasswordFakeProvidersForTests();
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace" });
+    const linked = await call(workspace, "POST", "/vaults/link", {
+      body: {
+        provider: "onepassword",
+        connectionId: installed.body.connectionId,
+        externalVaultId: installed.body.vaults[0].externalVaultId,
+        ownerKind: "workspace",
+        mode: "read_write",
+      },
+    });
+    expect(linked.body).toMatchObject({ mode: "read_write", canWrite: true, itemCount: 6 });
+    const vaultPath = `/vaults/${linked.body.id}`;
+
+    const created = await call(workspace, "POST", `${vaultPath}/items`, {
+      body: {
+        type: "login",
+        name: "Deploy bot",
+        websites: ["https://deploy.example.test"],
+        fields: [
+          { name: "username", value: "deploy-bot" },
+          { name: "password", generate: { length: 24 } },
+          {
+            name: "one-time password",
+            kind: "totp",
+            value: "otpauth://totp/Deploy?secret=JBSWY3DPEHPK3PXP&period=30&digits=6",
+          },
+        ],
+      },
+    });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      name: "Deploy bot",
+      vaultId: linked.body.id,
+      hasTotp: true,
+    });
+    const password = created.body.fields.find(
+      (field: { name: string }) => field.name === "password",
+    );
+    const revealed = await call(
+      workspace,
+      "POST",
+      `${vaultPath}/items/${created.body.id}/fields/${password.id}/reveal`,
+      { body: {} },
+    );
+    expect(revealed.body.value).toHaveLength(24);
+    expect((await call(workspace, "GET", vaultPath)).body.itemCount).toBe(7);
+
+    const stale = await call(workspace, "PATCH", `${vaultPath}/items/${created.body.id}`, {
+      body: { name: "Deploy bot 2", expectedGeneration: 999 },
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error).toBe("vault_generation_conflict");
+
+    // A change made in 1Password after the mirror was taken is a provider conflict.
+    const onePassword = await import("@opengeni/vaults-onepassword");
+    const direct = onePassword.vaultProviderForOnePasswordConnection({
+      token: FAKE_HEALTHY,
+      allowFakeTokens: true,
+    });
+    const ctx = { connectionId: null, budget: createProviderCallBudget(10) };
+    const [providerItem] = (
+      await direct.listItems(ctx, installed.body.vaults[0].externalVaultId)
+    ).filter((item) => item.name === "Deploy bot");
+    await direct.writeItem(ctx, installed.body.vaults[0].externalVaultId, {
+      externalItemId: providerItem!.externalItemId,
+      name: "Deploy bot",
+      type: "login",
+      websites: [],
+      fields: [{ name: "note", kind: "text", value: "changed in 1Password" }],
+    });
+    const conflict = await call(workspace, "PATCH", `${vaultPath}/items/${created.body.id}`, {
+      body: { name: "Deploy bot renamed", expectedGeneration: created.body.generation },
+    });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error).toBe("provider_conflict");
+
+    await call(workspace, "POST", `${vaultPath}/sync`);
+    const current = await call(workspace, "GET", `${vaultPath}/items/${created.body.id}`);
+    const renamed = await call(workspace, "PATCH", `${vaultPath}/items/${created.body.id}`, {
+      body: { name: "Deploy bot renamed", expectedGeneration: current.body.generation },
+    });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.name).toBe("Deploy bot renamed");
+
+    const archived = await call(workspace, "DELETE", `${vaultPath}/items/${created.body.id}`);
+    expect(archived.status).toBeLessThan(300);
+    const after = await call(workspace, "GET", `${vaultPath}/items`);
+    expect(after.body.items.map((item: { name: string }) => item.name)).not.toContain(
+      "Deploy bot renamed",
+    );
+    expect((await call(workspace, "GET", vaultPath)).body.itemCount).toBe(6);
   });
 
   test("links a host vault from the embedder's vaultProvider", async () => {

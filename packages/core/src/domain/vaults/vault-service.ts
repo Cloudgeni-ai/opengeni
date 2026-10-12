@@ -55,6 +55,7 @@ import {
   ensureTaskVault,
   getSession,
   getSessionSecretsView,
+  getVault,
   getVaultItem,
   listVaultFieldVersions,
   listVaultItems,
@@ -89,6 +90,11 @@ import {
   type VaultCallerAuthority,
 } from "./mapping";
 import { vaultErrorCodeForProvider } from "./provider-registry";
+import {
+  archiveProviderVaultItem,
+  writeProviderVaultItem,
+  type ProviderWriteDeps,
+} from "./provider-writes";
 import { chooseSecretCandidate, createSecretResolver } from "./secret-resolver";
 import type { VaultRequestActor, VaultServiceDeps } from "./types";
 
@@ -397,6 +403,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     return write;
   }
 
+  function providerWriteDeps(actor: VaultRequestActor, workspaceId: string): ProviderWriteDeps {
+    return {
+      db: deps.db,
+      context: subjectContext(actor, workspaceId),
+      providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+      resolveReference: humanReferenceResolver(actor, workspaceId),
+    };
+  }
+
   function key(): Uint8Array | null {
     return deps.encryptionKey;
   }
@@ -664,6 +679,17 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async createItem(actor, workspaceId, vaultId, req) {
+      const context = subjectContext(actor, workspaceId);
+      const vault = await getVault(deps.db, context, { vaultId });
+      if (vault.source !== "opengeni") {
+        // W5: connected read-write vaults change through their provider.
+        const itemId = await writeProviderVaultItem(providerWriteDeps(actor, workspaceId), {
+          vault,
+          existing: null,
+          change: req,
+        });
+        return toItem(await getVaultItem(deps.db, context, { itemId }));
+      }
       const write = await itemWrite(
         req,
         null,
@@ -683,6 +709,22 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const context = subjectContext(actor, workspaceId);
       const existing = await getVaultItem(deps.db, context, { itemId });
       const { expectedGeneration, ...changes } = req;
+      if (existing.vaultSource !== "opengeni") {
+        const vault = await getVault(deps.db, context, { vaultId: existing.vaultId });
+        const updatedId = await writeProviderVaultItem(providerWriteDeps(actor, workspaceId), {
+          vault,
+          existing: {
+            itemId,
+            name: existing.name,
+            type: existing.type,
+            websites: existing.websites,
+            fields: existing.fields,
+            expectedGeneration,
+          },
+          change: changes,
+        });
+        return toItem(await getVaultItem(deps.db, context, { itemId: updatedId }));
+      }
       const write = await itemWrite(
         changes,
         existing,
@@ -695,7 +737,14 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async archiveItem(actor, workspaceId, itemId) {
-      await archiveVaultItem(deps.db, subjectContext(actor, workspaceId), { itemId });
+      const context = subjectContext(actor, workspaceId);
+      const existing = await getVaultItem(deps.db, context, { itemId });
+      if (existing.vaultSource !== "opengeni") {
+        const vault = await getVault(deps.db, context, { vaultId: existing.vaultId });
+        await archiveProviderVaultItem(providerWriteDeps(actor, workspaceId), { vault, itemId });
+        return;
+      }
+      await archiveVaultItem(deps.db, context, { itemId });
     },
 
     async restoreItem(actor, workspaceId, itemId) {
