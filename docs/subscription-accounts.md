@@ -92,7 +92,7 @@ for it until the matching requirement below is implemented:
 - **SUB-OWN-03** A personal connection is scoped to one person and is usable
   in every workspace that person can use, including their Personal workspace,
   without exposing private workspace inventory to administrators.
-  Verification: pending (personal-connections).
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-OWN-04** An organization administrator can delegate management of a
   connection to a workspace administrator; ownership stays with the
   organization. Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`, `packages/db/test/subscription-core-m2-postgres.test.ts`.
@@ -103,9 +103,13 @@ for it until the matching requirement below is implemented:
 - **SUB-OWN-06** Widening a personal connection to workspaces or the
   organization turns it into a shared connection and shows a short notice
   that consumer plans may limit use to the account holder.
-  Verification: pending (personal-connections).
+  Only its exact owner who is also an organization administrator can perform
+  this explicit transition; organization inventory never lists personal accounts.
+  Verification: `packages/db/test/subscription-personal-sharing-postgres.test.ts`,
+  `apps/api/test/model-account-choice-routes-postgres.test.ts`,
+  `apps/web/src/components/connection-access-settings.test.tsx`.
 - **SUB-OWN-07** Who connected an account is audit metadata, never
-  ownership or authority. Verification: pending (data-model).
+  ownership or authority. Verification: `packages/db/test/subscription-personal-sharing-postgres.test.ts`.
 - **SUB-OWN-08** One upstream provider account is one connection per owner,
   however many workspaces it serves, so its quota is counted once.
   Verification: `packages/db/test/subscription-core-m2-postgres.test.ts`
@@ -148,7 +152,7 @@ for it until the matching requirement below is implemented:
 
 - **SUB-ELIG-01** Work may use only connections whose scope includes the
   work's workspace (or, for a personal connection, its owner under
-  SUB-ELIG-05). Verification: pending (data-model).
+  SUB-ELIG-05). Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ELIG-02** Workspace model restrictions are a ceiling on every
   selection, including failover. When the session's preferred model is
   outside the restriction, selection uses the first allowed model in its
@@ -243,9 +247,10 @@ for it until the matching requirement below is implemented:
 
 - **SUB-FAIL-01** Failover is automatic. No person has to press a button for
   work to continue on another eligible account.
-  Verification: pending (failover).
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`,
+  `apps/worker/test/subscription-serving-runtime.test.ts`.
 - **SUB-FAIL-02** Failover first tries another eligible account of the same
-  provider. Verification: pending (failover).
+  provider. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-FAIL-03** When the effective setting allows it, failover then moves to
   another provider using the organization's fallback order for the model,
   mapping the reasoning level to the nearest level the target supports:
@@ -297,9 +302,9 @@ for it until the matching requirement below is implemented:
   where known, and resumes automatically when capacity returns or the pool
   changes. Verification: pending (verification-suite).
 - **SUB-WAIT-03** Waits survive worker loss, workflow continue-as-new and
-  replay of existing workflow histories. Verification: pending (verification-suite).
+  replay of existing workflow histories. Verification: `test/integration/subscription-core-codex-wait.integration.ts`.
 - **SUB-WAIT-04** Pause, resume and cancel are respected while waiting.
-  Verification: pending (verification-suite).
+  Verification: `test/integration/subscription-core-codex-wait.integration.ts`.
 - **SUB-WAIT-05** A wait that cannot be armed surfaces as an explicit,
   retryable state, never as a generic activity failure. Database outages keep
   their exact-attempt recovery path. Verification: `apps/worker/test/subscription-capacity-arming.test.ts`.
@@ -338,7 +343,7 @@ for it until the matching requirement below is implemented:
   Leases fence turn ownership; they do not limit an account's concurrency.
   Verification: pending (shared-core).
 - **SUB-LEASE-02** A stale worker cannot renew, release or settle its
-  successor's lease. Verification: pending (verification-suite).
+  successor's lease. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-LEASE-03** Release is idempotent and expired leases are reaped.
   Verification: pending (shared-core).
 
@@ -404,14 +409,17 @@ for it until the matching requirement below is implemented:
 - **SUB-COMPAT-01** Migration preserves existing credentials, scopes, pins,
   settings, accepted authority, live waits and workflow histories.
   Verification: `packages/db/test/migration-0689-subscription-core-codex-cutover.test.ts`,
-  `test/integration/subscription-core-codex-cutover.integration.ts` (Codex,
-  migration 0689; Claude and SuperGrok move at M4).
+  `test/integration/subscription-core-codex-cutover.integration.ts`,
+  `test/integration/subscription-core-claude-cutover.integration.ts`,
+  `test/integration/subscription-core-xai-cutover.integration.ts`.
 - **SUB-COMPAT-02** Existing per-provider API and SDK shapes keep working as
   aliases that delegate to the core until they are versioned out.
   Verification: pending (rollout).
-- **SUB-COMPAT-03** Cutover runs in shadow first (the old path decides, the
-  core records its decision, and they are compared), behind a per-provider
-  switch with a documented rollback. Verification: pending (rollout).
+- **SUB-COMPAT-03** Historical shadow comparison precedes one drained move
+  per provider, with no dual writes. Preflight failure rolls back the migration
+  transaction; after activation, recovery is forward-only and an old binary
+  must not restart. Disabling a cutover fails closed, never back to the legacy
+  path. Verification: pending (rollout).
 
 ### Security and observability
 

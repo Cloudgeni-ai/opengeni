@@ -2171,6 +2171,7 @@ BEGIN
       'manage_subscription_core_personal(text,uuid,uuid,text,uuid,text,text,boolean,integer)',
       'subscription_core_personal_connections(text,uuid,uuid,text)',
       'subscription_core_personal_connection_versions(text,uuid,uuid,text)',
+      'subscription_core_personal_sharing(text,uuid,text,uuid,integer)',
       'read_subscription_core_owned_connection_credential(text,uuid,uuid,text,uuid)',
       'begin_subscription_core_owned_connection_refresh(text,uuid,uuid,text,uuid)',
       'record_subscription_core_owned_connection_quota(text,uuid,uuid,text,uuid,bigint,bigint,jsonb,timestamptz)',

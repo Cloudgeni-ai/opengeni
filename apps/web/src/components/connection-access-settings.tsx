@@ -352,6 +352,12 @@ export function ConnectionAccessFormPage({
       )
     ) : draft && data ? (
       <FieldStack>
+        {data.personalSharingSupported ? (
+          <Notice tone="muted" title="Share your personal account">
+            Sharing makes this an organization-managed account. Consumer plans may limit use to the
+            account holder.
+          </Notice>
+        ) : null}
         {organization ? (
           <div className="flex min-w-0 flex-col gap-3">
             <ChoiceCards
@@ -611,9 +617,11 @@ export function ConnectionAccessFormPage({
       backLabel={name}
       onClose={onClose}
       loading={!data && !access.error}
-      submitLabel="Save"
+      submitLabel={data?.personalSharingSupported ? "Share account" : "Save"}
       pendingLabel="Saving…"
-      submitDisabled={!canManage || !dirty}
+      submitDisabled={
+        !canManage || !dirty || Boolean(data?.personalSharingSupported && reachesNoWorkspace)
+      }
       disabledReason={
         canManage ? undefined : "Only people who can manage connections can change this."
       }
@@ -621,7 +629,9 @@ export function ConnectionAccessFormPage({
       onSubmit={async () => {
         if (!draft) return false;
         try {
-          await access.save(draft);
+          await access.save(
+            data?.personalSharingSupported ? { ...draft, sharePersonal: true } : draft,
+          );
         } catch (caught) {
           setError(saveFailure(caught));
           return false;

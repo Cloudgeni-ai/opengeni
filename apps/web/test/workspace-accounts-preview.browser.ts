@@ -63,6 +63,42 @@ try {
         "horizontal overflow",
       );
 
+    // SUB-OWN-06: the owner's actual Personal account page opens the same
+    // organization access form, but requires explicit sharing and chosen reach.
+    await open(
+      "sharing=personal&workspace=00000000-0000-4000-8000-0000000000d4&account=codex:00000000-0000-4000-8000-0000000000c4",
+    );
+    await page.getByRole("button", { name: "Share account", exact: true }).click();
+    await page
+      .getByText("Sharing makes this an organization-managed account.", { exact: false })
+      .waitFor();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByText("Alex's personal account", { exact: true }).click();
+    await page.getByRole("button", { name: "Share account", exact: true }).click();
+    await page
+      .getByText("Sharing makes this an organization-managed account.", { exact: false })
+      .waitFor();
+    assert(
+      await page.getByRole("button", { name: "Share account", exact: true }).isDisabled(),
+      "sharing without a reach",
+    );
+    await page.getByRole("checkbox", { name: "Design", exact: true }).check();
+    await noOverflow();
+    await shot("0-personal-sharing");
+    await page.getByRole("button", { name: "Share account", exact: true }).click();
+    await page.waitForFunction(() =>
+      (
+        window as unknown as { accessReceipts: { policy?: { sharePersonal?: boolean } }[] }
+      ).accessReceipts.some((receipt) => receipt.policy?.sharePersonal === true),
+    );
+    await page
+      .getByText("Share your personal account", { exact: true })
+      .waitFor({ state: "detached" });
+    assert(
+      (await page.getByText("This account isn't connected here", { exact: true }).count()) === 0,
+      "sharing returned to a nonexistent account page",
+    );
+
     // The organization's list: the Design workspace's account is listed once,
     // as an organization account, tagged with where it is available.
     await open("");

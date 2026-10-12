@@ -388,7 +388,7 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name)
-      values (${REACH_MIGRATION}), (${LATER_MIGRATION}), (${API_KEY_CONNECTIONS}), (${MAINTENANCE_MIGRATION}), (${CLAUDE_MAINTENANCE_MIGRATION}), (${RETIREMENT_MIGRATION}), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql')`;
+      values (${REACH_MIGRATION}), (${LATER_MIGRATION}), (${API_KEY_CONNECTIONS}), (${MAINTENANCE_MIGRATION}), (${CLAUDE_MAINTENANCE_MIGRATION}), (${RETIREMENT_MIGRATION}), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql'), ('0745_subscription_personal_sharing.sql')`;
     await migrate(database.ownerUrl);
     await owner`delete from schema_migrations where name in (${REACH_MIGRATION}, ${LATER_MIGRATION}, ${API_KEY_CONNECTIONS})`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });

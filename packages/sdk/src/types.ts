@@ -9859,6 +9859,8 @@ export type ModelConnectionAccessPolicy = {
    * `allowPersonalWorkspaces: false`.
    */
   allowedPeople?: string[] | null;
+  /** Explicit owner consent to share a personal subscription with the organization. */
+  sharePersonal?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {
@@ -9874,6 +9876,7 @@ export type ModelConnectionAccessResponse = {
   localWorkspaceIds?: string[];
   /** The workspace whose administrators also manage the account, if any. */
   managedByWorkspaceId?: string | null;
+  personalSharingSupported?: boolean;
 };
 
 export type ConnectorToolPermission = "allow" | "ask" | "block";

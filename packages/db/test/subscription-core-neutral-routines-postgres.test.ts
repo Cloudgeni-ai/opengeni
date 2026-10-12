@@ -88,6 +88,7 @@ beforeAll(async () => {
     "0735_subscription_core_owned_connection_usage.sql",
     // Reads the registry/receipt and rewrites the admission guard withheld above.
     "0739_subscription_failover_readiness_and_request_fence.sql",
+    "0745_subscription_personal_sharing.sql",
   ];
   // The drained SuperGrok and Claude cutovers and the retirement after them
   // are maintenance-only: a rolling deployment of 0707 never applies them, so

@@ -63,6 +63,7 @@ describe("pre-knowledge Memory storage compatibility", () => {
         "0741_subscription_core_claude_cutover.sql",
         // The retirement requires both cutovers.
         "0744_subscription_core_legacy_retirement.sql",
+        "0745_subscription_personal_sharing.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);

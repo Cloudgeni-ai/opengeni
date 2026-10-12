@@ -21,6 +21,67 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+test("SUB-OWN-06: sharing is explicit, explains consumer-plan limits and requires a chosen reach", async () => {
+  const writes: unknown[] = [];
+  const access = {
+    data: {
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [] as string[],
+        allowPersonalWorkspaces: false,
+        version: 3,
+      },
+      models: [],
+      workspaces: [{ id: "chosen-workspace", name: "Chosen workspace" }],
+      personalWorkspacesSupported: true,
+      personalSharingSupported: true,
+      peopleSupported: false,
+    },
+    error: null,
+    loading: false,
+    reload: async () => undefined,
+    save: async (value: unknown) => {
+      writes.push(value);
+    },
+  };
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <ConnectionAccessFormPage
+          access={access}
+          organization
+          canManage
+          name="Your subscription"
+          onClose={() => undefined}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Consumer plans may limit use to the account holder");
+    const submit = () =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Share account",
+      )!;
+    expect(submit().disabled).toBe(true);
+    // Chosen workspace is the first checkbox; Personal workspaces follows it.
+    const option = container.querySelector<HTMLElement>(
+      '[role="checkbox"], input[type="checkbox"]',
+    );
+    expect(option).not.toBeNull();
+    await act(async () => option!.click());
+    expect(submit().disabled).toBe(false);
+    await act(async () => submit().closest("form")!.requestSubmit());
+    expect(writes).toEqual([
+      { ...access.data.policy, allowedWorkspaces: ["chosen-workspace"], sharePersonal: true },
+    ]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper"] as const) {
   test(`${kind} workspace access stays editable before restrictions and after resetting to all models`, async () => {
     let policy = {

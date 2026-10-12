@@ -146,6 +146,17 @@ Every table is `ENABLE` + `FORCE ROW LEVEL SECURITY` and keyed by
   generic `organization_user_resource_authorities` tuple
   (`owner_organization_membership_id`, authority id, generation) with the new
   resource kind `subscription_connection`, and are not bound to a workspace.
+  An exact personal owner who is also an organization administrator can
+  explicitly share the named account through the organization access form
+  (`sharePersonal: true`, migration 0745). The form explains consumer-plan
+  limits and requires nonempty workspace reach. Other administrators gain no
+  personal inventory or conversion authority. The membership, personal-resource,
+  shared-upstream-identity and refresh fences serialize the versioned conversion
+  with revocation and reconnect. Conversion and reach commit together, preserving
+  connection and credential identity, quota, pins, leases and accepted history;
+  only the old personal resource authority is revoked. Frozen personal receipts
+  cannot become shared authority. Invalid reach, a stale version or an existing
+  shared upstream identity leaves the original account unchanged.
 - Scope (shared rows): `scope_kind` (`organization` | `workspaces` |
   `people`) and `allow_personal_workspaces`; assignments in
   `subscription_connection_workspaces` and `subscription_connection_people`

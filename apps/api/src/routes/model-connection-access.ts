@@ -250,6 +250,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 ...(people ? { peopleSupported: true, people } : { peopleSupported: false }),
                 localWorkspaceIds: coreAccess.localWorkspaceIds,
                 managedByWorkspaceId: coreAccess.managedByWorkspaceId,
+                ...(coreAccess.personalSharingSupported ? { personalSharingSupported: true } : {}),
               }
             : {}),
         }),
@@ -262,6 +263,10 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       if (!parsed.success)
         throw new HTTPException(422, { message: "Invalid connection access policy" });
       const policy = parsed.data;
+      if (policy.sharePersonal && (!core || connection.workspaceId !== null))
+        throw new HTTPException(422, {
+          message: "Personal sharing requires the organization subscription route",
+        });
       if (policy.allowedModels?.some((id) => !id.startsWith(modelPrefix(connection))))
         throw new HTTPException(422, {
           message: "Model belongs to a different connection provider",

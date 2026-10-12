@@ -86,6 +86,8 @@ const subscriptionCoreMigrations = [
   "0740_subscription_core_xai_cutover.sql",
   // Extends the capacity waiter table from withheld shared-core migrations.
   "0743_subscription_waiter_candidates.sql",
+  // Uses the shared connection row type and post-0715 owner routines.
+  "0745_subscription_personal_sharing.sql",
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

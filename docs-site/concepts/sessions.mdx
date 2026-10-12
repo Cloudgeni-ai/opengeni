@@ -84,6 +84,8 @@ Follow-ups without an explicit choice reuse the model, reasoning effort, and spe
 
 Subscription accounts belong to the organization and can be made available to everyone, selected workspaces, or selected people. Automatic selection prefers eligible shared accounts and keeps the selected account while its prompt cache is warm. Choosing an account changes the session's preference; it never gives already-accepted background work access to another person's account.
 
+If you own a personal subscription and are also an organization administrator, its Models account page offers **Share account**. Choose which workspaces may use it and explicitly confirm sharing. This makes it organization-managed without changing its credentials or conversation history. Other administrators cannot share your personal account for you. Consumer plans may limit use to the account holder.
+
 Codex, Claude and SuperGrok share account selection and capacity recovery. Cross-provider fallback requires an administrator-enabled policy, an exact configured model mapping, and a compatible conversation. Codex conversations using remote compaction remain Codex-only; deployments must separately activate cross-provider serving before those policies take effect.
 
 ## Voice input

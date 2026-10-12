@@ -17,8 +17,11 @@ const PEOPLE = [
 const ACME_PRO = "00000000-0000-4000-8000-0000000000c1";
 const DESIGN_PLAN = "00000000-0000-4000-8000-0000000000c2";
 const RESEARCH_PLAN = "00000000-0000-4000-8000-0000000000c3";
+const PERSONAL_PLAN = "00000000-0000-4000-8000-0000000000c4";
 
 const params = new URLSearchParams(window.location.search);
+const previewPersonalSharing = params.get("sharing") === "personal";
+let personalShared = false;
 /** `reach=people`: Acme Pro limited to people; `reach=all`: the Design plan in every shared workspace. */
 const initialReach = params.get("reach");
 /** `designSource=organization`: Design is set to use the organization's accounts. */
@@ -55,6 +58,7 @@ function account(id: string, label: string, email: string, remaining: number, ac
     fiveHour: weekly(Math.min(100, remaining + 20)),
   };
 }
+const personalAccount = account(PERSONAL_PLAN, "Alex's personal account", "alex@example.com", 71, true);
 const organizationAccounts = [
   account(ACME_PRO, "Acme Pro", "billing@example.com", 62, true),
   account(DESIGN_PLAN, "Design team plan", "design@example.com", 81, false),
@@ -66,9 +70,16 @@ type Policy = {
   allowedWorkspaces: string[] | null;
   allowPersonalWorkspaces: boolean;
   allowedPeople?: string[] | null;
+  sharePersonal?: true;
   version: number;
 };
 const policies: Record<string, Policy> = {
+  [PERSONAL_PLAN]: {
+    allowedModels: null,
+    allowedWorkspaces: [],
+    allowPersonalWorkspaces: false,
+    version: 1,
+  },
   // `reach=people`: the organization's own account limited to two people.
   [ACME_PRO]:
     initialReach === "people"
@@ -212,13 +223,16 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
         : workspaceId === WORKSPACES.research.id
           ? researchSource
           : "automatic";
-    const workspaceAvailable = rows.some((row) => row.local);
+    const workspaceAvailable = rows.some((row) => row.local) ||
+      (previewPersonalSharing && personal && !personalShared);
     const listed = (row: (typeof rows)[number]) =>
       mode === "automatic" || (mode === "workspace" ? row.local : row.organization);
     return {
-      accounts: rows
-        .filter(listed)
-        .map((row) => ({ ...row.entry, source: row.local ? "workspace" : "organization" })),
+      accounts: [
+        ...rows.filter(listed).map((row) => ({ ...row.entry, source: row.local ? "workspace" : "organization" })),
+        ...(previewPersonalSharing && personal && !personalShared
+          ? [{ ...personalAccount, source: "workspace" }] : []),
+      ],
       activeAccountId: ACME_PRO,
       source: {
         accountId: ORG,
@@ -255,7 +269,8 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
       workspaces: [WORKSPACES.design, WORKSPACES.platform, WORKSPACES.research],
       personalWorkspacesSupported: true,
       // People scope only for an account no workspace manages (design 5.4, decision 5).
-      peopleSupported: !managedBy[id],
+      peopleSupported: id !== PERSONAL_PLAN && !managedBy[id],
+      personalSharingSupported: id === PERSONAL_PLAN && !personalShared,
       ...(managedBy[id] ? {} : { people: PEOPLE }),
       localWorkspaceIds: local[id] ?? [],
       managedByWorkspaceId: managedBy[id] ?? null,
@@ -263,6 +278,10 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   async updateModelConnectionAccess(target: { connectionId: string }, policy: Policy) {
     receipts.push({ access: target.connectionId, policy });
+    if (target.connectionId === PERSONAL_PLAN && policy.sharePersonal) {
+      personalShared = true;
+      organizationAccounts.push(personalAccount);
+    }
     // Returned in the response schema's key order, as the API does.
     policies[target.connectionId] = {
       allowedModels: policy.allowedModels,

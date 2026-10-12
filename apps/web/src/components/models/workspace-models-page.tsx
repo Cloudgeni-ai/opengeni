@@ -381,12 +381,17 @@ export function WorkspaceModelsPageBody({
 
   const backToList = () => nav.openAccount(undefined);
   const codexPlaces: CodexPlaces = {
+    personal,
     workspaceName,
     organizationName,
     scope: labels,
     openAccount: (id) => nav.openAccount(accountKey("codex", id)),
     openConnect: () => nav.openView("connect:codex"),
     openAccess: (id) => nav.openView("model-access", accountKey("codex", id)),
+    sharePersonal:
+      personal && organizationAdmin
+        ? (id) => nav.openView("model-access", accountKey("codex", id, true))
+        : undefined,
     backToList,
   };
   const orgCodexPlaces: OrgCodexPlaces = {
@@ -405,6 +410,9 @@ export function WorkspaceModelsPageBody({
     openAccount: (id) => nav.openAccount(accountKey("supergrok", id)),
     openConnect: () => nav.openView("connect:supergrok"),
     openAccess: (id) => nav.openView("model-access", accountKey("supergrok", id)),
+    sharePersonal: organizationAdmin
+      ? (id) => nav.openView("model-access", accountKey("supergrok", id, true))
+      : undefined,
     backToList,
   };
   const orgGrokPlaces: SuperGrokPlaces = {
@@ -425,6 +433,9 @@ export function WorkspaceModelsPageBody({
     openConnect: (id) =>
       nav.openView("connect:claude_subscription", id ? accountKey("claude", id) : undefined),
     openAccess: (id) => nav.openView("model-access", accountKey("claude", id)),
+    sharePersonal: organizationAdmin
+      ? (id) => nav.openView("model-access", accountKey("claude", id, true))
+      : undefined,
     backToList,
   };
   const orgClaudePlaces: ClaudePlaces = {
@@ -956,7 +967,25 @@ export function WorkspaceModelsPageBody({
       />
     );
   } else if (view === "model-access" && key) {
-    const back = () => nav.openAccount(account);
+    // A personal account isn't in the organization's inventory until sharing
+    // commits. Both Cancel and Save must leave a usable page; saving already
+    // invalidates the provider lists through model-connections-changed.
+    const personalShare =
+      key.organization &&
+      ((key.provider === "codex" &&
+        personal &&
+        codex.accounts.some(
+          (candidate) => candidate.id === key.id && candidate.source !== "organization",
+        )) ||
+        (key.provider === "claude" &&
+          claude.accounts.some(
+            (candidate) => candidate.id === key.id && candidate.scope === "user",
+          )) ||
+        (key.provider === "supergrok" &&
+          grok.accounts.some(
+            (candidate) => candidate.id === key.id && candidate.scope === "user",
+          )));
+    const back = () => nav.openAccount(personalShare ? undefined : account);
     if (key.organization) {
       page =
         key.provider === "codex" ? (

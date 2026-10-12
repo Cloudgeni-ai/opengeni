@@ -154,7 +154,7 @@ describe("migration 0053 (Codex credential leases)", () => {
           -- The SuperGrok cutover requires 0712 through 0717; the retirement
           -- requires both cutovers.
           ('0740_subscription_core_xai_cutover.sql'), ('0741_subscription_core_claude_cutover.sql'),
-          ('0744_subscription_core_legacy_retirement.sql'), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql') on conflict do nothing`;
+          ('0744_subscription_core_legacy_retirement.sql'), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql'), ('0745_subscription_personal_sharing.sql') on conflict do nothing`;
       await migrate(databaseUrl);
       client = createDb(databaseUrl, { max: 2 });
 

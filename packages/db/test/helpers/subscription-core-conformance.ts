@@ -1350,7 +1350,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("placement honours shared scopes and keeps ownerless sessions shared-only", async () => {
+    test("SUB-ELIG-01: placement honours shared scopes and keeps ownerless sessions shared-only", async () => {
       const org = await organization();
       const otherWorkspace = await sharedConnection(org, `other-${crypto.randomUUID()}`, {
         kind: "workspaces",
@@ -1395,7 +1395,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
     });
 
-    test("personal connections serve only the owner's own turns with frozen authority", async () => {
+    test("SUB-OWN-03: personal connections serve only the owner's own turns with frozen authority", async () => {
       const org = await organization();
       const personal = await personalConnection(org, `personal-${crypto.randomUUID()}`);
       // The owner's personal connection of the foreign provider (same kind,
@@ -2987,7 +2987,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("leases are generation-fenced: replay, renew, foreign holders, release", async () => {
+    test("SUB-LEASE-02: leases are generation-fenced: replay, renew, foreign holders, release", async () => {
       const org = await organization();
       const connectionId = await sharedConnection(org, `lease-${crypto.randomUUID()}`);
       const turn = await runningTurn(org);
@@ -3155,7 +3155,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       ).rejects.toBeInstanceOf(unknownOutcome);
     });
 
-    test("a rate-limited connection fails over to another and counts the refusal", async () => {
+    test("SUB-FAIL-01, SUB-FAIL-02: a rate-limited connection fails over to another and counts the refusal", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `a-${crypto.randomUUID()}`);
       const b = await sharedConnection(org, `b-${crypto.randomUUID()}`);

@@ -73,6 +73,7 @@ export const ACCOUNT_COLUMNS: RowListColumn[] = [
 ];
 
 export interface CodexPlaces {
+  personal?: boolean;
   /** The workspace's name, for sentences like "stops paying for new work in Local". */
   workspaceName: string;
   /** The organization's name, or "your organization" when it has none. */
@@ -82,6 +83,7 @@ export interface CodexPlaces {
   openAccount: (accountId: string) => void;
   openConnect: () => void;
   openAccess: (accountId: string) => void;
+  sharePersonal?: ((accountId: string) => void) | undefined;
   backToList: () => void;
 }
 
@@ -1072,7 +1074,7 @@ function CodexAccountDetail({
     workspaceId: codex.workspaceId,
     kind: "codex",
     connectionId: account.id,
-    enabled: !organizationAccount,
+    enabled: !organizationAccount && !places.personal,
   });
   const overview = codex.overviewMap[account.id];
   const attempts = codex.redemptionAttempts(account.id);
@@ -1270,12 +1272,28 @@ function CodexAccountDetail({
                   }
                 />
               ) : null}
-              <ConnectionAccessRows
-                access={access}
-                organization={false}
-                canManage={codex.canManage}
-                onEdit={() => places.openAccess(account.id)}
-              />
+              {!places.personal ? (
+                <ConnectionAccessRows
+                  access={access}
+                  organization={false}
+                  canManage={codex.canManage}
+                  onEdit={() => places.openAccess(account.id)}
+                />
+              ) : null}
+              {places.sharePersonal ? (
+                <SettingRow
+                  label="Share with your organization"
+                  description="Choose which workspaces can use this account."
+                  control={
+                    <RowButton
+                      disabled={codex.busy}
+                      onClick={() => places.sharePersonal?.(account.id)}
+                    >
+                      Share account
+                    </RowButton>
+                  }
+                />
+              ) : null}
             </SettingRowGroup>
           </DetailSection>
         ) : null}
