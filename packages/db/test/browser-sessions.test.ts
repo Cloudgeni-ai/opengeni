@@ -29,6 +29,7 @@ import {
   getBrowserSession,
   getBrowserSessionControlRecord,
   getBrowserPrivateCheckpointAuthority,
+  getExpiredBrowserSessionResume,
   listBrowserSessions,
   LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
@@ -41,6 +42,7 @@ import {
   reconcileAttachedBrowserInventory,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
+  settleExpiredBrowserSessionResume,
   touchBrowserSessionController,
   touchInteractionOperation,
 } from "../src";
@@ -115,6 +117,35 @@ function createInput(
     identityId: null,
     baseRevisionId: null,
   };
+}
+
+/** Apply the transition reaper's settlement of an expired lifecycle transition:
+ * outcome unknown, lifecycle lost, exact controller binding retained. */
+async function expireBrowserTransition(
+  workspaceId: string,
+  browserSessionId: string,
+  operationId: string,
+) {
+  await shared!.admin`
+    update interaction_operations
+    set state = 'outcome_unknown',
+        error_code = 'outcome_unknown',
+        error_message = 'Interaction controller transition heartbeat expired',
+        error_retryable = false,
+        error_details = jsonb_build_object('reason', 'transition_heartbeat_expired'),
+        settled_at = now(),
+        updated_at = now()
+    where workspace_id = ${workspaceId}
+      and operation_id = ${operationId}
+      and state = 'dispatched'`;
+  await shared!.admin`
+    update browser_sessions
+    set lifecycle = 'lost',
+        failure_code = 'controller_transition_expired',
+        updated_at = now()
+    where workspace_id = ${workspaceId}
+      and id = ${browserSessionId}
+      and lifecycle in ('starting', 'suspending', 'restoring', 'ending')`;
 }
 
 async function activeBrowser(scope: Awaited<ReturnType<typeof fixture>>) {
@@ -1228,6 +1259,165 @@ describe("durable BrowserSession lifecycle", () => {
         browserSessionId: active.session.id,
       }),
     ).not.toBeNull();
+  });
+
+  test("an expired resume returns to suspended and resumes from the same private checkpoint", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const browserSessionId = active.session.id;
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      stateUpload: {
+        objectKey: checkpointArtifact(scope, suspendOperationId).objectKey,
+        cleanupAfter: new Date(Date.now() + 60_000),
+      },
+    });
+    await commitBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      artifact: checkpointArtifact(scope, suspendOperationId),
+    });
+    await clearSuspendedBrowserSessionController(client.db, {
+      ...scope,
+      browserSessionId,
+      expectedControllerGeneration: active.controllerGeneration,
+    });
+    const checkpoint = await getBrowserPrivateCheckpointAuthority(client.db, {
+      ...scope,
+      browserSessionId,
+    });
+    expect(checkpoint).not.toBeNull();
+
+    // The resume dispatches, its launch never completes, and the transition
+    // reaper settles it exactly as the global reaper does.
+    const expiredOperationId = crypto.randomUUID();
+    await prepareBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: expiredOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    const expiredGeneration = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: expiredOperationId,
+      browserSessionId,
+      controllerGeneration: expiredGeneration,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: expiredGeneration,
+        placementInstanceId: "placement:expired",
+      },
+    });
+    await expireBrowserTransition(scope.workspaceId, browserSessionId, expiredOperationId);
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "controller_transition_expired",
+      controller: { controllerGeneration: expiredGeneration },
+    });
+    await expect(
+      prepareBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+
+    expect(await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId })).toEqual(
+      { controllerGeneration: expiredGeneration },
+    );
+    await expect(
+      settleExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        expectedControllerGeneration: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
+    expect(
+      await settleExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        expectedControllerGeneration: expiredGeneration,
+      }),
+    ).toBe(true);
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "suspended",
+      failureCode: null,
+      controller: null,
+    });
+    expect(
+      await getBrowserPrivateCheckpointAuthority(client.db, { ...scope, browserSessionId }),
+    ).toEqual(checkpoint);
+    const [expiredOperation] = await shared!.admin<{ state: string }[]>`
+      select state from interaction_operations
+      where workspace_id = ${scope.workspaceId} and operation_id = ${expiredOperationId}`;
+    expect(expiredOperation?.state).toBe("outcome_unknown");
+
+    const resumed = await prepareBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: scope.subjectId,
+    });
+    expect(resumed.session.lifecycle).toBe("restoring");
+  });
+
+  test("only an expired resume is returned to suspended", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const browserSessionId = active.session.id;
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      stateUpload: {
+        objectKey: checkpointArtifact(scope, suspendOperationId).objectKey,
+        cleanupAfter: new Date(Date.now() + 60_000),
+      },
+    });
+    // An expired suspension may hold newer live state than any checkpoint.
+    await expireBrowserTransition(scope.workspaceId, browserSessionId, suspendOperationId);
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "controller_transition_expired",
+    });
+    expect(
+      await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId }),
+    ).toBeNull();
+    await expect(
+      settleExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        expectedControllerGeneration: active.controllerGeneration,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "lost",
+      controller: { controllerGeneration: active.controllerGeneration },
+    });
   });
 
   test("returns a failed suspension to the same active controller", async () => {

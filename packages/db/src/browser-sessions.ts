@@ -2050,6 +2050,141 @@ export async function clearSuspendedBrowserSessionController(
   );
 }
 
+export type ExpiredBrowserSessionResume = {
+  /** Retained binding of the expired resume; it must be ended before settling. */
+  controllerGeneration: string | null;
+};
+
+/** A browser whose resume transition expired never became active again, so its
+ * durable state (private checkpoint or base revision) is unchanged since it was
+ * suspended. Only that case is returned; losses of create, suspend or end
+ * transitions, and anything with a newer lifecycle operation, are excluded. */
+export async function getExpiredBrowserSessionResume(
+  db: Database,
+  input: { accountId: string; workspaceId: string; browserSessionId: string },
+): Promise<ExpiredBrowserSessionResume | null> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) throw new BrowserSessionNotFoundError("BrowserSession not found");
+      return (await expiredResumeEligible(tx, row))
+        ? { controllerGeneration: row.controllerGeneration }
+        : null;
+    }, CONSISTENT_READ),
+  );
+}
+
+/** Return an expired resume to an ordinary suspended browser once its retained
+ * controller generation was ended. The next resume restores the same durable
+ * state under a fresh controller generation; nothing durable is deleted. */
+export async function settleExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    expectedControllerGeneration: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) throw new BrowserSessionNotFoundError("BrowserSession not found");
+      if (row.lifecycle === "suspended" && row.controllerGeneration === null) return false;
+      if (!(await expiredResumeEligible(tx, row))) {
+        // The same refusal resume preparation gives every other lost browser.
+        throw new BrowserSessionStateError("Only a suspended BrowserSession can be resumed");
+      }
+      if (row.controllerGeneration !== input.expectedControllerGeneration) {
+        throw new BrowserSessionOperationConflictError(
+          "BrowserSession controller authority changed",
+        );
+      }
+      const [settled] = await tx
+        .update(schema.browserSessions)
+        .set({
+          lifecycle: "suspended",
+          failureCode: null,
+          controllerId: null,
+          controllerGeneration: null,
+          placementInstanceId: null,
+          controllerHeartbeatAt: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.id, input.browserSessionId),
+            eq(schema.browserSessions.lifecycle, "lost"),
+            eq(schema.browserSessions.failureCode, CONTROLLER_TRANSITION_EXPIRED),
+            input.expectedControllerGeneration === null
+              ? isNull(schema.browserSessions.controllerGeneration)
+              : eq(schema.browserSessions.controllerGeneration, input.expectedControllerGeneration),
+          ),
+        )
+        .returning({ id: schema.browserSessions.id });
+      if (!settled) throw new Error("BrowserSession expired resume settlement was lost");
+      await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+      return true;
+    }),
+  );
+}
+
+const CONTROLLER_TRANSITION_EXPIRED = "controller_transition_expired";
+
+async function loadBrowserSessionRow(
+  tx: Database,
+  workspaceId: string,
+  browserSessionId: string,
+): Promise<BrowserSessionRow | undefined> {
+  const [row] = await tx
+    .select()
+    .from(schema.browserSessions)
+    .where(
+      and(
+        eq(schema.browserSessions.workspaceId, workspaceId),
+        eq(schema.browserSessions.id, browserSessionId),
+      ),
+    )
+    .limit(1);
+  return row;
+}
+
+async function expiredResumeEligible(tx: Database, row: BrowserSessionRow): Promise<boolean> {
+  if (
+    row.lifecycle !== "lost" ||
+    row.failureCode !== CONTROLLER_TRANSITION_EXPIRED ||
+    row.driverId === EPHEMERAL_CHROMIUM_DRIVER_ID ||
+    (!row.privateCheckpointArtifactId && !row.baseRevisionId)
+  ) {
+    return false;
+  }
+  const [latest] = await tx
+    .select({
+      kind: schema.interactionOperations.kind,
+      state: schema.interactionOperations.state,
+      controllerGeneration: schema.interactionOperations.controllerGeneration,
+    })
+    .from(schema.interactionOperations)
+    .where(
+      and(
+        eq(schema.interactionOperations.workspaceId, row.workspaceId),
+        eq(schema.interactionOperations.resourceKind, "browser_session"),
+        eq(schema.interactionOperations.resourceId, row.id),
+      ),
+    )
+    .orderBy(desc(schema.interactionOperations.createdAt))
+    .limit(1);
+  return (
+    latest?.kind === "resume" &&
+    latest.state === "outcome_unknown" &&
+    (row.controllerGeneration === null || latest.controllerGeneration === row.controllerGeneration)
+  );
+}
+
 export async function failBrowserSessionSuspension(
   db: Database,
   input: {

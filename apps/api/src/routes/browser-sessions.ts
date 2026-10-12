@@ -103,6 +103,7 @@ import {
   failPreparedBrowserSessionSuspend,
   failBrowserSessionResume,
   failBrowserSessionResumePreparation,
+  getExpiredBrowserSessionResume,
   failBrowserSessionSuspension,
   failBrowserRevisionPublication,
   findBrowserSessionControlRecordByOperation,
@@ -134,6 +135,7 @@ import {
   prepareBrowserDownloadSave,
   prepareBrowserSessionEnd,
   prepareBrowserSessionResume,
+  settleExpiredBrowserSessionResume,
   prepareBrowserSessionSuspend,
   prepareBrowserRevisionPublication,
   prepareProtectedAuthFill,
@@ -2440,6 +2442,19 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           browserSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        if (
+          before.session.lifecycle === "lost" &&
+          before.session.failureCode === "controller_transition_expired"
+        ) {
+          // A resume whose transition expired never activated: end its retained
+          // controller generation, then resume normally from the same durable state.
+          await settleExpiredBrowserResume(context, grant, workspaceId, browserSessionId);
+          before = await getBrowserSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          });
+        }
         if (before.session.lifecycle === "suspended" && before.session.controller) {
           await finishSuspendedBrowserControllerCleanup(
             context,
@@ -3555,6 +3570,69 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       });
       throw error;
     }
+  }
+
+  /** End the retained controller generation of an expired resume and return
+   * the browser to suspended. Other lost browsers are left unchanged so the
+   * normal resume preparation refuses them. */
+  async function settleExpiredBrowserResume(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+  ): Promise<void> {
+    const expired = await getExpiredBrowserSessionResume(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    if (!expired) return;
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    const binding = record.session.controller;
+    if ((binding?.controllerGeneration ?? null) !== expired.controllerGeneration) {
+      throw new BrowserSessionStateError("BrowserSession controller authority changed");
+    }
+    if (binding) {
+      browserAuthorityRoot(deps);
+      const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+      await withBrowserPlacement(
+        sourceSession,
+        grant,
+        record.session.placement,
+        binding.placementInstanceId,
+        "browser.resume",
+        context.req.raw.signal,
+        async (placement) => {
+          const client = await provisionController(
+            deps,
+            grant,
+            record,
+            placement,
+            requestOrigin(context, deps.settings),
+          );
+          // A resident or provably never-completed launch is ended exactly; a
+          // possibly accepted launch stays preserved and refuses this resume.
+          await endCapturedBrowserController(client, browserSessionId, binding);
+        },
+      );
+    }
+    await settleExpiredBrowserSessionResume(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+      expectedControllerGeneration: expired.controllerGeneration,
+    });
+    await releaseInteractionHolder(
+      deps,
+      grant,
+      workspaceId,
+      browserSessionId,
+      record.controllerHostSandboxGroupId,
+    ).catch(() => undefined);
   }
 
   async function finishSuspendedBrowserControllerCleanup(
