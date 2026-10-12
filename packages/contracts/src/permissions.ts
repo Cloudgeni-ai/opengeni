@@ -32,19 +32,28 @@ export const Permission = z.enum([
   "connections:read",
   "connections:write",
   "capabilities:manage",
-  /** @deprecated alias of variable-sets:manage */
+  /** @deprecated alias of secrets:write */
   "environments:manage",
-  /** @deprecated alias of variable-sets:use */
+  /** @deprecated alias of secrets:use */
   "environments:use",
+  /** @deprecated alias of secrets:list */
   "variable-sets:list",
+  /** @deprecated alias of secrets:list */
   "variable-sets:read",
+  /** @deprecated alias of secrets:write */
   "variable-sets:write",
+  /** @deprecated alias of secrets:write */
   "variable-sets:manage",
+  /** @deprecated alias of secrets:use */
   "variable-sets:attach",
+  /** @deprecated alias of secrets:use */
   "variable-sets:use",
   "secrets:list",
+  /** Literal plaintext read through a tool or API key (agents lack it by default). */
   "secrets:read",
   "secrets:write",
+  /** Use secrets by reference; for humans, also reveal ("use = reveal"). */
+  "secrets:use",
   "mcp_servers:attach",
   "codemode:call",
   "goals:manage",
@@ -56,3 +65,25 @@ export const Permission = z.enum([
   "artifacts:publish",
 ]);
 export type Permission = z.infer<typeof Permission>;
+
+/**
+ * Legacy permission names and their secrets equivalents (Q-16). Stored role
+ * and API-key permission arrays are aliased at read time, never rewritten.
+ */
+export const SECRET_PERMISSION_ALIASES = {
+  "variable-sets:list": "secrets:list",
+  "variable-sets:read": "secrets:list",
+  "variable-sets:write": "secrets:write",
+  "variable-sets:manage": "secrets:write",
+  "environments:manage": "secrets:write",
+  "variable-sets:attach": "secrets:use",
+  "variable-sets:use": "secrets:use",
+  "environments:use": "secrets:use",
+} as const satisfies Readonly<Partial<Record<Permission, Permission>>>;
+
+/** Canonical name for a permission: legacy variable-set names map to `secrets:*`. */
+export function normalizePermission(name: string): string {
+  return Object.hasOwn(SECRET_PERMISSION_ALIASES, name)
+    ? SECRET_PERMISSION_ALIASES[name as keyof typeof SECRET_PERMISSION_ALIASES]
+    : name;
+}

@@ -39,6 +39,11 @@ export type AgentPromptResources = {
   gitCredentials: boolean;
   /** Files are attached (mounted) for this turn. */
   attachments: boolean;
+  /**
+   * The runtime resolves `{{secret:…}}` references for this attempt. Gates
+   * the secrets prompt module; omitted keeps prompts unchanged.
+   */
+  secretReferences?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
 };

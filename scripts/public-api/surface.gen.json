@@ -9147,6 +9147,7 @@
         "$|2.knowledge": "boolean?",
         "$|2.media": "boolean?",
         "$|2.schedules": "boolean?",
+        "$|2.secrets": "boolean?",
         "$|2.skills": "ref(AgentSkillsCapability)?",
         "$|2.subagents": "boolean?",
         "$|2.webSearch": "boolean?",
@@ -9160,7 +9161,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"schedules\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
+        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"schedules\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
       }
     },
     "AgentCapabilityStartingPoint": {
@@ -9182,7 +9183,8 @@
         "$.capabilities": "ref(AgentCapabilities)?",
         "$.identity": "string? null",
         "$.instructions": "string?",
-        "$.renderer": "ref(AgentRenderer)?"
+        "$.renderer": "ref(AgentRenderer)?",
+        "$.vaultPolicy": "ref(VaultPolicy)?"
       }
     },
     "AgentEffectiveTools": {
@@ -9330,7 +9332,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"secrets\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
       }
     },
     "AgentRenderer": {
@@ -14856,6 +14858,22 @@
         "$.text": "string!"
       }
     },
+    "GeneratePasswordSpec": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.digits": "boolean?",
+        "$.excludeAmbiguous": "boolean?",
+        "$.length": "integer?",
+        "$.lowercase": "boolean?",
+        "$.requireEachClass": "boolean?",
+        "$.symbolSet": "string?",
+        "$.symbols": "boolean?",
+        "$.uppercase": "boolean?"
+      }
+    },
     "GeneratedVideoFacts": {
       "io": [
         "output"
@@ -15674,6 +15692,7 @@
         "$": "object",
         "$.other": "string? null",
         "$.questionId": "string!",
+        "$.secret": "ref(HumanInputSecretAnswerResult)?",
         "$.values": "array!",
         "$.values[]": "string"
       }
@@ -15704,6 +15723,7 @@
         "$.options[]": "ref(HumanInputOption)",
         "$.prompt": "string!",
         "$.required": "boolean?",
+        "$.secret": "ref(HumanInputSecretSpec)?",
         "$.skillReview": "ref(SkillReviewReference)? null",
         "$.validation": "object? null",
         "$.validation.maxSelections": "integer? null",
@@ -15715,7 +15735,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"multi_select\\\"\",\"\\\"single_select\\\"\",\"\\\"text\\\"\"]"
+        "$": "enum=[\"\\\"multi_select\\\"\",\"\\\"secret\\\"\",\"\\\"single_select\\\"\",\"\\\"text\\\"\"]"
       }
     },
     "HumanInputRequestStatus": {
@@ -15742,6 +15762,42 @@
         "$|outcome=expired.outcome": "const!=[\"\\\"expired\\\"\"]",
         "$|outcome=cancelled": "object",
         "$|outcome=cancelled.outcome": "const!=[\"\\\"cancelled\\\"\"]"
+      }
+    },
+    "HumanInputSecretAnswerResult": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.itemName": "string!",
+        "$.reference": "string!",
+        "$.saveTo": "ref(SECRET_SAVE_TO)!",
+        "$.username": "string! null",
+        "$.vaultName": "string!"
+      }
+    },
+    "HumanInputSecretSpec": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.allowGenerate": "boolean?",
+        "$.autocomplete": "enum?=[\"\\\"current-password\\\"\",\"\\\"new-password\\\"\",\"\\\"off\\\"\",\"\\\"one-time-code\\\"\"]",
+        "$.field": "string?",
+        "$.fieldKind": "enum?=[\"\\\"concealed\\\"\",\"\\\"text\\\"\",\"\\\"totp\\\"\"]",
+        "$.generate": "ref(GeneratePasswordSpec)?",
+        "$.item": "string!",
+        "$.itemType": "enum?=[\"\\\"api_key\\\"\",\"\\\"login\\\"\",\"\\\"note\\\"\"]",
+        "$.looksLike": "string?",
+        "$.pattern": "string?",
+        "$.saveTo": "enum?=[\"\\\"task\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.username": "object?",
+        "$.username.prompt": "string!",
+        "$.username.value": "string?",
+        "$.vault": "string?",
+        "$.website": "string?"
       }
     },
     "ImportArchivedSessionRequest": {
@@ -19903,7 +19959,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
+        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:use\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
       }
     },
     "PersonalApiKey": {
@@ -21149,6 +21205,7 @@
         "$.knowledge": "boolean!",
         "$.media": "boolean!",
         "$.schedules": "boolean!",
+        "$.secrets": "boolean!",
         "$.skills": "ref(AgentSkillsCapability)!",
         "$.subagents": "boolean!",
         "$.webSearch": "boolean!",
@@ -21615,6 +21672,14 @@
         "$.batchSize": "integer?",
         "$.operationId": "string!",
         "$.runId": "string!"
+      }
+    },
+    "SECRET_SAVE_TO": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"task\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "SandboxBackend": {
@@ -26254,6 +26319,20 @@
         "$.version": "integer!"
       }
     },
+    "VaultPolicy": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"mode=all\",\"mode=selected\"]",
+        "$|mode=all": "object",
+        "$|mode=all.mode": "const!=[\"\\\"all\\\"\"]",
+        "$|mode=selected": "object",
+        "$|mode=selected.mode": "const!=[\"\\\"selected\\\"\"]",
+        "$|mode=selected.vaultIds": "array!",
+        "$|mode=selected.vaultIds[]": "string"
+      }
+    },
     "VerifyAuthRunRequest": {
       "io": [
         "input"
@@ -28586,6 +28665,7 @@
       "generatedImageSandboxPathMatches": "value",
       "GeneratedVideoFacts": "type",
       "GeneratedVideoReceipt": "type",
+      "GeneratePasswordSpec": "type",
       "GetMyUsageRequest": "type",
       "GetOrganizationCredentialProviderResponse": "type",
       "GetSessionOptions": "type",
@@ -28660,6 +28740,10 @@
       "HumanInputQuestion": "type",
       "HumanInputQuestionKind": "type",
       "HumanInputResponse": "type",
+      "HumanInputSecretAnswer": "type",
+      "HumanInputSecretAnswerResult": "type",
+      "HumanInputSecretSaveTo": "type",
+      "HumanInputSecretSpec": "type",
       "humanizeModelSlug": "value",
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InboxItem": "type",
@@ -29574,6 +29658,7 @@
       "VariableSetAttachmentMetadata": "type",
       "VariableSetSecret": "type",
       "VariableSetVariableMetadata": "type",
+      "VaultPolicy": "type",
       "VerifyAuthRunRequest": "type",
       "verifyCredentialProviderRequest": "value",
       "verifyOpenGeniSignature": "value",

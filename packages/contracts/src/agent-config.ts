@@ -20,6 +20,7 @@
  */
 import { z } from "zod";
 import { CUA_DESKTOP_TOOLS, isCuaDesktopModelTool } from "./cua-desktop-tools";
+import { VaultPolicy } from "./vaults";
 import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index";
 
 export const AGENT_CAPABILITY_IDS = [
@@ -32,6 +33,7 @@ export const AGENT_CAPABILITY_IDS = [
   "schedules",
   "artifacts",
   "browser",
+  "secrets",
   "media",
   "workspaceFiles",
   "workspaceConnectors",
@@ -68,6 +70,7 @@ export const AgentCapabilityToggles = z
     schedules: z.boolean().optional(),
     artifacts: z.boolean().optional(),
     browser: z.boolean().optional(),
+    secrets: z.boolean().optional(),
     media: z.boolean().optional(),
     workspaceFiles: z.boolean().optional(),
     workspaceConnectors: z.boolean().optional(),
@@ -107,6 +110,11 @@ export const AgentConfigRequest = z
     /** Alias of the session `instructions` field (same column, same bound). */
     instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
     renderer: AgentRenderer.optional(),
+    /**
+     * Vaults this session may use (input only, Q-08). Intersected with the
+     * parent's policy and any session-level `vaultPolicy`.
+     */
+    vaultPolicy: VaultPolicy.optional(),
   })
   .strict();
 export type AgentConfigRequest = z.infer<typeof AgentConfigRequest>;
@@ -132,6 +140,7 @@ export const ResolvedAgentCapabilities = z
     schedules: z.boolean(),
     artifacts: z.boolean(),
     browser: z.boolean(),
+    secrets: z.boolean(),
     media: z.boolean(),
     workspaceFiles: z.boolean(),
     workspaceConnectors: z.boolean(),
@@ -155,22 +164,44 @@ export type ResolvedAgentConfigSource = z.infer<typeof ResolvedAgentConfigSource
  * wanted on but this deployment does not offer (reported off, never widened
  * later without a new resolution).
  */
-export const ResolvedAgentConfig = z
-  .object({
-    version: z.literal(1),
-    from: AgentCapabilityStartingPoint,
-    capabilities: ResolvedAgentCapabilities,
-    unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
-    /**
-     * Why each `unavailable` capability is off, keyed by capability. Present
-     * whenever `unavailable` is non-empty; absent on historical configurations.
-     */
-    unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
-    identity: AgentIdentity.nullable(),
-    renderer: AgentRenderer,
-    source: ResolvedAgentConfigSource,
-  })
-  .strict();
+/**
+ * Configurations frozen before the `secrets` capability existed lack it.
+ * They read as `from === "all"` (Q-17); stored rows are never rewritten.
+ */
+function withStoredSecretsCapability(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const config = value as { from?: unknown; capabilities?: unknown };
+  const capabilities = config.capabilities;
+  if (
+    capabilities === null ||
+    typeof capabilities !== "object" ||
+    Array.isArray(capabilities) ||
+    Object.hasOwn(capabilities, "secrets")
+  ) {
+    return value;
+  }
+  return { ...config, capabilities: { ...capabilities, secrets: config.from === "all" } };
+}
+
+export const ResolvedAgentConfig = z.preprocess(
+  withStoredSecretsCapability,
+  z
+    .object({
+      version: z.literal(1),
+      from: AgentCapabilityStartingPoint,
+      capabilities: ResolvedAgentCapabilities,
+      unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
+      /**
+       * Why each `unavailable` capability is off, keyed by capability. Present
+       * whenever `unavailable` is non-empty; absent on historical configurations.
+       */
+      unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
+      identity: AgentIdentity.nullable(),
+      renderer: AgentRenderer,
+      source: ResolvedAgentConfigSource,
+    })
+    .strict(),
+);
 export type ResolvedAgentConfig = z.infer<typeof ResolvedAgentConfig>;
 
 /** `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/agent`. Omitted fields keep current values. */
@@ -679,6 +710,10 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
     description: "Publish files, documents, and Sites people can open.",
   },
   browser: { label: "Browser and computer", description: "Use a browser or desktop computer." },
+  secrets: {
+    label: "Secrets",
+    description: "Use saved passwords, keys, and codes by reference, and save new ones.",
+  },
   media: { label: "Images and video", description: "Generate images and videos." },
   workspaceFiles: {
     label: "Workspace files",
@@ -720,6 +755,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "subagents",
   "knowledge",
   "skills",
+  "secrets",
   "admin",
   "attachments",
 ] as const;
@@ -741,6 +777,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   subagents: "Session coordination",
   knowledge: "Knowledge",
   skills: "Skills",
+  secrets: "Secrets",
   admin: "Integration setup",
   attachments: "Attached files",
 };
@@ -755,6 +792,7 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
   subagents: ["subagents"],
   knowledge: ["knowledge"],
   skills: ["skills"],
+  secrets: ["secrets"],
   workspaceAdmin: ["admin"],
 };
 
@@ -802,6 +840,7 @@ export function allAgentCapabilities(): ResolvedAgentCapabilities {
     schedules: true,
     artifacts: true,
     browser: true,
+    secrets: true,
     media: true,
     workspaceFiles: true,
     workspaceConnectors: true,
@@ -821,6 +860,7 @@ export function noneAgentCapabilities(): ResolvedAgentCapabilities {
     schedules: false,
     artifacts: false,
     browser: false,
+    secrets: false,
     media: false,
     workspaceFiles: false,
     workspaceConnectors: false,
@@ -1417,6 +1457,8 @@ export function legacyEffectiveAgentCapabilities(input: {
     schedules: selected.has("schedules"),
     artifacts: selected.has("artifacts"),
     browser: selected.has("browser"),
+    // Legacy sessions keep reference resolution on (D25, Q-17).
+    secrets: true,
     media: true,
     workspaceFiles: serverOn("files"),
     workspaceConnectors:

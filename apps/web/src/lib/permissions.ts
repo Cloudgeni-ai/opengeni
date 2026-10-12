@@ -34,6 +34,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "secrets:list": "Variable sets",
   "secrets:read": "Variable sets",
   "secrets:write": "Variable sets",
+  "secrets:use": "Variable sets",
   "mcp_servers:attach": "Sessions",
   "github:manage": "GitHub",
   "github:use": "GitHub",
