@@ -3,13 +3,7 @@
 // (?view=edit, ?view=edit-setup). Reads poll so verification and promotion
 // move live. rigs:manage gates edit/promote/activate/default/delete;
 // rigs:use gates read + propose.
-import {
-  useOpenGeni,
-  useRig,
-  useRigChanges,
-  useRigVersions,
-  useVariableSets,
-} from "@opengeni/react";
+import { useOpenGeni, useRig, useRigChanges, useRigVersions } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
@@ -55,8 +49,8 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { resourceScopeLabel } from "@/components/resource-scope-picker";
-import { userFacingError } from "@/components/variable-sets/variable-set-model";
-import { LoadFailure } from "@/components/variable-sets/variable-set-pages";
+import { userFacingError } from "@/lib/api-error";
+import { LoadFailure } from "@/components/ui/load-failure";
 import { useAppContext } from "@/context";
 import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -95,15 +89,9 @@ export function RigDetailRoute({
   const rig = useRig(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const versions = useRigVersions(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const changes = useRigChanges(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
-  const variableSets = useVariableSets();
 
   const [tab, setTab] = useState<Tab>("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
-
-  const variableSetName = useMemo(() => {
-    const byId = new Map(variableSets.variableSets.map((set) => [set.id, set.name]));
-    return (id: string) => byId.get(id) ?? "Variable set you can't see";
-  }, [variableSets.variableSets]);
 
   const versionLabel = useMemo(() => {
     const byId = new Map(versions.versions.map((version) => [version.id, `v${version.version}`]));
@@ -214,8 +202,6 @@ export function RigDetailRoute({
       <RigSetupEditPage
         rigName={current.name}
         activeVersion={active}
-        rigScope={current.scope}
-        variableSets={variableSets.variableSets}
         onClose={() => openRig()}
         onPropose={async (request) => {
           try {
@@ -387,16 +373,9 @@ export function RigDetailRoute({
                 <RigOverview
                   rig={current}
                   changes={changes.changes}
-                  variableSetName={variableSetName}
                   canUse={canView}
                   mutating={rig.mutating}
                   onVerify={rig.verify}
-                  onOpenVariableSet={(id) =>
-                    void navigate({
-                      to: "/workspaces/$workspaceId/secrets/$vaultId",
-                      params: { workspaceId, vaultId: id },
-                    })
-                  }
                 />
               </div>
             </LineTabsContent>
@@ -415,7 +394,6 @@ export function RigDetailRoute({
                   <RigVersionsTimeline
                     versions={versions.versions}
                     activeVersionId={active?.id ?? null}
-                    variableSetName={variableSetName}
                     canManage={canManage}
                     mutating={rig.mutating}
                     onActivate={async (versionId) => {

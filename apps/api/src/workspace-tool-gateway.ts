@@ -103,6 +103,7 @@ import {
   withSiteSecretContext,
   workspaceGatewaySecretArguments,
 } from "./workspace-tool-gateway-secrets";
+import { vaultProviderRegistryFor } from "./routes/vault-providers";
 import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
 import {
   digestWorkspaceToolGatewayCatalogEntry,
@@ -944,6 +945,8 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           db: routeDeps.db,
           settings: gatewaySettings,
           grant,
+          providersForSubject: (subjectId) =>
+            vaultProviderRegistryFor(routeDeps, { workspaceId: grant.workspaceId, subjectId }),
         }),
         mapDefinition: (definition) => {
           // Raw/local providers have no native credential revision. The legacy

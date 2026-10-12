@@ -1514,7 +1514,6 @@ export type ForkSessionRequest = {
   visibility: SessionVisibility;
   workspaceSharedAcknowledged: boolean;
   rigId?: string | null | undefined;
-  variableSetIds?: string[] | undefined;
 };
 
 export type ForkSessionResponse = {
@@ -1644,10 +1643,11 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** Ordered low-to-high precedence; the final entry is the legacy singular alias. */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
   variableSetIds?: string[] | undefined;
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   variableSetId: string | null;
-  /** @deprecated use variableSetId */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
@@ -3350,8 +3350,9 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
   variableSetId: string | null;
-  /** @deprecated use variableSetId */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
@@ -3465,11 +3466,6 @@ export type CreateSessionRequest = {
   // Host working directory for a connected-machine target (the agent runs here;
   // default = the machine's launch dir). Ignored for managed sandboxes.
   workingDir?: string | undefined;
-  /** Ordered low-to-high precedence; later sets win name collisions. */
-  variableSetIds?: string[] | undefined;
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
   // The rig to bind this session to (M3). Its active version is frozen onto the
   // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
   rigId?: string | undefined;
@@ -6433,11 +6429,6 @@ export type UpdateSessionRequest = {
   title: string;
 };
 
-/** Replace the complete ordered low-to-high precedence Variable Set selection. */
-export type UpdateSessionVariableSetsRequest = {
-  variableSetIds: string[];
-};
-
 // --- Operator context controls (/clear, /compact) ----------------------------
 
 /** Outcome of a manual /compact trigger. */
@@ -6524,8 +6515,6 @@ export type NewSessionDraftOptions = {
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
   workingDir?: string | undefined;
-  variableSetIds?: string[] | undefined;
-  variableSetId?: string | undefined;
   rigId?: string | undefined;
   goal?: GoalSpec | undefined;
   firstPartyMcpPermissions?: Permission[] | undefined;
@@ -6886,9 +6875,6 @@ export type CreateAgentScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
-  variableSetId?: string | null | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | null | undefined;
   /**
    * Sandbox Environment each run binds to; its active version is resolved per
    * fire. Omit to resolve it once at create: the workspace default (none for a
@@ -6955,9 +6941,6 @@ export type UpdateScheduledTaskRequest = {
       }
     | undefined;
   status?: ScheduledTaskStatus | undefined;
-  variableSetId?: string | null | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | null | undefined;
   // The rig each run binds to (M3); active version resolved per fire.
   rigId?: string | null | undefined;
   /** Vault narrowing for every run. */
@@ -7133,85 +7116,6 @@ export type ListScheduledTaskAccessAttentionResponse = {
   tasks: ScheduledTaskAccessAttention[];
 };
 
-// --- VariableSets -------------------------------------------------------------
-
-/** Generic variable-set reads expose name + version metadata only. */
-export type VariableSetVariableMetadata = {
-  name: string;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
-/** Dedicated permissioned plaintext response; never embedded in metadata reads. */
-export type VariableSetSecret = {
-  variableSetId: string;
-  name: string;
-  version: number;
-  value: string;
-};
-
-export type VariableSet = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  scope: "organization" | "workspace" | "user";
-  generation: number;
-  status: "active" | "revoked";
-  name: string;
-  description: string | null;
-  variables: VariableSetVariableMetadata[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-/** Exact-ID attachment metadata; intentionally excludes catalog and secret metadata. */
-export type VariableSetAttachmentMetadata = {
-  id: string;
-  scope: "organization" | "workspace" | "user";
-};
-
-export type ResolveVariableSetAttachmentsRequest = {
-  variableSetIds: string[];
-};
-
-export type ResolveVariableSetAttachmentsResponse = {
-  variableSets: VariableSetAttachmentMetadata[];
-};
-
-/** @deprecated use VariableSetVariableMetadata */
-export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
-
-/** @deprecated use VariableSet */
-export type WorkspaceEnvironment = VariableSet;
-
-export type CreateVariableSetRequest = {
-  /** Omitted remains the legacy workspace-owned path. */
-  scope?: "organization" | "workspace" | "user" | undefined;
-  name: string;
-  description?: string | undefined;
-  /** Initial variables. Values are write-only: they never come back on reads. */
-  variables?: { name: string; value: string }[] | undefined;
-};
-
-/** @deprecated use CreateVariableSetRequest */
-export type CreateWorkspaceEnvironmentRequest = CreateVariableSetRequest;
-
-export type UpdateVariableSetRequest = {
-  name?: string | undefined;
-  description?: string | null | undefined;
-};
-
-/** @deprecated use UpdateVariableSetRequest */
-export type UpdateWorkspaceEnvironmentRequest = UpdateVariableSetRequest;
-
-export type SetVariableSetVariableRequest = {
-  value: string;
-};
-
-/** @deprecated use SetVariableSetVariableRequest */
-export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
-
 // --- Rigs ---------------------------------------------------------------------
 // Workspace-scoped, versioned sandbox machine definitions. Versions are
 // append-only and content-immutable; exactly one is active per rig.
@@ -7263,6 +7167,7 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
   defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
@@ -7373,7 +7278,6 @@ export type CreateRigRequest = {
   setupScript?: string | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
-  defaultVariableSetIds?: string[] | undefined;
 };
 
 export type UpdateRigRequest = {
@@ -7391,7 +7295,6 @@ export type RigDefinitionEditPayload = {
   setupScript?: string | null | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
-  defaultVariableSetIds?: string[] | undefined;
   changelog?: string | null | undefined;
 };
 

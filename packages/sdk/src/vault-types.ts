@@ -1,7 +1,7 @@
-// Vault wire types (hand-written mirrors of `@opengeni/contracts` vaults.ts, F1).
-// @opengeni/react may not depend on the contracts runtime; apps/web pins these
+// Vault wire types (hand-written mirrors of `@opengeni/contracts` vaults.ts).
+// SDK consumers do not need the contracts runtime; apps/web pins these
 // mirrors against the zod schemas in a type-parity test.
-import type { VaultPolicy } from "@opengeni/sdk";
+import type { VaultPolicy } from "./types";
 
 export type { VaultPolicy };
 

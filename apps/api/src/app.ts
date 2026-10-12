@@ -281,7 +281,7 @@ import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access"
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
-import { registerVaultProviderRoutes } from "./routes/vault-providers";
+import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
 import { registerConnectRoutes } from "./routes/connect";
 
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
@@ -2160,6 +2160,8 @@ export function createAppComposition(deps: AppDependencies): {
   const interactionSecrets = createVaultInteractionSecretsPort({
     db: routeDeps.db,
     encryptionKey: environmentsEncryptionKeyBytes(routeDeps.settings) ?? null,
+    providersFor: (workspaceId, subjectId) =>
+      vaultProviderRegistryFor(routeDeps, { workspaceId, subjectId }),
   });
   registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });

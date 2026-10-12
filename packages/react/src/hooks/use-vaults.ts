@@ -7,8 +7,8 @@ import type {
   VaultItem,
   VaultItemSummary,
   VaultSummary,
-} from "../types/vaults";
-import { asVaultClient, vaultsApi, type VaultsApi } from "../vaults";
+} from "@opengeni/sdk";
+import { asVaultClient, vaultsApi, type VaultsApi } from "@opengeni/sdk";
 import { usePolledValue } from "./internal";
 
 export type UseVaultQueryOptions = ClientOverride & {

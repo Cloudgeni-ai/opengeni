@@ -353,7 +353,6 @@ describe("buildCreateSessionRequest", () => {
         sandboxId: "00000000-0000-4000-8000-0000000000c3",
         folder: { kind: "root" as const },
       },
-      variableSetId: "00000000-0000-4000-8000-000000000011",
       rigId: "00000000-0000-4000-8000-000000000012",
     };
     const submission = submissionFromSessionDraft(draft, undefined, personalResourceAttachment);
@@ -365,7 +364,6 @@ describe("buildCreateSessionRequest", () => {
     });
 
     expect(request.targetSandboxId).toBe(draft.compute.sandboxId);
-    expect(request).not.toHaveProperty("variableSetId");
     expect(request).not.toHaveProperty("rigId");
     expect(request.personalResourceAttachment).toEqual(personalResourceAttachment);
   });
@@ -754,56 +752,10 @@ describe("new-session draft option mapping", () => {
     expect(newSessionCreateVisibility(false, "private", false)).toBe("private");
   });
 
-  test("preserves ordered Variable Set precedence through create and draft persistence", () => {
-    const variableSetIds = [
-      "00000000-0000-4000-8000-000000000011",
-      "00000000-0000-4000-8000-000000000013",
-    ];
-    const draft = {
-      ...emptySessionDraft(),
-      variableSetIds,
-      variableSetId: variableSetIds.at(-1)!,
-    };
-    const personalResourceAttachment = {
-      mode: "session" as const,
-      workspaceSharedAcknowledged: false,
-      sharedOutputWarningVersion: 1 as const,
-    };
-    const submission = submissionFromSessionDraft(draft, undefined, personalResourceAttachment);
-    expect(submission.extras).toMatchObject({
-      variableSetIds,
-      variableSetId: variableSetIds.at(-1),
-      personalResourceAttachment,
-    });
-    const visibility = newSessionCreateVisibility(true, draft.visibility, true);
-    const request = build([], [], {
-      submission: { text: "start privately", ...submission.extras },
-      visibility,
-    });
-    expect(request).toMatchObject({
-      visibility: "private",
-      variableSetIds,
-      variableSetId: variableSetIds.at(-1),
-      personalResourceAttachment,
-    });
-    const options = newSessionDraftOptionsFromSessionDraft(draft, undefined, visibility);
-    expect(options).toMatchObject({
-      visibility: "private",
-      variableSetIds,
-      variableSetId: variableSetIds.at(-1),
-    });
-    expect(options.visibility).toBe(request.visibility);
-    expect(sessionDraftFromNewSessionDraftOptions(options)).toMatchObject({
-      variableSetIds,
-      variableSetId: variableSetIds.at(-1),
-    });
-  });
-
   test("round-trips managed compute, goal, and exact custom permissions", () => {
     const draft = {
       ...emptySessionDraft(),
       compute: { kind: "sandbox" as const, backend: "modal" as const },
-      variableSetId: "00000000-0000-4000-8000-000000000011",
       rigId: "00000000-0000-4000-8000-000000000012",
       goalText: "  durable goal  ",
       goalSuccessCriteria: "  accepted live  ",
@@ -816,7 +768,6 @@ describe("new-session draft option mapping", () => {
     expect(options).toEqual({
       visibility: "workspace",
       sandboxBackend: "modal",
-      variableSetId: "00000000-0000-4000-8000-000000000011",
       rigId: "00000000-0000-4000-8000-000000000012",
       goal: {
         text: "durable goal",
@@ -828,7 +779,6 @@ describe("new-session draft option mapping", () => {
     expect(sessionDraftFromNewSessionDraftOptions(options)).toMatchObject({
       // Composer no longer restores managed-backend overrides into the draft.
       compute: { kind: "sandbox", backend: "" },
-      variableSetId: draft.variableSetId,
       rigId: draft.rigId,
       goalText: "durable goal",
       goalSuccessCriteria: "accepted live",

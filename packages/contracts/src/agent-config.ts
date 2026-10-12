@@ -733,7 +733,7 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   },
   workspaceAdmin: {
     label: "Workspace admin",
-    description: "Manage variable sets, projects, rigs, machines, and connector setup.",
+    description: "Manage projects, rigs, machines, and connector setup.",
   },
 };
 

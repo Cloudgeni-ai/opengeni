@@ -67,8 +67,6 @@ import type {
   CreateInteractionInterventionRequest,
   CreateNetworkRouteRequest,
   CreateSiteAuthConnectionRequest,
-  CreateWorkspaceEnvironmentRequest,
-  CreateVariableSetRequest,
   CreateRigRequest,
   UpdateRigRequest,
   ProposeRigChangeRequest,
@@ -144,17 +142,10 @@ import type {
   UpdateSessionPinRequest,
   UpdateNetworkRouteRequest,
   UpdateSiteAuthConnectionRequest,
-  UpdateWorkspaceEnvironmentRequest,
-  UpdateVariableSetRequest,
   UpdateWorkspaceRequest,
   Workspace,
   WorkspaceControlEvent,
   WorkspaceInteractionRevisionEvent,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
-  VariableSet,
-  VariableSetSecret,
-  VariableSetVariableMetadata,
   VerifyAuthRunRequest,
   WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
@@ -1038,141 +1029,6 @@ export class MockOpenGeniClient implements SessionClientLike {
     return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
   }
 
-  private environments: WorkspaceEnvironment[] = [
-    fabricateEnvironment("staging"),
-    fabricateEnvironment("production"),
-  ];
-
-  async listEnvironments(): Promise<WorkspaceEnvironment[]> {
-    return [...this.environments];
-  }
-
-  async listVariableSets(): Promise<VariableSet[]> {
-    return await this.listEnvironments();
-  }
-
-  async getVariableSetVariable(
-    _workspaceId: string,
-    variableSetId: string,
-    name: string,
-  ): Promise<VariableSetSecret> {
-    const variableSet = this.environments.find((candidate) => candidate.id === variableSetId);
-    const variable = variableSet?.variables.find((candidate) => candidate.name === name);
-    if (!variableSet || !variable) {
-      throw new Error("variable set variable not found");
-    }
-    return {
-      variableSetId,
-      name,
-      version: variable.version,
-      value: "demo-secret-value",
-    };
-  }
-
-  async createEnvironment(
-    _workspaceId: string,
-    request: CreateWorkspaceEnvironmentRequest,
-  ): Promise<WorkspaceEnvironment> {
-    const environment = fabricateEnvironment(
-      request.name,
-      request.variables?.map((variable) => variable.name) ?? [],
-    );
-    this.environments.push(environment);
-    return { ...environment };
-  }
-
-  async createVariableSet(
-    workspaceId: string,
-    request: CreateVariableSetRequest,
-  ): Promise<VariableSet> {
-    return await this.createEnvironment(workspaceId, request);
-  }
-
-  async updateEnvironment(
-    _workspaceId: string,
-    environmentId: string,
-    request: UpdateWorkspaceEnvironmentRequest,
-  ): Promise<WorkspaceEnvironment> {
-    const environment = this.environments.find((candidate) => candidate.id === environmentId);
-    if (!environment) {
-      throw new Error("environment not found");
-    }
-    if (request.name !== undefined) {
-      environment.name = request.name;
-    }
-    if (request.description !== undefined) {
-      environment.description = request.description;
-    }
-    return { ...environment };
-  }
-
-  async updateVariableSet(
-    workspaceId: string,
-    variableSetId: string,
-    request: UpdateVariableSetRequest,
-  ): Promise<VariableSet> {
-    return await this.updateEnvironment(workspaceId, variableSetId, request);
-  }
-
-  async deleteEnvironment(_workspaceId: string, environmentId: string): Promise<void> {
-    this.environments = this.environments.filter((candidate) => candidate.id !== environmentId);
-  }
-
-  async deleteVariableSet(workspaceId: string, variableSetId: string): Promise<void> {
-    await this.deleteEnvironment(workspaceId, variableSetId);
-  }
-
-  async setEnvironmentVariable(
-    _workspaceId: string,
-    environmentId: string,
-    name: string,
-    _value: string,
-  ): Promise<WorkspaceEnvironmentVariableMetadata> {
-    const environment = this.environments.find((candidate) => candidate.id === environmentId);
-    if (!environment) {
-      throw new Error("environment not found");
-    }
-    const now = new Date().toISOString();
-    const existing = environment.variables.find((variable) => variable.name === name);
-    if (existing) {
-      existing.version += 1;
-      existing.updatedAt = now;
-      return { ...existing };
-    }
-    const created = { name, version: 1, createdAt: now, updatedAt: now };
-    environment.variables.push(created);
-    return { ...created };
-  }
-
-  async setVariableSetVariable(
-    workspaceId: string,
-    variableSetId: string,
-    name: string,
-    value: string,
-  ): Promise<VariableSetVariableMetadata> {
-    return await this.setEnvironmentVariable(workspaceId, variableSetId, name, value);
-  }
-
-  async deleteEnvironmentVariable(
-    _workspaceId: string,
-    environmentId: string,
-    name: string,
-  ): Promise<void> {
-    const environment = this.environments.find((candidate) => candidate.id === environmentId);
-    if (environment) {
-      environment.variables = environment.variables.filter((variable) => variable.name !== name);
-    }
-  }
-
-  async deleteVariableSetVariable(
-    workspaceId: string,
-    variableSetId: string,
-    name: string,
-  ): Promise<void> {
-    await this.deleteEnvironmentVariable(workspaceId, variableSetId, name);
-  }
-
-  // Channels — minimal in-memory demo store.
   private channels: Channel[] = [];
 
   async listChannels(): Promise<Channel[]> {
@@ -1266,7 +1122,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       setupScript: request.setupScript ?? null,
       checks: request.checks ?? [],
       credentialHooks: request.credentialHooks ?? [],
-      defaultVariableSetIds: request.defaultVariableSetIds ?? [],
+      defaultVariableSetIds: [],
       changelog: "Initial version",
       providerImages: {},
       createdBy: "user:demo",
@@ -4005,31 +3861,6 @@ function fabricateGoal(sessionId: string): SessionGoal {
       nextAttemptAt: null,
       lastError: null,
     },
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function fabricateEnvironment(
-  name: string,
-  variableNames: string[] = ["CLOUD_API_TOKEN", "DATABASE_URL"],
-): WorkspaceEnvironment {
-  const now = new Date().toISOString();
-  return {
-    id: demoUuid(),
-    accountId: ACCOUNT_ID,
-    workspaceId: WORKSPACE_ID,
-    scope: "workspace",
-    generation: 1,
-    status: "active",
-    name,
-    description: `${name} credentials`,
-    variables: variableNames.map((variableName) => ({
-      name: variableName,
-      version: 1,
-      createdAt: now,
-      updatedAt: now,
-    })),
     createdAt: now,
     updatedAt: now,
   };

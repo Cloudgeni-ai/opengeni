@@ -67,6 +67,29 @@ export class VaultClient {
     );
   }
 
+  /** The first live item with this exact name in any vault the caller can see. */
+  async findItemByName(name: string): Promise<{ id: string; vaultId: string } | null> {
+    const vaults: any[] = (await this.listVaults()).json?.vaults ?? [];
+    for (const vault of vaults) {
+      const page = await this.api.request(
+        "GET",
+        this.#path(`/vaults/${vault.id}/items?q=${encodeURIComponent(name)}`),
+      );
+      const item = (page.json?.items ?? []).find((row: any) => row.name === name);
+      if (item) return { id: item.id, vaultId: vault.id };
+    }
+    return null;
+  }
+
+  /** Reveal a field by name; null when the item has no such field or reveal fails. */
+  async revealFieldByName(vaultId: string, itemId: string, field: string): Promise<string | null> {
+    const item = await this.api.request("GET", this.#path(`/vaults/${vaultId}/items/${itemId}`));
+    const row = (item.json?.fields ?? []).find((candidate: any) => candidate.name === field);
+    if (!row) return null;
+    const revealed = await this.revealField(vaultId, itemId, row.id);
+    return revealed.ok ? String(revealed.json?.value ?? "") : null;
+  }
+
   sessionSecrets(sessionId: string): Promise<ApiResult> {
     return this.api.request("GET", this.#path(`/sessions/${sessionId}/secrets`));
   }

@@ -428,6 +428,40 @@ function VaultRoute({
 
 /* ------------------------------------------------------------ an item's page */
 
+/**
+ * Who a subject is, for "Version 3 · by Ada": "you" for the signed-in person,
+ * else the workspace member's name. Null until known; history then says "a person".
+ */
+function usePersonName(workspaceId: string): (subjectId: string) => string | null {
+  const context = useAppContext();
+  const selfSubjectId = context.accessContext.subjectId;
+  const [names, setNames] = useState<ReadonlyMap<string, string>>(() => new Map());
+  useEffect(() => {
+    let active = true;
+    void context.client
+      .listWorkspaceMembers(workspaceId)
+      .then((members) => {
+        if (!active) return;
+        setNames(
+          new Map(
+            members.map((member) => [
+              member.subjectId,
+              member.subjectLabel?.trim() || member.subjectId.replace(/^(user|service):/, ""),
+            ]),
+          ),
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [context.client, workspaceId]);
+  return useCallback(
+    (subjectId: string) => (subjectId === selfSubjectId ? "you" : (names.get(subjectId) ?? null)),
+    [names, selfSubjectId],
+  );
+}
+
 function ItemRoute({
   vault,
   vaults,
@@ -453,6 +487,7 @@ function ItemRoute({
   const item = loaded.item;
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const personName = usePersonName(vault.workspaceId);
 
   if (!item) {
     return loaded.error && !loaded.loading ? (
@@ -506,6 +541,7 @@ function ItemRoute({
         vault={vault}
         api={api}
         canUse={canUse}
+        personName={personName}
         actions={{
           back: onBack,
           edit: () => onOpenItem(vault.id, item.id, { view: "edit" }),

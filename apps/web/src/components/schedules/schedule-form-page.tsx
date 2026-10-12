@@ -343,7 +343,6 @@ function AgentScheduleForm({
       const fromTask: ScheduleDraft = {
         ...formStateFromScheduledTask(task, formDefaults),
         cadence: cadenceOfSchedule(task.schedule),
-        variableSetId: task.variableSetId,
         rigId: task.rigId,
         visibility: task.visibility,
         ...(task.vaultPolicy?.mode === "selected" ? { vaultPolicy: task.vaultPolicy } : {}),
@@ -364,7 +363,6 @@ function AgentScheduleForm({
       return {
         ...recurringSessionTaskFormState(mode.sourceSessionId, canAttachOpenGeniTool, formDefaults),
         cadence: { timeZone: viewerTimeZone(), rule: { frequency: "hourly" } },
-        variableSetId: null,
         rigId: null,
         visibility: "workspace",
       };
@@ -388,7 +386,6 @@ function AgentScheduleForm({
   const [errors, setErrors] = useState<FormErrors>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [accessChange, setAccessChange] = useState<{
-    variableSets: boolean;
     environment: boolean;
   } | null>(null);
   const [adoptSessionSettings, setAdoptSessionSettings] = useState(false);
@@ -889,9 +886,6 @@ function AgentScheduleForm({
             const details = (error as { details?: Record<string, unknown> }).details;
             if (details?.code === "scheduled_target_access_change") {
               setAccessChange({
-                variableSets:
-                  typeof details?.removedVariableSetCount === "number" &&
-                  details.removedVariableSetCount > 0,
                 environment: Boolean(details?.removedRigId),
               });
             }
@@ -1144,11 +1138,7 @@ function AgentScheduleForm({
                     label="Use this chat's attachments"
                     description={
                       <>
-                        {accessChange.variableSets && accessChange.environment
-                          ? "The previous Variable Sets and environment will no longer apply."
-                          : accessChange.variableSets
-                            ? "The previous Variable Sets will no longer apply."
-                            : "The previous environment will no longer apply."}{" "}
+                        The previous environment will no longer apply.{" "}
                         <Link
                           className="underline underline-offset-2"
                           to="/workspaces/$workspaceId/sessions/$sessionId"

@@ -987,10 +987,12 @@ state remains application-owned; durable draft and session state remain in
   "summary" })` returns compact list entries; omit the option for full sessions.
   Scripted clients can omit the summary method and the hook projects full pages
   locally while retaining cancellation and causal read revisions.
-- `useVariableSets()` — workspace variable sets with metadata-only generic
-  reads and create/update/remove/set/delete operations. Dedicated permissioned
-  exact-value reveal is part of the held React/UI train rather than an
-  implicit field on ordinary reads.
+- `useVaults()` / `useVault()` / `useVaultItems()` / `useVaultItem()` /
+  `useVaultFieldVersions()` / `useSessionSecrets()` — vaults, items, field
+  history and a session's vault policy, metadata only. `useVaultsApi()` returns
+  the SDK's `client.vaults(workspaceId)` routes for writes and the one audited
+  `revealField` call; keep revealed values in component state, never in a
+  cache. Variable Sets and `useVariableSets()` were removed in 2.0.0.
 - `useWorkspaces()` — the caller's workspaces with create/update (client-only;
   not bound to the provider's workspace).
 - `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent

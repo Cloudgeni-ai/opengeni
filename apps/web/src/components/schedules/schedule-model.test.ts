@@ -135,12 +135,11 @@ describe("schedule requests", () => {
 
   test("a new-chat schedule is created with the default overlap and its attachments", () => {
     const request = createRequestFromDraft(
-      { ...base(), overlapPolicy: "skip", variableSetId: "vs-1", rigId: "rig-1" },
+      { ...base(), overlapPolicy: "skip", rigId: "rig-1" },
       { now: NOW, learningScope: "workspace" },
     );
     expect(request.overlapPolicy).toBe("allow_concurrent");
     if (!("agentConfig" in request)) throw new Error("Expected a separate agent");
-    expect(request.variableSetId).toBe("vs-1");
     expect(request.rigId).toBe("rig-1");
     expect(request.name).toBe("Summarize open incidents");
     expect(request.metadata).toEqual({});
@@ -233,7 +232,6 @@ describe("schedule requests", () => {
         ...base(),
         runMode: "existing_session",
         targetSessionId: "00000000-0000-4000-8000-000000000099",
-        variableSetId: "stale-set",
         rigId: "stale-environment",
       },
       { now: NOW, learningScope: "workspace" },
@@ -243,7 +241,6 @@ describe("schedule requests", () => {
       prompt: "Summarize open incidents.",
     });
     expect("agentConfig" in request).toBe(false);
-    expect("variableSetId" in request).toBe(false);
     expect("rigId" in request).toBe(false);
   });
 
@@ -271,7 +268,7 @@ describe("schedule requests", () => {
   });
 
   test("an edit sends the schedule and attachments only when they changed", () => {
-    const initial: ScheduleDraft = { ...base(), variableSetId: "vs-1", rigId: null };
+    const initial: ScheduleDraft = { ...base(), rigId: null };
     const untouched = updateRequestFromDraft(
       task(),
       initial,
@@ -282,7 +279,6 @@ describe("schedule requests", () => {
     );
     expect(untouched.name).toBe("Renamed");
     expect("schedule" in untouched).toBe(false);
-    expect("variableSetId" in untouched).toBe(false);
     expect("rigId" in untouched).toBe(false);
 
     const changed = updateRequestFromDraft(
@@ -290,14 +286,12 @@ describe("schedule requests", () => {
       initial,
       {
         ...initial,
-        variableSetId: null,
         rigId: "rig-2",
         cadence: { timeZone: "Europe/Oslo", rule: { frequency: "hourly" } },
       },
       { now: NOW },
     );
     expect(changed.schedule).toEqual({ type: "interval", everySeconds: 3_600 });
-    expect(changed.variableSetId).toBeNull();
     expect(changed.rigId).toBe("rig-2");
   });
 
@@ -409,7 +403,6 @@ describe("schedule requests", () => {
       model: "default-resolved-later",
       includeOpenGeniTool: !initial.includeOpenGeniTool,
       machineSandboxId: "default-machine-loaded-later",
-      variableSetId: "unused-set",
       rigId: "unused-environment",
       prompt: "Updated message",
     };
@@ -432,7 +425,6 @@ describe("schedule requests", () => {
       { now: NOW, agentLearning },
     );
     expect(separate.agentConfig?.model).toBe("default-resolved-later");
-    expect(separate.variableSetId).toBe("unused-set");
     expect(separate.rigId).toBe("unused-environment");
     expect(separate.agentLearning).toEqual(agentLearning);
     expect(scheduleInheritsChatSettings({ ...stored, reusableSessionId: null })).toBe(false);

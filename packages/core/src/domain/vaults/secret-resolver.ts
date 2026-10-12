@@ -35,6 +35,7 @@ import {
   isVaultProviderError,
   type ProviderCallBudget,
   type VaultProviderErrorCode,
+  type VaultProviderRegistry,
 } from "@opengeni/vaults";
 import type { VaultServiceDeps } from "./types";
 
@@ -43,6 +44,12 @@ export type SecretResolverOptions = {
   capabilityEnabled: boolean;
   /** Provider calls allowed for this attempt (Q-18); a fresh 50-call budget by default. */
   attemptBudget?: ProviderCallBudget;
+  /**
+   * Connected vaults for callers that only learn the acting human from the
+   * lookup itself (browser and computer routes, `run_on`, the tool gateway):
+   * 1Password connection tokens load for that subject. `deps.providers` wins.
+   */
+  providersForSubject?: (subjectId: string | null) => VaultProviderRegistry;
 };
 
 type Chosen = { reference: SecretReference; candidate: SecretReferenceCandidate };
@@ -288,7 +295,11 @@ export function createSecretResolver(
     for (const group of providerGroups.values()) {
       const first = group[0]!.candidate;
       try {
-        const provider = await (deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY).forVault({
+        const registry =
+          deps.providers ??
+          opts.providersForSubject?.(meta.subjectId) ??
+          EMPTY_VAULT_PROVIDER_REGISTRY;
+        const provider = await registry.forVault({
           source: first.source,
           providerConnectionId: first.providerConnectionId,
         });

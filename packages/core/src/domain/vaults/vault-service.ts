@@ -416,6 +416,110 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     return deps.encryptionKey;
   }
 
+  /**
+   * Move or copy an item when either side is a connected (provider) vault.
+   * Values never live in both stores' databases at once: each field is read
+   * from the source (service-side, unaudited like other internal copies),
+   * written to the target through its own path, and a move then archives the
+   * source so the old item stays recoverable. OpenGeni-to-OpenGeni moves keep
+   * the single-statement database move, which preserves the item id.
+   */
+  async function moveAcrossProviders(input: {
+    context: VaultDbContext;
+    providerWrites: ProviderWriteDeps;
+    itemId: string;
+    targetVaultId: string;
+    mode: "move" | "copy";
+    newName?: string | undefined;
+    createdBy: VaultVersionCreatedByKind;
+  }): Promise<VaultItemRow | null> {
+    const source = await getVaultItem(deps.db, input.context, { itemId: input.itemId });
+    const target = await getVault(deps.db, input.context, { vaultId: input.targetVaultId });
+    if (source.vaultSource === "opengeni" && target.source === "opengeni") return null;
+    if (source.archivedAt !== null) {
+      throw new VaultError("vault_item_not_found", "item is archived; restore it first", {
+        itemId: source.id,
+        archived: true,
+      });
+    }
+    const sourceVault = await getVault(deps.db, input.context, { vaultId: source.vaultId });
+    if (input.mode === "move" && sourceVault.mode === "read_only") {
+      throw new VaultError("vault_read_only", `${sourceVault.name} is read-only; copy instead`, {
+        vaultId: sourceVault.id,
+      });
+    }
+    if (source.type === "passkey") {
+      // A passkey's sign count and credential stay with the store that created it.
+      throw new VaultError(
+        "provider_unavailable",
+        "passkeys stay in the vault they were created in",
+        {
+          itemId: source.id,
+        },
+      );
+    }
+    const name = input.newName ?? source.name;
+    const fields: FieldSource[] = [];
+    for (const field of source.fields) {
+      if (field.currentVersion === null && source.vaultSource === "opengeni") continue;
+      const read = await readVaultFieldCiphertext(deps.db, input.context, {
+        fieldId: field.id,
+        purpose: "internal",
+        metadata: { reason: "vault_item_move" },
+      });
+      const revealed = await revealFromCiphertext(read);
+      fields.push(
+        revealed.encoding === "base64"
+          ? {
+              name: field.name,
+              kind: field.kind,
+              fileBase64: revealed.value,
+              ...(field.fileName ? { fileName: field.fileName } : {}),
+            }
+          : { name: field.name, kind: field.kind, value: revealed.value },
+      );
+    }
+    const change = {
+      type: source.type,
+      name,
+      websites: source.websites,
+      ...(source.expiresAt ? { expiresAt: source.expiresAt } : {}),
+      fields,
+    };
+    let created: VaultItemRow;
+    if (target.source !== "opengeni") {
+      const itemId = await writeProviderVaultItem(input.providerWrites, {
+        vault: target,
+        existing: null,
+        change,
+      });
+      created = await getVaultItem(deps.db, input.context, { itemId });
+    } else {
+      const write = await itemWrite(
+        change,
+        null,
+        input.providerWrites.resolveReference,
+        input.createdBy,
+      );
+      created = await upsertVaultItem(deps.db, input.context, {
+        ...write,
+        vaultId: target.id,
+        mode: "create",
+      });
+    }
+    if (input.mode === "move") {
+      if (source.vaultSource !== "opengeni") {
+        await archiveProviderVaultItem(input.providerWrites, {
+          vault: sourceVault,
+          itemId: source.id,
+        });
+      } else {
+        await archiveVaultItem(deps.db, input.context, { itemId: source.id });
+      }
+    }
+    return created;
+  }
+
   function toItem(row: VaultItemRow): VaultItem {
     return toVaultItem(row, key());
   }
@@ -758,6 +862,16 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async moveItem(actor, workspaceId, itemId, req) {
+      const crossed = await moveAcrossProviders({
+        context: subjectContext(actor, workspaceId),
+        providerWrites: providerWriteDeps(actor, workspaceId),
+        itemId,
+        targetVaultId: req.targetVaultId,
+        mode: req.mode,
+        newName: req.newName,
+        createdBy: createdByKind(actor),
+      });
+      if (crossed) return toItem(crossed);
       return toItem(
         await moveVaultItem(deps.db, subjectContext(actor, workspaceId), {
           itemId,
@@ -990,6 +1104,26 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const context = principalContext(principal);
       const target = await agentItemByReference(principal, input.reference);
       const vault = await agentVault(principal, input.toVault);
+      const crossed = await moveAcrossProviders({
+        context,
+        providerWrites: {
+          db: deps.db,
+          context,
+          providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+          resolveReference: (raw) => resolveTextReference(principal, raw, "secret_move"),
+        },
+        itemId: target.itemId,
+        targetVaultId: vault.id,
+        mode: input.mode ?? "move",
+        newName: input.newName,
+        createdBy: "agent",
+      });
+      if (crossed) {
+        return {
+          item: toVaultItemSummary(crossed, key()),
+          references: vaultItemReferences(crossed),
+        };
+      }
       const row = await moveVaultItem(deps.db, context, {
         itemId: target.itemId,
         targetVaultId: vault.id,

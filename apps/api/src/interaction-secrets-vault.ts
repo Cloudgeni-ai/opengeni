@@ -3,6 +3,7 @@
  * real secret resolver for agent Browser and Computer actions, and passkey
  * items for the session's virtual authenticators.
  */
+import type { VaultProviderRegistry } from "@opengeni/vaults";
 import {
   type BrowserPasskeyCredential,
   type BrowserPasskeyCredentialMaterial,
@@ -57,6 +58,8 @@ export function createVaultInteractionSecretsPort(deps: {
   encryptionKey: Uint8Array | null;
   /** Defaults to a service over the same database and key. */
   vaultService?: VaultService;
+  /** Connected vaults (1Password, host) for a workspace's acting subject. */
+  providersFor?: (workspaceId: string, subjectId: string | null) => VaultProviderRegistry;
 }): InteractionSecretsPort {
   const encryptionKey = deps.encryptionKey;
   let service = deps.vaultService ?? null;
@@ -194,8 +197,15 @@ export function createVaultInteractionSecretsPort(deps: {
 
   return {
     async resolverFor(principal): Promise<SecretResolver | null> {
+      const providersFor = deps.providersFor;
       return createSecretResolver({ db: deps.db, encryptionKey }, principal, {
         capabilityEnabled: await secretsEnabled(principal),
+        ...(providersFor
+          ? {
+              providersForSubject: (subjectId: string | null) =>
+                providersFor(principal.workspaceId, subjectId),
+            }
+          : {}),
       });
     },
     passkeys,

@@ -11,14 +11,23 @@
  * server received), and a known-value scan of every turn's events.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import type { FakeLoginServer } from "../../../packages/testing/src/fake-login";
+import {
+  type FakeLoginServer,
+  startFakeLoginServer,
+} from "../../../packages/testing/src/fake-login";
 import { totp } from "../../../packages/testing/src/fake-login/totp";
-import { type FeatureId, type FeatureProbe, type FeatureReport, missingFeatures } from "./features";
+import {
+  type FeatureId,
+  type FeatureProbe,
+  type FeatureReport,
+  KEYS_DIR,
+  missingFeatures,
+} from "./features";
 import { type Needle, type KnownValue, needlesFor, scanBuffer, scrubKnownValues } from "./scan";
-import type { StackApi, StackState } from "./stack";
+import { authStatePath, type StackApi, type StackState } from "./stack";
 import {
   type DirectiveReport,
   type TurnResult,
@@ -285,16 +294,12 @@ export const SCENARIOS: Scenario[] = [
         context,
         run,
         "machine-exec",
-        [execStep(`echo ${marker} && uname -s`), execStep(`printf %s '{{secret:Canary}}'`)],
+        [execStep(`echo ${marker} && uname -s`)],
         { machineSandboxId: context.machineSandboxId! },
       );
       run.check(
         "machine exec output reached the model",
         report?.outputs[0]?.includes(marker) === true,
-      );
-      run.check(
-        "reference text is passed through literally on this build",
-        report?.outputs[1]?.includes("{{secret:Canary}}") === true,
       );
     },
   },
@@ -422,10 +427,103 @@ export const SCENARIOS: Scenario[] = [
     mode: "real",
     acceptance: ["E2E-4", "AC-3", "AC-4", "UI S9"],
     requires: ["vaults_api", "secret_tools", "ask_card_secret_field", "real_model"],
-    run: async (_context, run) => {
-      run.notImplemented(
-        "drive the ask card in the real web UI once W3 lands its DOM (SecretInput selectors and Save to select)",
+    run: async (context, run) => {
+      const username = `ask-${crypto.randomUUID().slice(0, 8)}`;
+      const ask = await runTurn(context.owner, {
+        workspaceId: context.workspaceId,
+        model: context.model,
+        message: `Create an account at ${context.fakeLogin.url}/signup with the username ${username}. I want to choose the password myself: ask me for it with a secret question that offers to generate one, save it as a login in my vault, then sign up with it in the browser.`,
+        stopOnEventTypes: ["session.humanInput.requested"],
+        timeoutMs: 600_000,
+      });
+      run.recordTurn("ask", ask);
+      if (!run.check("agent raised an ask card", ask.status === "paused", ask.status)) return;
+      const requested = ask.events.find((event) => event.type === "session.humanInput.requested");
+      run.check(
+        "the card has a secret question",
+        JSON.stringify(requested?.data ?? {}).includes('"secret"'),
       );
+
+      // Answer as the person, in the real web UI: Generate, then send.
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch();
+      try {
+        for (const [label, viewport] of [
+          ["desktop", { width: 1440, height: 900 }],
+          ["mobile", { width: 390, height: 844 }],
+        ] as const) {
+          const page = await browser.newPage({
+            viewport,
+            storageState: authStatePath(context.stack, "owner"),
+          });
+          await page.goto(ask.url);
+          const field = page.locator("[data-secret-question]").first();
+          await field.waitFor({ timeout: 60_000 });
+          await field.scrollIntoViewIfNeeded();
+          await page.screenshot({ path: join(run.dir, `ask-card-${label}.png`) });
+          if (label === "mobile") {
+            await page.close();
+            continue;
+          }
+          await field.getByRole("button", { name: "Generate" }).click();
+          await page.screenshot({ path: join(run.dir, `ask-card-generated-${label}.png`) });
+          const typed = await field.locator('input[name^="secret-"]').inputValue();
+          run.check(
+            "Generate filled a strong password",
+            typed.length >= 16,
+            `${typed.length} chars`,
+          );
+          await page
+            .getByRole("button", { name: /^(Send|Submit)/u })
+            .first()
+            .click();
+          await page
+            .locator("[data-secret-question]")
+            .first()
+            .waitFor({ state: "detached", timeout: 60_000 });
+          await page.screenshot({ path: join(run.dir, `ask-card-answered-${label}.png`) });
+          await page.close();
+        }
+      } finally {
+        await browser.close();
+      }
+
+      // Follow the session until the turn that consumes the answer finishes.
+      let after = ask.lastSequence;
+      let sawAnswer = false;
+      let done: TurnResult | null = null;
+      for (let round = 0; round < 4 && !done; round += 1) {
+        const next = await runTurn(context.owner, {
+          workspaceId: context.workspaceId,
+          sessionId: ask.sessionId,
+          message: "",
+          resumeAfterSequence: after,
+          timeoutMs: 600_000,
+        });
+        after = next.lastSequence;
+        sawAnswer ||= next.events.some((event) => event.type === "user.humanInputResponse");
+        run.recordTurn(`after-answer-${round}`, next);
+        if (sawAnswer && next.status !== "timeout") done = next;
+        if (next.status === "timeout") break;
+      }
+      run.check("the answer reached the agent", sawAnswer);
+      if (!done) return;
+      requireTurnCompleted(run, "after-answer", done);
+
+      // The vault holds the generated password and the site received exactly it.
+      const vaults = new VaultClient(context.owner, context.workspaceId);
+      const saved = await vaults.findItemByName(username);
+      if (!run.check("the login is in the owner's vault", Boolean(saved), username)) return;
+      const password = await vaults.revealFieldByName(saved!.vaultId, saved!.id, "password");
+      if (!run.check("the saved password can be revealed", Boolean(password))) return;
+      context.knownValues.push({ label: "AskCardPassword", value: password! });
+      run.check("fake site: signup succeeded", loginSucceeded(context, "signup", username));
+      run.check(
+        "fake site received exactly the generated password",
+        receivedExactly(context, "signup", "password", password!),
+      );
+      const transcript = JSON.stringify(ask.events) + JSON.stringify(done.events);
+      run.check("the password never appears in the session", !transcript.includes(password!));
     },
   },
   {
@@ -463,14 +561,14 @@ export const SCENARIOS: Scenario[] = [
       const canary = context.knownValues.find((value) => value.label === "Canary");
       if (!run.check("canary seeded", Boolean(canary))) return;
       const expected = sha256(canary!.value);
-      const { report } = await scriptedTurn(
+      const { turn, report } = await scriptedTurn(
         context,
         run,
         "machine-exec",
         [
           execStep(`printf %s "{{secret:Canary}}" | sha256sum`),
           execStep(`printf %s "{{secret:Canary}}" | sha256sum`, { shell: "bash" }),
-          execStep("ls /tmp/opengeni-run-credentials 2>&1; env | cut -d= -f1 | sort"),
+          execStep("env | cut -d= -f1 | sort"),
         ],
         { machineSandboxId: context.machineSandboxId! },
       );
@@ -483,7 +581,19 @@ export const SCENARIOS: Scenario[] = [
         report?.outputs[1]?.includes(expected) === true,
       );
       const envDump = report?.outputs[2] ?? "";
-      run.check("CM-3: no run-credential directory", /No such file/u.test(envDump));
+      // The machine shares this host's /tmp with local-backend sessions, so look
+      // only at this session's directory: lock files are fine, credentials are not.
+      const sessionDir = `/tmp/opengeni-run-credentials/${turn.sessionId}`;
+      const credentialFiles = existsSync(sessionDir)
+        ? readdirSync(sessionDir, { recursive: true, withFileTypes: true }).filter(
+            (entry) => entry.isFile() && entry.name !== ".pointer.lock",
+          )
+        : [];
+      run.check(
+        "CM-3: no run-credential files for the machine session",
+        credentialFiles.length === 0,
+        credentialFiles.map((entry) => entry.name).join(", ") || undefined,
+      );
       run.check(
         "CM-3: no GH_TOKEN or GIT_* credential env",
         !/^(GH_TOKEN|GIT_ASKPASS|GIT_CONFIG)/mu.test(envDump),
@@ -496,10 +606,130 @@ export const SCENARIOS: Scenario[] = [
     mode: "real",
     acceptance: ["E2E-7", "OP-*"],
     requires: ["vaults_api", "secret_tools", "onepassword_token", "real_model"],
-    run: async (_context, run) => {
-      run.notImplemented(
-        "connect 1Password through POST /connections/1password/install (W5), start a fake-login instance with the RO Test Login values in-process, run the login turn, then the RW write and archive",
+    run: async (context, run) => {
+      const tokenLine = readFileSync(join(KEYS_DIR, "op.env"), "utf8")
+        .split("\n")
+        .find((line) => /ONEPASSWORD_TEST_SERVICE_ACCOUNT_TOKEN=/u.test(line));
+      const token = tokenLine
+        ?.split("=")
+        .slice(1)
+        .join("=")
+        .replace(/^['"]|['"]$/gu, "")
+        .trim();
+      if (!run.check("service-account token available", Boolean(token))) return;
+      const ws = `/v1/workspaces/${context.workspaceId}`;
+      const install = await context.owner.request("POST", `${ws}/connections/1password/install`, {
+        token,
+        ownership: "workspace",
+        planTier: "family",
+        label: "Gate 1Password",
+      });
+      if (!run.check("install the 1Password connection", install.ok, `${install.status}`)) return;
+      const connectionId = String(install.json.connectionId);
+      const providerVaults: any[] = install.json.vaults ?? [];
+      const ro = providerVaults.find((vault) => vault.name === "OpenGeni Test RO");
+      const rw = providerVaults.find((vault) => vault.name === "OpenGeni Test RW");
+      if (!run.check("both test vaults are listed", Boolean(ro && rw))) return;
+      const link = async (vault: any, mode: "read_only" | "read_write") => {
+        if (vault.linkedVaultId) return String(vault.linkedVaultId);
+        const linked = await context.owner.request("POST", `${ws}/vaults/link`, {
+          provider: "onepassword",
+          connectionId,
+          externalVaultId: vault.externalVaultId,
+          ownerKind: "workspace",
+          mode,
+          name: vault.name,
+        });
+        run.check(
+          `link ${vault.name} (${mode})`,
+          linked.ok,
+          `${linked.status} ${linked.text.slice(0, 200)}`,
+        );
+        return linked.ok ? String(linked.json.id ?? linked.json.vault?.id) : null;
+      };
+      const roVaultId = await link(ro, "read_only");
+      const rwVaultId = await link(rw, "read_write");
+      if (!roVaultId || !rwVaultId) return;
+
+      // The read-only "Test Login" seeds a second fake site with the same account.
+      const vaults = new VaultClient(context.owner, context.workspaceId);
+      const items: any[] = (await vaults.listItems(roVaultId)).json?.items ?? [];
+      const testLogin = items.find((item) => item.name === "Test Login");
+      if (!run.check("RO mirror lists Test Login", Boolean(testLogin))) return;
+      const username = await vaults.revealFieldByName(roVaultId, testLogin.id, "username");
+      const password = await vaults.revealFieldByName(roVaultId, testLogin.id, "password");
+      const item = (
+        await context.owner.request("GET", `${ws}/vaults/${roVaultId}/items/${testLogin.id}`)
+      ).json;
+      const totpField = (item?.fields ?? []).find((field: any) => field.kind === "totp");
+      const seed = totpField
+        ? String(
+            (await vaults.revealField(roVaultId, testLogin.id, totpField.id)).json?.value ?? "",
+          )
+        : "";
+      if (
+        !run.check(
+          "live values read from 1Password (username, password, TOTP seed)",
+          Boolean(username && password && seed),
+        )
+      ) {
+        return;
+      }
+      context.knownValues.push({ label: "OnePasswordPassword", value: password! });
+      const site = await startFakeLoginServer({
+        port: 0,
+        iframePort: 0,
+        accounts: [{ username: username!, password: password!, totpSecret: seed }],
+        log: () => undefined,
+      });
+      try {
+        await realTurn(
+          context,
+          run,
+          "onepassword-login",
+          `Sign in at ${site.url}/totp/login with the "Test Login" item from my "OpenGeni Test RO" vault, including its one-time code. Tell me what the page says after you sign in.`,
+        );
+        run.check(
+          "fake site: TOTP login with the 1Password item succeeded",
+          site.state().successes.some((row) => row.flow === "totp" && row.username === username),
+        );
+        run.check(
+          "fake site received exactly the 1Password password",
+          site
+            .received()
+            .some(
+              (row) => row.flow === "totp" && row.field === "password" && row.value === password,
+            ),
+        );
+      } finally {
+        await site.close();
+      }
+
+      // Two-way: the agent writes a new login into the read-write vault.
+      const name = `ogtest-gate-${crypto.randomUUID().slice(0, 8)}`;
+      const save = await realTurn(
+        context,
+        run,
+        "onepassword-save",
+        `Save a new login named ${name} with username gate@example.test and a generated 24-character password in my "OpenGeni Test RW" vault. Do not show me the password.`,
       );
+      run.check(
+        "agent saved with secret_save",
+        save.toolCalls.some((call) => call.name === "secret_save"),
+      );
+      const savedItems: any[] = (await vaults.listItems(rwVaultId)).json?.items ?? [];
+      const saved = savedItems.find((row) => row.name === name);
+      run.check("the new login is mirrored from 1Password", Boolean(saved));
+      if (saved) {
+        const generated = await vaults.revealFieldByName(rwVaultId, saved.id, "password");
+        run.check("the generated password reads back live", (generated ?? "").length >= 24);
+        if (generated)
+          context.knownValues.push({ label: "OnePasswordGenerated", value: generated });
+        const archived = await vaults.archiveItem(rwVaultId, saved.id);
+        run.check("archive the item in 1Password", archived.ok, `${archived.status}`);
+        const after: any[] = (await vaults.listItems(rwVaultId)).json?.items ?? [];
+        run.check("the archived item left the mirror", !after.some((row) => row.name === name));
+      }
     },
   },
   {
@@ -541,7 +771,7 @@ export const SCENARIOS: Scenario[] = [
           execStep(`printf %s "{{secret:Canary}}"`),
           { tool: "tool_list", args: { namePrefix: "secret_", limit: 40 } },
         ],
-        { extraBody: { agent: { capabilities: { secrets: false } } } },
+        { extraBody: { agent: { capabilities: { from: "all", secrets: false } } } },
       );
       run.check(
         "reference stays literal",

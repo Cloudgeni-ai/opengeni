@@ -11,6 +11,7 @@
 // session group exists. `run_on` builds a one-off backend session and runs a
 // single op WITHOUT touching the active pointer.
 
+import type { VaultProviderRegistry } from "@opengeni/vaults";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   agentCapabilityEnabled,
@@ -855,6 +856,8 @@ export async function createRunOnSecretResolver(
     attemptId: string;
     executionGeneration: number;
   },
+  /** Connected vaults (1Password, host) for the attempt's acting human. */
+  providersForSubject?: (subjectId: string | null) => VaultProviderRegistry,
 ): Promise<SecretResolver> {
   const session = await getSession(services.db, attempt.workspaceId, attempt.sessionId);
   return createSecretResolver(
@@ -864,6 +867,7 @@ export async function createRunOnSecretResolver(
       capabilityEnabled: session?.agent
         ? agentCapabilityEnabled(session.agent.capabilities, "secrets")
         : true,
+      ...(providersForSubject ? { providersForSubject } : {}),
     },
   );
 }

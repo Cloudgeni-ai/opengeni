@@ -312,6 +312,9 @@ export {
 } from "./message-links";
 export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
+export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults-api";
+export type { VaultClientLike, VaultsApi } from "./vaults-api";
+export type * from "./vault-types";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
@@ -965,8 +968,6 @@ export type {
   CreateScheduledTaskRequest,
   CreateSessionScheduledTaskRequest,
   CreateSessionRequest,
-  CreateVariableSetRequest,
-  CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
   EnsureWorkspaceResponse,
@@ -1334,7 +1335,6 @@ export type {
   GitLogResponse,
   GitShowRequest,
   GitShowResponse,
-  SetWorkspaceEnvironmentVariableRequest,
   WorkspaceCaptureFile,
   WorkspaceCaptureRepo,
   WorkspaceCaptureDegradedReason,
@@ -1367,7 +1367,6 @@ export type {
   SessionRetention,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
-  UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
   AgentCapabilityId,
@@ -1382,8 +1381,6 @@ export type {
   AgentEffectiveTools,
   ClientAgentConfig,
   AgentConfigErrorCode,
-  UpdateVariableSetRequest,
-  UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
@@ -1405,12 +1402,6 @@ export type {
   ListUserResourceAuthoritiesResponse,
   Workspace,
   WorkspaceControlEvent,
-  VariableSet,
-  VariableSetAttachmentMetadata,
-  ResolveVariableSetAttachmentsRequest,
-  ResolveVariableSetAttachmentsResponse,
-  VariableSetSecret,
-  VariableSetVariableMetadata,
   Channel,
   CreateChannelRequest,
   ReorderChannelsRequest,
@@ -1429,8 +1420,6 @@ export type {
   RigSetupAppendPayload,
   RigDefinitionEditPayload,
   ProposeRigChangeRequest,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
   WorkspaceMemberCandidate,
   PreviewSkillImportRequest,

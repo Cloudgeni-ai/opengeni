@@ -1,7 +1,6 @@
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,
-  BoxIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   EyeIcon,
@@ -60,7 +59,6 @@ export type Panel =
   | "tools"
   | "repos"
   | "voice"
-  | "variables"
   | "secrets"
   | "settings"
   | "runs-on"
@@ -129,10 +127,6 @@ export type ComposerPlusProps = {
     disabled?: boolean;
     /** Panel element; receives `leading` (back control) via clone. */
     panel: ReactElement<{ leading?: ReactNode }>;
-  };
-  variableSets?: {
-    selectedCount: number;
-    panel: ReactElement<{ leading?: ReactNode; onClose?: () => void }>;
   };
   /** Which vaults agents in this chat may use, and the task's own items. */
   secrets?: ComposerSettingPanel;
@@ -315,22 +309,6 @@ export function ComposerMobilePlusPanel(
               onOpen={() => setPanel("secrets")}
             />
           ) : null}
-          {props.variableSets ? (
-            <DropdownMenuItem
-              data-composer-panel="variables"
-              className="cursor-pointer"
-              disabled={props.disabled}
-              onSelect={(event) => {
-                event.preventDefault();
-                setPanel("variables");
-              }}
-            >
-              <BoxIcon className="size-4" />
-              Variable sets
-              <DropdownMenuMeta>{props.variableSets.selectedCount || ""}</DropdownMenuMeta>
-              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
-            </DropdownMenuItem>
-          ) : null}
           {props.runsOn || props.visibility ? <DropdownMenuSeparator /> : null}
           {props.runsOn ? (
             <SettingRowItem
@@ -420,14 +398,6 @@ export function ComposerMobilePlusPanel(
         />
       ) : panel === "repos" && repositories ? (
         withLeading(repositories.panel, backButton)
-      ) : panel === "variables" && props.variableSets ? (
-        cloneElement(props.variableSets.panel, {
-          leading: backButton,
-          onClose: () => {
-            setOpen(false);
-            setPanel("root");
-          },
-        })
       ) : panel === "secrets" && props.secrets ? (
         cloneElement(props.secrets.panel, {
           leading: backButton,
@@ -476,7 +446,6 @@ export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
   tools: "Connectors",
   repos: "Repositories",
   voice: "Voice model",
-  variables: "Variable sets",
   secrets: "Secrets",
   settings: "Chat settings",
   "runs-on": "Runs on",

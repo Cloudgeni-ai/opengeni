@@ -6,7 +6,6 @@ import type {
   MachineView,
   ResourceRef,
   SessionVisibility,
-  VariableSet,
 } from "@opengeni/sdk";
 import {
   fontStyle,
@@ -54,7 +53,6 @@ export interface NewSessionChoices {
   targetSandboxId: string | null;
   /** The project (workspace channel); null is Default. */
   channelId: string | null;
-  variableSetIds: string[];
   /** Connectors turned off for this chat; the rest follow the workspace defaults. */
   excludedConnectorIds: string[];
 }
@@ -64,7 +62,6 @@ const EMPTY_CHOICES: NewSessionChoices = {
   repositoryIds: [],
   targetSandboxId: null,
   channelId: null,
-  variableSetIds: [],
   excludedConnectorIds: [],
 };
 
@@ -82,9 +79,6 @@ export interface NewSessionOptions {
   projects: Channel[];
   channelId: string | null;
   setChannelId(next: string | null): void;
-  variableSets: VariableSet[];
-  selectedVariableSetIds: string[];
-  toggleVariableSet(id: string): void;
   connectors: NewSessionConnector[];
   excludedConnectorIds: string[];
   toggleConnector(id: string): void;
@@ -99,7 +93,6 @@ export interface NewSessionOptions {
     visibility?: SessionVisibility;
     targetSandboxId?: string;
     channelId?: string;
-    variableSetIds?: string[];
     excludedMcpServerIds?: string[];
     resources: ResourceRef[];
   };
@@ -108,7 +101,7 @@ export interface NewSessionOptions {
 
 /**
  * The new chat's options behind the composer's +: its project, who can see
- * it, which repositories, variable sets and connectors it uses, and where it
+ * it, which repositories and connectors it uses, and where it
  * runs. A list without entries is simply not offered. Choices reset with the
  * workspace.
  */
@@ -124,7 +117,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     repositories: GitHubRepository[];
     machines: MachineView[];
     projects: Channel[];
-    variableSets: VariableSet[];
     connectors: NewSessionConnector[];
   }>({
     workspaceId: null,
@@ -132,15 +124,14 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     repositories: [],
     machines: [],
     projects: [],
-    variableSets: [],
     connectors: [],
   });
 
   useEffect(() => {
     if (!workspaceId) return;
     let current = true;
-    // Each list is optional: a deployment without GitHub, machines, projects,
-    // variable sets or connectors simply omits that choice.
+    // Each list is optional: a deployment without GitHub, machines, projects
+    // or connectors simply omits that choice.
     void Promise.all([
       client
         .getSessionTenancyCreateCapabilities(workspaceId)
@@ -156,10 +147,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
         .catch(() => [] as MachineView[]),
       client.listChannels(workspaceId).catch(() => [] as Channel[]),
       client
-        .listVariableSets(workspaceId)
-        .then((sets) => sets.filter((set) => set.status === "active"))
-        .catch(() => [] as VariableSet[]),
-      client
         .listCapabilities(workspaceId)
         .then((capabilities) =>
           capabilities.items.flatMap((item) =>
@@ -173,7 +160,7 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
           ),
         )
         .catch(() => [] as NewSessionConnector[]),
-    ]).then(([canCreatePrivate, repositories, machines, projects, variableSets, connectors]) => {
+    ]).then(([canCreatePrivate, repositories, machines, projects, connectors]) => {
       if (current) {
         setCatalog({
           workspaceId,
@@ -181,7 +168,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
           repositories,
           machines,
           projects,
-          variableSets,
           connectors,
         });
       }
@@ -196,7 +182,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
   const repositories = ready ? catalog.repositories : [];
   const machines = ready ? catalog.machines : [];
   const projects = ready ? catalog.projects : [];
-  const variableSets = ready ? catalog.variableSets : [];
   const connectors = ready ? catalog.connectors : [];
   const canCreatePrivate = ready && catalog.canCreatePrivate;
   const patch = useCallback(
@@ -216,9 +201,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     repositories.some((repo) => repo.id === id),
   );
   const channelId = projects.some((project) => project.id === own.channelId) ? own.channelId : null;
-  const selectedVariableSetIds = own.variableSetIds.filter((id) =>
-    variableSets.some((set) => set.id === id),
-  );
   const excludedConnectorIds = own.excludedConnectorIds.filter((id) =>
     connectors.some((connector) => connector.id === id),
   );
@@ -230,7 +212,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
         repositoryIds: selectedRepositoryIds,
         targetSandboxId,
         channelId,
-        variableSetIds: selectedVariableSetIds,
         excludedConnectorIds,
       }
     : own;
@@ -248,9 +229,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     projects,
     channelId,
     setChannelId: (next) => patch({ channelId: next }),
-    variableSets,
-    selectedVariableSetIds,
-    toggleVariableSet: (id) => patch({ variableSetIds: toggle(own.variableSetIds, id) }),
     connectors,
     excludedConnectorIds,
     toggleConnector: (id) =>
@@ -262,7 +240,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
       ...(visibility === "private" ? { visibility } : {}),
       ...(targetSandboxId ? { targetSandboxId } : {}),
       ...(channelId ? { channelId } : {}),
-      ...(selectedVariableSetIds.length > 0 ? { variableSetIds: selectedVariableSetIds } : {}),
       ...(excludedConnectorIds.length > 0 ? { excludedMcpServerIds: excludedConnectorIds } : {}),
       resources: repositories
         .filter((repo) => selectedRepositoryIds.includes(repo.id))
@@ -272,7 +249,6 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
     reset: () =>
       patch({
         repositoryIds: [],
-        variableSetIds: [],
         excludedConnectorIds: [],
         visibility: "workspace",
       }),
@@ -381,23 +357,6 @@ export function ComposerPlusMenu(props: {
         })),
       });
     }
-    if (options.variableSets.length > 0) {
-      sessionActions.push({
-        id: "variable-sets",
-        title:
-          options.selectedVariableSetIds.length > 0
-            ? `Variable sets · ${options.selectedVariableSetIds.length}`
-            : "Variable sets",
-        image: "key",
-        subactions: options.variableSets.map((each) => ({
-          id: `variable-set:${each.id}`,
-          title: each.name,
-          state: options.selectedVariableSetIds.includes(each.id)
-            ? ("on" as const)
-            : ("off" as const),
-        })),
-      });
-    }
     if (options.canCreatePrivate) {
       sessionActions.push({
         id: "visibility",
@@ -439,7 +398,6 @@ export function ComposerPlusMenu(props: {
         else if (kind === "project" && value)
           options?.setChannelId(value === "default" ? null : value);
         else if (kind === "connector" && value) options?.toggleConnector(value);
-        else if (kind === "variable-set" && value) options?.toggleVariableSet(value);
         else if (kind === "runs-on" && value)
           options?.setTargetSandboxId(value === "managed" ? null : value);
         else if (kind === "visibility" && (value === "private" || value === "workspace"))
@@ -510,18 +468,8 @@ export function NewSessionOptionChips({ options }: { options: NewSessionOptions 
     [options.repositories, options.selectedRepositoryIds],
   );
   const project = options.projects.find((each) => each.id === options.channelId);
-  const sets = options.variableSets.filter((set) =>
-    options.selectedVariableSetIds.includes(set.id),
-  );
   const off = options.excludedConnectorIds.length;
-  if (
-    repos.length === 0 &&
-    !machine &&
-    !project &&
-    sets.length === 0 &&
-    off === 0 &&
-    options.visibility !== "private"
-  )
+  if (repos.length === 0 && !machine && !project && off === 0 && options.visibility !== "private")
     return null;
   return (
     <ScrollView
@@ -550,14 +498,6 @@ export function NewSessionOptionChips({ options }: { options: NewSessionOptions 
           onRemove={() => options.setTargetSandboxId(null)}
         />
       ) : null}
-      {sets.map((set) => (
-        <OptionChip
-          key={set.id}
-          icon="key-round"
-          label={set.name}
-          onRemove={() => options.toggleVariableSet(set.id)}
-        />
-      ))}
       {off > 0 ? (
         <OptionChip icon="plug" label={`${off} connector${off === 1 ? "" : "s"} off`} />
       ) : null}

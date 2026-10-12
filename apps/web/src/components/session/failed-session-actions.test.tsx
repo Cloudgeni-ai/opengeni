@@ -348,7 +348,6 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
     "upload",
     "repository",
     "policy",
-    "variable_sets",
     "personal_decision",
     "personal_loading",
   ] as const) {

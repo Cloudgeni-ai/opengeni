@@ -1,4 +1,5 @@
-import type { OpenGeniClient, VaultPolicy } from "@opengeni/sdk";
+import type { OpenGeniClient } from "./client";
+import type { VaultPolicy } from "./types";
 import type {
   CreateManagedProviderVaultRequest,
   CreateVaultItemRequest,
@@ -18,12 +19,12 @@ import type {
   VaultItem,
   VaultItemSummary,
   VaultSummary,
-} from "./types/vaults";
+} from "./vault-types";
 
 /**
- * Vault REST routes (dossier §10B.1.10) over the client's contract-checked JSON
- * transport. Responses carry metadata only; plaintext comes back only from
- * `revealField`, and callers keep it in component state, never in a cache.
+ * Vault REST routes over the client's JSON transport. Responses carry metadata
+ * only; plaintext comes back only from `revealField`, and callers keep it in
+ * memory for as long as they need it, never in a cache.
  */
 export type VaultClientLike = Pick<OpenGeniClient, "requestJson">;
 
@@ -43,7 +44,7 @@ export function asVaultClient(client: unknown): VaultClientLike {
   return {
     requestJson: (() =>
       Promise.reject(
-        new Error("@opengeni/react: vaults need a client with requestJson."),
+        new Error("Vaults need a client with requestJson."),
       )) as VaultClientLike["requestJson"],
   };
 }

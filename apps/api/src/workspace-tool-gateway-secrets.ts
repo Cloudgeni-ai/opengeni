@@ -6,6 +6,7 @@
  * Values replace references only in the deep copy the gateway executes; the
  * approval digest stays bound to the references.
  */
+import type { VaultProviderRegistry } from "@opengeni/vaults";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
@@ -60,6 +61,8 @@ export function workspaceGatewaySecretArguments(input: {
   db: Database;
   settings: Settings;
   grant: AccessGrant;
+  /** Connected vaults (1Password, host) for the resolved acting subject. */
+  providersForSubject?: ((subjectId: string | null) => VaultProviderRegistry) | undefined;
 }): ToolGatewayArgumentResolver {
   const encryptionKey = environmentsEncryptionKeyBytes(input.settings) ?? null;
   return async (call) => {
@@ -84,7 +87,10 @@ export function workspaceGatewaySecretArguments(input: {
     const resolver = createSecretResolver(
       { db: input.db, encryptionKey },
       workspaceGatewaySecretPrincipal(input.grant, site),
-      { capabilityEnabled: true },
+      {
+        capabilityEnabled: true,
+        ...(input.providersForSubject ? { providersForSubject: input.providersForSubject } : {}),
+      },
     );
     const hook = createSecretArgumentResolver({
       resolver,

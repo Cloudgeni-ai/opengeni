@@ -32,8 +32,10 @@ export function normalizeToolName(name: string): string {
 export type TurnResult = {
   sessionId: string;
   url: string;
-  status: "completed" | "failed" | "cancelled" | "timeout";
+  status: "completed" | "failed" | "cancelled" | "timeout" | "paused";
   failure?: { code?: string; message?: string };
+  /** Last event sequence seen; pass to resumeAfterSequence to keep following. */
+  lastSequence: number;
   toolCalls: ToolCallRecord[];
   assistantText: string;
   events: SessionEvent[];
@@ -55,6 +57,10 @@ export type StartTurnOptions = {
   /** Extra create-session body fields (for example future `agent.capabilities.secrets`). */
   extraBody?: Record<string, unknown>;
   timeoutMs?: number;
+  /** Return early (status "paused") once one of these event types arrives, e.g. an ask card. */
+  stopOnEventTypes?: string[];
+  /** Keep following an existing session from this sequence without posting a message. */
+  resumeAfterSequence?: number;
 };
 
 export async function runTurn(api: StackApi, options: StartTurnOptions): Promise<TurnResult> {
@@ -62,7 +68,9 @@ export async function runTurn(api: StackApi, options: StartTurnOptions): Promise
   const base = `/v1/workspaces/${options.workspaceId}/sessions`;
   let sessionId = options.sessionId;
   let afterSequence = 0;
-  if (sessionId) {
+  if (sessionId && options.resumeAfterSequence !== undefined) {
+    afterSequence = options.resumeAfterSequence;
+  } else if (sessionId) {
     afterSequence = await latestSequence(api, base, sessionId);
     await api.call("POST", `${base}/${sessionId}/messages`, { text: options.message });
   } else {
@@ -112,6 +120,8 @@ export async function runTurn(api: StackApi, options: StartTurnOptions): Promise
         };
       }
       if (event.type === "turn.cancelled") status = "cancelled";
+      if (!status && options.stopOnEventTypes?.includes(event.type)) status = "paused";
+      if (status === "paused") break;
     }
     if (!status) await Bun.sleep(1_000);
   }
@@ -120,6 +130,7 @@ export async function runTurn(api: StackApi, options: StartTurnOptions): Promise
     url,
     status: status ?? "timeout",
     ...(failure ? { failure } : {}),
+    lastSequence: afterSequence,
     toolCalls: [...calls.values()],
     assistantText,
     events,

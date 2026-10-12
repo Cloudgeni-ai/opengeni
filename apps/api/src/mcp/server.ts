@@ -181,6 +181,7 @@ import {
 } from "./scheduled-task-input";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
+import { vaultProviderRegistryFor } from "../routes/vault-providers";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import { registerSecretTools } from "./secret-tools";
 import {
@@ -1128,12 +1129,12 @@ export function buildOpenGeniMcpServer(
   registerSlackBotTools(server, deps, grant, sessionId, json);
   registerFikenTools(server, deps, grant, sessionId, json);
 
-  // Orchestration, variableSet, and GitHub status tools are permission-gated
+  // Orchestration, secret, and GitHub status tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
   // Sandboxed workers reach this server with the first-party delegated
   // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
-  // POWERFUL BY DEFAULT — it carries sessions:*, variable sets:*, and github:use,
-  // so agents can spawn/read sessions, manage variable set variables, inspect
+  // POWERFUL BY DEFAULT — it carries sessions:*, secrets:*, and github:use,
+  // so agents can spawn/read sessions, use and save vault secrets, inspect
   // GitHub connection availability, and use already-bound repository resources
   // out of the box. GitHub installation credentials are refreshed host-side and
   // never returned through a model-visible MCP tool. A user DEMOTES a specific
@@ -4199,11 +4200,12 @@ function registerFleetTools(
       const claims = exactAgentAttemptClaims(grant);
       const secretResolver =
         claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-          ? await createRunOnSecretResolver(deps, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              ...claims,
-            })
+          ? await createRunOnSecretResolver(
+              deps,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+              (subjectId) =>
+                vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+            )
           : null;
       return json(
         await runOnSandbox(services, await fleetContext(), target, typedOp, {
@@ -6350,9 +6352,6 @@ function registerProjectTools(
   }
 }
 
-// Variable-set management for agents. Generic reads remain metadata-only.
-// Plaintext has one dedicated tool that additionally requires literal
-// secrets:read plus exact live attempt/session authorization.
 type CapabilitySetupProjection =
   | { status: "ready"; action: null; detail: string }
   | {

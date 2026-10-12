@@ -279,18 +279,31 @@ const CREATED_BY: Record<VaultFieldVersionMeta["createdByKind"], string> = {
   system: "by Opengeni",
 };
 
+function createdByText(
+  version: VaultFieldVersionMeta,
+  personName: ((subjectId: string) => string | null) | undefined,
+): string {
+  if (version.createdByKind === "human" && version.createdBySubjectId && personName) {
+    const name = personName(version.createdBySubjectId);
+    if (name) return `by ${name}`;
+  }
+  return CREATED_BY[version.createdByKind];
+}
+
 function FieldHistory({
   item,
   field,
   canWrite,
   onRestored,
   api,
+  personName,
 }: {
   item: VaultItem;
   field: VaultItemField;
   canWrite: boolean;
   onRestored: () => Promise<void>;
   api: VaultsApi;
+  personName?: ((subjectId: string) => string | null) | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const history = useVaultFieldVersions(item.vaultId, item.id, field.id, { enabled: open });
@@ -318,7 +331,7 @@ function FieldHistory({
                 <span className="font-medium text-fg">Version {version.version}</span>
                 <span className="text-fg-muted">
                   {" · "}
-                  {CREATED_BY[version.createdByKind]}{" "}
+                  {createdByText(version, personName)}{" "}
                   <RelativeTime date={version.createdAt} inSentence />
                 </span>
                 {version.current ? <span className="text-fg-muted"> · current</span> : null}
@@ -377,6 +390,7 @@ export function ItemPage({
   api,
   canUse,
   actions,
+  personName,
 }: {
   item: VaultItem;
   vault: VaultSummary;
@@ -384,6 +398,8 @@ export function ItemPage({
   /** Reveal and copy values ("use = reveal"). Viewers can't. */
   canUse: boolean;
   actions: ItemPageActions;
+  /** Names version authors: "you", a member's name, or null when unknown. */
+  personName?: ((subjectId: string) => string | null) | undefined;
 }) {
   // Plaintext by field id. Component state only; gone on unmount.
   const [revealed, setRevealed] = useState<Record<string, string>>({});
@@ -650,6 +666,7 @@ export function ItemPage({
                       field={field}
                       canWrite={canWrite && !readOnly}
                       api={api}
+                      personName={personName}
                       onRestored={actions.refresh}
                     />
                   ))}

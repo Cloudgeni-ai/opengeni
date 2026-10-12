@@ -225,13 +225,6 @@ export type {
   UseSessionLineageOptions,
   UseSessionLineageResult,
 } from "./hooks/use-session-lineage";
-export { useVariableSets, useEnvironments } from "./hooks/use-environments";
-export type {
-  UseVariableSetsOptions,
-  UseVariableSetsResult,
-  UseEnvironmentsOptions,
-  UseEnvironmentsResult,
-} from "./hooks/use-environments";
 export {
   useVaultsApi,
   useVaults,
@@ -243,9 +236,44 @@ export {
   VAULT_ITEM_PAGE_LIMIT,
 } from "./hooks/use-vaults";
 export type { UseVaultQueryOptions } from "./hooks/use-vaults";
-export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults";
-export type { VaultClientLike, VaultsApi } from "./vaults";
-export type * from "./types/vaults";
+export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "@opengeni/sdk";
+export type { VaultClientLike, VaultsApi } from "@opengeni/sdk";
+export type {
+  VaultPolicy,
+  VaultOwnerKind,
+  VaultSource,
+  VaultMode,
+  VaultSyncStatus,
+  VaultItemType,
+  VaultFieldKind,
+  VaultAvailability,
+  VaultSummary,
+  VaultItemReferences,
+  VaultItemSummary,
+  VaultItemField,
+  PasskeySummary,
+  VaultItem,
+  VaultVersionCreatedByKind,
+  VaultFieldVersionMeta,
+  GeneratePasswordOptions,
+  CreateVaultRequest,
+  UpdateVaultRequest,
+  VaultFieldInput,
+  CreateVaultItemRequest,
+  UpdateVaultItemRequest,
+  MoveVaultItemRequest,
+  RevealVaultFieldResponse,
+  ListVaultItemsQuery,
+  SessionSecretsVault,
+  SessionSecretsView,
+  OnePasswordPlanTier,
+  InstallOnePasswordRequest,
+  ProviderVaultMeta,
+  InstallOnePasswordResponse,
+  LinkProviderVaultRequest,
+  CreateManagedProviderVaultRequest,
+  VaultErrorCode,
+} from "@opengeni/sdk";
 export { SecretsUiProvider, useSecretsUi } from "./secrets-ui";
 export {
   SecretAnswerChip,
