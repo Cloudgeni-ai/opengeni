@@ -9994,6 +9994,8 @@ export type ResolvedAgentConfig = {
   capabilities: ResolvedAgentCapabilities;
   /** Capabilities wanted on but not offered by this deployment. */
   unavailable: AgentCapabilityId[];
+  /** Why each unavailable capability is off; present whenever `unavailable` is non-empty. */
+  unavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
   identity: string | null;
   renderer: AgentRenderer;
   source:
