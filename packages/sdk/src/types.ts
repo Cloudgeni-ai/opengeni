@@ -3305,6 +3305,8 @@ export type ScheduledTask = {
   updatedAt: string;
   /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
   policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
+  /** Read-only: which accounts a run would use if it started now, for a viewer who can act on it. */
+  accountPlan?: ScheduledTaskAccountPlan | undefined;
 };
 
 /**
@@ -3347,6 +3349,34 @@ export type ScheduledTaskPolicyDrift = {
   unavailableAccounts: ScheduledTaskAccessConnector[];
   /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
   canRefresh: boolean;
+};
+
+/** One connector account a scheduled run would act as. */
+export type ScheduledTaskAccountPlanAccount = {
+  connectionId: string;
+  label: string;
+  /** `personal`: the schedule owner's own account. `shared`: a workspace account. */
+  scope: "personal" | "shared";
+};
+
+export type ScheduledTaskAccountPlanConnector = {
+  id: string;
+  name: string;
+  /** `default`: the owner's current accounts at each run. `pinned`: only the accounts a person chose. */
+  mode: "default" | "pinned";
+  /** Accounts a run would use if it started now; empty when none can be used. */
+  accounts: ScheduledTaskAccountPlanAccount[];
+  /** Pinned accounts that can no longer be used; always empty in `default` mode. */
+  unavailablePins: Array<{ connectionId: string }>;
+};
+
+/**
+ * Which connector accounts a run of this schedule would use if it started
+ * now, resolved at read time from the owner's live connections. Nothing here
+ * is stored.
+ */
+export type ScheduledTaskAccountPlan = {
+  connectors: ScheduledTaskAccountPlanConnector[];
 };
 
 /** Re-freeze with the caller's current authority; `executionDigest` is the reviewed head. */

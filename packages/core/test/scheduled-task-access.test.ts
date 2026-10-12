@@ -12,6 +12,7 @@ import {
   isScheduledTaskAccessRefreshHuman,
   orderScheduledTaskAccessAttention,
   planScheduledTaskPinnedAccounts,
+  planScheduledTaskAccounts,
   planScheduledTaskConnectors,
   planScheduledTaskOpenGeniTools,
   scheduledTaskAccessSource,
@@ -155,6 +156,82 @@ describe("scheduled task pinned accounts", () => {
       { serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID, connectionId: "drive" },
     ]);
     expect(plan.dropped).toEqual([{ id: "retired-crm", name: "retired-crm" }]);
+  });
+});
+
+describe("scheduled task account plan", () => {
+  const account = (
+    canonicalServerId: string,
+    connectionId: string,
+    subjectScope: "subject" | "workspace" = "subject",
+  ) => ({
+    canonicalServerId,
+    connectionId,
+    accountLabel: `${connectionId}@example.com`,
+    subjectScope,
+  });
+
+  test("an unpinned connector lists every account the owner can use now", () => {
+    const plan = planScheduledTaskAccounts({
+      connectionServerIds: ["slack"],
+      pins: [],
+      bindings: [account("slack", "mine"), account("slack", "team", "workspace")],
+      names,
+    });
+    expect(plan).toEqual({
+      connectors: [
+        {
+          id: "slack",
+          name: "Slack",
+          mode: "default",
+          accounts: [
+            { connectionId: "mine", label: "mine@example.com", scope: "personal" },
+            { connectionId: "team", label: "team@example.com", scope: "shared" },
+          ],
+          unavailablePins: [],
+        },
+      ],
+    });
+  });
+
+  test("a pinned connector uses only its pins and names the ones that are gone", () => {
+    const plan = planScheduledTaskAccounts({
+      connectionServerIds: ["gmail", "linear"],
+      pins: [
+        { serverId: "gmail", connectionId: "billing" },
+        { serverId: "gmail", connectionId: "revoked" },
+      ],
+      bindings: [account("gmail", "billing"), account("gmail", "personal"), account("linear", "l")],
+      names,
+    });
+    expect(plan.connectors).toEqual([
+      {
+        id: "gmail",
+        name: "Gmail",
+        mode: "pinned",
+        accounts: [{ connectionId: "billing", label: "billing@example.com", scope: "personal" }],
+        unavailablePins: [{ connectionId: "revoked" }],
+      },
+      {
+        id: "linear",
+        name: "Linear",
+        mode: "default",
+        accounts: [{ connectionId: "l", label: "l@example.com", scope: "personal" }],
+        unavailablePins: [],
+      },
+    ]);
+  });
+
+  test("a connector without a usable account is listed with none, and special surfaces are left out", () => {
+    const plan = planScheduledTaskAccounts({
+      connectionServerIds: ["notion", GOOGLE_DRIVE_PUBLICATION_SERVER_ID],
+      pins: [{ serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID, connectionId: "drive" }],
+      bindings: [account(GOOGLE_DRIVE_PUBLICATION_SERVER_ID, "drive")],
+      names,
+    });
+    expect(plan.connectors).toEqual([
+      { id: "notion", name: "Notion", mode: "default", accounts: [], unavailablePins: [] },
+    ]);
   });
 });
 

@@ -218,6 +218,31 @@ change. It is advisory: a failure to compute it omits the field and never fails
 the read. `canRefresh` is true only for a signed-in person holding
 `scheduled_tasks:manage`.
 
+## Which accounts a run would use
+
+The same reads add a read-only `accountPlan` for the same viewers, so nobody
+else sees the owner's account labels. For each connector that takes a
+connected account (host-supplied connectors and the special first-party
+surfaces are not listed), it says:
+
+- `mode`: `default` (each run uses the owner's current accounts) or `pinned`
+  (a person chose the accounts; runs use only those).
+- `accounts`: the accounts a run would use if it started now, with their label
+  and whether each is the owner's own (`personal`) or a workspace account
+  (`shared`). Empty when none can be used; the run then goes without that
+  connector.
+- `unavailablePins`: pinned accounts that can no longer be used.
+
+It is computed at read time from the owner's live connections with the same
+resolution a run uses, so what it shows is what the next run gets. For a
+schedule that posts into an existing chat it follows that chat's connectors
+and is always `default`. Nothing in it is stored. Like `policyDrift` it is
+advisory: a failure omits the field and never fails the read.
+
+The schedule page shows it as an Accounts section. A pin that can no longer
+be used offers "Use current accounts", which sends the remaining pins with the
+page's `expectedExecutionDigest`; a working pin changes only in the editor.
+
 ## The refresh is a new explicit human action
 
 `POST /v1/workspaces/:workspaceId/scheduled-tasks/:taskId/refresh-access` with

@@ -20,6 +20,7 @@ import {
 } from "@opengeni/config";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX,
   SCHEDULED_TASK_ACCESS_CONNECTORS_MAX,
   SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
   SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX,
@@ -30,10 +31,12 @@ import {
   type AccessGrant,
   type ConnectionMetadata,
   type FirstPartyMcpToolName,
+  type McpConnectionAccountBinding,
   type McpConnectionAccountSelection,
   type Permission,
   type RefreshScheduledTaskAccessRequest,
   type ScheduledTask,
+  type ScheduledTaskAccountPlan,
   type ScheduledTaskAccessAttention,
   type ScheduledTaskAccessConnector,
   type ScheduledTaskPolicyDrift,
@@ -198,6 +201,57 @@ export function planScheduledTaskPinnedAccounts(input: {
     unavailable: uniqueById(unavailable),
     dropped: uniqueById(dropped),
   };
+}
+
+/**
+ * What each connector of a scheduled run would act as if the run started
+ * now. `bindings` are every account the owner can use for the task's
+ * connectors right now, resolved the way a run resolves them. A connector
+ * without pins follows those accounts (Default); a pinned connector uses only
+ * the pinned accounts that still resolve and names the ones that do not.
+ * Special first-party surfaces keep their own account contract and are not
+ * listed; neither are host-supplied connectors (absent from
+ * `connectionServerIds`).
+ */
+export function planScheduledTaskAccounts(input: {
+  connectionServerIds: readonly string[];
+  pins: readonly McpConnectionAccountSelection[];
+  bindings: ReadonlyArray<
+    Pick<
+      McpConnectionAccountBinding,
+      "canonicalServerId" | "connectionId" | "accountLabel" | "subjectScope"
+    >
+  >;
+  names: ReadonlyMap<string, string>;
+}): ScheduledTaskAccountPlan {
+  const connectors: ScheduledTaskAccountPlan["connectors"] = [];
+  for (const serverId of new Set(input.connectionServerIds)) {
+    if (PRESERVED_ACCOUNT_SURFACES.has(serverId)) continue;
+    if (connectors.length === SCHEDULED_TASK_ACCESS_CONNECTORS_MAX) break;
+    const pinned = new Set(
+      input.pins.filter((pin) => pin.serverId === serverId).map((pin) => pin.connectionId),
+    );
+    const usable = input.bindings.filter(
+      (binding) =>
+        binding.canonicalServerId === serverId &&
+        (pinned.size === 0 || pinned.has(binding.connectionId)),
+    );
+    const resolved = new Set(usable.map((binding) => binding.connectionId));
+    connectors.push({
+      ...connector(serverId, input.names),
+      mode: pinned.size === 0 ? "default" : "pinned",
+      accounts: usable.slice(0, SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX).map((binding) => ({
+        connectionId: binding.connectionId,
+        label: binding.accountLabel,
+        scope: binding.subjectScope === "subject" ? ("personal" as const) : ("shared" as const),
+      })),
+      unavailablePins: [...pinned]
+        .filter((connectionId) => !resolved.has(connectionId))
+        .slice(0, SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX)
+        .map((connectionId) => ({ connectionId })),
+    });
+  }
+  return { connectors };
 }
 
 export type ScheduledTaskOpenGeniToolPlan = {
@@ -372,6 +426,8 @@ function hasAgentAccess(task: Pick<ScheduledTask, "action" | "agentConfig">): bo
 
 export type ScheduledTaskAccessPlan = {
   drift: Omit<ScheduledTaskPolicyDrift, "canRefresh">;
+  /** What each connector would act as if a run started now (see `planScheduledTaskAccounts`). */
+  accounts: ScheduledTaskAccountPlan;
   /** Connectors with a pinned account the task no longer uses (see the pin plan). */
   droppedPins: ScheduledTaskAccessConnector[];
   tools: ToolRef[];
@@ -491,7 +547,7 @@ export async function computeScheduledTaskAccessPlan(input: {
   const source = input.source;
   const pins = task.agentConfig.pinnedAccounts ?? [];
   const availableBindings =
-    pins.length === 0
+    connectionServerIds.length === 0
       ? []
       : await availableMcpAccountBindings({
           db,
@@ -540,6 +596,12 @@ export async function computeScheduledTaskAccessPlan(input: {
       missingOpenGeniTools: openGeni.missing,
       unavailableAccounts: accounts.unavailable,
     },
+    accounts: planScheduledTaskAccounts({
+      connectionServerIds,
+      pins,
+      bindings: availableBindings,
+      names,
+    }),
     droppedPins: accounts.dropped,
     tools: connectors.tools,
     creatorFirstPartyPolicy: openGeni.policy,
@@ -559,9 +621,10 @@ export function scheduledTaskPolicyDriftHasChanges(
 }
 
 /**
- * Attach `policyDrift` to each task this viewer can act on. A viewer who
- * cannot act on a task receives it unchanged. Drift is advisory: a failure to
- * compute it never fails the read, it only omits the field.
+ * Attach `policyDrift` and `accountPlan` to each task this viewer can act on.
+ * A viewer who cannot act on a task receives it unchanged, so nobody else sees
+ * the owner's account labels. Both are advisory: a failure to compute them
+ * never fails the read, it only omits the fields.
  */
 export async function withScheduledTaskPolicyDrift(input: {
   db: Database;
@@ -596,7 +659,10 @@ export async function withScheduledTaskPolicyDrift(input: {
     hasPermission(grant.permissions, "scheduled_tasks:manage") &&
     isScheduledTaskAccessRefreshHuman(input.authorization, workspaceId);
   const cache = scheduledTaskAccessReadCache();
-  const drift = new Map<string, ScheduledTaskPolicyDrift | null>();
+  const decorations = new Map<
+    string,
+    { policyDrift: ScheduledTaskPolicyDrift | null; accountPlan: ScheduledTaskAccountPlan }
+  >();
   for (const task of actionable) {
     try {
       const plan = await computeScheduledTaskAccessPlan({
@@ -610,17 +676,20 @@ export async function withScheduledTaskPolicyDrift(input: {
         cache,
         workspaceSettings,
       });
-      drift.set(
-        task.id,
-        scheduledTaskPolicyDriftHasChanges(plan.drift) ? { ...plan.drift, canRefresh } : null,
-      );
+      decorations.set(task.id, {
+        policyDrift: scheduledTaskPolicyDriftHasChanges(plan.drift)
+          ? { ...plan.drift, canRefresh }
+          : null,
+        accountPlan: plan.accounts,
+      });
     } catch (error) {
       input.onError?.(error);
     }
   }
-  return input.tasks.map((task) =>
-    drift.has(task.id) ? { ...task, policyDrift: drift.get(task.id)! } : task,
-  );
+  return input.tasks.map((task) => {
+    const decoration = decorations.get(task.id);
+    return decoration ? { ...task, ...decoration } : task;
+  });
 }
 
 /**

@@ -21779,6 +21779,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.accountPlan": "ref(ScheduledTaskAccountPlan)?",
         "$.action": "union!=[\"kind=agent_turn\",\"kind=knowledge_source_sync\"]",
         "$.action|kind=agent_turn": "object",
         "$.action|kind=agent_turn.kind": "const!=[\"\\\"agent_turn\\\"\"]",
@@ -21840,6 +21841,43 @@
         "$": "object",
         "$.id": "string!",
         "$.name": "string!"
+      }
+    },
+    "ScheduledTaskAccountPlan": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectors": "array!",
+        "$.connectors[]": "ref(ScheduledTaskAccountPlanConnector)"
+      }
+    },
+    "ScheduledTaskAccountPlanAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectionId": "string!",
+        "$.label": "string!",
+        "$.scope": "enum!=[\"\\\"personal\\\"\",\"\\\"shared\\\"\"]"
+      }
+    },
+    "ScheduledTaskAccountPlanConnector": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accounts": "array!",
+        "$.accounts[]": "ref(ScheduledTaskAccountPlanAccount)",
+        "$.id": "string!",
+        "$.mode": "enum!=[\"\\\"default\\\"\",\"\\\"pinned\\\"\"]",
+        "$.name": "string!",
+        "$.unavailablePins": "array!",
+        "$.unavailablePins[]": "object",
+        "$.unavailablePins[].connectionId": "string!"
       }
     },
     "ScheduledTaskAction": {
@@ -29230,6 +29268,9 @@
       "ScheduledTaskAccessAttention": "type",
       "ScheduledTaskAccessConnector": "type",
       "ScheduledTaskAccessFailureReason": "type",
+      "ScheduledTaskAccountPlan": "type",
+      "ScheduledTaskAccountPlanAccount": "type",
+      "ScheduledTaskAccountPlanConnector": "type",
       "ScheduledTaskAction": "type",
       "ScheduledTaskAgentConfig": "type",
       "ScheduledTaskAgentConfigInput": "type",

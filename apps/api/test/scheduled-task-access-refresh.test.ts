@@ -246,6 +246,18 @@ describe("scheduled task access drift and refresh", () => {
       unavailableAccounts: [{ id: "linear", name: "Linear" }],
       canRefresh: true,
     });
+    // The account plan shows the stale pin: Linear is pinned, nothing it names resolves.
+    expect(ownerView?.accountPlan).toEqual({
+      connectors: [
+        {
+          id: "linear",
+          name: "Linear",
+          mode: "pinned",
+          accounts: [],
+          unavailablePins: [{ connectionId: task.agentConfig.pinnedAccounts![0]!.connectionId }],
+        },
+      ],
+    });
     const [memberView] = await withScheduledTaskPolicyDrift({
       db: client.db,
       settings: settings(),
@@ -272,6 +284,71 @@ describe("scheduled task access drift and refresh", () => {
       },
     ]);
     expect(await attention(grant(workspace, workspace.member))).toEqual([]);
+  }, 60_000);
+
+  test("without pins the account plan follows the owner's current accounts", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const task = await createScheduledTask(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      name: "Linear triage",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3_600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Triage new Linear issues",
+        resources: [],
+        tools: [{ kind: "mcp", id: "linear" }],
+        metadata: {},
+      },
+      createdBy: { kind: "subject", subjectId: workspace.owner },
+      metadata: {},
+    });
+    const plan = async (subjectId: string) =>
+      (
+        await withScheduledTaskPolicyDrift({
+          db: client.db,
+          settings: settings(),
+          authorization: signedIn(workspace, subjectId),
+          tasks: [task],
+          permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+        })
+      )[0]?.accountPlan;
+    const sharedAccount = (connectionId: string) => ({
+      connectionId,
+      label: expect.stringContaining("This workspace"),
+      scope: "shared",
+    });
+    expect(await plan(workspace.owner)).toEqual({
+      connectors: [
+        {
+          id: "linear",
+          name: "Linear",
+          mode: "default",
+          accounts: [sharedAccount(workspace.liveConnectionId)],
+          unavailablePins: [],
+        },
+      ],
+    });
+    // A newly connected account is picked up without saving the schedule again.
+    const added = await createConnection(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: null,
+      providerDomain: "linear.app",
+      kind: "oauth2",
+      credentialEncrypted: "not-read-by-metadata-selection",
+    });
+    const after = await plan(workspace.owner);
+    expect(after?.connectors[0]?.mode).toBe("default");
+    expect(after?.connectors[0]?.accounts.map((account) => account.connectionId).sort()).toEqual(
+      [workspace.liveConnectionId, added.id].sort(),
+    );
+    // Someone who cannot act on the schedule never sees its owner's accounts.
+    expect(await plan(workspace.member)).toBeUndefined();
   }, 60_000);
 
   test("refuses keys, other members and a changed head before writing", async () => {

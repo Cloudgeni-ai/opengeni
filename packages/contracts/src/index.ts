@@ -10705,6 +10705,60 @@ export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
   .strict();
 export type ScheduledTaskPolicyDrift = z.infer<typeof ScheduledTaskPolicyDrift>;
 
+export const SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX = 32;
+
+/** One connector account a scheduled run would act as. */
+export const ScheduledTaskAccountPlanAccount = /* @__PURE__ */ z
+  .object({
+    connectionId: z.string().uuid(),
+    label: z.string().min(1).max(512),
+    /** `personal`: the schedule owner's own account. `shared`: a workspace account. */
+    scope: z.enum(["personal", "shared"]),
+  })
+  .strict();
+export type ScheduledTaskAccountPlanAccount = z.infer<typeof ScheduledTaskAccountPlanAccount>;
+
+export const ScheduledTaskAccountPlanConnector = /* @__PURE__ */ z
+  .object({
+    id: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    /**
+     * `default`: each run uses the owner's current accounts for this
+     * connector. `pinned`: a person chose the accounts; runs use only those.
+     */
+    mode: z.enum(["default", "pinned"]),
+    /**
+     * The accounts a run would use if it started now. Empty when none can be
+     * used: a run then goes without this connector (or, for a pinned connector
+     * on a schedule that requires its pinned accounts, is skipped).
+     */
+    accounts: z
+      .array(ScheduledTaskAccountPlanAccount)
+      .max(SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX),
+    /** Pinned accounts that can no longer be used. Always empty in `default` mode. */
+    unavailablePins: z
+      .array(z.object({ connectionId: z.string().uuid() }).strict())
+      .max(SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX),
+  })
+  .strict();
+export type ScheduledTaskAccountPlanConnector = z.infer<typeof ScheduledTaskAccountPlanConnector>;
+
+/**
+ * Which connector accounts a run of this schedule would use if it started
+ * now, per connector: Default (the owner's current accounts) or Pinned (the
+ * accounts a person chose), resolved at read time from the owner's live
+ * connections. Nothing here is stored; runs resolve again when they start.
+ * Connectors whose credentials an embedding host supplies are not listed.
+ */
+export const ScheduledTaskAccountPlan = /* @__PURE__ */ z
+  .object({
+    connectors: z
+      .array(ScheduledTaskAccountPlanConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+  })
+  .strict();
+export type ScheduledTaskAccountPlan = z.infer<typeof ScheduledTaskAccountPlan>;
+
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -10746,6 +10800,12 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   updatedAt: z.string(),
   /** Read-only response projection; never stored and never execution authority. */
   policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
+  /**
+   * Read-only response projection for a viewer who can act on the task (the
+   * same viewers as `policyDrift`); never stored and never execution
+   * authority. Absent when it could not be computed.
+   */
+  accountPlan: ScheduledTaskAccountPlan.optional(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
