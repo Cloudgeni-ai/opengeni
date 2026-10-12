@@ -168,11 +168,15 @@ function HumanInputForm({
     [],
   );
   const registerSecretClear = useCallback((id: string) => {
-    secretRegistrars.current[id] ??= (clear) => {
+    // One stable registrar per question, so the field's effect runs once.
+    const existing = secretRegistrars.current[id];
+    if (existing) return existing;
+    const registrar = (clear: (() => void) | null) => {
       if (clear) secretClears.current[id] = clear;
       else delete secretClears.current[id];
     };
-    return secretRegistrars.current[id];
+    secretRegistrars.current[id] = registrar;
+    return registrar;
   }, []);
   const clearSecrets = () => {
     secretValues.current = {};
@@ -344,7 +348,7 @@ function HumanInputForm({
                 question={question}
                 index={single ? null : index + 1}
                 draft={drafts[question.id] ?? emptyDraft()}
-                error={errors[question.id]}
+                error={isSecretQuestion(question) ? undefined : errors[question.id]}
                 disabled={busy}
                 onChange={(next) => update(question.id, next)}
               >

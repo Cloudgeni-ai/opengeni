@@ -82,9 +82,10 @@ export function SecretQuestionField({
     minHeight: 44,
     borderRadius: theme.radius.sm,
     borderWidth: 1,
-    borderColor: error ? c["status-failed"] : c.border,
+    borderColor: c.border,
     backgroundColor: c["surface-1"],
   };
+  const valueFrame = { ...frame, borderColor: error ? c["status-failed"] : c.border };
   const text = { ...fontStyle(theme), fontSize: theme.size.sm, color: c.fg };
 
   return (
@@ -109,7 +110,7 @@ export function SecretQuestionField({
       {draft.generate ? (
         <View
           style={{
-            ...frame,
+            ...valueFrame,
             flexDirection: "row",
             alignItems: "center",
             gap: 8,
@@ -124,7 +125,9 @@ export function SecretQuestionField({
           <Button label={messages.undo} variant="ghost" disabled={disabled} onPress={undo} />
         </View>
       ) : (
-        <View style={{ ...frame, flexDirection: "row", alignItems: "center", paddingLeft: 10 }}>
+        <View
+          style={{ ...valueFrame, flexDirection: "row", alignItems: "center", paddingLeft: 10 }}
+        >
           <Icon name="lock" size={14} color={c["fg-subtle"]} />
           <TextInput
             ref={input}
@@ -165,6 +168,12 @@ export function SecretQuestionField({
           </Pressable>
         </View>
       )}
+
+      {error ? (
+        <Text accessibilityRole="alert" style={{ ...note, color: c["status-failed"] }}>
+          {error}
+        </Text>
+      ) : null}
 
       {spec?.looksLike || mismatch || (spec?.allowGenerate && !draft.generate) ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
