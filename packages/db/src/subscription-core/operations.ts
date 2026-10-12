@@ -156,6 +156,61 @@ export type SubscriptionCoreConnectionRefreshDeps = {
   now?: () => Date;
 };
 
+/** A connection's credential columns, as a credential read returns them. */
+export type SubscriptionCoreConnectionCredentialRow = {
+  status: string;
+  refresh_generation: number | string;
+  credential_encrypted: string | null;
+  expires_at: Date | string | null;
+  last_refresh_at: Date | string | null;
+  provider_account_id: string | null;
+  plan_type: string | null;
+  provider_state: Record<string, unknown> | null;
+};
+
+/**
+ * The writes of one credential refresh, under the caller's authority (each
+ * runs in the caller's transaction): `begin` takes the per-connection
+ * refresh lock, rechecks the caller's access and returns the stored
+ * credential to rotate (null: refused); `persist` stores the rotated
+ * credential and `fail` marks the connection needs-relogin, each fenced on
+ * the refresh generation `begin` returned.
+ */
+export type SubscriptionCoreCredentialRefreshWriter = {
+  begin(tx: Database): Promise<{ refreshGeneration: number; credentialEncrypted: string } | null>;
+  persist(
+    tx: Database,
+    input: {
+      refreshGeneration: number;
+      credentialEncrypted: string;
+      expiresAt: Date | null;
+      refreshedAt: Date;
+    },
+  ): Promise<boolean>;
+  fail(tx: Database, input: { refreshGeneration: number; message: string }): Promise<boolean>;
+};
+
+/** A stored quota row's columns (`subscription_connection_quota`). */
+export type SubscriptionCoreStoredQuotaRow = {
+  quota: unknown;
+  quota_revision: number | string | null;
+  quota_observed_refresh_generation: number | string | null;
+  quota_updated_at: Date | string | null;
+};
+
+/** The quota write one usage observation makes. */
+export type SubscriptionCoreUsageObservationWrite = {
+  /** The quota document to store. */
+  stored: Pick<
+    SubscriptionQuota,
+    "windows" | "modelCooldowns" | "exhaustedUntil" | "exhaustedKind" | "source"
+  >;
+  /** When it was observed (the row's `updated_at`). */
+  observedAt: number;
+  /** It ends a stored exhaustion (the caller wakes waiters after commit). */
+  recovered: boolean;
+};
+
 export const SUBSCRIPTION_MODEL_CATALOG_TTL_MS = 60_000;
 
 /**
@@ -480,16 +535,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     assertRefMatches(connectionId, ref);
     const key = encryptionKey(settings);
     const access = await withOperationScope(db, scope, async (tx) => {
-      const [row] = await rawRows<{
-        status: string;
-        refresh_generation: number | string;
-        credential_encrypted: string | null;
-        expires_at: Date | string | null;
-        last_refresh_at: Date | string | null;
-        provider_account_id: string | null;
-        plan_type: string | null;
-        provider_state: Record<string, unknown> | null;
-      }>(
+      const [row] = await rawRows<SubscriptionCoreConnectionCredentialRow>(
         tx,
         sql`select status, refresh_generation, credential_encrypted, expires_at, last_refresh_at,
           provider_account_id, plan_type, provider_state
@@ -499,7 +545,15 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
       );
       return row ?? null;
     });
-    const row = access?.value;
+    return connectionCredentialLoad(key, connectionId, access?.value ?? null);
+  }
+
+  /** A credential read's row as a credential load (decrypts and decodes the secret). */
+  function connectionCredentialLoad(
+    key: Uint8Array,
+    connectionId: string,
+    row: SubscriptionCoreConnectionCredentialRow | null,
+  ): SubscriptionCoreConnectionCredentialLoad {
     if (!row) return { kind: "not_visible" };
     if (row.status === "needs_relogin") return { kind: "needs_relogin" };
     if (row.status !== "active" || !row.credential_encrypted) return { kind: "unavailable" };
@@ -518,6 +572,15 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     };
   }
 
+  /** `connectionCredentialLoad` for a caller with its own credential read (the settings' key). */
+  function subscriptionCoreConnectionCredentialLoad(
+    settings: Settings,
+    connectionId: string,
+    row: SubscriptionCoreConnectionCredentialRow | null,
+  ): SubscriptionCoreConnectionCredentialLoad {
+    return connectionCredentialLoad(encryptionKey(settings), connectionId, row);
+  }
+
   /**
    * Rotate the connection's refresh token under the per-connection advisory
    * key. Authorization (live operation lease, scope, enabled cutover) happens
@@ -534,14 +597,10 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     deps: SubscriptionCoreConnectionRefreshDeps = {},
   ): Promise<SubscriptionCoreConnectionRefreshOutcome> {
     assertRefMatches(connectionId, ref);
-    const key = encryptionKey(settings);
-    const now = deps.now ?? (() => new Date());
+    encryptionKey(settings);
     const tenant = scopeTenant(scope);
-    const access = await withOperationScope(
-      db,
-      scope,
-      async (tx): Promise<SubscriptionCoreConnectionRefreshOutcome> => {
-        await tx.execute(sql`set local lock_timeout = '30s'`);
+    const writer: SubscriptionCoreCredentialRefreshWriter = {
+      begin: async (tx) => {
         const [credential] = await rawRows<{
           refresh_generation: number | string;
           credential_encrypted: string;
@@ -552,67 +611,114 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
             ${routineArgs(scope, connectionId, ref)}
           )`,
         );
-        if (!credential) return { kind: "refused" };
-        const generation = Number(credential.refresh_generation);
-        if (generation !== observedRefreshGeneration) return { kind: "superseded" };
-        let current: unknown;
-        try {
-          current = decodeCredential(key, credential.credential_encrypted);
-        } catch (error) {
-          return { kind: "error", error };
-        }
-        // Renewal depends on the credential's format, never on the provider.
-        const refresher = subscriptionCoreCredentialRefresher(provider.adapter, current);
-        if (!refresher) {
-          // A credential that never renews is refreshed only when it expired
-          // or the provider refused it: only a new sign-in recovers.
-          const message = provider.adapter.reloginText("");
-          const [marked] = await rawRows<{ marked: boolean }>(
-            tx,
-            sql`select opengeni_private.fail_subscription_core_connection_refresh(${providerId},
-              ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
-              ${generation}::bigint, ${message}
-            ) as marked`,
-          );
-          return { kind: "relogin", message, marked: marked?.marked === true };
-        }
-        try {
-          const rotated = await refresher.rotate(current);
-          // Persist before any other fallible work: a rolled-back transaction
-          // would discard the only valid refresh token.
-          const [persisted] = await rawRows<{ persisted: boolean }>(
-            tx,
-            sql`select opengeni_private.persist_subscription_core_connection_refresh(${providerId},
-              ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
-              ${generation}::bigint,
-              ${encryptEnvironmentValue(key, provider.adapter.credential.encode(rotated.credential))},
-              ${rotated.expiresAt?.toISOString() ?? null}::timestamptz,
-              ${now().toISOString()}::timestamptz
-            ) as persisted`,
-          );
-          if (persisted?.persisted !== true) return { kind: "superseded" };
-          return {
-            kind: "refreshed",
-            credential: rotated.credential,
-            refreshGeneration: generation + 1,
-          };
-        } catch (error) {
-          const relogin = refresher.reloginMessage(error);
-          if (relogin !== null) {
-            const [marked] = await rawRows<{ marked: boolean }>(
-              tx,
-              sql`select opengeni_private.fail_subscription_core_connection_refresh(${providerId},
-                ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
-                ${generation}::bigint, ${provider.adapter.reloginText(relogin)}
-              ) as marked`,
-            );
-            return { kind: "relogin", message: relogin, marked: marked?.marked === true };
-          }
-          return { kind: "error", error };
-        }
+        return credential
+          ? {
+              refreshGeneration: Number(credential.refresh_generation),
+              credentialEncrypted: credential.credential_encrypted,
+            }
+          : null;
       },
+      persist: async (tx, input) => {
+        const [persisted] = await rawRows<{ persisted: boolean }>(
+          tx,
+          sql`select opengeni_private.persist_subscription_core_connection_refresh(${providerId},
+            ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
+            ${input.refreshGeneration}::bigint, ${input.credentialEncrypted},
+            ${input.expiresAt?.toISOString() ?? null}::timestamptz,
+            ${input.refreshedAt.toISOString()}::timestamptz
+          ) as persisted`,
+        );
+        return persisted?.persisted === true;
+      },
+      fail: async (tx, input) => {
+        const [marked] = await rawRows<{ marked: boolean }>(
+          tx,
+          sql`select opengeni_private.fail_subscription_core_connection_refresh(${providerId},
+            ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
+            ${input.refreshGeneration}::bigint, ${input.message}
+          ) as marked`,
+        );
+        return marked?.marked === true;
+      },
+    };
+    const access = await withOperationScope(db, scope, (tx) =>
+      rotateSubscriptionCoreConnectionCredential(
+        tx,
+        settings,
+        writer,
+        observedRefreshGeneration,
+        deps,
+      ),
     );
     return access?.value ?? { kind: "refused" };
+  }
+
+  /**
+   * One credential refresh in the caller's transaction, through the caller's
+   * writer: `begin` (lock and recheck), the adapter's rotation, then
+   * `persist` before any other fallible work (a rolled-back transaction
+   * would discard the only valid refresh token), or `fail` when only a new
+   * sign-in recovers.
+   */
+  async function rotateSubscriptionCoreConnectionCredential(
+    tx: Database,
+    settings: Settings,
+    writer: SubscriptionCoreCredentialRefreshWriter,
+    observedRefreshGeneration: number,
+    deps: SubscriptionCoreConnectionRefreshDeps = {},
+  ): Promise<SubscriptionCoreConnectionRefreshOutcome> {
+    const key = encryptionKey(settings);
+    const now = deps.now ?? (() => new Date());
+    await tx.execute(sql`set local lock_timeout = '30s'`);
+    const credential = await writer.begin(tx);
+    if (!credential) return { kind: "refused" };
+    const generation = credential.refreshGeneration;
+    if (generation !== observedRefreshGeneration) return { kind: "superseded" };
+    let current: unknown;
+    try {
+      current = decodeCredential(key, credential.credentialEncrypted);
+    } catch (error) {
+      return { kind: "error", error };
+    }
+    // Renewal depends on the credential's format, never on the provider.
+    const refresher = subscriptionCoreCredentialRefresher(provider.adapter, current);
+    if (!refresher) {
+      // A credential that never renews is refreshed only when it expired
+      // or the provider refused it: only a new sign-in recovers.
+      const message = provider.adapter.reloginText("");
+      const marked = await writer.fail(tx, { refreshGeneration: generation, message });
+      return { kind: "relogin", message, marked };
+    }
+    try {
+      const rotated = await refresher.rotate(current);
+      // Persist before any other fallible work: a rolled-back transaction
+      // would discard the only valid refresh token.
+      const persisted = await writer.persist(tx, {
+        refreshGeneration: generation,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          provider.adapter.credential.encode(rotated.credential),
+        ),
+        expiresAt: rotated.expiresAt ?? null,
+        refreshedAt: now(),
+      });
+      if (!persisted) return { kind: "superseded" };
+      return {
+        kind: "refreshed",
+        credential: rotated.credential,
+        refreshGeneration: generation + 1,
+      };
+    } catch (error) {
+      const relogin = refresher.reloginMessage(error);
+      if (relogin !== null) {
+        const marked = await writer.fail(tx, {
+          refreshGeneration: generation,
+          message: provider.adapter.reloginText(relogin),
+        });
+        return { kind: "relogin", message: relogin, marked };
+      }
+      return { kind: "error", error };
+    }
   }
 
   /** Store a shared connection's successful catalog read without altering quota or admin policy. */
@@ -687,12 +793,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
       );
       if (!connection) return { applied: false, recovered: false };
       const refreshGeneration = Number(connection.refresh_generation);
-      const [row] = await rawRows<{
-        quota: unknown;
-        quota_revision: number | string | null;
-        quota_observed_refresh_generation: number | string | null;
-        quota_updated_at: Date | string | null;
-      }>(
+      const [row] = await rawRows<SubscriptionCoreStoredQuotaRow>(
         tx,
         sql`select quota, revision as quota_revision,
           observed_refresh_generation as quota_observed_refresh_generation,
@@ -701,40 +802,18 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         where account_id = ${scope.accountId}::uuid and connection_id = ${connectionId}::uuid
         for update`,
       );
-      const current = row ? decodeSubscriptionQuota(row) : null;
-      const observed = applyQuotaObservation({ refreshGeneration, quota: current }, observation, {
-        usageReadingsComplete: provider.adapter.usageReadingsComplete === true,
-      });
-      if (!observed || observed === current) return { applied: false, recovered: false };
-      // An authoritative usage read below the limit ends a quota exhaustion
-      // (adapter opt-in; this row is locked, and the write bumps its revision).
-      // An at-limit read without a known reset is not below the limit.
-      const next =
-        provider.adapter.usageReadEndsQuotaExhaustion === true &&
-        observation.source === "usage_endpoint" &&
-        observation.exhaustedUntil === null &&
-        observation.exhaustedKind === null &&
-        observed.exhaustedKind === "quota"
-          ? { ...observed, exhaustedUntil: null, exhaustedKind: null }
-          : observed;
-      const observedNow = observation.observedAt ?? Date.now();
-      const recovered =
-        current !== null &&
-        quotaCapacity(current, observedNow).kind === "exhausted" &&
-        quotaCapacity(next, observedNow).kind !== "exhausted";
-      const stored = {
-        windows: next.windows,
-        modelCooldowns: next.modelCooldowns,
-        exhaustedUntil: next.exhaustedUntil,
-        exhaustedKind: next.exhaustedKind,
-        source: next.source,
-      };
+      const write = mergeSubscriptionCoreUsageObservation(
+        row ?? null,
+        refreshGeneration,
+        observation,
+      );
+      if (!write) return { applied: false, recovered: false };
       await tx.execute(
         sql`insert into subscription_connection_quota (
           account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
         ) values (
-          ${scope.accountId}::uuid, ${connectionId}::uuid, ${JSON.stringify(stored)}::jsonb,
-          ${refreshGeneration}, 1, ${new Date(observedNow).toISOString()}::timestamptz
+          ${scope.accountId}::uuid, ${connectionId}::uuid, ${JSON.stringify(write.stored)}::jsonb,
+          ${refreshGeneration}, 1, ${new Date(write.observedAt).toISOString()}::timestamptz
         )
         on conflict (connection_id) do update
           set quota = excluded.quota,
@@ -743,9 +822,54 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
               updated_at = excluded.updated_at
           where subscription_connection_quota.account_id = excluded.account_id`,
       );
-      return { applied: true, recovered };
+      return { applied: true, recovered: write.recovered };
     });
     return access?.value ?? { applied: false, recovered: false };
+  }
+
+  /**
+   * The quota write one usage observation makes on a connection's stored
+   * quota (null: it changes nothing, or the refresh-generation fence refuses
+   * it). The caller holds the stored row (locked, or fenced on its revision)
+   * and writes `stored` with a bumped revision.
+   */
+  function mergeSubscriptionCoreUsageObservation(
+    row: SubscriptionCoreStoredQuotaRow | null,
+    refreshGeneration: number,
+    observation: SubscriptionQuota,
+  ): SubscriptionCoreUsageObservationWrite | null {
+    const current = row ? decodeSubscriptionQuota(row) : null;
+    const observed = applyQuotaObservation({ refreshGeneration, quota: current }, observation, {
+      usageReadingsComplete: provider.adapter.usageReadingsComplete === true,
+    });
+    if (!observed || observed === current) return null;
+    // An authoritative usage read below the limit ends a quota exhaustion
+    // (adapter opt-in; the caller holds the row, and the write bumps its
+    // revision). An at-limit read without a known reset is not below the limit.
+    const next =
+      provider.adapter.usageReadEndsQuotaExhaustion === true &&
+      observation.source === "usage_endpoint" &&
+      observation.exhaustedUntil === null &&
+      observation.exhaustedKind === null &&
+      observed.exhaustedKind === "quota"
+        ? { ...observed, exhaustedUntil: null, exhaustedKind: null }
+        : observed;
+    const observedAt = observation.observedAt ?? Date.now();
+    const recovered =
+      current !== null &&
+      quotaCapacity(current, observedAt).kind === "exhausted" &&
+      quotaCapacity(next, observedAt).kind !== "exhausted";
+    return {
+      stored: {
+        windows: next.windows,
+        modelCooldowns: next.modelCooldowns,
+        exhaustedUntil: next.exhaustedUntil,
+        exhaustedKind: next.exhaustedKind,
+        source: next.source,
+      },
+      observedAt,
+      recovered,
+    };
   }
 
   /**
@@ -777,6 +901,9 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     releaseSubscriptionCoreOperationLease,
     loadSubscriptionCoreConnectionCredential,
     refreshSubscriptionCoreConnectionCredential,
+    subscriptionCoreConnectionCredentialLoad,
+    rotateSubscriptionCoreConnectionCredential,
+    mergeSubscriptionCoreUsageObservation,
     recordSubscriptionCoreModelCatalog,
     recordSubscriptionCoreUsageObservation,
     resolveSubscriptionCoreConnectionId,
