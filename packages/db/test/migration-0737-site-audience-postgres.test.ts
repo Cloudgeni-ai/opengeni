@@ -1,5 +1,5 @@
-// Migration 0734: Site audiences. Sites published before it are staged on a
-// database migrated without it, then 0734 is applied alone. Every existing
+// Migration 0737: Site audiences. Sites published before it are staged on a
+// database migrated without it, then 0737 is applied alone. Every existing
 // Site must stay visible to the workspace, and gets an owner only when one
 // can be established from organization members: the person whose chat turn
 // published its first version, else the member who published it directly.
@@ -18,7 +18,7 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0734_site_audience.sql";
+const MIGRATION = "0737_site_audience.sql";
 
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -57,7 +57,7 @@ afterAll(async () => {
 });
 
 test.skipIf(!realDb)(
-  "0734 keeps existing Sites workspace-visible and backfills their owners",
+  "0737 keeps existing Sites workspace-visible and backfills their owners",
   async () => {
     const admin = database!.admin;
     const userId = `site-audience-${crypto.randomUUID()}`;

@@ -88,7 +88,7 @@ everyone using this app."
 - Existing schedules keep their current audience. Schedules that already post
   into an Only me chat, or write to personal knowledge, become Only me, which
   only narrows who can see them.
-- Existing Sites stay shared with the workspace. Migration 0734 records an
+- Existing Sites stay shared with the workspace. Migration 0737 records an
   owner for each (the person whose chat published its first version, or the
   member who published it directly), so that person can later limit it.
 

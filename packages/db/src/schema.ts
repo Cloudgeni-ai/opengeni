@@ -249,7 +249,7 @@ export const workspaceArtifacts = pgTable(
     // that table exists. Keeping this pointer here makes reads inexpensive.
     currentVersionId: uuid("current_version_id"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
-    // Who can see the Site (migration 0734), like a chat or a schedule: the
+    // Who can see the Site (migration 0737), like a chat or a schedule: the
     // whole workspace (`workspace_shared`) or only its owner (`user_private`).
     // The owner is the person it was published for and never changes; only
     // they can change the audience. An Only me Site needs an owner.
