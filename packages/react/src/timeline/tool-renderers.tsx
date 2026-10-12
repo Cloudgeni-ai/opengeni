@@ -1,5 +1,6 @@
 import { useHasToolReview, useRecordedToolReview } from "../components/tool-review-history";
 import { ToolActionReviewCard } from "../components/tool-action-review";
+import { SecretRefText } from "../components/secret-ref-chip";
 import type { ToolReviewStatus } from "@opengeni/sdk";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { defaultUrlTransform } from "react-markdown";
@@ -339,7 +340,8 @@ function PresentedToolRow({
     <ActivityDisclosure
       icon={<ConnectorLogoIcon src={logo} fallback={<Icon className={ICON_SIZE} />} />}
       iconTone={p.iconTone}
-      title={p.title}
+      // A chip inside the row's own toggle never links.
+      title={<SecretRefText text={p.title} linkable={false} />}
       {...(p.titleMono ? { titleMono: true } : {})}
       {...(p.running ? { running: true } : {})}
       {...(p.chip ? { chip: p.chip } : {})}
