@@ -2018,7 +2018,7 @@ export function describeSubscriptionCoreConformance<Credential>(
 
     /**
      * A session holds one binding per provider (D-32) once the rolling window
-     * of 0730 closes: the next drained provider cutover drops the index that
+     * of 0731 closes: the next drained provider cutover drops the index that
      * kept one row per session for the previous binary. The tests that call
      * this run last in the suite, so every earlier test runs on the schema
      * production runs during the rolling window.
@@ -4896,8 +4896,8 @@ export function describeSubscriptionCoreConformance<Credential>(
     });
 
     // Runs before the tests that close the rolling window: production keeps
-    // 0730's rolling index until the next drained provider cutover drops it.
-    test("rolling window: a first binding that meets 0730's rolling index is a lost compare-and-swap, not an error", async () => {
+    // 0731's rolling index until the next drained provider cutover drops it.
+    test("rolling window: a first binding that meets 0731's rolling index is a lost compare-and-swap, not an error", async () => {
       const [index] = await admin()<{ present: boolean }[]>`
         select to_regclass('subscription_session_bindings_rolling_session_idx') is not null
           as present`;
