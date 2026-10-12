@@ -24,6 +24,28 @@ export const ModelAccountChoiceRefusal = z.enum([
 ]);
 export type ModelAccountChoiceRefusal = z.infer<typeof ModelAccountChoiceRefusal>;
 
+/**
+ * Stored observation only, not a live check or a promise of available capacity.
+ * Source/time describe the snapshot, not each retained window. Windows can be
+ * partial, unknown or stale; a past reset does not prove replenishment.
+ */
+export const ModelAccountUsageSnapshot = z.object({
+  observedAt: z.string().datetime().nullable(),
+  source: z.enum(["usage_endpoint", "response_headers", "refusal"]).nullable(),
+  windows: z.array(
+    z.object({
+      id: z.string(),
+      /** Null means unknown; values over 100 can represent overage. */
+      usedPercent: z.number().finite().nonnegative().nullable(),
+      resetsAt: z.string().datetime().nullable(),
+      status: z.enum(["ok", "warning", "exhausted", "unknown"]),
+    }),
+  ),
+  exhaustedUntil: z.string().datetime().nullable(),
+  exhaustedKind: z.enum(["quota", "rate_limit"]).nullable(),
+});
+export type ModelAccountUsageSnapshot = z.infer<typeof ModelAccountUsageSnapshot>;
+
 export const ModelAccountChoiceOption = z.object({
   provider: ProviderId,
   connectionId: z.string().uuid(),
@@ -39,6 +61,8 @@ export const ModelAccountChoiceOption = z.object({
   allowedModelIds: z.array(z.string()).nullable(),
   choosable: z.boolean(),
   refusal: ModelAccountChoiceRefusal.nullable(),
+  /** Omitted on older servers; null when this visible account has no decodable snapshot. */
+  usage: ModelAccountUsageSnapshot.nullable().optional(),
 });
 export type ModelAccountChoiceOption = z.infer<typeof ModelAccountChoiceOption>;
 
