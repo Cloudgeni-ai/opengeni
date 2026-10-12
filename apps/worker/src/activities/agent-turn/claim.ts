@@ -673,6 +673,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       events: inputs,
       ...(runState ? { runState } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
+      ...(inputSettlement.notStartedToolCallIds?.length
+        ? { notStartedToolCallIds: inputSettlement.notStartedToolCallIds }
+        : {}),
     });
     if (result.action === "stale") {
       // The terminal write can lose to a control transaction before the
