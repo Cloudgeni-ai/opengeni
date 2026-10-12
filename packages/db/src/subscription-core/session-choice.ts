@@ -355,9 +355,10 @@ export type SubscriptionCoreSessionChoiceOutcome =
   /** The database refused the connection for this session (binding guard). */
   | "refused"
   /**
-   * Defensive: the binding is locked before its version is compared, so this
-   * is not expected in practice. Clients may treat it like any other refusal
-   * to retry later.
+   * The choice could not be applied for now: the transaction kept losing a
+   * deadlock to a concurrent placement after its bounded replay (the binding
+   * is locked before its version is compared, so a lost compare-and-swap is
+   * defensive only). Nothing changed; the client may retry.
    */
   | "conflict";
 
@@ -417,6 +418,51 @@ export async function chooseSubscriptionCoreSessionAccount(
   },
   providers: SubscriptionCoreChoiceProviders = registeredProviders(),
 ): Promise<SubscriptionCoreSessionChoiceResult> {
+  // A choice locks the session row, then the binding, then (through the
+  // binding's disconnect-admission trigger) the chosen connection's refresh
+  // lock. A session's first placement takes that refresh lock before it
+  // locks the binding it inserts, so the two can close a cycle. PostgreSQL
+  // aborts one side with 40P01 and every effect of the aborted choice rolls
+  // back, so replaying the whole transaction is exact. The replay stays
+  // outside the transaction it repeats.
+  const maxAttempts = 3;
+  const requested =
+    input.connectionId !== null && UUID_PATTERN.test(input.connectionId)
+      ? input.connectionId.toLowerCase()
+      : input.connectionId;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await chooseOnce(db, { ...input, connectionId: requested }, providers);
+    } catch (error) {
+      if (postgresErrorCode(error) !== "40P01") throw error;
+      if (attempt >= maxAttempts) {
+        return {
+          outcome: "conflict",
+          appliedTo: "next_turn",
+          provider: null,
+          connectionId: null,
+          events: [],
+          wakes: [],
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5 + Math.random() * 20));
+    }
+  }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function chooseOnce(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    connectionId: string | null;
+    subjectId: string;
+  },
+  providers: SubscriptionCoreChoiceProviders,
+): Promise<SubscriptionCoreSessionChoiceResult> {
   const none = (
     outcome: SubscriptionCoreSessionChoiceOutcome,
   ): SubscriptionCoreSessionChoiceResult => ({
@@ -472,11 +518,15 @@ export async function chooseSubscriptionCoreSessionAccount(
         }
         if (!target) return none("not_found");
       }
-      // The binding guard authorizes the choosing human.
+      // The binding guard authorizes the choosing human. Only a person is
+      // recorded as the initiating human; any other subject leaves it unset
+      // (a personal binding still needs its owner).
       await setSubjectRlsContext(tx, input.subjectId);
-      await tx.execute(
-        sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
-      );
+      if (input.subjectId.startsWith("user:")) {
+        await tx.execute(
+          sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
+        );
+      }
       // A preference change admits no inference, so the canonical
       // session-events lock is taken without the workspace control prefix
       // (the same lock contract as every pin).

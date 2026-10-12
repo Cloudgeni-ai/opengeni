@@ -5253,7 +5253,9 @@ or provider on a shared account). This change does not alter either order.
 2. `chooseSubscriptionCoreSessionAccount`: one neutral entry point that sets
    an explicit choice or returns the session to automatic selection. It locks
    the binding, compares and swaps its version (bounded retries against a
-   concurrent placement), and leaves the decision to the binding guard: a
+   concurrent placement; the whole transaction is replayed a bounded number
+   of times when it loses a deadlock to a session's first placement, and
+   then reports `conflict`), and leaves the decision to the binding guard: a
    refusal surfaces as `refused`, never as a silent fallback. A turn waiting
    for capacity is woken and re-placed at once; otherwise the choice applies
    from the next turn. It records `model_account.selection.changed`.
@@ -5262,7 +5264,11 @@ or provider on a shared account). This change does not alter either order.
    turn already waiting can fall back at once. Turning it off wakes nothing
    and moves no running turn (D-27).
 3. Migration 0729 (rolling) lets a person read and change only their own
-   `subscription_person_preferences` row (see `docs/deployment.md`).
+   `subscription_person_preferences` row (see `docs/deployment.md`). Its
+   membership routine reads the caller's own membership through an
+   owner-only, marker-gated SELECT policy, so it works under the documented
+   migration owner without `BYPASSRLS`
+   (`packages/db/test/subscription-person-preferences-owner-postgres.test.ts`).
 4. API: `GET`/`PUT /v1/workspaces/{ws}/sessions/{id}/model-account` behind
    the session authorization middleware, and `GET`/`PATCH
    /v1/organizations/{org}/me/model-account-preferences` (same-origin

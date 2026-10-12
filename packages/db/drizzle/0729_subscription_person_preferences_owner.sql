@@ -15,6 +15,17 @@
 --    in the caller's `opengeni.account_id` scope, or null. Runtime roles
 --    cannot read organization_memberships directly, so this SECURITY
 --    DEFINER routine answers only this one question about the caller.
+--    organization_memberships is FORCE row security and the documented
+--    migration owner has no BYPASSRLS, so the routine reads it through a
+--    dedicated owner-only SELECT policy
+--    (`subscription_own_person_membership_read`): it applies only to the
+--    migration owner while the transaction-local marker
+--    `opengeni.organization_tenancy_lifecycle =
+--    'subscription_own_person_membership'` is set, and only to the caller's
+--    own row (`opengeni.account_id` and `opengeni.subject_id`). The routine
+--    sets the marker immediately before its single SELECT and restores the
+--    caller's value right after it (0349's and 0726's pattern); the marker
+--    enables no write.
 --    `opengeni_private.subscription_person_preference_owned(account,
 --    membership)` is true only when the membership is that one.
 -- 2. Three permissive policies (SELECT, INSERT, UPDATE) admitting exactly
@@ -30,19 +41,61 @@
 -- membership under the accepted turn's capability.
 SET LOCAL lock_timeout = '5s';
 
+DO $subscription_own_person_membership_policy$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+  migration_owner text := current_user;
+BEGIN
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY subscription_own_person_membership_read '
+      || 'ON %I.organization_memberships FOR SELECT USING ('
+      || 'current_user = %L '
+      || 'AND current_setting(''opengeni.organization_tenancy_lifecycle'', true) '
+      || '= ''subscription_own_person_membership'' '
+      || 'AND account_id = nullif(current_setting(''opengeni.account_id'', true), '''')::uuid '
+      || 'AND subject_id = opengeni_private.current_subject_id())',
+    data_schema, migration_owner
+  );
+END
+$subscription_own_person_membership_policy$;
+
 CREATE FUNCTION opengeni_private.subscription_own_person_membership_id(
   p_account_id uuid
 ) RETURNS uuid
-LANGUAGE sql STABLE SECURITY DEFINER
+LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $body$
-  SELECT membership.id FROM organization_memberships membership
-  WHERE p_account_id::text = nullif(current_setting('opengeni.account_id', true), '')
-    AND membership.account_id = p_account_id
-    AND membership.subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+DECLARE
+  previous_lifecycle text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
+  own_membership_id uuid;
+BEGIN
+  IF p_account_id IS NULL
+    OR p_account_id::text IS DISTINCT FROM
+      nullif(pg_catalog.current_setting('opengeni.account_id', true), '')
+  THEN
+    RETURN NULL;
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', 'subscription_own_person_membership', true
+  );
+  SELECT membership.id INTO own_membership_id FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = nullif(pg_catalog.current_setting('opengeni.subject_id', true), '')
     AND membership.subject_id LIKE 'user:%'
     AND membership.status = 'active' AND membership.revoked_at IS NULL
-  LIMIT 1
+  LIMIT 1;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
+  );
+  RETURN own_membership_id;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
+  );
+  RAISE;
+END
 $body$;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_own_person_membership_id(uuid) FROM PUBLIC;
 

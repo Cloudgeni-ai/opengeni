@@ -4395,6 +4395,10 @@ export function describeSubscriptionCoreConformance<Credential>(
           connectionId: personal,
           choice: "explicit",
         });
+        // The same id in upper case names the same account (no change).
+        expect(await choose(first, org.ownerSubjectId, personal.toUpperCase())).toMatchObject({
+          outcome: "unchanged",
+        });
         expect((await picker(first, org.ownerSubjectId))!.binding).toEqual({
           provider: providerId,
           connectionId: personal,

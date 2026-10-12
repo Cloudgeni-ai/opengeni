@@ -5096,9 +5096,19 @@ personal-fallback opt-in through
 else gains access to the row; placement keeps reading it under the accepted
 turn's capability as before.
 
+Because `organization_memberships` is FORCE row security and the migration
+owner has no `BYPASSRLS` in the documented posture, it also adds one
+SELECT-only policy there, `subscription_own_person_membership_read`. It
+applies only to the migration owner while the transaction-local marker
+`opengeni.organization_tenancy_lifecycle = 'subscription_own_person_membership'`
+is set, and only to the caller's own row (`opengeni.account_id` and
+`opengeni.subject_id`). The membership routine sets the marker for its single
+read and restores the caller's value right after; the runtime role still has
+no privilege on the table.
+
 **Rollback.** Older binaries never call the new routines or routes and run
 unchanged on 0729. An opt-in a person turned on stays in effect after a
-rollback (placement already read it); dropping the three policies and two
+rollback (placement already read it); dropping the four policies and two
 routines removes only the person's own access.
 
 ### Slack API pilot activation (0597)
