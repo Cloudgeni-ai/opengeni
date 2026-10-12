@@ -3675,6 +3675,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
     )
       state.actionEffectCount = effectsBeforeScroll;
+    let point = await this.centerPoint(state, backendDOMNodeId);
+    if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
+      const revealed = await this.revealFromStickyCover(state, backendDOMNodeId, frameId);
+      if (!revealed) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser element is covered or not pointer-actionable",
+          true,
+        );
+      }
+      point = revealed;
+    }
+    return point;
+  }
+
+  private async centerPoint(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<{ x: number; y: number }> {
     const result = await this.sendTarget<{ model?: unknown }>(state, "DOM.getBoxModel", {
       backendNodeId: backendDOMNodeId,
     });
@@ -3697,21 +3716,60 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const xs = [numbers[0]!, numbers[2]!, numbers[4]!, numbers[6]!];
     const ys = [numbers[1]!, numbers[3]!, numbers[5]!, numbers[7]!];
-    const point = {
+    return {
       x: xs.reduce((sum, value) => sum + value, 0) / xs.length,
       y: ys.reduce((sum, value) => sum + value, 0) / ys.length,
     };
-    if (requireHit) {
-      const hit = await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, []);
-      if (hit !== true) {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser element is covered or not pointer-actionable",
-          true,
-        );
+  }
+
+  private async hitsAtCenter(state: TargetState, backendDOMNodeId: number): Promise<boolean> {
+    return (await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [])) === true;
+  }
+
+  /**
+   * Sticky table columns and headers, and fixed toolbars, can cover a target
+   * that Chromium already considers in view, so scrolling "if needed" does
+   * nothing. A person scrolls the container until the target clears the bar;
+   * try the same with other scroll alignments. A layer over the whole viewport
+   * (a modal or its backdrop) is not scrolled past, so that refusal stays
+   * definite. Returns the new action point, or null when still covered.
+   */
+  private async revealFromStickyCover(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+  ): Promise<{ x: number; y: number } | null> {
+    if (frameId === undefined) return null;
+    const sticky = await this.callOnNode(state, backendDOMNodeId, STICKY_COVER_FUNCTION, [], {
+      isolatedFrameId: frameId,
+    }).catch(() => false);
+    if (sticky !== true) return null;
+    const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    const effectsBeforeScroll = state.actionEffectCount;
+    for (const alignment of ["end", "center", "start"] as const) {
+      // Scrolling runs page scroll listeners, so it is a possible effect: a
+      // refusal after it is reported as an unknown outcome.
+      await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        SCROLL_INTO_VIEW_FUNCTION,
+        [{ value: alignment }],
+        {
+          potentialEffect: true,
+        },
+      );
+      if (await this.hitsAtCenter(state, backendDOMNodeId)) {
+        return await this.centerPoint(state, backendDOMNodeId);
       }
     }
-    return point;
+    // Nothing could move (for example a sticky bar taller than its scroller):
+    // no scroll listener ran, so the refusal is still definite.
+    if (
+      scrollBefore !== null &&
+      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+    )
+      state.actionEffectCount = effectsBeforeScroll;
+    return null;
   }
 
   private async focusNode(state: TargetState, backendDOMNodeId: number | null): Promise<void> {
@@ -4886,6 +4944,37 @@ const HIT_TEST_FUNCTION = `function() {
   const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
   const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
   return Boolean(hit && (element === hit || element.contains?.(hit)));
+}`;
+
+// Whether the element at the target's centre belongs to a sticky element, or
+// to a fixed one smaller than the viewport, i.e. a bar that scrolling can
+// move the target out from under.
+const STICKY_COVER_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  let node = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!node || element === node || element.contains(node)) return false;
+  while (node instanceof Element) {
+    const position = getComputedStyle(node).position;
+    if (position === "sticky") return true;
+    if (position === "fixed") {
+      const box = node.getBoundingClientRect();
+      return !(box.left <= 0 && box.top <= 0 && box.right >= innerWidth && box.bottom >= innerHeight);
+    }
+    const parentRoot = node.getRootNode();
+    node = node.parentElement ?? (parentRoot instanceof ShadowRoot ? parentRoot.host : null);
+  }
+  return false;
+}`;
+
+const SCROLL_INTO_VIEW_FUNCTION = `function(alignment) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element)) return false;
+  element.scrollIntoView({ block: alignment, inline: alignment, behavior: "instant" });
+  return true;
 }`;
 
 const VISIBLE_FUNCTION = `function() {

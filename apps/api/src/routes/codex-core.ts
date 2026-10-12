@@ -10,7 +10,6 @@ import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
 import { CodexAppsDesignationRequest } from "@opengeni/contracts";
 import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
-import { ApiHttpError } from "../http/api-error";
 import {
   clearSubscriptionCoreCodexApps,
   connectSubscriptionCoreCodexConnection,
@@ -45,19 +44,9 @@ import {
   managedHumanOrAgent,
   requireCodexAppsHuman,
 } from "./codex";
+import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscription-core-http";
 
-export const SUBSCRIPTION_CORE_CUTOVER_DISABLED = "subscription_core_cutover_disabled";
-
-/** The public error envelope with the core reason in `details.reason`. */
-function typedHttpError(status: 409 | 503, reason: string, message: string): ApiHttpError {
-  return new ApiHttpError(status, {
-    code: status === 503 ? "upstream_unavailable" : "conflict",
-    message,
-    retryable: status === 503,
-    outcomeUnknown: false,
-    details: { reason },
-  });
-}
+export { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError };
 
 /**
  * Only an enabled Codex cutover admits a request. Missing and disabled rows

@@ -51,6 +51,11 @@ import {
 export type SubscriptionCoreCredentialInput = {
   /** v1 envelope of the adapter's encoded credential. */
   credentialEncrypted: string;
+  /**
+   * The stored format of that credential (`adapter.credential.format`);
+   * `v1`, the 0707 writers' format, when omitted.
+   */
+  credentialFormat?: string;
   providerAccountId: string | null;
   /**
    * The signed-in person within the upstream account. Two people's logins of
@@ -96,6 +101,12 @@ export type SubscriptionCoreConnectScope = {
   /** null: the organization route. */
   workspaceId: string | null;
   subjectId: string;
+  /**
+   * The caller asked for the person's own connection (a legacy `user`
+   * scope): only a personal connection in their Personal workspace, else
+   * refused (`forbidden`), never a shared one.
+   */
+  personal?: boolean;
 };
 
 function iso(value: Date | null): string | null {
@@ -122,6 +133,9 @@ async function isOrganizationAdministrator(tx: Database, accountId: string): Pro
   return row?.admin === true;
 }
 
+/** A stored `credential_format` name, as 0728's personal writer checks it. */
+const SUBSCRIPTION_CORE_CREDENTIAL_FORMAT = /^[a-z][a-z0-9_]{0,63}$/u;
+
 /**
  * Connect (or reconnect) one account of this provider from a completed
  * sign-in. The caller delivers `wake` after commit.
@@ -131,6 +145,15 @@ export async function connectSubscriptionCoreConnection(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreConnectScope & SubscriptionCoreCredentialInput,
 ): Promise<SubscriptionCoreConnectResult> {
+  // The format is the adapter's stored-format name (`credential.format`),
+  // never free text. A malformed one is a caller defect, reported as such on
+  // every path rather than as a refusal or a maintenance pause.
+  if (
+    input.credentialFormat !== undefined &&
+    !SUBSCRIPTION_CORE_CREDENTIAL_FORMAT.test(input.credentialFormat)
+  ) {
+    throw new Error("subscription core credential format is malformed");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -138,10 +161,13 @@ export async function connectSubscriptionCoreConnection(
       await setSubjectRlsContext(tx, input.subjectId);
       if (
         input.workspaceId !== null &&
-        (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal"
+        (input.personal === true ||
+          (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal")
       ) {
+        // The personal writer refuses a workspace that is not the person's own.
         return await connectPersonal(tx, provider, { ...input, workspaceId: input.workspaceId });
       }
+      if (input.personal === true) return { kind: "refused", reason: "forbidden" };
       return await connectShared(tx, provider, input);
     },
   );
@@ -155,13 +181,24 @@ async function connectPersonal(
   if (!input.subjectId.startsWith("user:")) return { kind: "refused", reason: "forbidden" };
   const [row] = await rawRows<{ outcome: string; connection_id: string | null; is_new: boolean }>(
     tx,
-    sql`select outcome, connection_id::text as connection_id, is_new
+    // The `v1` format keeps the 0707 writer (the format it stores); any
+    // other format takes the 0728 overload.
+    input.credentialFormat === undefined || input.credentialFormat === "v1"
+      ? sql`select outcome, connection_id::text as connection_id, is_new
       from opengeni_private.connect_subscription_core_personal(${subscriptionCoreProviderId(provider)},
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
         ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.providerSubjectId}, ${input.planType},
         ${JSON.stringify(input.providerState)}::jsonb, ${iso(input.expiresAt)}::timestamptz,
         ${iso(input.lastRefreshAt)}::timestamptz, ${input.accountEmail}, ${input.label},
         ${input.connectedBySubjectId ?? null}
+      )`
+      : sql`select outcome, connection_id::text as connection_id, is_new
+      from opengeni_private.connect_subscription_core_personal(${subscriptionCoreProviderId(provider)},
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
+        ${input.credentialEncrypted}, ${input.providerAccountId}, ${input.providerSubjectId}, ${input.planType},
+        ${JSON.stringify(input.providerState)}::jsonb, ${iso(input.expiresAt)}::timestamptz,
+        ${iso(input.lastRefreshAt)}::timestamptz, ${input.accountEmail}, ${input.label},
+        ${input.connectedBySubjectId ?? null}, ${input.credentialFormat}
       )`,
   );
   if (row?.outcome === "connected" && row.connection_id) {
@@ -267,6 +304,7 @@ async function connectShared(
       ? { accountId: input.accountId, reason }
       : { accountId: input.accountId, reason, workspaceIds: [input.workspaceId] };
   const providerState = JSON.stringify(input.providerState);
+  const credentialFormat = input.credentialFormat ?? "v1";
   if (existing) {
     if (input.workspaceId !== null) {
       const pool = await readSubscriptionCoreWorkspacePool(tx, provider, {
@@ -294,7 +332,7 @@ async function connectShared(
         return await rawRows<{ id: string }>(
           savepoint as unknown as Database,
           sql`update subscription_connections set
-              credential_encrypted = ${input.credentialEncrypted}, credential_format = 'v1',
+              credential_encrypted = ${input.credentialEncrypted}, credential_format = ${credentialFormat},
               expires_at = ${iso(input.expiresAt)}::timestamptz, last_refresh_at = ${iso(input.lastRefreshAt)}::timestamptz,
               refresh_generation = refresh_generation + 1, version = version + 1,
               status = 'active', last_error = null,
@@ -328,7 +366,7 @@ async function connectShared(
       ) values (
         ${input.accountId}::uuid, ${providerId}, ${connectionKind}, ${input.providerAccountId},
         ${input.accountEmail}, ${input.label}, ${input.planType}, ${input.credentialEncrypted},
-        'v1', ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
+        ${credentialFormat}, ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
         ${workspaceScoped ? "workspaces" : "organization"}, ${!workspaceScoped},
         ${input.workspaceId}::uuid, ${providerState}::jsonb,
         ${input.providerSubjectId}
@@ -445,11 +483,7 @@ async function disconnectTarget(
   const providerId = subscriptionCoreProviderId(provider);
   const connectionKind = subscriptionCoreConnectionKind(provider);
   if (input.workspaceId === null) {
-    const id = await resolveSubscriptionConnectionId(tx, {
-      accountId: input.accountId,
-      provider: providerId,
-      connectionId: rawId,
-    });
+    const id = await resolveRouteConnectionIdInTransaction(tx, provider, input, rawId);
     if (!id) return null;
     const [row] = await rawRows<{ id: string }>(
       tx,
@@ -460,17 +494,8 @@ async function disconnectTarget(
     );
     return row ? { id: row.id, organization: true } : null;
   }
-  if ((await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal") {
-    // Resolve migrated aliases inside the owner-only routine. Ordinary app
-    // RLS deliberately hides personal aliases, including from administrators.
-    const [personal] = await rawRows<{ resolved: { id: string } | null }>(
-      tx,
-      sql`select opengeni_private.manage_subscription_core_personal(${providerId},
-        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${rawId}::uuid,
-        'resolve', null, null, null) as resolved`,
-    );
-    if (personal?.resolved) return { id: personal.resolved.id, organization: false };
-  }
+  const personal = await resolvePersonalConnectionIdInTransaction(tx, provider, input, rawId);
+  if (personal) return { id: personal, organization: false };
   const id = await resolveSubscriptionConnectionId(tx, {
     accountId: input.accountId,
     provider: providerId,
@@ -483,6 +508,69 @@ async function disconnectTarget(
   });
   const entry = pool.connections.find((candidate) => candidate.row.id === id);
   return entry ? { id, organization: entry.source === "organization" } : null;
+}
+
+/**
+ * The caller's own personal connection a route id names (canonical, or a
+ * legacy id the drained cutover kept as its alias), only in their own
+ * Personal workspace. Resolved inside the owner-only routine: ordinary app
+ * RLS deliberately hides personal aliases, including from administrators.
+ */
+async function resolvePersonalConnectionIdInTransaction(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  input: SubscriptionCoreConnectScope,
+  rawId: string,
+): Promise<string | null> {
+  if (input.workspaceId === null) return null;
+  if ((await workspaceKind(tx, input.accountId, input.workspaceId)) !== "personal") return null;
+  const [personal] = await rawRows<{ resolved: { id: string } | null }>(
+    tx,
+    sql`select opengeni_private.manage_subscription_core_personal(${subscriptionCoreProviderId(provider)},
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}, ${rawId}::uuid,
+      'resolve', null, null, null) as resolved`,
+  );
+  return personal?.resolved?.id ?? null;
+}
+
+async function resolveRouteConnectionIdInTransaction(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  input: SubscriptionCoreConnectScope,
+  rawId: string,
+): Promise<string | null> {
+  const personal = await resolvePersonalConnectionIdInTransaction(tx, provider, input, rawId);
+  if (personal) return personal;
+  return await resolveSubscriptionConnectionId(tx, {
+    accountId: input.accountId,
+    provider: subscriptionCoreProviderId(provider),
+    connectionId: rawId,
+  });
+}
+
+/**
+ * A route's account id (canonical, or a legacy id the drained cutover kept
+ * as an alias) as the canonical connection id, resolved as the caller: an
+ * organization administrator sees every alias of the organization (the
+ * organization route, `workspaceId: null`, or any workspace route); anyone
+ * else the aliases of connections the workspace reaches; a personal
+ * connection's only its owner, in their own Personal workspace. Null when
+ * nothing resolves; the caller's projection still decides whether the
+ * connection is theirs to name.
+ */
+export async function resolveSubscriptionCoreRouteConnectionId(
+  db: Database,
+  provider: SubscriptionCoreProvider,
+  input: SubscriptionCoreConnectScope & { connectionId: string },
+): Promise<string | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      await setSubjectRlsContext(tx, input.subjectId);
+      return await resolveRouteConnectionIdInTransaction(tx, provider, input, input.connectionId);
+    },
+  );
 }
 
 /**

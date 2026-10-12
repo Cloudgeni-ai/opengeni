@@ -70,6 +70,7 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
     c.header("cache-control", "private, no-store");
     const workspaceId = parseId(c.req.param("workspaceId"), "workspace");
     const sessionId = parseId(c.req.param("sessionId"), "session");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const choice = await readSubscriptionCoreSessionAccountChoice(deps.db, {
       accountId: grant.accountId,
@@ -114,6 +115,7 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
           details: { reason: "account_not_eligible" },
         });
       case "conflict":
+        // Defensive: the binding is locked before its version is compared.
         throw new ApiHttpError(409, {
           code: "conflict",
           message: "the session's account changed at the same time; try again",
@@ -179,6 +181,8 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
         details: { reason: "version_conflict", currentVersion: result.preferences.version },
       });
     }
+    // Waiters recheck on their own bounded timer; a lost wake only delays.
+    await deliverSubscriptionCoreProviderWakes(deps.db, result.wakes);
     return c.json(ModelAccountPreferences.parse(result.preferences));
   });
 }

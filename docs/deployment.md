@@ -5059,9 +5059,31 @@ GROUP BY 1, 2
 HAVING count(DISTINCT authority.generation) = 1;
 ```
 
-### A person's own subscription preferences (0727)
+### Personal connect writer with a credential format (0728)
 
-Migration `0727_subscription_person_preferences_owner.sql` is **rolling**.
+Migration `0728_subscription_core_personal_connect_format.sql` is
+**rolling**: deploy it like any release, without draining. Design record:
+[subscription core, SuperGrok track](design/subscription-core-2026-10-07.md#x2b-routes-and-writers).
+It adds one overload of the neutral personal connect writer,
+`opengeni_private.connect_subscription_core_personal`, whose last argument
+is the stored credential format (SuperGrok stores `xai_oauth_v1`), built
+from the live 0707 definition with every check, lock and security setting
+unchanged. The 0707 writer stays for older binaries; Codex keeps calling it
+and still stores `v1`. It also adds
+`opengeni_private.subscription_authority_carrier_inserted_now`, which tells
+the compatibility copy (0716) whether this transaction inserted a scheduled
+task revision, so a replayed materialization skips the copy instead of
+failing. Like 0712 and 0713, it grants both routines to the
+configured application roles: a deployment whose runtime role is not
+`opengeni_app` must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. It locks no table and
+changes no row. Nothing acts on deploy: only a provider whose own cutover
+receipt exists reaches either routine, so both stay unused until the
+SuperGrok cutover.
+
+### A person's own subscription preferences (0729)
+
+Migration `0729_subscription_person_preferences_owner.sql` is **rolling**.
 Design record:
 [subscription core, M5 explicit choice](design/subscription-core-2026-10-07.md#56-m5-explicit-account-choice-and-personal-preferences).
 It changes no column, value or existing policy. It adds two
@@ -5075,7 +5097,7 @@ else gains access to the row; placement keeps reading it under the accepted
 turn's capability as before.
 
 **Rollback.** Older binaries never call the new routines or routes and run
-unchanged on 0727. An opt-in a person turned on stays in effect after a
+unchanged on 0729. An opt-in a person turned on stays in effect after a
 rollback (placement already read it); dropping the three policies and two
 routines removes only the person's own access.
 

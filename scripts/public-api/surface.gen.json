@@ -18338,7 +18338,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"inactive\\\"\",\"\\\"personal_not_allowed\\\"\",\"\\\"personal_not_owner_work\\\"\"]"
+        "$": "enum=[\"\\\"inactive\\\"\",\"\\\"personal_not_allowed\\\"\",\"\\\"personal_not_owner_work\\\"\",\"\\\"session_has_no_owner\\\"\"]"
       }
     },
     "ModelAccountPreferences": {

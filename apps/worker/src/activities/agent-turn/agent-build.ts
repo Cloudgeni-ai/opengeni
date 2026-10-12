@@ -11,7 +11,11 @@ import {
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
   sessionHasToolRouterHistory,
+  readSubscriptionCoreProviderRouteForWorkspace,
+  SUBSCRIPTION_CORE_XAI,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
 } from "@opengeni/db";
+import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
@@ -31,7 +35,10 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
-import { executeXaiSubscriptionImageGeneration } from "../xai-image-generation";
+import {
+  executeCoreXaiImageGeneration,
+  executeXaiSubscriptionImageGeneration,
+} from "../xai-image-generation";
 import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
@@ -394,10 +401,43 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     }
 
     if (resolvedModel?.provider.kind === "xai-subscription") {
-      // A SuperGrok turn placed by the shared core offers no image tool until
-      // its media consumers move onto core operation leases (X2a): the legacy
-      // image path dispatches without the per-request fence and reservation.
-      if (providerTurn.xaiSubscriptionCore) return {};
+      // A SuperGrok turn placed by the shared core generates images on its own
+      // placed connection under an `image` operation lease; the legacy
+      // credential tables and the session binding are never touched.
+      const core = providerTurn.xaiSubscriptionCore;
+      if (core) {
+        const executionGeneration = leases.xai.generation;
+        if (executionGeneration === null) return {};
+        return {
+          imageGeneration: {
+            kind: "provider_adapter",
+            execute: async ({ prompt, references }, { toolCallId }) => {
+              const referenceResolution = await resolveImageReferences(references);
+              if (referenceResolution.status === "rejected") return referenceResolution.result;
+              const receipt = await executeCoreXaiImageGeneration({
+                db,
+                settings: capabilitySettings,
+                objectStorage,
+                core,
+                executionGeneration,
+                assertChatLease: () => leases.xai.assertCurrentForDispatch(),
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                toolCallId,
+                prompt,
+                references: referenceResolution.references,
+                ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+              });
+              media.rememberGeneratedImageCreatedThisTurn(receipt);
+              await media.materializeGeneratedImage(receipt);
+              return receipt;
+            },
+          },
+        };
+      }
       const imageAuthority = connectedSubscriptionImageGenerationAuthority(
         providerTurn.xaiRequestContext,
         providerTurn.effectiveXaiCredentialId,
@@ -491,16 +531,34 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ...workspaceCredential,
         };
       }
-    } else if (
-      videoGenerationPolicy.fundingSource === "supergrok_subscription" &&
-      // A core-placed SuperGrok turn never reaches the legacy credential tables,
-      // the subject's current v1 authority or the legacy session pin: no video
-      // tool until X2a moves video onto core operation leases.
-      !providerTurn.xaiSubscriptionCore
-    ) {
+    } else if (videoGenerationPolicy.fundingSource === "supergrok_subscription") {
+      const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
+      });
+      if (route === "core" && eventing.modelRunSettings.supergrokSubscriptionEnabled) {
+        // After the receipt: a shared connection for the session's owner,
+        // referenced (never copied) by the operation (EP-T17/EP-N12), only
+        // while the deployment enables SuperGrok subscriptions.
+        videoGenerationCredential = await subscriptionCoreVideoGenerationCredentialLease(
+          db,
+          eventing.modelRunSettings,
+          SUBSCRIPTION_CORE_XAI,
+          videoGenerationPolicy.fundingSource,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          },
+        );
+      }
       const encryptionKey = environmentsEncryptionKeyBytes(eventing.modelRunSettings);
       const subjectId = leases.xai.subjectId ?? turn.initiatingHumanSubjectId;
-      if (encryptionKey && subjectId) {
+      // A core-placed SuperGrok turn never reaches the legacy credential
+      // tables, the subject's current v1 authority or the legacy session pin,
+      // whatever the route reads now.
+      if (route === "legacy" && !providerTurn.xaiSubscriptionCore && encryptionKey && subjectId) {
         const authoritySnapshot =
           providerTurn.xaiAuthoritySnapshot ??
           (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
