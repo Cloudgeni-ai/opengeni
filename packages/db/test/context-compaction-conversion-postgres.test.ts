@@ -31,7 +31,12 @@ import {
   rebuildCompactionConversation,
   planCompactionConversionStep,
 } from "../../runtime/src/compaction-conversion";
-import { conversionChunkKey, conversionDigest, type ConversionCheckpoint } from "@opengeni/codex";
+import {
+  conversionChunkKey,
+  conversionDigest,
+  conversionWorkUnits,
+  type ConversionCheckpoint,
+} from "@opengeni/codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -824,4 +829,180 @@ test("SUB-FAIL-09 complete reduction graph persists once without duplicate leaf 
     ).toEqual({ recorded: false, reason: "coverage_invalid" });
   }
   throw new Error("reduction did not converge");
+}, 30_000);
+
+function substitutedSource(plan: PreparedCompactionConversion) {
+  const forged = structuredClone(plan);
+  forged.snapshot.rows[0]!.item = message(
+    "fabricated instructions never present in the durable original conversation",
+  );
+  const text = conversionWorkUnits(forged.snapshot.rows)!
+    .map((unit) => unit.text)
+    .join("\n");
+  const base = {
+    inputDigest: conversionDigest(text),
+    coverage: plan.manifest.rows.map((row) => row.id),
+    children: [],
+    inputTokens: text.length,
+  };
+  const checkpoint = {
+    ...base,
+    key: conversionChunkKey(plan.manifest, plan.target, plan.budget, base),
+    summary: "fabricated summary",
+    outputTokens: 18,
+  };
+  return { forged, checkpoint };
+}
+
+test("SUB-FAIL-09 caller source text substitution cannot checkpoint or install under authentic coverage IDs", async () => {
+  const input = await fixture();
+  const before = await snapshot(input);
+  const plan = await planFor(input, before);
+  const { forged, checkpoint } = substitutedSource(plan);
+  const operation = await receipt(input, plan, checkpoint.key);
+  const recorded = await recordCompactionConversionChunk(
+    client.db,
+    input,
+    forged,
+    checkpoint,
+    operation,
+  );
+  // Exercise the whole reproduced attack before asserting: the original bug
+  // both saved a false coverage attestation and installed its fabricated result.
+  const installed = await finishCompactionConversion(client.db, input, before, {
+    kind: "converted",
+    plan: forged,
+    rootKey: checkpoint.key,
+    droppedWorkUnits: 0,
+  });
+  expect({ recorded: recorded.recorded, installed: installed.applied }).toEqual({
+    recorded: false,
+    installed: false,
+  });
+  expect(await snapshot(input)).toEqual(before);
+}, 30_000);
+
+test("SUB-FAIL-09 caller source metadata and manifest identities are independently compared with fenced truth", async () => {
+  const input = await fixture();
+  await append(
+    input,
+    (await snapshot(input)).boundary.maxPosition + 1,
+    "another original work unit",
+  );
+  expect(
+    (
+      await applyContextCompaction(client.db, {
+        ...input,
+        expectedExecutionGeneration: input.executionGeneration,
+        expectedAttemptId: input.attemptId,
+        replacementItems: [],
+        summaryItem: { type: "compaction", encrypted_content: "test-only" },
+        eventPayload: { implementation: "responses_compaction_v2" },
+      })
+    ).applied,
+  ).toBe(true);
+  const before = await snapshot(input);
+  const plan = await planFor(input, before);
+  const mutations: Array<(plan: PreparedCompactionConversion) => void> = [
+    (p) => {
+      p.snapshot.rows[0]!.item = message("substituted");
+    },
+    (p) => {
+      p.snapshot.rows[0]!.id = crypto.randomUUID();
+    },
+    (p) => {
+      p.snapshot.rows[0]!.position += 100;
+    },
+    (p) => {
+      p.snapshot.rows[0]!.turnId = crypto.randomUUID();
+    },
+    (p) => {
+      p.snapshot.rows[0]!.createdAt = "2020-01-01T00:00:00Z";
+    },
+    (p) => {
+      p.snapshot.rows.reverse();
+    },
+    (p) => {
+      p.snapshot.events = [];
+    },
+    (p) => {
+      p.snapshot.events[0]!.turnId = crypto.randomUUID();
+    },
+    (p) => {
+      p.snapshot.events[0]!.payload.summaryPosition = 99;
+    },
+    (p) => {
+      p.snapshot.authorityDigest = "forged";
+    },
+    (p) => {
+      p.snapshot.attempt.sessionId = crypto.randomUUID();
+    },
+    (p) => {
+      p.manifest.rows[0]!.digest = "forged";
+    },
+  ];
+  for (const mutate of mutations) {
+    const forged = structuredClone(plan);
+    mutate(forged);
+    expect(await readCompactionConversionChunks(client.db, input, forged)).toEqual({
+      available: false,
+      reason: "history_changed",
+    });
+  }
+  expect(await readCompactionConversionChunks(client.db, input, plan)).toEqual({
+    available: true,
+    checkpoints: [],
+  });
+  expect(await snapshot(input)).toEqual(before);
+}, 30_000);
+
+test("SUB-FAIL-09 caller source substitution cannot validate a previously persisted forged leaf", async () => {
+  const input = await fixture();
+  const before = await snapshot(input);
+  const plan = await planFor(input, before);
+  const { forged, checkpoint } = substitutedSource(plan);
+  const operation = await receipt(input, plan, checkpoint.key);
+  // Simulate a row retained by an older writer. The actual restricted INSERT
+  // still passes the SQL attempt/receipt fence; graph validation must not trust it.
+  await withSessionActivityRlsContext(client.db, input, (tx) =>
+    tx.execute(sql`insert into session_compaction_conversion_chunks
+    (account_id,workspace_id,session_id,turn_id,attempt_id,generation,snapshot_id,source_digest,chunk_key,operation_id,target_provider,target_model,target_connection_id,checkpoint)
+    values (${input.accountId}::uuid,${input.workspaceId}::uuid,${input.sessionId}::uuid,${input.turnId}::uuid,${input.attemptId}::uuid,
+      ${input.executionGeneration},${plan.snapshotId},${plan.snapshot.boundary.contentDigest},${checkpoint.key},${operation}::uuid,
+      ${plan.target.provider},${plan.target.modelId},${plan.target.connectionId}::uuid,${JSON.stringify(checkpoint)}::jsonb)`),
+  );
+  for (const candidate of [forged, plan]) {
+    const read = await readCompactionConversionChunks(client.db, input, candidate);
+    const installed = await finishCompactionConversion(client.db, input, before, {
+      kind: "converted",
+      plan: candidate,
+      rootKey: checkpoint.key,
+      droppedWorkUnits: 0,
+    });
+    expect({ available: read.available, installed: installed.applied }).toEqual({
+      available: false,
+      installed: false,
+    });
+  }
+  expect(await snapshot(input)).toEqual(before);
+}, 30_000);
+
+test("SUB-FAIL-09 verified source is detached from a caller object that changes after comparison", async () => {
+  const input = await fixture();
+  const before = await snapshot(input);
+  const plan = await planFor(input, before);
+  const { forged, checkpoint } = substitutedSource(plan);
+  const alteredRows = forged.snapshot.rows;
+  let reads = 0;
+  // Deterministically model a caller retaining/changing its source references
+  // across later awaits. A boolean authenticity check is not a safe handoff.
+  Object.defineProperty(forged.snapshot, "rows", {
+    get: () => (++reads === 1 ? before.rows : alteredRows),
+  });
+  const operation = await receipt(input, plan, checkpoint.key);
+  expect(
+    await recordCompactionConversionChunk(client.db, input, forged, checkpoint, operation),
+  ).toEqual({ recorded: false, reason: "coverage_invalid" });
+  expect(reads).toBe(1);
+  expect(await snapshot(input)).toEqual(before);
 }, 30_000);

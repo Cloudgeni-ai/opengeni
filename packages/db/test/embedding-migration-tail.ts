@@ -215,4 +215,6 @@ export const embeddingMigrationTail = [
   "0728_subscription_core_personal_connect_format.sql",
   // Adds owner policies on the person preferences table from withheld 0642.
   "0729_subscription_person_preferences_owner.sql",
+  // References operation receipts from withheld 0645; replay after the core.
+  "0734_compaction_conversion_refusal.sql",
 ];

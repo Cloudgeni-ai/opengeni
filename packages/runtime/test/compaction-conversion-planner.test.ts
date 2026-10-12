@@ -129,6 +129,50 @@ test("SUB-FAIL-09 failures, non-reducing summaries and exhausted budgets never t
   }
 });
 
+test("SUB-FAIL-09 insufficient total tokens refuse before the first request", () => {
+  const rebuilt = rebuild([message("complete source")]);
+  const first = planCompactionConversionStep({
+    rebuilt,
+    target,
+    budget,
+    checkpoints: [],
+    countTokens,
+  });
+  if (first.kind !== "request") throw new Error("expected request with sufficient budget");
+  expect(
+    planCompactionConversionStep({
+      rebuilt,
+      target,
+      budget: { ...budget, totalTokens: first.chunk.inputTokens + budget.outputTokens - 1 },
+      checkpoints: [],
+      countTokens,
+    }),
+  ).toMatchObject({ kind: "refused", reason: "conversion_budget_exhausted" });
+});
+
+test("SUB-FAIL-09 nonshrinking summary below the output ceiling refuses", () => {
+  const rebuilt = rebuild([message("short source")]);
+  const first = planCompactionConversionStep({
+    rebuilt,
+    target,
+    budget,
+    checkpoints: [],
+    countTokens,
+  });
+  if (first.kind !== "request") throw new Error("expected request");
+  expect(first.chunk.inputTokens).toBeLessThan(budget.outputTokens);
+  expect(countTokens(first.text)).toBe(first.chunk.inputTokens);
+  expect(
+    planCompactionConversionStep({
+      rebuilt,
+      target,
+      budget,
+      checkpoints: [{ ...first.chunk, summary: first.text, outputTokens: first.chunk.inputTokens }],
+      countTokens,
+    }),
+  ).toMatchObject({ kind: "refused", reason: "conversion_summary_failed" });
+});
+
 test("SUB-FAIL-09 malicious manifests, gaps, duplicate coverage and unrelated checkpoints are rejected", () => {
   const rebuilt = rebuild([message("first source"), message("second source")]);
   const first = planCompactionConversionStep({

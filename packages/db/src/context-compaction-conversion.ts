@@ -289,29 +289,35 @@ async function verifiedChunks(
   return verified;
 }
 
-function planMatches(
+/** Authenticate the supplied identity, then discard its source objects. Only
+ * fenced database rows/events may feed checkpoint input/coverage verification.
+ * Returning a boolean would leave the untrusted caller snapshot in circulation.
+ */
+function verifiedPlan(
   input: CompactionConversionAttempt,
   plan: PreparedCompactionConversion,
   current: Awaited<ReturnType<typeof readHistory>>,
   authorityDigest: string,
-): boolean {
+): PreparedCompactionConversion | null {
   if (
     !sameSnapshot(input, plan.snapshot, current.boundary) ||
-    authorityDigest !== plan.snapshot.authorityDigest
+    authorityDigest !== plan.snapshot.authorityDigest ||
+    conversionDigest(plan.snapshot.rows) !== conversionDigest(current.rows) ||
+    conversionDigest(plan.snapshot.events) !== conversionDigest(current.events)
   )
-    return false;
+    return null;
   try {
     const derived = prepareCompactionConversion(
-      { ...plan.snapshot, ...current },
+      { attempt: { ...input }, authorityDigest, ...current },
       plan.target,
       plan.budget,
     );
-    return (
-      derived.snapshotId === plan.snapshotId &&
+    return derived.snapshotId === plan.snapshotId &&
       conversionDigest(derived.manifest) === conversionDigest(plan.manifest)
-    );
+      ? derived
+      : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -443,7 +449,7 @@ async function allRequestsAccounted(
 export async function recordCompactionConversionChunk(
   db: Database,
   input: CompactionConversionAttempt,
-  plan: PreparedCompactionConversion,
+  requestedPlan: PreparedCompactionConversion,
   checkpoint: ConversionCheckpoint,
   operationId: string,
 ): Promise<{ recorded: true; duplicate: boolean } | { recorded: false; reason: Unavailable }> {
@@ -452,10 +458,13 @@ export async function recordCompactionConversionChunk(
     if (!fence.allowed) return { recorded: false, reason: fence.reason };
     const reason = unavailable(fence.session);
     if (reason) return { recorded: false, reason };
-    if (
-      !planMatches(input, plan, await readHistory(tx, input), conversionDigest(fence.turn.metadata))
-    )
-      return { recorded: false, reason: "history_changed" };
+    const plan = verifiedPlan(
+      input,
+      requestedPlan,
+      await readHistory(tx, input),
+      conversionDigest(fence.turn.metadata),
+    );
+    if (!plan) return { recorded: false, reason: "history_changed" };
     const prior = await verifiedChunks(tx, input, plan);
     if (!prior) return { recorded: false, reason: "coverage_invalid" };
     const existing = prior.find((row) => row.checkpoint.key === checkpoint.key);
@@ -503,7 +512,7 @@ export async function recordCompactionConversionChunk(
 export async function readCompactionConversionChunks(
   db: Database,
   input: CompactionConversionAttempt,
-  plan: PreparedCompactionConversion,
+  requestedPlan: PreparedCompactionConversion,
 ): Promise<
   | { available: true; checkpoints: ConversionCheckpoint[] }
   | { available: false; reason: Unavailable }
@@ -513,10 +522,13 @@ export async function readCompactionConversionChunks(
     if (!fence.allowed) return { available: false, reason: fence.reason };
     const reason = unavailable(fence.session);
     if (reason) return { available: false, reason };
-    if (
-      !planMatches(input, plan, await readHistory(tx, input), conversionDigest(fence.turn.metadata))
-    )
-      return { available: false, reason: "history_changed" };
+    const plan = verifiedPlan(
+      input,
+      requestedPlan,
+      await readHistory(tx, input),
+      conversionDigest(fence.turn.metadata),
+    );
+    if (!plan) return { available: false, reason: "history_changed" };
     const saved = await verifiedChunks(tx, input, plan);
     if (!saved) return { available: false, reason: "coverage_invalid" };
     if (!(await allRequestsAccounted(tx, input, plan, saved)))
@@ -595,15 +607,15 @@ export async function finishCompactionConversion(
         throw new Error(
           "conversion_unsummarized_units: summarize every retained work unit or refuse conversion",
         );
-      if (!planMatches(input, result.plan, current, conversionDigest(fence.turn.metadata)))
-        return { applied: false, reason: "history_changed" };
-      const saved = await verifiedChunks(tx, input, result.plan);
+      const plan = verifiedPlan(input, result.plan, current, conversionDigest(fence.turn.metadata));
+      if (!plan) return { applied: false, reason: "history_changed" };
+      const saved = await verifiedChunks(tx, input, plan);
       const root = saved?.find((row) => row.checkpoint.key === result.rootKey)?.checkpoint;
       if (
         !saved ||
         !root ||
         conversionDigest(root.coverage) !==
-          conversionDigest(result.plan.manifest.rows.map((row) => row.id))
+          conversionDigest(plan.manifest.rows.map((row) => row.id))
       )
         return { applied: false, reason: "coverage_invalid" };
       const visited = new Set<string>();
@@ -614,7 +626,7 @@ export async function finishCompactionConversion(
       };
       visit(root.key);
       if (visited.size !== saved.length) return { applied: false, reason: "coverage_invalid" };
-      if (!(await allRequestsAccounted(tx, input, result.plan, saved)))
+      if (!(await allRequestsAccounted(tx, input, plan, saved)))
         return { applied: false, reason: "request_unsettled" };
       const source = attributeCompactionConversation(current);
       if (!source.rebuilt) return { applied: false, reason: "coverage_invalid" };
@@ -672,7 +684,7 @@ export async function finishCompactionConversion(
         summaryPosition,
         blockLength: items.length,
         droppedWorkUnits: result.droppedWorkUnits,
-        conversionSnapshotId: result.plan.snapshotId,
+        conversionSnapshotId: plan.snapshotId,
         conversionRootKey: root.key,
         coverageDigest: source.manifest.digest,
         coveredRows: source.manifest.rows.length,

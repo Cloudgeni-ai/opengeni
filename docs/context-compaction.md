@@ -24,7 +24,11 @@ unchanged (only history `active` flags change upon installation).
 `session_compaction_conversion_chunks` is append-only, tenant/session-scoped and
 FORCE-RLS. Checkpoints bind exact attempt/generation, source/authority snapshot,
 target provider/model/connection, coverage, conversion budget and a settled core
-physical request. JSONB round trips preserve structural identities. Identical
+physical request. JSONB round trips preserve structural identities.
+Source authenticity is established from the complete fenced database rows/events,
+not a caller's manifest IDs alone. After comparison, all checkpoint input and
+coverage verification uses a newly derived database-backed plan, never the caller's
+mutable snapshot objects. Identical
 checkpoint retries return the original result; conflicts and unknown/unmatched
 requests refuse. A successful physical response without a checkpoint blocks
 further planning until that exact result is recovered; absence of a checkpoint
