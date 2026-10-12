@@ -78,6 +78,15 @@ const LightboxGalleryContext = createContext<LightboxGalleryRegistry | null>(nul
 /** Images in one timeline page together; elsewhere the whole document does. */
 const GALLERY_ROOT_SELECTOR = "[data-og-timeline-scroller]";
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.isContentEditable ||
+    target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !==
+      null
+  );
+}
+
 /**
  * Adds the element's image to the lightbox gallery so an open lightbox can page
  * to it with the arrow controls, in document order. The entry is resolved only
@@ -188,7 +197,15 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     sourceOwner.release();
   }, [sourceOwner]);
 
-  useEffect(() => releaseCurrentSource, [releaseCurrentSource]);
+  // Unmount also fences in-flight discovery and paging, so a load that settles
+  // afterwards releases its own source instead of handing it to a dead owner.
+  useEffect(
+    () => () => {
+      generation.current++;
+      releaseCurrentSource();
+    },
+    [releaseCurrentSource],
+  );
 
   const discoverGallery = useCallback((source: HTMLElement, token: number) => {
     const root = source.closest(GALLERY_ROOT_SELECTOR) ?? source.ownerDocument.body;
@@ -286,6 +303,8 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     if (!galleryOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+      // Arrow keys typed into a field move its caret; they never page images.
+      if (isEditableTarget(event.target)) return;
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
         step(event.key === "ArrowLeft" ? -1 : 1);
