@@ -834,6 +834,28 @@ export async function getProviderVaultSyncTarget(
   );
 }
 
+export type ProviderVaultItemRefRow = {
+  itemId: string;
+  providerItemRef: string;
+  providerVersion: string | null;
+  generation: number;
+};
+
+/** A mirrored item's provider refs, looked up by item id or by provider item ref. */
+export async function getProviderVaultItemRef(
+  db: Database,
+  context: VaultDbContext,
+  input: { vaultId: string; itemId?: string; providerItemRef?: string },
+): Promise<ProviderVaultItemRefRow> {
+  return await inVaultContext(db, context, (scoped, principal) =>
+    one<ProviderVaultItemRefRow>(
+      scoped,
+      sql`select provider_vault_item_ref(${input.vaultId}::uuid, ${input.itemId ?? null}::uuid,
+        ${input.providerItemRef ?? null}, ${principal}::jsonb) as value`,
+    ),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Ask-card answers
 // ---------------------------------------------------------------------------

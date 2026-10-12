@@ -3070,6 +3070,42 @@ BEGIN
 END
 $$;
 
+-- One mirrored item's provider refs, by item id or by provider item ref (for
+-- writes through the provider). Raises vault_item_not_found when absent.
+CREATE FUNCTION provider_vault_item_ref(
+  p_vault uuid, p_item uuid, p_provider_item_ref text, p_principal jsonb DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+  context jsonb;
+  vault_row vaults;
+  item_row vault_items;
+BEGIN
+  PERFORM opengeni_private.vault_capability_open('read');
+  context := opengeni_private.vault_context(p_principal);
+  vault_row := opengeni_private.vault_reachable_row(context, p_vault);
+  IF vault_row.source = 'opengeni' THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'only connected vaults have provider items');
+  END IF;
+  SELECT item.* INTO item_row FROM vault_items item
+  WHERE item.vault_id = vault_row.id AND item.provider_item_ref IS NOT NULL
+    AND ((p_item IS NOT NULL AND item.id = p_item)
+      OR (p_item IS NULL AND item.provider_item_ref = p_provider_item_ref));
+  IF item_row.id IS NULL THEN
+    PERFORM opengeni_private.vault_raise('vault_item_not_found', 'item not found',
+      pg_catalog.jsonb_build_object('vaultId', vault_row.id));
+  END IF;
+  PERFORM opengeni_private.vault_capability_close();
+  RETURN pg_catalog.jsonb_build_object(
+    'itemId', item_row.id,
+    'providerItemRef', item_row.provider_item_ref,
+    'providerVersion', item_row.provider_version,
+    'generation', item_row.generation);
+END
+$$;
+
 -- Secret ask-card answers, written inside the human-input accept transaction
 -- (values are encrypted by the caller). p_answers: [{questionId, saveTo?:
 -- "user"|"task"|"workspace", vaultId?, item: vault_write_item input with name,
@@ -3160,7 +3196,7 @@ BEGIN
           'set_session_vault_policy', 'session_secrets_view', 'update_passkey_sign_count',
           'lease_vault_passkeys', 'release_vault_passkey_leases', 'upsert_provider_vault_items',
           'set_vault_sync_status', 'apply_secret_answers', 'link_provider_vault',
-          'provider_vault_sync_target'
+          'provider_vault_sync_target', 'provider_vault_item_ref'
         )
       )
   LOOP
@@ -3208,7 +3244,8 @@ BEGIN
       format('%I.set_vault_sync_status(uuid,jsonb,jsonb)', target_schema),
       format('%I.apply_secret_answers(uuid,uuid,jsonb,jsonb)', target_schema),
       format('%I.link_provider_vault(jsonb,jsonb)', target_schema),
-      format('%I.provider_vault_sync_target(uuid,jsonb)', target_schema)
+      format('%I.provider_vault_sync_target(uuid,jsonb)', target_schema),
+      format('%I.provider_vault_item_ref(uuid,uuid,text,jsonb)', target_schema)
     ]::regprocedure[] LOOP
       EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO opengeni_app', routine);
     END LOOP;
