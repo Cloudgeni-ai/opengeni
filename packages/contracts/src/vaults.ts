@@ -468,6 +468,8 @@ export const VaultErrorCode = z.enum([
   "vault_read_only",
   "vault_generation_conflict",
   "vault_permission_denied",
+  /** A session's vault policy reaches outside its parent's effective vaults (AX-2). */
+  "vault_policy_outside_parent",
   "vault_reveal_requires_human",
   "encryption_key_missing",
   "provider_auth_invalid",
@@ -503,6 +505,7 @@ export const VAULT_ERROR_HTTP_STATUS: Readonly<Record<VaultErrorCode, number>> =
   invalid_secret_name: 422,
   secret_value_too_large: 422,
   secret_save_forbidden: 422,
+  vault_policy_outside_parent: 422,
   vault_read_only: 403,
   vault_permission_denied: 403,
   vault_reveal_requires_human: 403,
