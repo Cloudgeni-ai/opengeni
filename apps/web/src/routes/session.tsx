@@ -164,6 +164,7 @@ import {
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { useSessionRouteMemory } from "@/lib/last-session-memory";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { secretSaveTargets } from "@/lib/secrets-ui";
 import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { currentModelRecovery } from "@/lib/model-recovery";
 import { ModelRecoveryNotice } from "@/components/session/model-recovery-notice";
@@ -3206,6 +3207,10 @@ function SessionChatPane(props: {
                               <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
                                 <HumanInputSurface
                                   loadSkillReview={loadSkillReview}
+                                  allowedSaveTo={secretSaveTargets(
+                                    context.accessContext,
+                                    props.session.workspaceId,
+                                  )}
                                   requests={props.humanInput.requests}
                                   respondingRequestId={props.humanInput.respondingRequestId}
                                   error={props.humanInput.mutationError?.message}
