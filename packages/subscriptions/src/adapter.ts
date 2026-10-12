@@ -1,4 +1,4 @@
-import type { CacheFacts, ModelId, ProviderId, SubscriptionQuota } from "./types";
+import type { CacheFacts, ModelId, ModelTier, ProviderId, SubscriptionQuota } from "./types";
 
 /**
  * The prompt-cache lifetime a provider adapter declares (SUB-PROV-01,
@@ -227,6 +227,13 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   readonly refresh: CredentialRefresher<Credential> | null;
   /** Stored needs-relogin text for a provider message (fills an empty one). */
   reloginText(message: string): string;
+  /**
+   * Optional tier of one of the provider's models (D-35). With no explicit
+   * fallback entry, placement derives a cross-provider order from equal
+   * tiers. Absent, or null for a model: no tier, so nothing is derived for
+   * or to that model and only explicit fallback entries apply.
+   */
+  modelTier?(modelId: ModelId): ModelTier | null;
   /**
    * Optional out-of-turn quota probe: read the provider's usage endpoint
    * with one connection's bearer. Every physical request goes through
