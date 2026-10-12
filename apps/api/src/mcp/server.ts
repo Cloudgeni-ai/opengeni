@@ -182,6 +182,7 @@ import {
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
+import { registerSecretTools } from "./secret-tools";
 import {
   attemptSecretWriteContext,
   prepareSecretAnswers,
@@ -1043,6 +1044,9 @@ export function buildOpenGeniMcpServer(
   // Reading existing Knowledge and Skills remains available when authoring is Off.
   if (sessionId !== null) {
     registerKnowledgeEntryTools(server, deps, grant, sessionId);
+    // secret_* (capability `secrets`): gated by permission and the signed
+    // tool selection like every catalogued tool; agent attempts only.
+    registerSecretTools(server, deps, grant, sessionId);
   }
   server.registerTool(
     "artifacts_list",
@@ -6350,6 +6354,8 @@ function registerCapabilityDiscoveryTools(
   sessionId: string,
   json: JsonResult,
 ): void {
+  const signedTools = grant.metadata?.["firstPartyMcpTools"];
+  const secretsSelected = Array.isArray(signedTools) && signedTools.includes("secret_search");
   const catalog = () =>
     buildCapabilityCatalog({
       db: deps.db,
@@ -6492,7 +6498,10 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the OpenGeni Browser Chrome extension link; never paste an enroll token into the chat yourself.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the OpenGeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
+        (secretsSelected
+          ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
+          : ""),
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
