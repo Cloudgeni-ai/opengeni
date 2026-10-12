@@ -224,4 +224,6 @@ export const embeddingMigrationTail = [
   "0730_maintenance_work_probes.sql",
   // Reads browser/outbox claim routines withheld by historical lifecycle fixtures.
   "0732_sandbox_maintenance_work_probes.sql",
+  // Extends the capacity waiter table from withheld shared-core migrations.
+  "0738_subscription_waiter_candidates.sql",
 ];

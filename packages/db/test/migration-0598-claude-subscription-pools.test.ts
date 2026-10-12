@@ -78,6 +78,8 @@ const subscriptionCoreMigrations = [
   "0733_subscription_session_bindings_per_provider.sql",
   // Previews the system-update claim rewritten by withheld core migrations.
   "0732_sandbox_maintenance_work_probes.sql",
+  // Extends the capacity waiter table from withheld shared-core migrations.
+  "0738_subscription_waiter_candidates.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

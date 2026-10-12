@@ -4052,6 +4052,7 @@ function mapSubscriptionCoreCodexWaiter(
   return {
     waiterId: row.waiter_id,
     provider: "codex",
+    candidateProviders: null,
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
