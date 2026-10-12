@@ -909,7 +909,13 @@ export type BrowserAction =
   | { type: "double_click"; locator: BrowserLocator }
   | { type: "hover"; locator: BrowserLocator }
   | { type: "fill"; locator: BrowserLocator; value: string }
-  | { type: "type"; locator?: BrowserLocator | undefined; text: string }
+  | {
+      type: "type";
+      locator?: BrowserLocator | undefined;
+      text: string;
+      /** `keys` sends one key press per character (split one-time-code boxes). */
+      mode?: "insert" | "keys" | undefined;
+    }
   | { type: "press"; locator?: BrowserLocator | undefined; key: string }
   | { type: "select"; locator: BrowserLocator; values: string[] }
   | { type: "check"; locator: BrowserLocator; checked: boolean }

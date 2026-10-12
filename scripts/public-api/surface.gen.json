@@ -10274,6 +10274,7 @@
         "$|type=fill.value": "string!",
         "$|type=type": "object",
         "$|type=type.locator": "ref(BrowserLocator)?",
+        "$|type=type.mode": "enum?=[\"\\\"insert\\\"\",\"\\\"keys\\\"\"]",
         "$|type=type.text": "string!",
         "$|type=type.type": "const!=[\"\\\"type\\\"\"]",
         "$|type=press": "object",
