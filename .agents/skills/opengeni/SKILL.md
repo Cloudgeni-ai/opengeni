@@ -374,7 +374,7 @@ the public-catalog fallback; preserve v1/frozen semantics. Targeted requests use
 live fence (`apps/api/src/workspace-tool-target-fence.ts`): each physical callback
 evaluates caller, Site, selected route (narrow reads) and live action policy once,
 after its last credential step; never share or cache decisions, never lock or
-write the key inside it, and start no read after its deadline; do not change
+write the key inside it, and start no further part after its deadline; do not change
 frozen worker/Codemode policy semantics. SDK/Site adoption and explicit legacy mode are documented in
 `packages/sdk/README.md`; local previews retain frozen Codemode authority.
 

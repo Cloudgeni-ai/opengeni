@@ -203,9 +203,11 @@ second, and a person's route-owned fresh grant runs beside them uncancelled. A
 pinned Site is read once per evaluation, as the caller may see it (its audience
 and active version), however many tools it pins. At
 the deadline an evaluation is answered as unavailable authority and starts no
-further part or read; a read already running ends at its statement timeout and
-the transaction rolls back. Before an execution-mode credential resolve, which
-may refresh a token or record use, only the caller is checked. The route part
+further part; the running part may still finish its current read and issue its
+remaining ones, each bounded by the statement timeout, and the transaction rolls
+back. Before an
+execution-mode credential resolve, which may refresh a token or record use, only
+the caller is checked. The route part
 reads only the rows that can produce the
 selected servers (their capability installations and explicit `mcpServerId`
 claimants, integrations with those runtime keys, the selected connections under

@@ -24,8 +24,9 @@ export const TARGET_FENCE_DEADLINE_MS = 2_500;
 
 /**
  * A part of the live fence. `db` is the evaluation's bounded transaction;
- * `stop` aborts once the evaluation's deadline passes or its request ends, and
- * a part with several reads checks it between them.
+ * `stop` aborts once the evaluation's deadline passes or its request ends. The
+ * evaluation checks it before each part; the route part also checks it between
+ * its capability, integration and connection reads.
  */
 export type TargetFenceCheck = (db: Database, stop: AbortSignal) => Promise<void>;
 
@@ -137,8 +138,10 @@ export function targetFenceCaller(
  * transaction bounded by `statement_timeout`; an external actor's authorizer
  * runs in a second bounded transaction and a person's fresh grant beside them.
  * At the deadline the evaluation is answered as unavailable authority and no
- * further part or read starts; a read already running ends at its statement
- * timeout and the transaction rolls back.
+ * further part starts. The running part may still finish its current read and
+ * issue its remaining ones (a pinned Site's version after its artifact, the
+ * next selected connection), each bounded by the statement timeout; the
+ * transaction then rolls back.
  * Boundaries swallow hook failures, so the fence records each outcome itself;
  * `settle()` reports a recorded denial or unavailable authority instead of an
  * opaque missing connector. After `close()` (strictly after the awaited
@@ -321,7 +324,7 @@ export class TargetAuthorityFence {
     if (full && this.input.targeted && !this.#route)
       throw new HTTPException(403, { message: "tool_access_changed" });
     // The deadline (or the request's end) answers at once and stops the work:
-    // no later part or read starts, and its transaction rolls back.
+    // no later part starts, and its transaction rolls back.
     const expiry = new AbortController();
     const timer = setTimeout(() => expiry.abort(new TargetFenceDeadlineError()), this.#deadlineMs);
     const stop = this.input.signal
