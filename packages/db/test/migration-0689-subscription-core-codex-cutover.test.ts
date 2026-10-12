@@ -61,6 +61,7 @@ const FENCES = "0717_subscription_authority_fences.sql";
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
+const FAILOVER_READINESS = "0737_subscription_failover_readiness_and_request_fence.sql";
 const key = Buffer.alloc(32, 72);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -718,9 +719,9 @@ describe.skipIf(!realDb)(
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
       // 0712 records the provider cutover receipts and requires the committed
       // 0689, so it is withheld with it and applied by the same cutover run.
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${FAILOVER_READINESS})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS})`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS}, ${FAILOVER_READINESS})`;
       await seed();
     }, 180_000);
 

@@ -2265,6 +2265,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0734_connected_output_reachable_due.sql",
+      "0737_subscription_failover_readiness_and_request_fence.sql",
       "0733_subscription_session_bindings_per_provider.sql",
       "0732_sandbox_maintenance_work_probes.sql",
       "0731_published_site_versions_workspace_visible.sql",
