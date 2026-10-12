@@ -2354,6 +2354,11 @@ describe("release schema contract", () => {
       "0702_subscription_codex_access_editor.sql",
       "0701_quiescence_receipt_wake_repair.sql",
       "0700_codex_ownerless_person_refresh.sql",
+      "0739_native_pty_command_supervision.sql",
+      "0740_native_command_qualification.sql",
+      "0738_native_command_broker_transport.sql",
+      "0741_native_command_broker_control_replies.sql",
+      "0742_native_command_broker_input_replies.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
       "0698_codex_ownerless_person_turns.sql",
       "0697_codex_retry_after_unknown_outcome.sql",
@@ -2752,11 +2757,6 @@ describe("release schema contract", () => {
       "0684_claude_haiku_5_5_default_model.sql",
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
-      "0739_native_pty_command_supervision.sql",
-      "0740_native_command_qualification.sql",
-      "0738_native_command_broker_transport.sql",
-      "0741_native_command_broker_control_replies.sql",
-      "0742_native_command_broker_input_replies.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

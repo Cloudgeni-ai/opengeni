@@ -595,15 +595,6 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateRoutines: [
-      ...["native_command_qualification_guard()", "native_command_receipt_immutable()"].map(
-        (name) => ({
-          name,
-          owner: "opengeni_migrator",
-          execute: false,
-          publicExecute: false,
-          securityDefiner: false,
-        }),
-      ),
       ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -674,6 +665,15 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
       },
+      ...["native_command_qualification_guard()", "native_command_receipt_immutable()"].map(
+        (name) => ({
+          name,
+          owner: "opengeni_migrator",
+          execute: false,
+          publicExecute: false,
+          securityDefiner: false,
+        }),
+      ),
     ],
   };
 }
