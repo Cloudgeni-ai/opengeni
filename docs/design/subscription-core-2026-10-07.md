@@ -4298,8 +4298,8 @@ Fail-closed choices:
   title requests.
 - Core-routed admission funding is opt-in per provider and only while the
   provider is enabled on the deployment (SuperGrok here, matching its
-  catalog readiness); Claude's admission funding moves in its own track
-  step, so no Claude admission reads a provider route before then.
+  catalog readiness); Claude's entry is added by C1a (its call-site step),
+  so no Claude admission reads a provider route before then.
 - A source disconnect is recognised by its shared code
   (`subscription_core_source_disconnected`) for every provider, so a core
   SuperGrok disconnect joins the admitted title stream and propagates out of
@@ -4960,8 +4960,107 @@ models by their scope-specific provider id
 while `modelPolicyProviderId` is one value per adapter (§5.1.3 lists this as
 still missing). The adapter declares the organization id; C1a makes the
 policy provider id a function of the model in the shared placement world,
-in a provider-neutral change after the SuperGrok track's X1a and X1b, so
-workspace-scoped Claude models keep their policy.
+in a provider-neutral change after the SuperGrok track's X1a and X1b. Until
+C2 adds workspace-scoped connections, a workspace-scoped Claude model runs
+on organization connections on the core, so it must be allowed under both
+its own identity and the organization identity: the per-model identities
+only ever narrow access (review finding on #4132).
+
+##### C1a: Claude chat call sites (implemented)
+
+Built on the X1a/X1b generalizations (core turn lease, placement, request
+lanes, placed-core helpers); dormant until Claude's receipt (C3), because
+every Claude entry point reads the provider route first and the binding is
+unregistered until then.
+
+- Policy identity. The shared adapter interface gains an optional
+  `modelPolicyProviderIdsFor(modelId)`, read through
+  `subscriptionCoreModelPolicyProviderIds(adapter, modelId)` by the
+  placement world, which admits a model only when the workspace policy
+  allows every identity it carries (an empty or absent list means the
+  declared `modelPolicyProviderId`). The Claude adapter returns
+  `[organization]` for an organization model and `[workspace,
+  organization]` for a workspace-scoped model, because on the core it runs
+  on organization connections; providers with one identity declare nothing.
+  The shared conformance suite asserts, for every provider, that a policy
+  naming only a model's first identity never admits a model that carries
+  another, and that allowing all of them places it.
+- Placement. `selectClaudeTurnCapacityByRoute`: `legacy` runs the legacy
+  Claude selection unchanged after one route read; `maintenance` fails
+  closed; `core` places the accepted turn (holder
+  `claude-turn:<workflow>:<turn>:<attempt>`, the legacy Claude lease TTL)
+  and adopts the core lease. `ClaudeTurnLease` becomes a core subscription
+  turn lease, keeping the legacy heartbeat while a legacy subject holds it
+  and the `claude_credential_lease_lost` code. A core turn never enables the
+  legacy rotation, and carries no legacy authority snapshot or credential
+  version. No park until C1b: a core wait is a terminal capacity failure,
+  and compaction defers with its request preserved.
+  Until C1b, a core 429, 529 or unrenewed 401 settles through the generic
+  provider recovery (no account refusal is recorded and the overload lane
+  is not yet distinguished), so C3 must not register Claude before C1b has
+  merged. Unreachable while dormant.
+- Materialization and refresh. The bearer comes from the shared turn token
+  resolver under the exact accepted turn and the attempt's live core lease;
+  the capability settings carry only the account identity, the connection
+  id and refresh generation with a placeholder token, and each request's
+  custody sets the live bearer (OAuth `authorization`, tested with the
+  production provider shape); the token scope follows the
+  accepted product model's prefix. A 401 renews through one forced refresh
+  per attempt (memoized, under the connection's refresh lock in the shared
+  resolver) and retries the same request on the same connection, as a new
+  reservation, only when the generation advanced past the refused bearer's;
+  otherwise, and for a second 401, the refusal surfaces (classified in C1b).
+- Request custody. The Anthropic transport's per-request preparation
+  (`withClaudeUsageObserver`) gains an optional custody: the dispatch fence
+  and reservation are the last awaited step before each physical fetch; an
+  error status settles refused (408, 409 and 504 unknown); a successful body
+  settles when it ends or stops, read by a Claude response inspector
+  (`message_delta` or `message_stop` is a response, an `overloaded_error` or
+  `rate_limit_error` event before any content block a refusal, any other
+  stream error such as a timeout or conflict and anything else unknown); a
+  failed fetch is unknown, and a response the custody cannot settle is
+  cancelled. An unknown outcome is never replayed: later requests of the
+  attempt are refused locally. A paused web search (`pause_turn`) continues
+  the same model call with a new physical request before the history
+  checkpoint: Claude's main lane declares `continuesAfterResponse` (the
+  title lane does not; a title call never continues), so a further
+  reservation is admitted while every pending request of the lane has
+  received its response (each still reserved before its I/O and settled
+  once at the checkpoint); any request without a response still refuses
+  the next one, and lanes that do not declare it keep refusing any pending
+  request (review finding on #4132). The 401 renewal resends the same body
+  only when it can be sent again; a forced refresh that fails stays failed
+  for the attempt. A 529 settles refused on its connection and is never
+  refreshed or retried in place; that it never rotates accounts is C1b's
+  settlement. The capability settings carry the account identity with a
+  placeholder bearer, so a request outside custody fails closed upstream.
+  The placeholder is unique per connection and credential version: for an
+  account without a UUID (a setup token) the settings' key also scopes
+  stored hosted web searches (#4143), and one shared placeholder would
+  replay one account's encrypted results to another, which Anthropic
+  rejects (review finding on #4132).
+  Session titles use their own lane under
+  the same fence; only an admitted main-lane request moves the generation
+  the refusal settlement fences on (`core.credentialVersion`), so a title
+  request renewed after a 401 never does. As with the title-independent
+  recovery in #4179, tool-less title requests never enter history and do not
+  block main-request recovery or failover; unknown or unresolved main requests
+  still fail closed. The legacy usage observer, its receipts and its usage
+  rows are not used on a core turn; header usage becomes quota
+  observations in C1b.
+- Readiness and `list_models` use the merged C2a implementation below, not a
+  second C1a reader. `readSubscriptionCoreClaudeCatalogReadiness` projects
+  workspace and organization readiness and allowlists separately, and one
+  projection is shared with the restriction loader. A frozen legacy authority
+  snapshot no longer selects the core pool. Legacy Claude pools are never read
+  on the core route; maintenance closes both prefixes. Workspace and eligible
+  Personal-workspace pools retain their workspace-prefixed catalog models.
+- Funding and attribution: admission funding on the core is opt-in per
+  provider (`CORE_ROUTED_FUNDING`, from X1b); C1a adds the `claude` entry, so
+  a Claude admission reads its provider route only while Claude
+  subscriptions are enabled on the deployment (credential source `claude`).
+  Usage facts attribute the core connection through the placed core turn,
+  and the legacy model-connection check is skipped for a core turn.
 
 Conformance. The shared suite runs against the production binding twice,
 with OAuth credentials and with setup tokens; the suite decides whether a

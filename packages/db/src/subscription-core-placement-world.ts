@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
   declaredCacheLifetimeMs,
+  subscriptionCoreModelPolicyProviderIds,
   type ModelDescriptor,
   type PlacementInput,
   type ReselectionPoint,
@@ -208,19 +209,23 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       workspacePolicy.allowedProviders === null && workspacePolicy.allowedModels === null
         ? null
         : request.models
-            .filter(
-              (model) =>
-                evaluateWorkspaceModelPolicy(workspacePolicy, {
-                  // Workspace model policy uses the resolved provider identity;
-                  // the subscription core's provider key is intentionally neutral.
-                  providerId:
-                    model.provider === providerId
-                      ? provider.adapter.modelPolicyProviderId
-                      : model.provider,
-                  modelId: model.id,
-                  // Subscription placement: these models never spend Opengeni credits.
-                  chargesCredits: false,
-                }).allowed,
+            .filter((model) =>
+              // Workspace model policy uses the resolved provider identity;
+              // the subscription core's provider key is intentionally
+              // neutral, and a provider may name a model under more than one
+              // identity, every one of which must be allowed.
+              (model.provider === providerId
+                ? subscriptionCoreModelPolicyProviderIds(provider.adapter, model.id)
+                : [model.provider]
+              ).every(
+                (policyProviderId) =>
+                  evaluateWorkspaceModelPolicy(workspacePolicy, {
+                    providerId: policyProviderId,
+                    modelId: model.id,
+                    // Subscription placement: these models never spend Opengeni credits.
+                    chargesCredits: false,
+                  }).allowed,
+              ),
             )
             .map((model) => model.id);
     const input: PlacementInput = {
