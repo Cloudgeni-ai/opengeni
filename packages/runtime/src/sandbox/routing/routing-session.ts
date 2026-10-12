@@ -2961,9 +2961,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     await this.ensureParentPromotion(record);
     if (!record.backend.session.cancelSupervisedCommand)
       throw new Error("Supervised command control is unavailable");
-    return await withProviderCommandInputAdmission(undefined, () =>
+    const applied = await withProviderCommandInputAdmission(undefined, () =>
       record.backend.session.cancelSupervisedCommand!(providerSessionId, reason),
     );
+    // A native broker may positively close a partial definition before any
+    // supervisor exists. Its protected persistence settles that distinct state;
+    // consume only the canonical result, never the cancellation acknowledgement.
+    if (applied && record.process.providerCommand.kind === "modal-broker-v1")
+      await this.reconcileRetainedProcess(providerSessionId);
+    return applied;
   }
 
   /** Empty-input eager reads belong to the model's foreground wait, while

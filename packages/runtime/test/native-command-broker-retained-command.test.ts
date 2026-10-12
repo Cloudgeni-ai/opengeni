@@ -46,6 +46,7 @@ function fixture(pty = false) {
     failReceipt: false,
     failCapture: false,
     failCancellation: false,
+    failRejection: false,
     loseCapture: false,
     dispatchError: null as Error | null,
   };
@@ -174,6 +175,18 @@ function fixture(pty = false) {
       state.cancelled = true;
     },
     cancellationRequested: async () => state.cancelled,
+    rejectBrokerLaunch: async (original, proof) => {
+      trace.push("reject-launch");
+      if (state.failRejection) throw new Error("rejection store unavailable");
+      expect(original).toEqual(state.command);
+      const saved = requests.get(proof.requestId)!;
+      expect(proof).toEqual({
+        requestId: saved.frame.requestId,
+        ownerEpoch: saved.frame.ownerEpoch,
+        inputSequence: saved.frame.sequence,
+        responseSequence: frames.at(-1)!.sequence,
+      });
+    },
   };
   const driver = {
     send: async (request: NativeBrokerRequest) => {
@@ -367,6 +380,48 @@ test("an exact recorded control result is returned without another dispatch", as
     responseSequence: 1,
   });
   expect(f.sent).toHaveLength(1);
+});
+
+test("positive prelaunch cancellation settles only through committed native proof", async () => {
+  const f = fixture();
+  await f.controller().cancel("explicit_stop");
+  f.output(
+    "status",
+    Buffer.from('{"state":"not_started","launchClosed":true}'),
+    0,
+    f.sent[0]!.requestId,
+  );
+  f.state.failRejection = true;
+  await expect(f.controller().status()).rejects.toThrow("rejection store unavailable");
+  expect(f.sent).toHaveLength(1);
+  f.state.failRejection = false;
+  expect(await f.controller().status()).toEqual({ state: "never_started", responseSequence: 1 });
+  expect(f.state.receipt).toBeNull();
+  expect(f.state.command.streams.stdout.exitCode).toBeNull();
+  expect(f.sent).toHaveLength(1);
+});
+
+test("not-started text on a release response or without protected settlement cannot retire custody", async () => {
+  const f = fixture();
+  await f.controller().release();
+  f.output(
+    "status",
+    Buffer.from('{"state":"not_started","launchClosed":true}'),
+    0,
+    f.sent[0]!.requestId,
+  );
+  await expect(f.controller().release()).rejects.toThrow("exact cancellation settlement");
+  expect(f.trace).not.toContain("reject-launch");
+  const cancelled = fixture();
+  await cancelled.controller().cancel("explicit_stop");
+  cancelled.output(
+    "status",
+    Buffer.from('{"state":"not_started","launchClosed":true}'),
+    0,
+    cancelled.sent[0]!.requestId,
+  );
+  cancelled.persistence.rejectBrokerLaunch = undefined;
+  await expect(cancelled.controller().status()).rejects.toThrow("exact cancellation settlement");
 });
 
 test("a confirmed cancellation is followed by status polling, not a permanently cached running reply", async () => {

@@ -207,6 +207,17 @@ export class NativeBrokerRetainedCommand {
           ])
           .safeParse(body);
         if (!parsed.success) throw new Error("Invalid native broker control response");
+        if (parsed.data.state === "not_started") {
+          if (payload !== "cancel" || !this.persistence.rejectBrokerLaunch)
+            throw new Error("Never-started broker command requires exact cancellation settlement");
+          await this.persistence.rejectBrokerLaunch(command, {
+            requestId,
+            ownerEpoch: original.frame.ownerEpoch,
+            inputSequence: original.frame.sequence,
+            responseSequence: reply.sequence,
+          });
+          return { state: "never_started" as const, responseSequence: reply.sequence };
+        }
         if (parsed.data.state === "quiescent")
           retainedNativeBrokerCommandSnapshot(command, parsed.data.receipt);
         return {

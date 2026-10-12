@@ -446,8 +446,18 @@ partial or uncertain start keeps its original identity and never allocates a
 replacement. The private ready-context union does not widen the router's public
 descriptor: the task-router adapter explicitly refuses broker-only admission.
 These primitives still require application selection and complete lifecycle
-wiring. In particular, positive native never-started cancellation needs its own
-canonical settlement bridge; retaining an uncertain locator is not that proof.
+wiring. Retaining an uncertain locator is not never-started proof.
+
+The distinct `rejectRetainedBrokerLaunch` seam consumes the exact committed
+native cancel request and its `not_started` / `launchClosed: true` reply. Forward
+maintenance migration `0752` independently reconstructs both fixed v1 wire hashes
+and requires their scoped immutable request, control-reply and frame entries.
+The existing pristine-command, child-admission, receipt, lease, holder and atomic
+settlement guards remain in force. Only that positive evidence can settle the
+original reservation as `lost` / `provider_start_rejected`, without inventing
+supervisor exit, EOF or quiescence. Concurrent exact replay is idempotent; unknown
+dispatch, `command_unknown`, an unavailable broker or a cancelled waiter remain
+unsettled. Routing consumes the canonical settlement, never a cancel ACK alone.
 
 `native-command-broker-command.ts` projects each command from committed frames.
 It joins control evidence to the exact accepted immutable request and ties data,
@@ -502,8 +512,9 @@ session surface aborts only its observations and leaves the shared coordinator
 and physical commands owned by their existing lifecycle. Stdin requires its
 exact existing private child admission and currently rejects payloads beyond
 one native frame rather than silently splitting, truncating or reauthorizing.
-Application installation, larger-input framing, continuously owned diagnostics,
-prelaunch never-started settlement and setup-command ownership remain gates.
+Application installation, larger-input framing, continuously owned diagnostics
+and setup-command ownership remain gates. A positive prelaunch cancel reply can
+now settle its exact original reservation; uncertainty still cannot.
 
 `NativeBrokerRetainedCommand` bridges an already retained command to that
 canonical persistence. Each bounded read reconstructs its exact locator and

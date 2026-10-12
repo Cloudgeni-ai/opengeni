@@ -87,9 +87,11 @@ committed canonical reservation before prepare/definition/launch.
 `NativeBrokerCommandSession` provides the distinct retained-handle/banner
 surface without a legacy fallback. It captures output before presentation,
 preserves pages when a global ACK becomes unknown, and keeps the shared physical
-coordinator alive when one session surface closes. Application selection,
-prelaunch cancellation settlement and setup ownership remain open; the router
-refuses broker-only admission rather than using its older launcher.
+coordinator alive when one session surface closes. Positive native prelaunch
+cancellation settles through `rejectRetainedBrokerLaunch` and the independent
+journal-hash guard in migration `0752`, without fabricated exit or quiescence.
+Unknown starts retain custody. Application selection and setup ownership remain
+open; the router refuses broker-only admission rather than its older launcher.
 `retained-provider-commands.ts` atomically captures the versioned broker locator
 and session output under the canonical native receipt/holder/settlement guards;
 the task-router adapter explicitly refuses that separate locator.

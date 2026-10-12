@@ -12,6 +12,7 @@ import {
   admittedProviderCommandInput,
   MAX_PROVIDER_COMMAND_HANDLE,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandStartRejectedError,
   ProviderCommandObservationUnavailableError,
   type ProviderCommandOutput,
   type ProviderCommandPersistence,
@@ -251,7 +252,11 @@ export class NativeBrokerCommandSession implements ProviderCommandSession {
     try {
       let page = await capture();
       if (page.exitCode === null && !page.chunks.length && !page.hasMore) {
-        await control.status(signal);
+        const status = await control.status(signal);
+        if (status.state === "never_started")
+          throw new ProviderCommandStartRejectedError(
+            new Error("Native cancellation closed the original command before launch"),
+          );
         page = await capture();
         const budget = Math.min(50_000, requestedBudget);
         if (budget && page.exitCode === null && !page.chunks.length && !page.hasMore) {
@@ -286,6 +291,7 @@ export class NativeBrokerCommandSession implements ProviderCommandSession {
       signal.throwIfAborted();
       return this.format(handle, page, args.maxOutputTokens);
     } catch (cause) {
+      if (cause instanceof ProviderCommandStartRejectedError) throw cause;
       throw new ProviderCommandObservationUnavailableError(entry.command, cause);
     }
   }

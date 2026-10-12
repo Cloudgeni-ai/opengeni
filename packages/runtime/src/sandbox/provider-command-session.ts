@@ -23,6 +23,16 @@ export type ProviderCommandOutput = {
  * retention/adoption. They are never accepted as command arguments. */
 export type ProviderCommandPersistence = {
   rejectSupervisedLaunch?(command: ModalRouterProviderCommand): Promise<void>;
+  /** Exact retained native cancel reply, not a caller assertion of absence. */
+  rejectBrokerLaunch?(
+    command: ModalBrokerProviderCommand,
+    proof: {
+      requestId: string;
+      ownerEpoch: number;
+      inputSequence: number;
+      responseSequence: number;
+    },
+  ): Promise<void>;
   load(): Promise<SandboxProviderCommand | null>;
   acknowledge(command: SandboxProviderCommand): Promise<SandboxProviderCommand>;
   reserveInput(byteLength?: number): Promise<number>;

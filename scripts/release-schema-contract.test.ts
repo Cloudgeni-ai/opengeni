@@ -37,6 +37,14 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("registers native broker never-started settlement as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0752_native_broker_launch_rejection.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
   test("registers the native broker diagnostic writer fence as maintenance-only", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2387,6 +2395,7 @@ describe("release schema contract", () => {
       "0749_native_broker_creation_qualification.sql",
       "0750_native_broker_bootstrap_admission.sql",
       "0751_native_broker_diagnostic_fault.sql",
+      "0752_native_broker_launch_rejection.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
       "0698_codex_ownerless_person_turns.sql",
       "0697_codex_retry_after_unknown_outcome.sql",

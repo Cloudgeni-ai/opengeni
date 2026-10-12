@@ -17,9 +17,10 @@ import {
   commitWarmingToWarm,
   publishNativeCommandQualification,
   settleRetainedProcess,
+  retainedProviderCommandPersistence,
+  rejectRetainedBrokerLaunch,
   type DbClient,
 } from "@opengeni/db";
-import { retainedProviderCommandPersistence } from "../../db/src/retained-provider-commands";
 import { withRlsContext, rawRows } from "../../db/src/database";
 import {
   registerNativeBrokerTransport,
@@ -1263,6 +1264,191 @@ async function stdinFixture() {
   return { f, active, custody, input, counter };
 }
 
+async function neverStartedFixture(
+  pty = false,
+  payload = "cancel",
+  body = '{"state":"not_started","launchClosed":true}',
+  capture = true,
+  admitInput = false,
+) {
+  const f = await fixture();
+  const active = await start(f);
+  const journal = f.service();
+  await journal.captureOutput(
+    "0-0",
+    page(f, Buffer.from(accepted(f, active.write.input)).toString()),
+  );
+  const commandId = crypto.randomUUID();
+  const command = ModalBrokerProviderCommand.parse({
+    kind: "modal-broker-v1",
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    execId: commandId,
+    pty,
+    supervision: {
+      protocol: pty
+        ? "native-subreaper-broker-channel-pty-v1"
+        : "native-subreaper-broker-channel-v1",
+      invocationId: commandId,
+      brokerId: f.binding.brokerId,
+      launchRequestId: crypto.randomUUID(),
+      launchEpoch: 1,
+    },
+    capture: { sequence: 1, receiptAckObserved: false },
+    streams: {
+      stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    },
+  });
+  const custody = await retainNativeFixture(f, command);
+  if (admitInput) await custody.inputAdmission();
+  await custody.persistence.requestCancellation("explicit_stop");
+  const requestId = crypto.randomUUID();
+  await journal.reserve(active.writerId, 1, {
+    requestId,
+    commandId,
+    kind: "control",
+    offset: 0,
+    payload: Buffer.from(payload),
+  });
+  const sent = (await journal.dispatchIntent(active.writerId, 1, requestId))!;
+  const response = encodeNativeBrokerFrame({
+    direction: "response",
+    brokerId: f.binding.brokerId,
+    commandId,
+    requestId,
+    ownerEpoch: 1,
+    sequence: 3,
+    kind: "status",
+    offset: 0,
+    payload: Buffer.from(body),
+  });
+  if (capture)
+    await journal.captureOutput(
+      "1-0",
+      page(f, Buffer.concat([accepted(f, sent.input, 2), response]).toString(), "2-0"),
+    );
+  const proof = { requestId, ownerEpoch: 1, inputSequence: sent.index, responseSequence: 3 };
+  return { f, command, custody, proof, journal };
+}
+
+test.each([false, true])(
+  "broker %s never-started cancellation settles exact custody without exit or fabricated output",
+  async (pty) => {
+    const { f, command, custody, proof } = await neverStartedFixture(pty);
+    await Promise.all([
+      custody.persistence.rejectBrokerLaunch(command, proof),
+      rejectRetainedBrokerLaunch(client.db, custody.scope, command, proof),
+    ]);
+    const process = (await getRetainedProcess(client.db, custody.scope))!;
+    expect(process).toMatchObject({
+      state: "lost",
+      exitCode: null,
+      settlementReason: "provider_start_rejected",
+    });
+    expect(await custody.persistence.load()).toEqual(command);
+    expect(await custody.persistence.loadSupervisionReceipt()).toBeNull();
+    const [row] =
+      await database.admin`select supervision_output_captured from sandbox_retained_processes where id=${custody.scope.processId}`;
+    expect(row!.supervision_output_captured).toBe(false);
+    const [admission] =
+      await database.admin`select provider_outcome, settled_at from sandbox_workspace_mutation_admissions where id=${process.parentAdmissionId}`;
+    expect(admission!.provider_outcome).toBe("rejected");
+    expect(admission!.settled_at).not.toBeNull();
+    expect(
+      await database.admin`select holder_id from sandbox_lease_holders where lease_id=${f.binding.leaseId} and holder_id=${process.holderId}`,
+    ).toHaveLength(0);
+    const [lease] =
+      await database.admin`select lease_epoch, instance_id from sandbox_leases where id=${f.binding.leaseId}`;
+    expect(lease).toMatchObject({
+      lease_epoch: f.binding.createEpoch,
+      instance_id: f.binding.sandboxId,
+    });
+    await expect(custody.settle()).rejects.toThrow();
+  },
+);
+
+test("never-started settlement rejects missing, altered, foreign or non-cancel journal evidence", async () => {
+  const good = await neverStartedFixture();
+  for (const proof of [
+    { ...good.proof, requestId: crypto.randomUUID() },
+    { ...good.proof, inputSequence: 1 },
+    { ...good.proof, responseSequence: 2 },
+    { ...good.proof, ownerEpoch: 2 },
+  ])
+    await expect(good.custody.persistence.rejectBrokerLaunch(good.command, proof)).rejects.toThrow(
+      "committed",
+    );
+  for (const [payload, body, capture] of [
+    ["cancel", '{"state":"not_started","launchClosed":true}', false],
+    ["release", '{"state":"not_started","launchClosed":true}', true],
+    ["cancel", '{"state":"running"}', true],
+    ["cancel", '{"state":"not_started","launchClosed":false}', true],
+  ] as const) {
+    const other = await neverStartedFixture(false, payload, body, capture);
+    await expect(
+      other.custody.persistence.rejectBrokerLaunch(other.command, other.proof),
+    ).rejects.toThrow("committed");
+    await expect(
+      other.custody.persistence.rejectBrokerLaunch(other.command, good.proof),
+    ).rejects.toThrow("committed");
+    expect((await getRetainedProcess(client.db, other.custody.scope))!.state).toBe("active");
+  }
+});
+
+test("ordinary lost callbacks and a forged old launch marker cannot bypass the independent broker proof guard", async () => {
+  const { command, custody } = await neverStartedFixture(false, "cancel", undefined, false);
+  const expected = (await getRetainedProcess(client.db, custody.scope))!;
+  await expect(
+    settleRetainedProcess(client.db, {
+      ...custody.scope,
+      expected,
+      outcome: "lost",
+      reason: "provider_start_rejected",
+      idleGraceMs: 0,
+    }),
+  ).rejects.toThrow();
+  await expect(
+    database.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.supervised_launch_rejection_binding', ${JSON.stringify({ processId: custody.scope.processId, command })}, true)`;
+      await tx`update sandbox_retained_processes set state='lost',exit_code=null,settled_at=now(),settlement_reason='provider_start_rejected' where id=${custody.scope.processId}`;
+    }),
+  ).rejects.toThrow("committed cancellation proof");
+  expect((await getRetainedProcess(client.db, custody.scope))!.state).toBe("active");
+});
+
+test("even a real never-started reply cannot erase admitted stdin or captured command output", async () => {
+  const child = await neverStartedFixture(false, "cancel", undefined, true, true);
+  await expect(
+    child.custody.persistence.rejectBrokerLaunch(child.command, child.proof),
+  ).rejects.toThrow("admitted process input");
+  const output = await neverStartedFixture();
+  const next = structuredClone(output.command);
+  next.capture.sequence = 3;
+  next.streams.stdout.byteOffset = 1;
+  await output.custody.persistence.captureBrokerPage({
+    expected: output.command,
+    command: next,
+    stdout: "x",
+    stderr: "",
+  });
+  await expect(output.custody.persistence.rejectBrokerLaunch(next, output.proof)).rejects.toThrow(
+    "pristine",
+  );
+});
+
+test("broker never-started settlement cannot expose a caller-owned savepoint as committed proof", async () => {
+  const f = await neverStartedFixture();
+  await withRlsContext(client.db, f.custody.scope, async (tx) => {
+    await expect(
+      rejectRetainedBrokerLaunch(tx, f.custody.scope, f.command, f.proof),
+    ).rejects.toThrow("outer commit boundary");
+  });
+  expect((await getRetainedProcess(client.db, f.custody.scope))!.state).toBe("active");
+  await f.custody.persistence.rejectBrokerLaunch(f.command, f.proof);
+  expect((await getRetainedProcess(client.db, f.custody.scope))!.state).toBe("lost");
+});
+
 test("retained stdin commits one byte reservation and one immutable request under concurrent replay", async () => {
   const { f, active, input, counter, custody } = await stdinFixture();
   const bytes = Buffer.from("hello\u0000binary");
@@ -2495,6 +2681,79 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
         verify: async () => ({ sandboxId: f.binding.sandboxId, taskId: f.binding.taskId }),
       };
       brokerSession = new NativeBrokerCommandSession(sessionOptions);
+      // A partially prepared command has no supervisor and therefore cannot
+      // produce a quiescence receipt or exit code. The actual native cancel
+      // response must close its birth and settle only its pristine reservation.
+      const partialId = crypto.randomUUID();
+      const partialWriter = await coordinator.claimWriter();
+      const partialState = await f.service().read();
+      const partial = ModalBrokerProviderCommand.parse({
+        ...retained,
+        execId: partialId,
+        supervision: {
+          ...retained.supervision,
+          invocationId: partialId,
+          launchRequestId: crypto.randomUUID(),
+          launchEpoch: partialWriter.epoch,
+        },
+        capture: { sequence: partialState.output.lastSequence, receiptAckObserved: false },
+        streams: {
+          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        },
+      });
+      const partialCustody = await retainNativeFixture(f, partial, 4);
+      const prepareId = crypto.randomUUID();
+      const partialDefinitionSize = Buffer.alloc(4);
+      partialDefinitionSize.writeUInt32BE(20);
+      await coordinator.send({
+        requestId: prepareId,
+        commandId: partialId,
+        kind: "prepare",
+        offset: 0,
+        payload: partialDefinitionSize,
+      });
+      expect((await coordinator.reply(prepareId)).kind).toBe("status");
+      const partialControl = new NativeBrokerRetainedCommand(
+        partial,
+        partialCustody.persistence,
+        f.service(),
+        coordinator,
+      );
+      await partialControl.cancel("explicit_stop");
+      await observeUntil(async () =>
+        (await frames(partial.capture.sequence)).some(
+          (frame) =>
+            frame.commandId === partialId &&
+            frame.kind === "status" &&
+            Buffer.from(frame.payload).toString() === '{"state":"not_started","launchClosed":true}',
+        ),
+      );
+      expect((await partialControl.status()).state).toBe("never_started");
+      expect((await getRetainedProcess(client.db, partialCustody.scope))!).toMatchObject({
+        state: "lost",
+        exitCode: null,
+        settlementReason: "provider_start_rejected",
+      });
+      expect(await partialCustody.persistence.loadSupervisionReceipt()).toBeNull();
+      expect(await partialCustody.persistence.load()).toEqual(partial);
+      const lateLaunch = partial.supervision.launchRequestId;
+      await coordinator.send({
+        requestId: lateLaunch,
+        commandId: partialId,
+        kind: "launch",
+        offset: 0,
+        payload: new Uint8Array(),
+      });
+      const denied = await coordinator.reply(lateLaunch);
+      expect(denied.kind).toBe("error");
+      expect(Buffer.from(denied.payload).toString()).toBe('{"error":"invalid_launch"}');
+      expect(
+        (await frames(partial.capture.sequence)).some(
+          (frame) =>
+            frame.commandId === partialId && ["stdout", "stderr", "exit"].includes(frame.kind),
+        ),
+      ).toBe(false);
       const startRetained = async (cmd: string, handle: number) => {
         let commandCustody!: Awaited<ReturnType<typeof retainNativeFixture>>;
         const started = await withProviderCommandHandle(handle, () =>

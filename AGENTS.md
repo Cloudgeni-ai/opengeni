@@ -554,6 +554,10 @@ Modal Start transport errors are not rejection proof, including DNS-shaped
 `UNAVAILABLE`. Only locally constructed pre-dispatch readiness proof permits
 recovery. Function tools return explicit outcome-unknown results without replay;
 retain the exact invocation and its writer fence until terminal provider proof.
+The separate initial-process broker can settle a partial launch only from its
+committed native cancel/launch-closed reply and the `0752` journal-hash guard.
+That is never-started evidence, not an exit code or fabricated quiescence;
+unknown input and missing commands remain retained. See `docs/design/native-command-broker.md`.
 SDK setup observes/adopts only its original invocation while the helper frame
 is alive. If setup unwinds with a genuine unknown outcome, retain its command
 or unresolved admission and park the exact turn as recovering with the durable

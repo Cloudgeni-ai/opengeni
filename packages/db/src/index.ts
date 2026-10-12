@@ -270,6 +270,7 @@ import {
   type SandboxRecoveryProjection,
   type SandboxRecoveryRequest,
   ModalRouterProviderCommand,
+  ModalBrokerProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
   sessionTurnSurfaceOrNull,
@@ -300,6 +301,10 @@ import {
 import { createRetryFailedSessionInTransaction } from "./session-retry";
 export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
 import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
+import {
+  NativeBrokerLaunchRejectionProof,
+  requireNativeBrokerLaunchRejection,
+} from "./native-broker-launch-rejection";
 export * from "./native-command-qualification";
 export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
   sessionEffectiveSandboxRecoveryBlocked,
@@ -1199,6 +1204,7 @@ export * from "./model-catalog";
 
 import {
   dbBindingFor,
+  isTransactionHandle,
   rawRows,
   retryRlsPersistence,
   retryWorkspacePersistence,
@@ -57070,6 +57076,35 @@ export async function rejectRetainedSupervisedLaunch(
   );
 }
 
+/** Native cancellation positively closed this exact command before spawning a
+ * supervisor. Only retained channel evidence can authorize this distinct lost
+ * outcome; no fake exit, EOF or quiescence receipt is created. */
+export async function rejectRetainedBrokerLaunch(
+  db: Database,
+  scope: { accountId: string; workspaceId: string; sessionId: string; processId: string },
+  command: ModalBrokerProviderCommand,
+  proof: NativeBrokerLaunchRejectionProof,
+): Promise<void> {
+  if (isTransactionHandle(db))
+    throw new Error("Native broker launch rejection requires an outer commit boundary");
+  const expectedCommand = ModalBrokerProviderCommand.parse(command);
+  const evidence = NativeBrokerLaunchRejectionProof.parse(proof);
+  const process = await getRetainedProcess(db, scope);
+  if (!process) throw new Error("Retained broker launch is unavailable");
+  await settleRetainedProcessWithAuthority(
+    db,
+    {
+      ...scope,
+      expected: process,
+      outcome: "lost",
+      reason: "provider_start_rejected",
+      idleGraceMs: 0,
+    },
+    expectedCommand,
+    evidence,
+  );
+}
+
 /** Compose the leaf cursor/proof persistence with canonical settlement. The
  * leaf subpath cannot import this root without reversing the DB boundary. */
 export function retainedProviderCommandPersistence(
@@ -57079,6 +57114,10 @@ export function retainedProviderCommandPersistence(
     ...retainedProviderCommandState(db, scope, publish),
     rejectSupervisedLaunch: (command: ModalRouterProviderCommand) =>
       rejectRetainedSupervisedLaunch(db, scope, command),
+    rejectBrokerLaunch: (
+      command: ModalBrokerProviderCommand,
+      proof: NativeBrokerLaunchRejectionProof,
+    ) => rejectRetainedBrokerLaunch(db, scope, command, proof),
   };
 }
 
@@ -57087,7 +57126,8 @@ export function retainedProviderCommandPersistence(
 async function settleRetainedProcessWithAuthority(
   db: Database,
   input: Parameters<typeof settleRetainedProcess>[1],
-  rejectedLaunch?: ModalRouterProviderCommand,
+  rejectedLaunch?: ModalRouterProviderCommand | ModalBrokerProviderCommand,
+  brokerRejection?: NativeBrokerLaunchRejectionProof,
 ): ReturnType<typeof settleRetainedProcess> {
   const reason = normalizeRetainedProcessSettlementReason(input.reason);
   const exitCode = input.outcome === "exited" ? (input.exitCode ?? null) : null;
@@ -57128,6 +57168,10 @@ async function settleRetainedProcessWithAuthority(
         );
       }
       if (rejectedLaunch) {
+        if (rejectedLaunch.kind === "modal-broker-v1") {
+          if (!brokerRejection) throw new Error("Broker rejection requires committed native proof");
+          await requireNativeBrokerLaunchRejection(tx, input, brokerRejection);
+        } else if (brokerRejection) throw new Error("Router rejection cannot carry broker proof");
         if (
           input.outcome !== "lost" ||
           reason !== "provider_start_rejected" ||
@@ -57136,6 +57180,8 @@ async function settleRetainedProcessWithAuthority(
           process.supervisionOutputCaptured ||
           process.reconcileProofOutcome !== null ||
           process.providerCommandInputIndex !== 0 ||
+          (rejectedLaunch.kind === "modal-broker-v1" &&
+            rejectedLaunch.capture.receiptAckObserved) ||
           !Object.values(rejectedLaunch.streams).every(
             (stream) =>
               stream.byteOffset === 0 &&
@@ -57317,6 +57363,15 @@ async function settleRetainedProcessWithAuthority(
         select set_config('opengeni.supervised_launch_rejection_binding',
           ${JSON.stringify({ processId: process.id, command: rejectedLaunch })}, true)
       `);
+      const [priorBrokerRejectionProof] = brokerRejection
+        ? await tx.execute<{ value: string | null }>(sql`
+          select current_setting('opengeni.native_broker_launch_rejection_proof', true) as value
+        `)
+        : [];
+      if (brokerRejection)
+        await tx.execute(
+          sql`select set_config('opengeni.native_broker_launch_rejection_proof', ${JSON.stringify(brokerRejection)}, true)`,
+        );
       const [updated] = await tx
         .update(schema.sandboxRetainedProcesses)
         .set({
@@ -57346,6 +57401,10 @@ async function settleRetainedProcessWithAuthority(
         await tx.execute(sql`
         select set_config('opengeni.supervised_launch_rejection_binding', ${priorRejectionBinding?.value ?? ""}, true)
       `);
+      if (brokerRejection)
+        await tx.execute(
+          sql`select set_config('opengeni.native_broker_launch_rejection_proof', ${priorBrokerRejectionProof?.value ?? ""}, true)`,
+        );
       if (!updated) {
         throw new SandboxWorkspaceMutationFencedError(
           "process_fenced",

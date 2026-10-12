@@ -10,9 +10,11 @@ import {
   withCommandSupervisionReady,
   withProviderCommandHandle,
   withProviderCommandInputAdmission,
+  ProviderCommandStartRejectedError,
   type ProviderCommandPersistence,
 } from "../src/sandbox/provider-command-session";
 import { hasTypedExecHandleLoss } from "../src/sandbox/exec-banner";
+import type { NativeBrokerFrame } from "../src/sandbox/providers/native-command-broker-wire";
 
 function fixture() {
   const identity = { brokerId: crypto.randomUUID(), sandboxId: "sb-exact", taskId: "ta-exact" };
@@ -241,4 +243,49 @@ test("closing one session surface neither closes the shared broker nor grants la
   ).rejects.toThrow("closed");
   expect(f.counts()).toEqual({ qualifications: 0, writes: 0, captures: 0 });
   expect(f.session.getProviderCommand(37)).toBeNull();
+});
+
+test("a committed never-started reply reports rejection rather than a fabricated exit or observation uncertainty", async () => {
+  const f = fixture();
+  let request: NativeBrokerFrame | undefined;
+  let settled = false;
+  f.options.coordinator.send = async (input) => {
+    request = {
+      ...input,
+      direction: "request",
+      brokerId: f.command.supervision.brokerId,
+      ownerEpoch: 1,
+      sequence: 1,
+    };
+    return { state: "accepted", index: 1 };
+  };
+  f.options.journal.request = async (id) =>
+    request?.requestId === id
+      ? {
+          frame: request as NativeBrokerFrame & { direction: "request" },
+          accepted: true,
+          phase: "accepted",
+        }
+      : null;
+  f.options.journal.controlReply = async (id) =>
+    request?.requestId === id
+      ? {
+          ...request,
+          direction: "response",
+          kind: "status",
+          sequence: 2,
+          payload: Buffer.from('{"state":"not_started","launchClosed":true}'),
+        }
+      : null;
+  f.persistence.rejectBrokerLaunch = async (_command, proof) => {
+    expect(proof.requestId).toBe(request!.requestId);
+    settled = true;
+  };
+  f.session.bindProviderCommand(37, f.command, f.persistence);
+  await f.session.cancelSupervisedCommand(37, "explicit_stop");
+  await expect(f.session.writeStdin({ sessionId: 37, yieldTimeMs: 0 })).rejects.toBeInstanceOf(
+    ProviderCommandStartRejectedError,
+  );
+  expect(settled).toBe(true);
+  expect(f.session.getProviderCommand(37)!.streams.stdout.exitCode).toBeNull();
 });

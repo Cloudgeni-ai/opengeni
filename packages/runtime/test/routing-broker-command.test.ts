@@ -57,6 +57,7 @@ function fixture() {
     page: null as ProviderCommandOutput | null,
     beforeWrite: async () => {},
     failWrite: false,
+    durablySettled: false,
   };
   const backend: RoutableBackendSession = {
     bindProviderCommand: (_handle, bound) => {
@@ -117,6 +118,7 @@ function fixture() {
     captureProcessOutput: async ({ chunk }) => {
       state.appended.push(chunk);
     },
+    isProcessSettled: async () => state.durablySettled,
   });
   proxy.adoptRetainedProcess({
     process: { id: processId, providerSessionId: 37, providerCommand: command },
@@ -224,6 +226,17 @@ test("broker controls use native cancellation and refuse legacy process helpers"
   await expect(f.proxy.execCommandForProcessControl(37, { cmd: "kill -9 123" })).rejects.toThrow(
     "Legacy process helpers are unavailable",
   );
+});
+
+test("native cancellation acknowledgement alone keeps custody; only canonical never-started settlement releases the route", async () => {
+  const f = fixture();
+  expect(await f.proxy.cancelSupervisedCommand(37, "explicit_stop")).toBe(true);
+  expect(f.proxy.hasRetainedProcess(37)).toBe(true);
+  f.state.durablySettled = true;
+  expect(await f.proxy.cancelSupervisedCommand(37, "explicit_stop")).toBe(true);
+  expect(f.proxy.hasRetainedProcess(37)).toBe(false);
+  expect(f.state.writes).toBe(0);
+  expect(f.state.settlements).toEqual([]);
 });
 
 test("broker pages require atomic capture and never enter legacy append-then-ack", async () => {

@@ -285,6 +285,18 @@ test("broker capture is exact-session scoped and cannot expose a foreign process
   expect(await getRetainedProviderCommand(client.db, f.scope)).toEqual(f.original);
 });
 
+test("broker readiness requires the independently enabled never-started settlement guard", async () => {
+  await shared.admin`alter table sandbox_retained_processes disable trigger native_broker_launch_rejection_guard`;
+  try {
+    expect(
+      await supervisedCommandProtocolReady(client.db, "native-subreaper-broker-channel-v1"),
+    ).toBe(false);
+    expect(await supervisedCommandProtocolReady(client.db, "native-subreaper-v1")).toBe(true);
+  } finally {
+    await shared.admin`alter table sandbox_retained_processes enable trigger native_broker_launch_rejection_guard`;
+  }
+});
+
 test.each([false, true])(
   "broker %s keeps receipt, atomic output and terminal settlement separate",
   async (pty) => {

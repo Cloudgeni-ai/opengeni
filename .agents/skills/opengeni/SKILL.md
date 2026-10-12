@@ -115,14 +115,17 @@ Then open the smallest source files that answer the question:
   prefix, not canonical command custody. `native-command-broker-start.ts`
   requires private protocol/handle context and durable reservation before an
   idle native launch. Partial starts preserve their original locator. These
-  primitives do not activate application routing or solve prelaunch-cancellation
-  settlement; the task router rejects broker-only admission.
+  primitives do not activate application routing; the task router rejects
+  broker-only admission. Positive prelaunch cancellation now uses
+  `rejectRetainedBrokerLaunch` with exact immutable request/reply/frame evidence
+  and the independent SQL hash guard in migration `0752`. It creates no exit or
+  quiescence proof; uncertain input and `command_unknown` remain retained.
   `native-command-broker-session.ts` supplies the distinct retained-handle/banner
   surface without a legacy setup or TaskExec fallback. Output commits before
   presentation, and an uncertain global ACK retains the captured page without
   replaying input. Session-surface close does not close the shared coordinator.
-  Application installation, larger stdin framing and canonical never-started
-  settlement remain incomplete; do not confuse adapter tests with activation.
+  Application installation and larger stdin framing remain incomplete; do not
+  confuse adapter tests with activation or cancellation ACKs with settlement.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse

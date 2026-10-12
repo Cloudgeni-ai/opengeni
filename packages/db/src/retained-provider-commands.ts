@@ -488,7 +488,12 @@ export async function supervisedCommandProtocolReady(
         ) = 'native-command-broker-retention-v1'
         and exists (select 1 from pg_catalog.pg_index i
           where i.indexrelid = pg_catalog.to_regclass('native_broker_retained_command_identity')
-            and i.indrelid = 'sandbox_retained_processes'::regclass and i.indisvalid and i.indisunique))
+            and i.indrelid = 'sandbox_retained_processes'::regclass and i.indisvalid and i.indisunique)
+        and exists (select 1 from pg_catalog.pg_trigger t
+          where t.tgrelid = 'sandbox_retained_processes'::regclass
+            and t.tgname = 'native_broker_launch_rejection_guard' and t.tgenabled in ('O','A')
+            and t.tgfoid = pg_catalog.to_regprocedure('opengeni_private.native_broker_launch_rejection_guard()')
+            and not t.tgisinternal and pg_catalog.obj_description(t.tgfoid, 'pg_proc') = 'native-broker-launch-rejection-v1'))
     ) as ready from pg_catalog.pg_trigger
     where (tgrelid, tgname) in (
       ('sandbox_retained_processes'::regclass, 'supervised_command_guard'),
