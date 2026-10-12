@@ -571,7 +571,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
       // 0730
       "subscription_core_personal_connection_versions(text, uuid, uuid, text)",
-      // 0731
+      // 0735
       "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
       "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
       "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",

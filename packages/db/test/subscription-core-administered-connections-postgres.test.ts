@@ -2,7 +2,7 @@
  * Live usage reads outside a workspace pool (design 5.3, C2c), for any
  * provider: an organization administrator's read of an organization-pool
  * connection, and an owner's read of their own personal connection in their
- * own Personal workspace (migration 0731's owner-only routines). Driven
+ * own Personal workspace (migration 0735's owner-only routines). Driven
  * through the test-only API-key connector with a scripted usage endpoint, on
  * real PostgreSQL as the application role; no provider name of production
  * appears here, and production registers nothing (asserted below).
@@ -364,13 +364,13 @@ describe("the test registration", () => {
   });
 });
 
-describe("the owner-only routines' predicates (0731)", () => {
+describe("the owner-only routines' predicates (0735)", () => {
   // Exact full-body baselines, not a bag of authorization fragments. This
   // deliberately rejects even a connector-only change, an added overload or
   // a moved check. Any change requires re-review against the behavioral
   // settings/context matrix below before updating these fingerprints.
   // Sources: live 0707 routines (including their 0715/0727 repairs and both
-  // 0728 connect overloads), and the three routines introduced by 0731.
+  // 0728 connect overloads), and the three routines introduced by 0735.
   const expectedBodies: Record<string, string> = {
     "opengeni_private.begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)":
       "ae583ca6bf31f1ef2ac97f8be27bfde5daec12c7cd16fba9d5e5d2507926585d",

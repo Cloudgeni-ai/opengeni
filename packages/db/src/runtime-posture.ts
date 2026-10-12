@@ -845,7 +845,7 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
   // Migration 0730: the owner's personal connections with their row version.
   "subscription_core_personal_connection_versions(text, uuid, uuid, text)",
-  // Migration 0731: the owner's live usage read of their own personal
+  // Migration 0735: the owner's live usage read of their own personal
   // connection (credential, refresh begin, quota write).
   "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
   "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
