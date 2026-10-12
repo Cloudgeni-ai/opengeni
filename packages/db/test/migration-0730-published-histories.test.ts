@@ -105,15 +105,14 @@ for (const history of ["fresh", "neither", "personal", "maintenance", "both"] as
       expect(
         await app`SELECT opengeni_private.site_auth_maintenance_due_v1(600000) AS due`,
       ).toMatchObject([{ due: false }]);
-      expect(
-        await app`SELECT p.proname,
+      const grants = await app`SELECT p.proname,
         has_function_privilege('public', p.oid, 'EXECUTE') AS public_execute,
         has_function_privilege(current_user, p.oid, 'EXECUTE') AS app_execute,
         p.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS app_owns
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'opengeni_private' AND p.proname = ANY(${routines}::text[])
-        ORDER BY p.proname`,
-      ).toEqual(
+        ORDER BY p.proname`;
+      expect([...grants]).toEqual(
         [...routines].sort().map((proname) => ({
           proname,
           public_execute: false,
