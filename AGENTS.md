@@ -577,6 +577,12 @@ requires positive historical provider identity in the same authenticated
 namespace; absence never licenses another create. Only ordinary holder-fenced
 draining may stop a recovered instance. See `docs/run-lifecycle.md`.
 
+The in-progress native broker bootstrap derives its artifact and broker identity
+from the original private physical enrollment, not a shaped lease or guest
+report. Its qualified core composition refuses fresh registration on a warm
+instance and rechecks the live creation after capture. This is not command
+admission or initial-stderr verification; see `docs/design/native-command-broker.md`.
+
 Public historical checkpoint consent (0495) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy
 fence before a complete group census; a visible session count is not authority.

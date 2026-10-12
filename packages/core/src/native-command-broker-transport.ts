@@ -4,7 +4,12 @@ import {
   findNativeBrokerTransportBinding,
   type NativeBrokerTransportBinding,
 } from "@opengeni/db/native-command-broker-transport";
-import { type Database } from "@opengeni/db";
+import {
+  loadNativeBrokerBootstrapAdmission,
+  type NativeBrokerBootstrapAdmissionInput,
+  type Database,
+} from "@opengeni/db";
+import { isDeepStrictEqual } from "node:util";
 import {
   durableNativeBrokerTransport,
   captureNativeBrokerBootstrap,
@@ -24,6 +29,46 @@ export function createDurableNativeBrokerTransport(
     nativeBrokerTransportStore(db, encryptionKey, binding),
     binding,
   );
+}
+
+/** Compose the frozen owner-qualified creation with exact authenticated
+ * initial-channel capture. This still grants no command authority: initial
+ * stderr, live command admission and the session adapter remain separate.
+ * Warm recovery requires existing retained evidence and never reads a new
+ * prefix or retrospectively registers an already-running sandbox. */
+export async function registerQualifiedNativeBrokerBootstrap(
+  db: Database,
+  encryptionKey: Uint8Array,
+  input: NativeBrokerBootstrapAdmissionInput,
+  channel: Pick<NativeBrokerChannel, "sandboxId" | "taskId" | "output">,
+  signal?: AbortSignal,
+) {
+  const scope = structuredClone(input);
+  signal?.throwIfAborted();
+  const admitted = await loadNativeBrokerBootstrapAdmission(db, scope);
+  const selected = { ...admitted.binding, taskId: channel.taskId };
+  if (channel.sandboxId !== selected.sandboxId)
+    throw new Error("Qualified native broker initial channel changed its sandbox identity");
+  if (admitted.phase === "warm" && !(await findNativeBrokerTransportBinding(db, selected)))
+    throw new Error("Warm native broker requires its existing durable bootstrap evidence");
+  const captured = await registerCapturedNativeBrokerBootstrap(
+    db,
+    encryptionKey,
+    selected,
+    channel,
+    admitted.artifact,
+    signal,
+  );
+  // No provider I/O while a DB transaction is held. Recheck after capture: a
+  // lost/replaced/draining lease cannot become an application startup result.
+  const current = await loadNativeBrokerBootstrapAdmission(db, scope);
+  if (
+    !isDeepStrictEqual(current.binding, admitted.binding) ||
+    !isDeepStrictEqual(current.artifact, admitted.artifact)
+  )
+    throw new Error("Native broker bootstrap qualification changed during capture");
+  signal?.throwIfAborted();
+  return Object.freeze({ ...captured, commandAdmission: false as const });
 }
 
 /** Fresh, already-attributed initial channel only. This closes the prefix

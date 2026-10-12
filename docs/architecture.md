@@ -65,8 +65,12 @@ projection readers verify distinct artifact, receipt, output and exit facts.
 `native-command-broker-bootstrap-capture.ts` verifies a bounded read-only initial
 prefix before registration. Core commits its complete frame/page receipts and
 cursor with the transport atomically; exact registration replay never rewinds
-progress or retrofits missing evidence. This does not authenticate creation,
-verify initial stderr or admit commands.
+progress or retrofits missing evidence. The qualified core composition derives
+the original broker identity and artifact from the scoped immutable physical
+enrollment (`native_broker_bootstrap_admission`, migration `0750`), before any
+provider reads and again after capture. Warm recovery requires existing durable
+evidence; it cannot register an old running box. This does not verify initial
+stderr or admit commands.
 `retained-provider-commands.ts` atomically captures the versioned broker locator
 and session output under the canonical native receipt/holder/settlement guards;
 the task-router adapter explicitly refuses that separate locator.

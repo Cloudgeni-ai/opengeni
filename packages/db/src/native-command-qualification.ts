@@ -7,7 +7,7 @@ import {
   type CommandSupervisionProtocol,
   type NativeBrokerCommandProtocol,
 } from "@opengeni/contracts";
-import { withRlsContext, type Database } from "./database";
+import { withRlsContext, isTransactionHandle, type Database } from "./database";
 import { assertNativeCommandQualificationReady } from "./native-command-readiness";
 
 const QualificationBase = z.object({
@@ -65,6 +65,69 @@ export type NativeCommandProviderQualification =
   | { status: "legacy" }
   | { status: "enrolled"; qualification: NativeCommandBirthQualification }
   | { status: "blocked"; reason: string; qualification?: NativeCommandBirthQualification };
+
+const BootstrapAdmissionInput = z
+  .object({
+    accountId: z.uuid(),
+    workspaceId: z.uuid(),
+    sandboxGroupId: z.uuid(),
+    leaseId: z.uuid(),
+    createOperationId: z.string().min(1).max(200),
+    sandboxId: z.string().regex(/^sb-[A-Za-z0-9_-]{1,200}$/u),
+    sourceSha: QualificationBase.shape.sourceSha,
+    providerBindingKey: QualificationBase.shape.providerBindingKey,
+  })
+  .strict();
+export type NativeBrokerBootstrapAdmissionInput = z.infer<typeof BootstrapAdmissionInput>;
+
+/** Read-only creation proof, not command authority. Source and namespace come
+ * from the immutable host build and authenticated provider. Plan and artifact
+ * are derived from the owner-qualified birth and original physical admission,
+ * never from public metadata or an echo from the guest. No provider I/O here. */
+export async function loadNativeBrokerBootstrapAdmission(
+  db: Database,
+  input: NativeBrokerBootstrapAdmissionInput,
+) {
+  if (isTransactionHandle(db))
+    throw new Error("Native broker bootstrap admission requires an outer commit boundary");
+  const scope = BootstrapAdmissionInput.parse(input);
+  return withRlsContext(db, scope, async (tx) => {
+    await assertNativeCommandQualificationReady(tx);
+    const [row] = await tx.execute<{ admission: unknown }>(sql`
+      select native_broker_bootstrap_admission(${scope.accountId}::uuid,
+        ${scope.workspaceId}::uuid,${scope.sandboxGroupId}::uuid,${scope.leaseId}::uuid,
+        ${scope.createOperationId},${scope.sandboxId}) as admission`);
+    const result = z
+      .object({
+        qualification: Qualification,
+        plan: NativeBrokerCreatePlan,
+        providerBindingKey: QualificationBase.shape.providerBindingKey,
+        createEpoch: z.number().int().nonnegative().safe(),
+        phase: z.enum(["warming", "warm"]),
+      })
+      .strict()
+      .parse(row?.admission);
+    const plan = validateQualifiedNativeBrokerPlan(result.qualification, result.plan);
+    if (
+      !plan ||
+      result.qualification.sourceSha !== scope.sourceSha ||
+      result.qualification.providerBindingKey !== scope.providerBindingKey ||
+      result.providerBindingKey !== scope.providerBindingKey
+    )
+      throw new Error("Native broker bootstrap host source or provider namespace is unqualified");
+    return Object.freeze({
+      phase: result.phase,
+      binding: Object.freeze({
+        version: 1 as const,
+        ...scope,
+        brokerId: plan.brokerId,
+        createEpoch: result.createEpoch,
+        artifactSha256: plan.artifact.artifactSha256,
+      }),
+      artifact: Object.freeze({ ...plan.artifact }),
+    });
+  });
+}
 
 /** Data validation only. The trusted provider caller obtains the plan from
  * the original physical intent, never from public metadata. SQL repeats this

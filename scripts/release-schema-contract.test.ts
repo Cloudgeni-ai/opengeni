@@ -37,6 +37,14 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("registers the read-only native broker bootstrap admission seam as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0750_native_broker_bootstrap_admission.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "rolling" });
+  });
   test("registers distinct broker creation qualification as maintenance-only", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2369,6 +2377,7 @@ describe("release schema contract", () => {
       "0747_native_command_broker_control_replies.sql",
       "0748_native_command_broker_input_replies.sql",
       "0749_native_broker_creation_qualification.sql",
+      "0750_native_broker_bootstrap_admission.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
       "0698_codex_ownerless_person_turns.sql",
       "0697_codex_retry_after_unknown_outcome.sql",

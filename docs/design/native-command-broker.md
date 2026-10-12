@@ -105,12 +105,22 @@ Canonical capture/drain may retain a broker group's checkpoint, but consuming
 a provider snapshot remains refused until its separate preservation path is
 qualified; that refusal never discards the snapshot or changes cohort birth.
 
+The core `registerQualifiedNativeBrokerBootstrap` composition reads the exact
+frozen physical enrollment through the scoped `native_broker_bootstrap_admission`
+reader (rolling migration `0750`). It derives the broker identity and artifact
+pin from that record, requires the host source and authenticated namespace to
+match, and rechecks the lease after prefix capture. A warming lease must already
+have the exact physical receipt. Warm recovery requires its existing retained
+bootstrap: missing evidence cannot be recreated from a later provider read.
+An apparently valid lease JSON object without the original private enrollment
+does not qualify. No provider I/O runs inside the admission transaction.
+
 This is request binding and lifecycle ordering, not provider qualification.
 Neither the plan nor its in-memory proof grants command authority or verifies
 the initial stream. Application code does not yet select the opt-in. The frozen
-cohort/qualified image selection, authenticated task
-and initial stdout/stderr verification, the verified-prefix journal composition
-and session adapter must be connected before activation. Fake-provider lifecycle tests do not
+cohort/qualified image selection, authenticated task and initial stderr
+verification, qualified verified-prefix composition and session adapter must be
+connected to application creation before activation. Fake-provider lifecycle tests do not
 replace that physical proof, and this recipe cannot enroll an old warm sandbox
 or authorize a snapshot derivation.
 

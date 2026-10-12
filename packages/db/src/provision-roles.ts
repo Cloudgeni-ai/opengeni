@@ -2111,7 +2111,8 @@ BEGIN
     END LOOP;
     FOREACH routine_signature IN ARRAY ARRAY[
       'native_command_birth_qualification(uuid,uuid,uuid)',
-      'native_command_provider_qualification(uuid,uuid,uuid,text,bigint)'
+      'native_command_provider_qualification(uuid,uuid,uuid,text,bigint)',
+      'native_broker_bootstrap_admission(uuid,uuid,uuid,uuid,text,text)'
     ] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);

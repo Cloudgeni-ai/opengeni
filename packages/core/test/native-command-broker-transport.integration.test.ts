@@ -12,6 +12,10 @@ import {
   createDb,
   createSession,
   getRetainedProcess,
+  beginModalProviderCreate,
+  recordWarmingSandboxCreated,
+  commitWarmingToWarm,
+  publishNativeCommandQualification,
   settleRetainedProcess,
   type DbClient,
 } from "@opengeni/db";
@@ -32,11 +36,13 @@ import {
   projectNativeBrokerCommand,
   NativeBrokerRetainedCommand,
   captureNativeBrokerBootstrap,
+  type NativeBrokerArtifactPin,
 } from "@opengeni/runtime/sandbox";
 import { encodeNativeBrokerCommandDefinition } from "../../runtime/src/sandbox/providers/native-command-broker-definition";
 import {
   createDurableNativeBrokerTransport,
   registerCapturedNativeBrokerBootstrap,
+  registerQualifiedNativeBrokerBootstrap,
 } from "../src/native-command-broker-transport";
 import {
   encodeNativeBrokerFrame,
@@ -57,7 +63,7 @@ afterAll(async () => {
   await database?.release();
 }, 60_000);
 
-async function fixture(register = true) {
+async function fixture(register = true, qualifiedPin?: NativeBrokerArtifactPin) {
   const unique = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -68,7 +74,38 @@ async function fixture(register = true) {
     workspaceName: "Broker",
     subjectId: `test-${unique}`,
   });
-  const { accountId, workspaceId } = access.workspaceGrants[0]!;
+  const { accountId, workspaceId, subjectId } = access.workspaceGrants[0]!;
+  const createIdempotencyKey = crypto.randomUUID();
+  const imageRef = `ghcr.io/cloudgeni-ai/opengeni-desktop@sha256:${"e".repeat(64)}`;
+  const providerBindingKey = JSON.stringify({
+    version: 1,
+    serverUrl: "https://api.modal.test",
+    workspaceName: "test",
+    environment: "test",
+  });
+  if (qualifiedPin) {
+    const operator = createDb(database.adminUrl, { max: 1 });
+    try {
+      await publishNativeCommandQualification(operator.db, {
+        accountId,
+        workspaceId: workspaceId!,
+        creatorSubjectId: subjectId,
+        createIdempotencyKey,
+        id: crypto.randomUUID(),
+        activationGeneration: 1,
+        sourceSha: "a".repeat(40),
+        imageRef,
+        providerImageId: "im-bootstrap-fixture",
+        providerBindingKey,
+        acceptanceEvidenceHash: "f".repeat(64),
+        enrollmentEnabled: true,
+        protocols: ["native-subreaper-broker-channel-v1", "native-subreaper-broker-channel-pty-v1"],
+        brokerArtifact: qualifiedPin,
+      });
+    } finally {
+      await operator.close();
+    }
+  }
   const session = await createSession(client.db, {
     accountId,
     workspaceId: workspaceId!,
@@ -78,7 +115,10 @@ async function fixture(register = true) {
     model: "test",
     reasoningEffort: "medium",
     latencyMode: "standard",
-    sandboxBackend: "none",
+    sandboxBackend: qualifiedPin ? "modal" : "none",
+    ...(qualifiedPin
+      ? { createdBy: { kind: "subject" as const, subjectId }, createIdempotencyKey }
+      : {}),
   });
   const binding: NativeBrokerTransportBinding = {
     version: 1,
@@ -91,14 +131,9 @@ async function fixture(register = true) {
     createEpoch: 1,
     sandboxId: `sb-${unique}`,
     taskId: `ta-${unique}`,
-    providerBindingKey: JSON.stringify({
-      version: 1,
-      serverUrl: "https://api.modal.test",
-      workspaceName: "test",
-      environment: "test",
-    }),
+    providerBindingKey,
     sourceSha: "a".repeat(40),
-    artifactSha256: "b".repeat(64),
+    artifactSha256: qualifiedPin?.artifactSha256 ?? "b".repeat(64),
     bootstrapEvidenceSha256: "c".repeat(64),
   };
   await database.admin`INSERT INTO sandbox_leases ${database.admin({
@@ -109,19 +144,64 @@ async function fixture(register = true) {
     backend: "modal",
     liveness: "warming",
     lease_epoch: 1,
-    instance_id: binding.sandboxId,
+    instance_id: qualifiedPin ? null : binding.sandboxId,
     expires_at: new Date(Date.now() + 300000),
-    provider_create_attempt: database.admin.json({
-      version: 1,
+    provider_create_attempt: qualifiedPin
+      ? null
+      : database.admin.json({
+          version: 1,
+          operationId: binding.createOperationId,
+          leaseEpoch: 1,
+          providerBindingKey: binding.providerBindingKey,
+          appId: "ap-test",
+          providerName: `opengeni-create-${binding.createOperationId}`,
+          requestSha256: "d".repeat(64),
+          instanceId: binding.sandboxId,
+        }),
+  })}`;
+  if (qualifiedPin) {
+    await beginModalProviderCreate(client.db, {
+      accountId,
+      workspaceId: workspaceId!,
+      sandboxGroupId: binding.sandboxGroupId,
+      expectedEpoch: 1,
       operationId: binding.createOperationId,
-      leaseEpoch: 1,
-      providerBindingKey: binding.providerBindingKey,
-      appId: "ap-test",
+      providerBindingKey,
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-bootstrap-fixture",
+      imageRef,
+      appId: "ap-bootstrap-fixture",
       providerName: `opengeni-create-${binding.createOperationId}`,
       requestSha256: "d".repeat(64),
-      instanceId: binding.sandboxId,
-    }),
-  })}`;
+      nativeSourceSha: binding.sourceSha,
+      nativeImagePreparation: {
+        kind: "registry-import",
+        imageRef,
+        imageId: "im-bootstrap-fixture",
+      },
+      nativeBroker: {
+        version: 1,
+        brokerId: binding.brokerId,
+        sourceSha: binding.sourceSha,
+        imageId: "im-bootstrap-fixture",
+        artifact: qualifiedPin,
+      },
+    });
+    expect(
+      (
+        await recordWarmingSandboxCreated(client.db, {
+          accountId,
+          workspaceId: workspaceId!,
+          sandboxGroupId: binding.sandboxGroupId,
+          expectedEpoch: 1,
+          providerCreateOperationId: binding.createOperationId,
+          instanceId: binding.sandboxId,
+          leaseTtlMs: 60_000,
+        })
+      ).recorded,
+    ).toBe(true);
+  }
   const initial = initialNativeBrokerTransportState(binding);
   if (register) await registerNativeBrokerTransport(client.db, key, binding, initial);
   const store = nativeBrokerTransportStore(client.db, key, binding);
@@ -130,14 +210,14 @@ async function fixture(register = true) {
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-async function bootstrapFixture() {
-  const f = await fixture(false);
+async function bootstrapFixture(qualified = false) {
   const binary = Buffer.alloc(64, 17);
   const pin = {
     artifactSha256: createHash("sha256").update(binary).digest("hex"),
     byteSize: binary.length,
     target: "linux-amd64" as const,
   };
+  const f = await fixture(false, qualified ? pin : undefined);
   const bodies = [
     {
       kind: "hello" as const,
@@ -188,6 +268,140 @@ async function bootstrapFixture() {
   });
   return { f, pin, channel, captured };
 }
+
+function bootstrapAdmission(f: Fixture) {
+  const {
+    accountId,
+    workspaceId,
+    sandboxGroupId,
+    leaseId,
+    createOperationId,
+    sandboxId,
+    sourceSha,
+    providerBindingKey,
+  } = f.binding;
+  return {
+    accountId,
+    workspaceId,
+    sandboxGroupId,
+    leaseId,
+    createOperationId,
+    sandboxId,
+    sourceSha,
+    providerBindingKey,
+  };
+}
+
+test("qualified creation and bootstrap compose without guest-selected pins or warm reenrollment", async () => {
+  const { f, channel, captured } = await bootstrapFixture(true);
+  const input = bootstrapAdmission(f);
+  const results = await Promise.all(
+    [1, 2].map(() => registerQualifiedNativeBrokerBootstrap(client.db, key, input, channel)),
+  );
+  expect(results[0]!.binding).toEqual(f.binding);
+  expect(results[1]!.bootstrap).toEqual(captured.bootstrap);
+  expect(results[0]!.commandAdmission).toBe(false);
+  const writer = crypto.randomUUID();
+  await results[0]!.journal.claimWriter(writer);
+  const progressed = await results[0]!.journal.read();
+  expect(
+    (
+      await commitWarmingToWarm(client.db, {
+        ...input,
+        expectedEpoch: 1,
+        instanceId: input.sandboxId,
+        leaseTtlMs: 60_000,
+      })
+    ).committed,
+  ).toBe(true);
+  const recovered = await registerQualifiedNativeBrokerBootstrap(client.db, key, input, {
+    ...channel,
+    output() {
+      throw new Error("Warm recovery must not query old provider pages");
+    },
+  });
+  expect(await recovered.journal.read()).toEqual(progressed);
+  await expect(
+    registerQualifiedNativeBrokerBootstrap(client.db, key, input, {
+      ...channel,
+      taskId: "ta-substituted",
+      output() {
+        throw new Error("Must not read");
+      },
+    }),
+  ).rejects.toThrow("fenced");
+});
+
+test("qualified bootstrap rejects old groups, mismatched host source and unattested warm histories", async () => {
+  for (const qualified of [false, true]) {
+    const { f, channel } = await bootstrapFixture(qualified);
+    const input = bootstrapAdmission(f);
+    let reads = 0;
+    const observed = {
+      ...channel,
+      output() {
+        reads++;
+        return channel.output();
+      },
+    };
+    if (!qualified) {
+      await expect(
+        registerQualifiedNativeBrokerBootstrap(client.db, key, input, observed),
+      ).rejects.toThrow();
+    } else {
+      await expect(
+        registerQualifiedNativeBrokerBootstrap(
+          client.db,
+          key,
+          { ...input, sourceSha: "b".repeat(40) },
+          observed,
+        ),
+      ).rejects.toThrow("unqualified");
+      await expect(
+        registerQualifiedNativeBrokerBootstrap(client.db, key, input, {
+          ...observed,
+          sandboxId: "sb-substituted",
+        }),
+      ).rejects.toThrow("sandbox identity");
+      expect(
+        (
+          await commitWarmingToWarm(client.db, {
+            ...input,
+            expectedEpoch: 1,
+            instanceId: input.sandboxId,
+            leaseTtlMs: 60_000,
+          })
+        ).committed,
+      ).toBe(true);
+      await expect(
+        registerQualifiedNativeBrokerBootstrap(client.db, key, input, observed),
+      ).rejects.toThrow("existing durable bootstrap evidence");
+    }
+    expect(reads).toBe(0);
+    expect(
+      await database.admin`select id from native_command_broker_transports where id=${f.binding.brokerId}`,
+    ).toHaveLength(0);
+  }
+});
+
+test("lease transition during qualified prefix capture fences registration without replay", async () => {
+  const { f, channel } = await bootstrapFixture(true);
+  await expect(
+    registerQualifiedNativeBrokerBootstrap(client.db, key, bootstrapAdmission(f), {
+      ...channel,
+      async *output() {
+        try {
+          yield* channel.output();
+        } finally {
+          await database.admin`update sandbox_leases set liveness='draining' where id=${f.binding.leaseId}`;
+        }
+      },
+    }),
+  ).rejects.toThrow("fenced");
+  expect(
+    await database.admin`select id from native_command_broker_transports where id=${f.binding.brokerId}`,
+  ).toHaveLength(0);
+});
 
 test("initial bootstrap and all receipts commit together, survive concurrent replay and never rewind", async () => {
   const { f, pin, channel, captured } = await bootstrapFixture();
@@ -966,6 +1180,15 @@ test("nested savepoint handles cannot return a dispatch before the actual outer 
         { artifactSha256: f.binding.artifactSha256, byteSize: 64, target: "linux-amd64" },
       ),
     ).rejects.toThrow("outer commit");
+    await expect(
+      registerQualifiedNativeBrokerBootstrap(tx, key, bootstrapAdmission(f), {
+        sandboxId: f.binding.sandboxId,
+        taskId: f.binding.taskId,
+        output() {
+          throw new Error("qualified provider read inside a transaction");
+        },
+      }),
+    ).rejects.toThrow("outer commit");
   });
 });
 
@@ -1378,7 +1601,12 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     const elf = await readFile(join(artifactRoot, "build/opengeni-command-supervisor"));
     expect(sha(elf)).toBe(manifest.artifactSha256);
     expect(elf.length).toBe(manifest.byteSize);
-    const f = await fixture(false);
+    const artifactPin = {
+      artifactSha256: manifest.artifactSha256,
+      byteSize: manifest.byteSize,
+      target: manifest.target,
+    };
+    const f = await fixture(false, artifactPin);
     const directory = await mkdtemp(join(tmpdir(), "opengeni-native-broker-"));
     const child = Bun.spawn(
       [
@@ -1397,12 +1625,6 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     );
     const watchdog = setTimeout(() => child.kill("SIGTERM"), 50_000);
     watchdog.unref();
-    const artifactPin = {
-      artifactSha256: manifest.artifactSha256,
-      byteSize: manifest.byteSize,
-      target: manifest.target,
-    };
-    f.binding.artifactSha256 = artifactPin.artifactSha256;
     const pages: NativeBrokerOutputPage[] = [];
     let wake = () => {},
       streamError: unknown,
@@ -1505,12 +1727,11 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     }
     const id = crypto.randomUUID();
     try {
-      const registered = await registerCapturedNativeBrokerBootstrap(
+      const registered = await registerQualifiedNativeBrokerBootstrap(
         client.db,
         key,
-        f.binding,
+        bootstrapAdmission(f),
         channel,
-        artifactPin,
       );
       f.binding.bootstrapEvidenceSha256 = registered.binding.bootstrapEvidenceSha256;
       driver = new NativeBrokerDriver(registered.journal, channel, writerId);

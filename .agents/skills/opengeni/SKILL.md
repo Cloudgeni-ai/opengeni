@@ -100,6 +100,9 @@ Then open the smallest source files that answer the question:
   core registers its verified frame/page receipts and cursor atomically. Exact
   replay cannot rewind state or retrofit missing evidence. Creation authority,
   initial stderr and qualified application selection remain separate gates.
+  `registerQualifiedNativeBrokerBootstrap` derives its pin and broker identity
+  through the immutable physical-enrollment reader (migration `0750`), rechecks
+  after capture, and requires existing durable evidence for warm recovery.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse

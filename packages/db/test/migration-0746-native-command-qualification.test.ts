@@ -30,6 +30,7 @@ import {
   disableNativeCommandEnrollment,
   inspectNativeCommandProviderQualification,
   loadNativeCommandBirthQualification,
+  loadNativeBrokerBootstrapAdmission,
   publishNativeCommandQualification,
   type NativeCommandQualification,
 } from "../src/native-command-qualification";
@@ -1138,6 +1139,129 @@ function brokerPlan(q: NativeCommandQualification) {
     artifact: { ...q.brokerArtifact },
   };
 }
+
+async function expectBootstrapPhysicalRefusal(action: Promise<unknown>) {
+  let failure: unknown;
+  try {
+    await action;
+  } catch (error) {
+    failure = error;
+  }
+  while (failure instanceof Error && failure.cause) failure = failure.cause;
+  expect(failure).toMatchObject({
+    code: "55000",
+    message: "Native broker bootstrap physical creation is fenced",
+  });
+}
+
+test("bootstrap admission derives only the exact immutable attributed broker creation", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws, 1, true);
+  const root = await session(ws);
+  const scope = scopeFor(ws, root.sandboxGroupId);
+  const leaseId = await warming(scope);
+  const plan = brokerPlan(q);
+  const create = createInput(scope, 0, { nativeBroker: plan });
+  await beginModalProviderCreate(app.db, create);
+  const sandboxId = `sb-${crypto.randomUUID()}`;
+  const input = {
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    sandboxGroupId: root.sandboxGroupId,
+    leaseId,
+    createOperationId: create.operationId,
+    sandboxId,
+    sourceSha: SOURCE,
+    providerBindingKey: BINDING_KEY,
+  };
+  await expectBootstrapPhysicalRefusal(loadNativeBrokerBootstrapAdmission(app.db, input));
+  expect(
+    (
+      await recordWarmingSandboxCreated(app.db, {
+        ...scope,
+        expectedEpoch: 0,
+        providerCreateOperationId: create.operationId,
+        instanceId: sandboxId,
+        leaseTtlMs: 60_000,
+      })
+    ).recorded,
+  ).toBe(true);
+  const loaded = await loadNativeBrokerBootstrapAdmission(app.db, input);
+  expect(loaded).toEqual({
+    phase: "warming",
+    artifact: plan.artifact,
+    binding: {
+      version: 1,
+      ...input,
+      brokerId: plan.brokerId,
+      createEpoch: 0,
+      artifactSha256: plan.artifact.artifactSha256,
+    },
+  });
+  expect(Object.isFrozen(loaded.binding)).toBe(true);
+  for (const changed of [
+    { accountId: crypto.randomUUID() },
+    { workspaceId: crypto.randomUUID() },
+    { sandboxGroupId: crypto.randomUUID() },
+    { leaseId: crypto.randomUUID() },
+    { createOperationId: crypto.randomUUID() },
+    { sandboxId: "sb-other" },
+    { sourceSha: "f".repeat(40) },
+    { providerBindingKey: JSON.stringify({ ...BINDING, environment: "other" }) },
+  ])
+    await expect(
+      loadNativeBrokerBootstrapAdmission(app.db, { ...input, ...changed }),
+    ).rejects.toThrow();
+  await disableNativeCommandEnrollment(owner.db, { ...ws, qualificationId: q.id });
+  // Disabling new births does not rewrite a frozen physical admission.
+  expect(await loadNativeBrokerBootstrapAdmission(app.db, input)).toEqual(loaded);
+  await warm(scope, create, sandboxId);
+  expect((await loadNativeBrokerBootstrapAdmission(app.db, input)).phase).toBe("warm");
+  await fixture.admin`update sandbox_leases set liveness='draining' where id=${leaseId}`;
+  await expectBootstrapPhysicalRefusal(loadNativeBrokerBootstrapAdmission(app.db, input));
+});
+
+test("bootstrap admission refuses metadata-only leases with no original enrollment", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws, 1, true);
+  const root = await session(ws);
+  const scope = scopeFor(ws, root.sandboxGroupId);
+  const plan = brokerPlan(q);
+  const create = createInput(scope, 0, { nativeBroker: plan });
+  const leaseId = crypto.randomUUID();
+  const sandboxId = `sb-${crypto.randomUUID()}`;
+  // Deliberately bypass canonical UPDATE admission using the isolated fixture
+  // administrator. A shaped lease alone is not the private enrollment record.
+  await fixture.admin`insert into sandbox_leases ${fixture.admin({
+    id: leaseId,
+    account_id: ws.accountId,
+    workspace_id: ws.workspaceId,
+    sandbox_group_id: scope.sandboxGroupId,
+    backend: "modal",
+    liveness: "warming",
+    lease_epoch: 0,
+    instance_id: sandboxId,
+    expires_at: new Date(Date.now() + 60_000),
+    provider_create_attempt: fixture.admin.json({
+      ...create,
+      version: 1,
+      leaseEpoch: 0,
+      instanceId: sandboxId,
+    }),
+  })}`;
+  await expectBootstrapPhysicalRefusal(
+    loadNativeBrokerBootstrapAdmission(app.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: scope.sandboxGroupId,
+      leaseId,
+      createOperationId: create.operationId,
+      sandboxId,
+      sourceSha: SOURCE,
+      providerBindingKey: BINDING_KEY,
+    }),
+  );
+});
 
 test("both publisher and SQL reject incomplete or mixed broker qualification pins", async () => {
   const ws = await workspace();

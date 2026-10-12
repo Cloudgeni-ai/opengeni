@@ -1009,6 +1009,7 @@ export const NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES = [
 export const NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES = [
   "native_command_birth_qualification(uuid, uuid, uuid)",
   "native_command_provider_qualification(uuid, uuid, uuid, text, bigint)",
+  "native_broker_bootstrap_admission(uuid, uuid, uuid, uuid, text, text)",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES,
