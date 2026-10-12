@@ -210,7 +210,7 @@ export function xaiCoreTitleCustody(
  */
 export function xaiCoreRequestOutcomeUnknown(
   error: unknown,
-  core: Pick<SubscriptionCoreTurn, "requests" | "titleRequests">,
+  core: Pick<SubscriptionCoreTurn, "requests">,
 ): (Error & { code: string }) | null {
   let current: unknown = error;
   let unknown = false;
@@ -218,23 +218,21 @@ export function xaiCoreRequestOutcomeUnknown(
     unknown = hasCoreCode(current, "subscription_core_request_outcome_unknown");
     current = current.cause;
   }
-  if (!unknown && !core.requests?.hasUnknownOutcome() && !core.titleRequests?.hasUnknownOutcome())
-    return null;
+  // The tool-less session-title request never enters history and is joined
+  // before settlement, so its custody does not fence replay.
+  if (!unknown && !core.requests?.hasUnknownOutcome()) return null;
   return XAI.errors.requestOutcomeUnknown() as Error & { code: string };
 }
 
 /** After the history commit, settle completed responses; true when no request is unresolved. */
 export async function xaiCoreLanesRecoverAfterCheckpoint(
-  core: Pick<SubscriptionCoreTurn, "requests" | "titleRequests">,
+  core: Pick<SubscriptionCoreTurn, "requests">,
   commitHistory: () => Promise<void>,
 ): Promise<boolean> {
   try {
     await commitHistory();
     await core.requests?.checkpoint();
-    return (
-      (!core.requests || core.requests.canRecover()) &&
-      (!core.titleRequests || core.titleRequests.canRecover())
-    );
+    return !core.requests || core.requests.canRecover();
   } catch {
     return false;
   }

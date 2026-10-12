@@ -84,8 +84,9 @@ export async function failOverCoreCodexTurn(
     return null;
   }
   // Logical disconnect/lease loss never proves an outstanding fetch quiescent.
+  // The tool-less session-title request is cancelled and joined before
+  // settlement and never enters history, so it does not fence failover.
   if (core.requests && !core.requests.canRecover()) return null;
-  if (core.titleRequests && !core.titleRequests.canRecover()) return null;
   const disconnected = refusal === "source_disconnected";
   const refusals = disconnected
     ? null
