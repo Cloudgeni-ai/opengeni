@@ -40,6 +40,7 @@ import {
   requireWorkspaceToolGatewayAuthorization,
   throwWorkspaceToolGatewayHttpError,
   type PreparedWorkspaceToolGateway,
+  type WorkspaceSiteVersionResolver,
 } from "./workspace-tool-gateway";
 import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { TargetAuthorityFence, targetFenceCaller } from "./workspace-tool-target-fence";
@@ -71,22 +72,44 @@ function projectedPath(identity: ToolGatewayIdentity) {
   return projectToolGatewayPath({ identity, ...(alias ? { codemodePath: alias } : {}) });
 }
 
+/**
+ * Reads a pinned Site as the request's caller may see it. Targeted routes admit
+ * no attempt-scoped grant (`requireWorkspaceToolGatewayAuthorization`), so whom
+ * a caller reads Sites as follows from its grant alone and is resolved once per
+ * request. Every read still filters by it, so an audience change applies at
+ * the next evaluation.
+ */
+async function siteVersionReader(
+  deps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+): Promise<WorkspaceSiteVersionResolver> {
+  const viewer = await siteViewerForGrant(deps.db, authorization.grant);
+  return async (db, grant, artifactId, versionId) =>
+    await getWorkspaceArtifactContentRef(db, grant.workspaceId, viewer, artifactId, versionId);
+}
+
 /** Site paths are matched to the stored allowlist before any provider work. */
 async function siteTarget(
   deps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
   request: ToolGatewayResolveRequest,
   options: TargetGatewayOptions,
-): Promise<ToolGatewayTarget> {
-  if (!request.siteArtifactId || !request.siteVersionId) return request.target;
+): Promise<{
+  target: ToolGatewayTarget;
+  site?: {
+    context: { siteArtifactId: string; siteVersionId: string; identity: ToolGatewayIdentity };
+    visible: WorkspaceSiteVersionResolver;
+  };
+}> {
+  if (!request.siteArtifactId || !request.siteVersionId) return { target: request.target };
+  const visible = await siteVersionReader(deps, authorization);
   let identity: ToolGatewayIdentity;
   if ("identity" in request.target) identity = request.target.identity;
   else {
     try {
-      const { status, version } = await getWorkspaceArtifactContentRef(
+      const { status, version } = await visible(
         deps.db,
-        authorization.grant.workspaceId,
-        await siteViewerForGrant(deps.db, authorization.grant),
+        authorization.grant,
         request.siteArtifactId,
         request.siteVersionId,
       );
@@ -99,12 +122,18 @@ async function siteTarget(
       throw new HTTPException(403, { message: "site_tool_not_authorized" });
     }
   }
+  const context = {
+    siteArtifactId: request.siteArtifactId,
+    siteVersionId: request.siteVersionId,
+    identity,
+  };
   await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
     deps.db,
     authorization.grant,
-    { siteArtifactId: request.siteArtifactId, siteVersionId: request.siteVersionId, identity },
+    context,
+    visible,
   );
-  return { identity };
+  return { target: { identity }, site: { context, visible } };
 }
 
 /**
@@ -163,21 +192,16 @@ async function withTarget<T>(
   try {
     // Admission: the live caller, then the exact pinned Site entry.
     await fence.admit();
-    const target = await siteTarget(deps, authorization, request, options);
-    if (request.siteArtifactId && request.siteVersionId && "identity" in target) {
-      const site = {
-        siteArtifactId: request.siteArtifactId,
-        siteVersionId: request.siteVersionId,
-        identity: target.identity,
-      };
+    const { target, site } = await siteTarget(deps, authorization, request, options);
+    if (site)
       fence.setSite(async (db) => {
         await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
           db,
           authorization.grant,
-          site,
+          site.context,
+          site.visible,
         );
       });
-    }
     let tool: ToolGatewayResolvedTool;
     try {
       // Preparation installs the route part before any provider is built and
@@ -409,36 +433,23 @@ export async function approveWorkspaceToolTarget(
   );
 }
 
-/** Compatibility discovery is bounded by requested identities, grouped per connector. */
-export async function resolveWorkspaceToolManifest(
-  deps: ApiRouteDeps,
+/**
+ * Every requested identity must still be on the pinned Site version; with none
+ * requested, the version itself must still be the active one. Each evaluation
+ * reads the Site once, as the caller may see it, and checks every identity
+ * against that read.
+ */
+function manifestSiteCheck(
   authorization: AccessGrantAuthorization,
-  request: ToolGatewayManifestRequest,
-  options: TargetGatewayOptions = {},
+  site: { siteArtifactId: string; siteVersionId: string },
+  identities: readonly ToolGatewayIdentity[],
+  visible: WorkspaceSiteVersionResolver,
+  options: TargetGatewayOptions,
 ) {
-  requireWorkspaceToolGatewayAuthorization(authorization);
-  options.signal?.throwIfAborted();
-  const identities = [
-    ...new Map(request.identities.map((identity) => [key(identity), identity])).values(),
-  ];
-  const siteArtifactId = request.siteArtifactId;
-  const siteVersionId = request.siteVersionId;
-  // Every requested identity must still be on the pinned Site version; with
-  // none requested, the version itself must still be the active one. Each
-  // evaluation reads the version once and checks every identity against it.
-  const authorizeSite = async (db: Database) => {
-    if (!siteArtifactId || !siteVersionId) return;
-    // Who the caller reads Sites as, then the version they can see.
-    let read: ReturnType<typeof getWorkspaceArtifactContentRef> | undefined;
+  return async (db: Database) => {
+    let read: ReturnType<WorkspaceSiteVersionResolver> | undefined;
     const pinned = () =>
-      (read ??= (async () =>
-        await getWorkspaceArtifactContentRef(
-          db,
-          authorization.grant.workspaceId,
-          await siteViewerForGrant(db, authorization.grant),
-          siteArtifactId,
-          siteVersionId,
-        ))());
+      (read ??= visible(db, authorization.grant, site.siteArtifactId, site.siteVersionId));
     if (identities.length === 0) {
       let status: string;
       let versionId: string;
@@ -451,24 +462,48 @@ export async function resolveWorkspaceToolManifest(
           throw new HTTPException(403, { message: "site_tool_not_authorized" });
         throw error;
       }
-      if (status !== "active" || versionId !== siteVersionId)
+      if (status !== "active" || versionId !== site.siteVersionId)
         throw new HTTPException(403, { message: "site_tool_not_authorized" });
     }
     for (const identity of identities)
       await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
         db,
         authorization.grant,
-        { siteArtifactId, siteVersionId, identity },
+        { ...site, identity },
         pinned,
       );
   };
+}
+
+/** Compatibility discovery is bounded by requested identities, grouped per connector. */
+export async function resolveWorkspaceToolManifest(
+  deps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+  request: ToolGatewayManifestRequest,
+  options: TargetGatewayOptions = {},
+) {
+  requireWorkspaceToolGatewayAuthorization(authorization);
+  options.signal?.throwIfAborted();
+  const identities = [
+    ...new Map(request.identities.map((identity) => [key(identity), identity])).values(),
+  ];
   const fence = createTargetFence(deps, authorization, options, false);
   let prepared: PreparedWorkspaceToolGateway | undefined;
   try {
     // Admission: the live caller, then the pinned Site entries.
     await fence.admit();
-    await authorizeSite(deps.db);
-    fence.setSite(authorizeSite);
+    const { siteArtifactId, siteVersionId } = request;
+    if (siteArtifactId && siteVersionId) {
+      const authorizeSite = manifestSiteCheck(
+        authorization,
+        { siteArtifactId, siteVersionId },
+        identities,
+        await siteVersionReader(deps, authorization),
+        options,
+      );
+      await authorizeSite(deps.db);
+      fence.setSite(authorizeSite);
+    }
     try {
       prepared = await (options.prepare ?? prepareWorkspaceToolGateway)(deps, authorization, {
         allowedIdentities: identities,
