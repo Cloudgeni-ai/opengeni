@@ -80068,7 +80068,18 @@ export type SettleCodexCredentialLeaseLossResult =
   | { action: "failed"; events: SessionEvent[] }
   | { action: "stale"; events: [] };
 
+import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";
+import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
+
 export type RequestSessionTurnRecoveryInput = {
+  /** C2 only: proposal is persisted atomically with recovery, never placement. */
+  subscriptionServingTarget?: {
+    crossProviderFailoverEnabled: true;
+    executionGeneration: number;
+    policy: import("@opengeni/contracts").TurnServingPolicyV1["policy"];
+    connectionId: string;
+    reason: import("@opengeni/contracts").TurnServingPolicyV1["reason"];
+  };
   sessionId: string;
   turnId: string;
   triggerEventId: string;
@@ -80304,6 +80315,33 @@ export async function requestSessionTurnRecovery(
           };
         }
       }
+      let servingTarget: import("@opengeni/contracts").TurnPendingServingPolicyV1 | null = null;
+      if (input.subscriptionServingTarget) {
+        const target = input.subscriptionServingTarget;
+        if (
+          target.crossProviderFailoverEnabled !== true ||
+          session.codexCompactionMode !== "portable"
+        )
+          throw new Error("Serving recovery requires enabled failover and portable history");
+        const scope = {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+        };
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          ...scope,
+          attemptId: input.attemptId,
+          executionGeneration: target.executionGeneration,
+        });
+        if (!fence.allowed) throw new Error(`Serving recovery fenced: ${fence.reason}`);
+        await assertSubscriptionServingRecoverySettledTx(tx as unknown as Database, scope);
+        servingTarget = await stageSubscriptionCorePendingServingPolicyTx(
+          tx as unknown as Database,
+          { ...scope, ...target, attemptId: input.attemptId },
+          fence,
+        );
+      }
       await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
         id: input.attemptId,
         accountId: session.accountId,
@@ -80383,6 +80421,7 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(servingTarget ? { turnPendingServingPolicyV1: servingTarget } : {}),
             ...(input.claudeAuthRecovery ? { claudeAuthRecovery: input.claudeAuthRecovery } : {}),
             ...(input.subscriptionLeaseBusy
               ? {
@@ -87588,3 +87627,19 @@ export async function loadDirectModelProviderConnection(
   return { ...metadata, apiKey: connection.credential.apiKey };
 }
 export { apiIntegrationToolEffect } from "./api-integration-approvals";
+export {
+  subscriptionCoreProvider,
+  subscriptionCoreProviderIds,
+} from "./subscription-core-providers";
+export {
+  placeSubscriptionCoreTurnWithFailover,
+  evaluateSubscriptionCorePlacementWithFailover,
+  type SubscriptionCoreFailoverPlacement,
+} from "./subscription-core/failover";
+export { type SubscriptionCoreFailoverModel } from "./subscription-core/failover-world";
+export { readSubscriptionCoreFailoverProvider } from "./subscription-core/failover-readiness";
+export {
+  recordSubscriptionCoreServingPolicyForTurnAttempt,
+  readSubscriptionCoreServingPolicyForTurn,
+} from "./subscription-core/serving-policy";
+export { readSubscriptionHistoryProvenance } from "./subscription-core/serving-runtime";

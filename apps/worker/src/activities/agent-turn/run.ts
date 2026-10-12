@@ -105,6 +105,7 @@ import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
+import { selectServingTurnCapacity } from "./subscription-serving-capacity";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import {
   assertTurnModelConnection,
@@ -648,12 +649,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               trigger,
               codexWorkspaceKey,
             };
-            const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
-            if ("exit" in codexCapacity) return codexCapacity.exit;
-            const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
-            if ("exit" in xaiCapacity) return xaiCapacity.exit;
-            const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
-            if ("exit" in claudeCapacity) return claudeCapacity.exit;
+            if (claimed.ok.servingAttempt) {
+              const servingCapacity = await selectServingTurnCapacity(
+                { ...capacityDeps, settings: capabilitySettings },
+                claimed.ok.servingAttempt,
+              );
+              if ("exit" in servingCapacity) return servingCapacity.exit;
+            } else {
+              const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
+              if ("exit" in codexCapacity) return codexCapacity.exit;
+              const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
+              if ("exit" in xaiCapacity) return xaiCapacity.exit;
+              const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
+              if ("exit" in claudeCapacity) return claudeCapacity.exit;
+            }
           }
 
           let selectedCapabilitySettings = capabilitySettings;
