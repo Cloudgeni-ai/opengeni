@@ -22,26 +22,12 @@ ALTER TABLE workspace_artifacts
   );
 
 -- The backfill reads across tenants, so it lifts FORCE row security for its
--- own transaction on exactly the tables that have it, then restores it.
-CREATE TEMP TABLE site_audience_forced_tables ON COMMIT DROP AS
-  SELECT relation.oid::regclass AS relation
-  FROM pg_catalog.pg_class relation
-  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-  WHERE namespace.nspname = pg_catalog.current_schema()
-    AND relation.relname IN (
-      'workspace_artifacts', 'workspace_artifact_versions', 'session_turns',
-      'organization_memberships'
-    )
-    AND relation.relforcerowsecurity;
-
-DO $lift$
-DECLARE target regclass;
-BEGIN
-  FOR target IN SELECT relation FROM site_audience_forced_tables LOOP
-    EXECUTE pg_catalog.format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', target);
-  END LOOP;
-END
-$lift$;
+-- own transaction on the tables it reads and writes, then restores it. All
+-- four are FORCE row security tables.
+ALTER TABLE workspace_artifacts NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_artifact_versions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_turns NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE organization_memberships NO FORCE ROW LEVEL SECURITY;
 
 WITH owners AS (
   SELECT site.id, coalesce(
@@ -88,15 +74,7 @@ WHERE site.id = owners.id
 -- row security is still lifted, so the table can be altered back below.
 SET CONSTRAINTS workspace_artifacts_validate_current IMMEDIATE;
 
-DO $restore$
-DECLARE target regclass;
-BEGIN
-  FOR target IN SELECT relation FROM site_audience_forced_tables LOOP
-    EXECUTE pg_catalog.format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target);
-  END LOOP;
-END
-$restore$;
-
+-- Checked while row security is still lifted, so it sees every Site.
 DO $existing_sites_stay_shared$
 BEGIN
   IF EXISTS (SELECT 1 FROM workspace_artifacts WHERE visibility <> 'workspace_shared') THEN
@@ -104,3 +82,8 @@ BEGIN
   END IF;
 END
 $existing_sites_stay_shared$;
+
+ALTER TABLE organization_memberships FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_turns FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_artifact_versions FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_artifacts FORCE ROW LEVEL SECURITY;
