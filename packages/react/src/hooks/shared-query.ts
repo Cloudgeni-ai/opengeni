@@ -15,10 +15,12 @@ import { usePageLiveActivity } from "./internal";
  *   (`["codex-accounts", workspaceId, "session", sessionId]`).
  * - By default nothing outlives its readers: mounted readers of one key share
  *   one request and one snapshot, and the entry is dropped as soon as the last
- *   reader unmounts. Only the reader instance that let go may take it back
- *   (StrictMode, effect re-runs); a different reader mounting in the same
- *   commit (a host re-keying its tree for another person) starts from nothing
- *   and the earlier read is discarded. Only a scope a host retains
+ *   reader unmounts. A reader renders an entry's rows only once it has
+ *   registered on it (layout phase, then a re-render before paint), and only
+ *   the reader instance that let go may take an entry back (StrictMode, effect
+ *   re-runs); a different reader mounting in the same commit (a host
+ *   re-keying its tree for another person) never renders the previous rows,
+ *   starts from nothing, and the earlier read and writes are discarded. Only a scope a host retains
  *   (`retainSharedQueries`, used by the provider opt-in) keeps unmounted
  *   entries for `retainMs`, so a host that reuses one client for different
  *   people never serves one person's rows to the next mount. Ending the last
@@ -112,6 +114,8 @@ type Entry = {
   retainTimer: ReturnType<typeof setTimeout> | null;
   /** The reader instance that last let go of this entry while it awaits release. */
   releasedBy: object | null;
+  /** When this entry last started over for a new owner (see `resetSequence`). */
+  resetMark: number;
 };
 
 type Scope = {
@@ -124,6 +128,11 @@ type Scope = {
 };
 
 const scopes = new WeakMap<object, Scope>();
+/**
+ * Orders writers against entries that started over for a new owner: a writer
+ * created before an entry's mark never writes to it.
+ */
+let resetSequence = 0;
 
 function idle<T>(loading: boolean): SharedQuerySnapshot<T> {
   return { data: null, loading, fetching: false, error: null, updatedAt: null };
@@ -163,8 +172,13 @@ function readers(entry: Entry): Subscriber[] {
   );
 }
 
+/**
+ * Registered readers keep an entry. Store listeners don't: React removes them
+ * in the passive phase, after the layout-phase unsubscribe has already
+ * decided the entry's release.
+ */
 function mounted(entry: Entry): boolean {
-  return entry.subscribers.size > 0 || entry.listeners.size > 0;
+  return entry.subscribers.size > 0;
 }
 
 function stopTimer(entry: Entry): void {
@@ -348,6 +362,9 @@ function getOrCreate(scope: object, key: string, loading: boolean): Entry {
     timerInterval: null,
     retainTimer: null,
     releasedBy: null,
+    // Without retention a new entry may be someone else's: writers created
+    // before it (by an earlier, now unmounted reader) never fill it.
+    resetMark: state.retainers === 0 ? ++resetSequence : 0,
   };
   state.entries.set(key, created);
   return created;
@@ -357,7 +374,7 @@ function getOrCreate(scope: object, key: string, loading: boolean): Entry {
  * Register a reader instance. In an unretained scope an entry that another
  * instance let go of in this same commit is not adopted: its rows and any read
  * in flight belonged to that reader (possibly another person), so it starts
- * over and writes begun before now are refused. True when it was reset.
+ * over and writes to it begun before now are refused. True when it was reset.
  */
 function registerSubscriber(scope: object, entry: Entry, subscriber: Subscriber): boolean {
   const state = scopeState(scope);
@@ -370,7 +387,7 @@ function registerSubscriber(scope: object, entry: Entry, subscriber: Subscriber)
     supersedeReads(entry);
     stopTimer(entry);
     entry.invalidated = false;
-    state.epoch += 1;
+    entry.resetMark = ++resetSequence;
     setSnapshot(entry, IDLE);
   }
   entry.releasedBy = null;
@@ -394,6 +411,20 @@ function unsubscribe(scope: object, entry: Entry, subscriber: Subscriber, retain
   scheduleRelease(state, entry, state.retainers > 0 ? retainMs : 0);
 }
 
+/**
+ * The entry a reader may render. Without host retention an entry's rows belong
+ * to the readers registered on it: until this reader has registered (layout
+ * phase) it renders a placeholder, so a reader replacing another in one
+ * commit never renders, or hands its children, the previous rows.
+ */
+function visibleEntry(scope: object, key: string, registered: Entry | null): Entry | null {
+  const state = scopes.get(scope);
+  const entry = state?.entries.get(key);
+  if (!state || !entry) return null;
+  if (state.retainers === 0 && registered !== entry) return null;
+  return entry;
+}
+
 /** The retained snapshot for a key, without subscribing or reading. */
 export function peekSharedQuery<T>(
   scope: object,
@@ -408,17 +439,20 @@ export function peekSharedQuery<T>(
 
 /**
  * A writer for data read some other way (for example a live provider refresh).
- * Create it BEFORE starting that read: a clear in between refuses the write,
- * so a retired identity's late result is never recorded. Mounted readers
+ * Create it BEFORE starting that read: a clear in between refuses every write,
+ * and an entry that started over for a new owner meanwhile refuses writes to
+ * it, so a retired identity's late result is never recorded. Mounted readers
  * render a write at once; with no reader, only a retained scope keeps it.
  */
 export function sharedQueryWriter(scope: object): SharedQueryWriter {
   const state = scopeState(scope);
   const epoch = state.epoch;
+  const since = resetSequence;
   return <T>(parts: SharedQueryKey, data: T): boolean => {
     if (state.epoch !== epoch) return false;
     const key = serialize(parts);
     const existing = state.entries.get(key);
+    if (existing && existing.resetMark > since) return false;
     if (!(existing && mounted(existing)) && state.retainers === 0) return false;
     const entry = existing ?? getOrCreate(scope, key, false);
     // A read already in flight started before this write; its result is older.
@@ -556,10 +590,13 @@ export function useSharedQuery<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scope, key],
   );
+  // The entry this instance is registered on (set in the layout phase).
+  const registered = useRef<Entry | null>(null);
   const getSnapshot = useCallback(
     () =>
-      (scopes.get(scope)?.entries.get(key)?.snapshot as SharedQuerySnapshot<T> | undefined) ??
-      (enabled ? IDLE_LOADING : IDLE),
+      (visibleEntry(scope, key, registered.current)?.snapshot as
+        | SharedQuerySnapshot<T>
+        | undefined) ?? (enabled ? IDLE_LOADING : IDLE),
     [scope, key, enabled],
   );
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
@@ -579,11 +616,18 @@ export function useSharedQuery<T>(
       staleTimeMs,
       retainMs,
     };
-    const reset = registerSubscriber(scope, entry, subscriber);
+    registerSubscriber(scope, entry, subscriber);
+    registered.current = entry;
     reconcile(entry);
-    // This render showed the previous reader's rows: replace them before paint.
-    if (reset) rerender();
-    return () => unsubscribe(scope, entry, subscriber, retainMs);
+    // Rendered before registering (a placeholder) or before a reset: show
+    // what is registered now, before the browser paints.
+    if (getSnapshot() !== snapshot) rerender();
+    return () => {
+      if (registered.current === entry) registered.current = null;
+      unsubscribe(scope, entry, subscriber, retainMs);
+    };
+    // `snapshot` is what this commit rendered; it never re-registers a reader.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, key, enabled, pageLive, pollIntervalMs, staleTimeMs, retainMs]);
 
   const refresh = useCallback((): Promise<void> => {
@@ -618,9 +662,12 @@ export function useSharedQueryValue<T>(
     },
     [scope, key],
   );
+  const registered = useRef<Entry | null>(null);
   const getSnapshot = useCallback(
     () =>
-      (scopes.get(scope)?.entries.get(key)?.snapshot as SharedQuerySnapshot<T> | undefined) ?? IDLE,
+      (visibleEntry(scope, key, registered.current)?.snapshot as
+        | SharedQuerySnapshot<T>
+        | undefined) ?? IDLE,
     [scope, key],
   );
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
@@ -637,8 +684,14 @@ export function useSharedQueryValue<T>(
       staleTimeMs: DEFAULT_STALE_TIME_MS,
       retainMs: DEFAULT_RETAIN_MS,
     };
-    if (registerSubscriber(scope, entry, subscriber)) rerender();
-    return () => unsubscribe(scope, entry, subscriber, DEFAULT_RETAIN_MS);
+    registerSubscriber(scope, entry, subscriber);
+    registered.current = entry;
+    if (getSnapshot() !== snapshot) rerender();
+    return () => {
+      if (registered.current === entry) registered.current = null;
+      unsubscribe(scope, entry, subscriber, DEFAULT_RETAIN_MS);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, key]);
   return snapshot;
 }

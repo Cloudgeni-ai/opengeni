@@ -11,7 +11,16 @@
      flight; clear resets mounted readers in place; failures are never cached.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { act, StrictMode, startTransition, Suspense, type ReactNode } from "react";
+import {
+  act,
+  StrictMode,
+  startTransition,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   clearSharedQueries,
@@ -207,6 +216,87 @@ describe("useSharedQuery — reader instances (no host opt-in)", () => {
     await flush();
     expect(tree.container.textContent).toBe("bob:bob-rows");
     await tree.unmount();
+  });
+
+  test("a re-keyed reader's children never see, keep or act on the previous rows", async () => {
+    const scope = {};
+    let person = "alice";
+    const { load } = counter(() => `${person}-rows`);
+    const seen: string[] = [];
+    function Child({ who, rows }: { who: string; rows: string | null }) {
+      // State seeded from the first rows it receives, plus both effect phases.
+      const [initial] = useState(() => rows);
+      seen.push(`${who}:render:${rows}`);
+      useLayoutEffect(() => {
+        seen.push(`${who}:layout:${rows}`);
+      });
+      useEffect(() => {
+        seen.push(`${who}:effect:${rows}`);
+      });
+      return <span>{`${who}:initial=${initial};now=${rows}`}</span>;
+    }
+    function Page({ who }: { who: string }) {
+      const { data } = useSharedQuery(scope, ["accounts"], load);
+      seen.push(`${who}:page:${data}`);
+      return <Child who={who} rows={data} />;
+    }
+    const tree = await renderTree(<Page key="alice" who="alice" />);
+    await flush();
+    expect(tree.container.textContent).toBe("alice:initial=null;now=alice-rows");
+    person = "bob";
+    await tree.rerender(<Page key="bob" who="bob" />);
+    await flush();
+    expect(tree.container.textContent).toBe("bob:initial=null;now=bob-rows");
+    const bobSaw = seen.filter((each) => each.startsWith("bob:"));
+    expect(bobSaw.length).toBeGreaterThan(0);
+    expect(bobSaw.filter((each) => each.includes("alice"))).toEqual([]);
+    await tree.unmount();
+  });
+
+  test("a reader joining a live one shows its rows without reading again", async () => {
+    const scope = {};
+    const { state, load } = counter(() => "rows");
+    const first = await mount(scope, ["accounts"], load);
+    await flush();
+    const second = await mount(scope, ["accounts"], load);
+    expect(second.result.current).toMatchObject({ data: "rows", loading: false });
+    expect(state.reads).toBe(1);
+    await second.unmount();
+    await first.unmount();
+  });
+
+  test("writes begun before an entry started over are refused for it, not for other entries", async () => {
+    const scope = {};
+    let person = "alice";
+    const { load } = counter(() => `${person}-rows`);
+    const usage = await renderHook(() => useSharedQueryValue<string>(scope, ["usage"]), undefined);
+    const tree = await renderTree(<Reader key="alice" scope={scope} who="alice" load={load} />);
+    await flush();
+    // Another surface's live read started before the re-key.
+    const write = sharedQueryWriter(scope);
+    person = "bob";
+    await tree.rerender(<Reader key="bob" scope={scope} who="bob" load={load} />);
+    await flush();
+    let accepted: boolean[] = [];
+    await actRun(async () => {
+      accepted = [write(["accounts"], "alice-late"), write(["usage"], "reading")];
+    });
+    expect(accepted).toEqual([false, true]);
+    expect(tree.container.textContent).toBe("bob:bob-rows");
+    expect(usage.result.current.data).toBe("reading");
+    await tree.unmount();
+    await flush();
+    // A later reader gets a new entry; a writer from before it never fills it.
+    const later = await renderTree(<Reader key="carol" scope={scope} who="carol" load={load} />);
+    await flush();
+    let late = true;
+    await actRun(async () => {
+      late = write(["accounts"], "alice-late");
+    });
+    expect(late).toBe(false);
+    expect(later.container.textContent).toBe("carol:bob-rows");
+    await later.unmount();
+    await usage.unmount();
   });
 
   test("the same reader's effect re-run keeps its rows and its read", async () => {
