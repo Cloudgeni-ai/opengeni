@@ -564,6 +564,14 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateRoutines: [
+      {
+        name: "knowledge_index_due_v1(text, integer)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog"],
+      },
       ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -2058,6 +2066,14 @@ describe("runtime database posture evaluator", () => {
         publicExecute: false,
         securityDefiner: false,
       },
+      {
+        name: "automatic_session_title_fanout_due_v1()",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog"],
+      },
     );
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
 
@@ -2104,6 +2120,47 @@ describe("runtime database posture evaluator", () => {
         expect.stringContaining("must be SECURITY INVOKER"),
       ]),
     );
+  });
+
+  test("a maintenance work check carries exactly its claim's authority", () => {
+    const violation = "maintenance work check knowledge_index_due_v1(text, integer)";
+    expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+    const unsafe = (
+      mutate: (routine: RuntimeDatabasePosture["privateRoutines"][number]) => void,
+    ) => {
+      const posture = safePosture();
+      mutate(
+        posture.privateRoutines.find(
+          (routine) => routine.name === "knowledge_index_due_v1(text, integer)",
+        )!,
+      );
+      return evaluateRuntimeDatabasePosture(posture, options).some((message) =>
+        message.startsWith(violation),
+      );
+    };
+    expect(unsafe((routine) => (routine.owner = "opengeni_app_owner"))).toBe(true);
+    expect(unsafe((routine) => (routine.publicExecute = true))).toBe(true);
+    expect(unsafe((routine) => (routine.execute = false))).toBe(true);
+    expect(unsafe((routine) => (routine.securityDefiner = false))).toBe(true);
+    expect(unsafe((routine) => (routine.configuration = ["search_path=public"]))).toBe(true);
+    const missing = safePosture();
+    missing.privateRoutines = missing.privateRoutines.filter(
+      (routine) => routine.name !== "knowledge_index_due_v1(text, integer)",
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(missing, options).some((message) =>
+        message.startsWith(violation),
+      ),
+    ).toBe(true);
+    // Before the claim exists, its check is not required.
+    missing.targetRoutines = missing.targetRoutines.filter(
+      (routine) => routine.name !== "knowledge_index_claim(text, integer, integer)",
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(missing, options).some((message) =>
+        message.startsWith(violation),
+      ),
+    ).toBe(false);
   });
 
   test("keeps pre-policy binaries ready against the post-policy-migration private routine catalog", () => {

@@ -1075,6 +1075,7 @@ export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
 export * from "./quiescence-receipt-wake-repair";
+export * from "./maintenance-work-probes";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";

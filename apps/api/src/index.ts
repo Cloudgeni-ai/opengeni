@@ -32,7 +32,9 @@ import { createObjectStorage } from "@opengeni/storage";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
   resolveCatalogSettings,
-  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
 } from "@opengeni/core";
 import {
   Connection,
@@ -173,9 +175,13 @@ export async function createTemporalWorkflowClient(
       });
     },
     requestSessionWorkflowWakeDispatch: async () => {
-      await temporal.schedule
-        .getHandle(SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID)
-        .trigger(ScheduleOverlapPolicy.BUFFER_ONE);
+      await temporal.workflow.signalWithStart(SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE, {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId: SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [],
+        signal: SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
+      });
     },
     signalCodexCapacity: async ({
       accountId,

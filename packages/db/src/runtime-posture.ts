@@ -42,6 +42,27 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+/** Read-only maintenance work checks (migration 0730) and the claim each one
+ * previews, which fixes its owner and runtime grant. */
+const MAINTENANCE_WORK_PROBE_ROUTINES = [
+  ["session_workflow_wakes_due_v1()", "claim_session_workflow_wakes(integer)", "private"],
+  [
+    "automatic_session_title_fanout_due_v1()",
+    "claim_automatic_session_title_fanout_v1(integer)",
+    "private",
+  ],
+  [
+    "knowledge_index_due_v1(text, integer)",
+    "knowledge_index_claim(text, integer, integer)",
+    "target",
+  ],
+  [
+    "site_auth_maintenance_due_v1(bigint)",
+    "claim_site_auth_maintenance(bigint, integer)",
+    "private",
+  ],
+] as const;
+
 const MODEL_FACT_CAPABILITY_ROUTINES = [
   [
     "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
@@ -4883,6 +4904,28 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
   ];
+  // Read-only maintenance work checks hold exactly the authority of the claim
+  // each previews. Once that claim exists, its check must too, so a cadence
+  // never silently loses the ability to see work.
+  for (const [name, claimName, claimSchema] of MAINTENANCE_WORK_PROBE_ROUTINES) {
+    const claim = (
+      claimSchema === "target" ? posture.targetRoutines : posture.privateRoutines
+    ).find((entry) => entry.name === claimName);
+    if (!claim) continue;
+    const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+    const routine = matches[0];
+    if (
+      matches.length !== 1 ||
+      !routine ||
+      routine.owner !== claim.owner ||
+      !routine.securityDefiner ||
+      routine.publicExecute ||
+      !routine.execute ||
+      !routine.configuration?.includes("search_path=pg_catalog")
+    ) {
+      violations.push(`maintenance work check ${name} is missing or has unsafe posture`);
+    }
+  }
   if (tableByName.has("organization_credential_providers")) {
     for (const [name] of integrationRoutine) {
       if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
