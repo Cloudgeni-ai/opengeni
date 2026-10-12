@@ -8536,6 +8536,24 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
+      "sdk": [
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
+      "sdk": [
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/video-generation",
       "sdk": [
         "OpenGeniClient.getVideoGenerationSettings"
@@ -13409,6 +13427,7 @@
         "$|1.status": "enum?=[\"\\\"active\\\"\",\"\\\"paused\\\"\"]",
         "$|1.targetSessionId": "string? null",
         "$|1.variableSetId": "string? null",
+        "$|1.vaultPolicy": "ref(VaultPolicy)?",
         "$|1.visibility": "ref(SessionVisibility)?",
         "$|runMode=existing_session": "ref(CreateSessionScheduledTaskRequest)"
       }
@@ -13479,6 +13498,7 @@
         "$.variableSetId": "string?",
         "$.variableSetIds": "array?",
         "$.variableSetIds[]": "string",
+        "$.vaultPolicy": "ref(VaultPolicy)?",
         "$.visibility": "enum?=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]",
         "$.workingDir": "string?"
       }
@@ -21876,6 +21896,13 @@
         "$.temporalScheduleId": "string!",
         "$.updatedAt": "string!",
         "$.variableSetId": "string! null",
+        "$.vaultPolicy": "union!=[\"mode=all\",\"mode=selected\"]",
+        "$.vaultPolicy|mode=all": "object",
+        "$.vaultPolicy|mode=all.mode": "const!=[\"\\\"all\\\"\"]",
+        "$.vaultPolicy|mode=selected": "object",
+        "$.vaultPolicy|mode=selected.mode": "const!=[\"\\\"selected\\\"\"]",
+        "$.vaultPolicy|mode=selected.vaultIds": "array!",
+        "$.vaultPolicy|mode=selected.vaultIds[]": "string",
         "$.visibility": "enum!=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]",
         "$.workspaceId": "string!"
       }
@@ -25731,6 +25758,7 @@
         "$.status": "ref(ScheduledTaskStatus)?",
         "$.targetSessionId": "string? null",
         "$.variableSetId": "string? null",
+        "$.vaultPolicy": "ref(VaultPolicy)?",
         "$.visibility": "ref(SessionVisibility)?"
       }
     },

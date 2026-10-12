@@ -9,6 +9,7 @@ import {
   accessContextHasInbox,
   verifyDelegatedAccessToken,
   DEVELOPER_SETUP_API_KEY_PRESET,
+  normalizePermission,
   organizationAccessPresetPermissions,
   type AccountGrant,
   type AccessContext,
@@ -1359,15 +1360,28 @@ export function hasPermission(
   permissionMode?: AccessGrant["permissionMode"],
 ): boolean {
   if (!Array.isArray(permissions)) return false;
-  if (permissionMode === "explicit" || explicitPermissionSets.has(permissions))
-    return permissions.includes(permission);
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
+  const granted = permissions.includes(permission) || grantsSecretAlias(permissions, permission);
+  if (permissionMode === "explicit" || explicitPermissionSets.has(permissions)) return granted;
   // Variable-set metadata, plaintext read, write/rotation, attachment, and
   // runtime use are independent capabilities. Deprecated broad permissions
   // remain parseable but do not imply any of the exact permissions.
-  return permissions.includes(permission) || permissions.includes("workspace:admin");
+  return granted || permissions.includes("workspace:admin");
+}
+
+/**
+ * Stored roles and API keys keep their legacy variable-set names (Q-16): a
+ * canonical `secrets:*` requirement is met by any granted name that aliases to
+ * it. Legacy requirements (the variable-set routes, until they are removed)
+ * keep their exact meaning. `secrets:read` is never aliased.
+ */
+function grantsSecretAlias(permissions: readonly Permission[], permission: Permission): boolean {
+  if (normalizePermission(permission) !== permission) return false;
+  return permissions.some(
+    (granted) => granted !== permission && normalizePermission(granted) === permission,
+  );
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
