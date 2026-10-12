@@ -11,26 +11,35 @@
  */
 import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
+import { SUBSCRIPTION_CORE_CLAUDE } from "./subscription-core-claude-adapter";
 import { SUBSCRIPTION_CORE_CODEX } from "./subscription-core-codex-adapter";
 import { SUBSCRIPTION_CORE_XAI } from "./subscription-core-xai-adapter";
 
-const REGISTERED: readonly SubscriptionCoreProvider[] = Object.freeze([
-  SUBSCRIPTION_CORE_CODEX as SubscriptionCoreProvider,
-  SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider,
-]);
-
 // Private: callers read through the functions below, so the registry cannot
-// be changed at runtime.
-const BINDINGS = new Map(REGISTERED.map((binding) => [binding.adapter.provider, binding]));
+// be changed at runtime. Initialize on first use, not module evaluation:
+// adapter usage codecs also import repository helpers, which import this
+// registry. An adapter-first import must not read its unfinished binding.
+let bindings: ReadonlyMap<string, SubscriptionCoreProvider> | undefined;
+function registeredBindings(): ReadonlyMap<string, SubscriptionCoreProvider> {
+  if (!bindings) {
+    const registered: readonly SubscriptionCoreProvider[] = Object.freeze([
+      SUBSCRIPTION_CORE_CODEX as SubscriptionCoreProvider,
+      SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider,
+      SUBSCRIPTION_CORE_CLAUDE as SubscriptionCoreProvider,
+    ]);
+    bindings = new Map(registered.map((binding) => [binding.adapter.provider, binding]));
+  }
+  return bindings;
+}
 
 /** The registered provider ids, sorted. */
 export function subscriptionCoreProviderIds(): string[] {
-  return [...BINDINGS.keys()].sort();
+  return [...registeredBindings().keys()].sort();
 }
 
 /** The registered binding for a provider id; fails closed for any other id. */
 export function subscriptionCoreProvider(providerId: string): SubscriptionCoreProvider {
-  const binding = BINDINGS.get(providerId);
+  const binding = registeredBindings().get(providerId);
   if (!binding || binding.adapter.provider !== providerId) {
     throw new Error("No subscription-core provider is registered for this id");
   }

@@ -229,4 +229,5 @@ export const embeddingMigrationTail = [
   // Owner-only routines over the shared connection table from withheld 0642.
   "0735_subscription_core_owned_connection_usage.sql",
   "0738_subscription_core_xai_cutover.sql",
+  "0739_subscription_core_claude_cutover.sql",
 ];

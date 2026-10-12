@@ -3,41 +3,21 @@
  * EP-N24 and EP-S13) through the real app, on real PostgreSQL as the
  * non-owner application role: who may read and refresh which connection.
  *
- * Claude stays unregistered in production until its cutover (C3); this file
- * registers the production binding in its own process and admits it on its
- * own test database. The usage endpoint is scripted through `claudeFetch`;
- * real network is denied.
- *
- * Run this file in its own process: the registration replaces module
- * bindings for the whole process.
+ * The migrated fixture uses the production Claude registration and receipt.
+ * The usage endpoint is scripted through `claudeFetch`; real network is denied.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import {
-  subscriptionCoreClaudeProvider,
-  type SubscriptionCoreClaudeCredential,
-} from "../../../packages/db/src/subscription-core-claude-adapter";
+import type { SubscriptionCoreClaudeCredential } from "../../../packages/db/src/subscription-core-claude-adapter";
 import { encryptEnvironmentValue } from "../../../packages/db/src/environment-crypto";
 import { installNetworkDenialGuard } from "../../../packages/db/test/fixtures/subscription-core-fake-api-key";
-import {
-  admitTestSubscriptionCoreProvider,
-  testSubscriptionCoreProviderModules,
-} from "../../../packages/db/test/helpers/subscription-core-test-provider";
 
 setDefaultTimeout(180_000);
-
-const CLAUDE = subscriptionCoreClaudeProvider({
-  fetch: (async () => {
-    throw new Error("no OAuth refresh is expected in this suite");
-  }) as unknown as typeof fetch,
-});
-for (const [specifier, factory] of testSubscriptionCoreProviderModules(CLAUDE))
-  mock.module(specifier, factory);
 
 const {
   createDb,
@@ -73,7 +53,6 @@ beforeAll(async () => {
   shared = acquired;
   client = createDb(shared.appUrl, { max: 6 });
   network = installNetworkDenialGuard(() => []);
-  await admitTestSubscriptionCoreProvider(shared.admin, CLAUDE);
 }, 180_000);
 
 afterAll(async () => {

@@ -32,6 +32,14 @@ import {
   createClaudeUsageObserver,
   type CapturedClaudeUsage,
 } from "../../../apps/worker/src/activities/agent-turn/claude-usage-observer";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 const key = Buffer.alloc(32, 7);
 const settings = testSettings({
@@ -42,7 +50,10 @@ const setupToken = "sk-ant-oat01-fixture";
 let shared: SharedTestDatabase;
 let client: DbClient;
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("claude-subscription-usage");
+  const acquired = await acquireSharedTestDatabase(
+    "claude-subscription-usage",
+    LEGACY_CLAUDE_WORLD,
+  );
   if (!acquired) throw new Error("Real PostgreSQL required for Claude usage verification");
   shared = acquired;
   client = createDb(shared.appUrl);

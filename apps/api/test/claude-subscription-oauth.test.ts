@@ -53,6 +53,14 @@ import { settingsWithOrganizationProviderCredentials } from "../../worker/src/ac
 import { parseModelProvidersJson, withClaudeConnectionCredential } from "@opengeni/config";
 import { refreshClaudeAccountUsage } from "../src/claude-subscription-account-usage";
 import { httpStatusForError } from "../src/app";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 const key = Buffer.alloc(32, 11);
 const settings = testSettings({
@@ -61,7 +69,7 @@ const settings = testSettings({
 });
 let shared: SharedTestDatabase, client: DbClient, deps: ApiRouteDeps;
 beforeAll(async () => {
-  const db = await acquireSharedTestDatabase("claude-subscription-oauth");
+  const db = await acquireSharedTestDatabase("claude-subscription-oauth", LEGACY_CLAUDE_WORLD);
   if (!db) throw new Error("Real PostgreSQL required for Claude sign-in verification");
   shared = db;
   client = createDb(db.appUrl);

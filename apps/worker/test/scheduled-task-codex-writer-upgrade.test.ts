@@ -53,6 +53,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   const personalConnectionVersions = "0730_subscription_core_personal_connection_versions.sql";
   const xaiCutover = "0738_subscription_core_xai_cutover.sql";
+  const claudeCutover = "0739_subscription_core_claude_cutover.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
@@ -63,7 +64,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
       (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}),
-      (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover})`;
+      (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);

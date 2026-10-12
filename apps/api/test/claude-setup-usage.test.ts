@@ -20,6 +20,14 @@ import {
 import { registerConnectionRoutes } from "../src/routes/connections";
 import { registerWorkspaceModelProviderRoutes } from "../src/routes/workspace-model-providers";
 import { registerClaudeSubscriptionAccountRoutes } from "../src/routes/claude-subscription-accounts";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 const secret = "claude-usage-api-test-delegation";
 const key = Buffer.alloc(32, 7);
@@ -27,7 +35,7 @@ let shared: SharedTestDatabase, client: DbClient;
 let accountId: string, workspaceId: string, subjectId: string;
 let credentialId: string;
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("claude-setup-usage-api");
+  const acquired = await acquireSharedTestDatabase("claude-setup-usage-api", LEGACY_CLAUDE_WORLD);
   if (!acquired) throw new Error("Real PostgreSQL required for Claude API verification");
   shared = acquired;
   client = createDb(shared.appUrl);

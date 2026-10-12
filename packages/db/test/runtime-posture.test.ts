@@ -420,7 +420,7 @@ function safePosture(): RuntimeDatabasePosture {
     sessionVariableSetAttachmentsCutoverPresent: true,
     claudeSubscriptionPoolActivationPresent: true,
     subscriptionCodexCutoverActivationPresent: true,
-    subscriptionProviderCutoverReceipts: ["codex", "xai"],
+    subscriptionProviderCutoverReceipts: ["claude", "codex", "xai"],
     tables: [
       {
         name: "tenant_rows",
@@ -887,6 +887,9 @@ describe("runtime database posture evaluator", () => {
     );
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the xai subscription-core cutover receipt (0738_subscription_core_xai_cutover.sql); apply the pending migrations first",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the claude subscription-core cutover receipt (0739_subscription_core_claude_cutover.sql); apply the pending migrations first",
     );
     // Each listed cutover migration is in this binary's ledger.
     for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
@@ -1674,7 +1677,9 @@ describe("runtime database posture evaluator", () => {
             ? 1
             : 0) -
           // 0738: the five legacy SuperGrok tables become read-only forensics.
-          (tables === RUNTIME_FULL_DML_TABLES ? 5 : 0) +
+          (tables === RUNTIME_FULL_DML_TABLES ? 5 : 0) -
+          // 0739: the five legacy Claude pool tables and its usage table too.
+          (tables === RUNTIME_FULL_DML_TABLES ? 6 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +

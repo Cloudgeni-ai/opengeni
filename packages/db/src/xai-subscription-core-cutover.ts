@@ -29,10 +29,12 @@ import {
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import {
   encodeSubscriptionCoreXaiCredential,
+  SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_CREDENTIAL_FORMAT,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
   SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID,
 } from "./subscription-core-xai-adapter";
+import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import {
   planSubscriptionCoreCutover,
   type SubscriptionCutoverConnection,
@@ -42,7 +44,11 @@ import {
   type SubscriptionCutoverSource,
 } from "./subscription-core/cutover-plan";
 import {
+  contentFreeSubscriptionCutoverError,
   createSubscriptionCutoverStageTables,
+  loadSubscriptionCutoverPlanContext,
+  subscriptionCutoverConflictError,
+  SubscriptionCutoverStageError,
   mintSubscriptionCutoverPersonalGenerations,
   writeSubscriptionCutoverConnections,
   type SubscriptionCutoverStagedConnection,
@@ -227,43 +233,13 @@ export function planXaiCutover(input: {
   return planSubscriptionCoreCutover(XAI_CUTOVER_RULES, input);
 }
 
-/** A stage error whose text is fixed and content-free by construction. */
-class XaiCutoverStageError extends Error {
-  readonly code: string | undefined;
-  constructor(message: string, code?: string) {
-    super(message);
-    this.name = "XaiCutoverStageError";
-    this.code = code;
-  }
-}
-
-const SQLSTATE = /^[0-9A-Z]{5}$/;
-const IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
-const OWN_REFUSAL = /^\d{4} [a-z][A-Za-z0-9 ,:()_-]{0,300}$/;
-
 /**
- * Driver errors carry the statement's parameters (ciphertext, labels, emails)
- * and the server's detail text; neither may leave the stage. Only the
- * SQLSTATE and the violated constraint's name survive, plus the migration's
- * own fixed refusals.
+ * Driver errors carry the statement's parameters and the server's detail
+ * text; only the SQLSTATE, the violated constraint's name and the
+ * migration's own fixed refusals leave the stage.
  */
 export function contentFreeXaiCutoverError(error: unknown): Error {
-  if (error instanceof XaiCutoverStageError) return error;
-  const source = (error ?? {}) as { code?: unknown; constraint_name?: unknown; message?: unknown };
-  const code = typeof source.code === "string" && SQLSTATE.test(source.code) ? source.code : null;
-  if (code === "55000" && typeof source.message === "string" && OWN_REFUSAL.test(source.message)) {
-    return new XaiCutoverStageError(source.message, code);
-  }
-  const constraint =
-    typeof source.constraint_name === "string" && IDENTIFIER.test(source.constraint_name)
-      ? source.constraint_name
-      : null;
-  return new XaiCutoverStageError(
-    `SuperGrok subscription cutover could not write the shared core (SQLSTATE ${code ?? "unknown"}${
-      constraint ? `, ${constraint}` : ""
-    }); see the runbook`,
-    code ?? undefined,
-  );
+  return contentFreeSubscriptionCutoverError(error, "SuperGrok");
 }
 
 function nonEmpty(value: unknown): string | null {
@@ -304,7 +280,7 @@ function decodeCredential(
     };
   } catch {
     // Neither codec, JSON nor token values may escape through diagnostics.
-    throw new XaiCutoverStageError(
+    throw new SubscriptionCutoverStageError(
       "SuperGrok subscription cutover could not decode a legacy credential (credential_undecodable); see the runbook",
       "55000",
     );
@@ -381,7 +357,7 @@ async function moveXaiCredentials(
     ORDER BY id`;
   if (rows.length === 0 && operations.length === 0) return;
   if (encryptionKey?.length !== 32) {
-    throw new XaiCutoverStageError(
+    throw new SubscriptionCutoverStageError(
       "SuperGrok subscription cutover requires the existing environments encryption key",
     );
   }
@@ -432,7 +408,10 @@ async function stageVideoReferences(
       connectionId?: unknown;
     };
     if (parsed.connectionId !== (connectionId ?? UNMAPPED_VIDEO_CONNECTION)) {
-      throw new XaiCutoverStageError("0738 parity mismatch (video_reference_readability)", "55000");
+      throw new SubscriptionCutoverStageError(
+        "0738 parity mismatch (video_reference_readability)",
+        "55000",
+      );
     }
     await tx`INSERT INTO subscription_cutover_video_credentials (
         operation_id, account_id, connection_id, reference_encrypted
@@ -453,72 +432,16 @@ async function moveXaiCredentialRows(
     decoded.set(row.id, decodeCredential(encryptionKey, stored!.credential_encrypted));
   }
 
-  const accountIds = [...new Set(rows.map((row) => row.account_id))];
-  const workspaces = await tx<{ id: string; account_id: string; personal: boolean }[]>`
-    SELECT workspace.id::text, workspace.account_id::text,
-      EXISTS (SELECT 1 FROM organization_memberships membership
-        WHERE membership.account_id = workspace.account_id
-          AND membership.personal_workspace_id = workspace.id) AS personal
-    FROM workspaces workspace WHERE workspace.account_id = ANY(${accountIds}::uuid[])`;
-  const memberships = await tx<
-    {
-      id: string;
-      account_id: string;
-      subject_id: string;
-      active: boolean;
-      personal_workspace_id: string | null;
-    }[]
-  >`
-    SELECT id::text, account_id::text, subject_id,
-      (status = 'active' AND revoked_at IS NULL) AS active, personal_workspace_id::text
-    FROM organization_memberships WHERE account_id = ANY(${accountIds}::uuid[])`;
-  const authorities = await tx<
-    {
-      id: string;
-      account_id: string;
-      organization_membership_id: string;
-      resource_id: string;
-      generation: number | string;
-      active: boolean;
-    }[]
-  >`
-    SELECT id::text, account_id::text, organization_membership_id::text, resource_id::text,
-      generation, (status = 'active' AND revoked_at IS NULL) AS active
-    FROM organization_user_resource_authorities
-    WHERE account_id = ANY(${accountIds}::uuid[]) AND resource_kind = ${LEGACY_RESOURCE_KIND}`;
-
+  const context = await loadSubscriptionCutoverPlanContext(tx, {
+    accountIds: rows.map((row) => row.account_id),
+    legacyResourceKind: LEGACY_RESOURCE_KIND,
+  });
   const plan = planXaiCutover({
     rows,
     identities: new Map([...decoded].map(([id, value]) => [id, value.identity])),
-    workspaces: workspaces.map((workspace) => ({
-      id: workspace.id,
-      accountId: workspace.account_id,
-      personal: workspace.personal,
-    })),
-    memberships: memberships.map((membership) => ({
-      id: membership.id,
-      accountId: membership.account_id,
-      subjectId: membership.subject_id,
-      active: membership.active,
-      personalWorkspaceId: membership.personal_workspace_id,
-    })),
-    legacyAuthorities: authorities.map((authority) => ({
-      id: authority.id,
-      accountId: authority.account_id,
-      membershipId: authority.organization_membership_id,
-      resourceId: authority.resource_id,
-      generation: Number(authority.generation),
-      active: authority.active,
-    })),
+    ...context,
   });
-  if (plan.conflicts.length > 0) {
-    const classes = [...new Set(plan.conflicts.map((entry) => entry.conflictClass))].sort();
-    const organizations = new Set(plan.conflicts.map((entry) => entry.accountId)).size;
-    throw new XaiCutoverStageError(
-      `0738 refused ambiguous legacy state (${classes.join(", ")}) in ${organizations} organization(s); see the runbook`,
-      "55000",
-    );
-  }
+  if (plan.conflicts.length > 0) throw subscriptionCutoverConflictError("0738", plan.conflicts);
 
   const personalOwners = [
     ...new Set(
@@ -575,7 +498,7 @@ async function moveXaiCredentialRows(
       };
     });
   await writeSubscriptionCutoverConnections(tx, {
-    provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
+    binding: SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider,
     encryptionKey,
     staged,
     personalGenerations,

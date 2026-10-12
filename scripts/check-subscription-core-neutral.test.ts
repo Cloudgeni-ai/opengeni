@@ -22,8 +22,9 @@ describe("subscription-core neutrality guard", () => {
     expect(files).toContain("packages/subscriptions/src/eligibility.ts");
     expect(files).toContain("packages/subscriptions/src/adapter.ts");
     expect(files.some((path) => path.includes("codex"))).toBe(false);
-    expect(sqlRegistryProviders(root)).toEqual(["codex", "xai"]);
+    expect(sqlRegistryProviders(root)).toEqual(["claude", "codex", "xai"]);
     expect(sqlRegistryConnectionKinds(root)).toEqual({
+      claude: "subscription",
       codex: "subscription",
       xai: "subscription",
     });

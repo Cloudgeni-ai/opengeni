@@ -3,11 +3,9 @@
  * the shared core (design 5.3, Claude track C2a), on real PostgreSQL as the
  * non-owner application role.
  *
- * Claude stays unregistered in production until its cutover (C3); this file
- * registers the production binding in its own process, and its registry row
- * and cutover receipt on its own test database, after first asserting the
- * legacy route (no receipt) is unchanged. The usage endpoint is scripted
- * through the probe's transport; real network is denied.
+ * The production registry and migrated database admit Claude. A separate
+ * historical fixture proves the pre-receipt legacy route. Only the adapter's
+ * token transport is replaced; usage is scripted and real network is denied.
  *
  * Run this file in its own process: the registration replaces module
  * bindings for the whole process.
@@ -16,22 +14,17 @@ import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } 
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { CLAUDE_OAUTH_TOKEN_URL, type Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
-import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
+import * as productionRegistry from "../src/subscription-core-providers";
 import {
   subscriptionCoreClaudeProvider,
   type SubscriptionCoreClaudeCredential,
 } from "../src/subscription-core-claude-adapter";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
-import {
-  admitTestSubscriptionCoreProvider,
-  testSubscriptionCoreProviderModules,
-} from "./helpers/subscription-core-test-provider";
 
 setDefaultTimeout(180_000);
 
-// Read before the test registration: what production registers.
-const productionProviderIds = subscriptionCoreProviderIds();
+const productionProviderIds = productionRegistry.subscriptionCoreProviderIds();
 
 /** The OAuth token endpoint; only the credential refresh tests script it. */
 let tokenEndpoint: typeof fetch = (async () => {
@@ -41,8 +34,11 @@ const CLAUDE = subscriptionCoreClaudeProvider({
   fetch: ((input: string | URL | Request, init?: RequestInit) =>
     tokenEndpoint(input, init)) as unknown as typeof fetch,
 });
-for (const [specifier, factory] of testSubscriptionCoreProviderModules(CLAUDE))
-  mock.module(specifier, factory);
+const productionLookup = productionRegistry.subscriptionCoreProvider;
+mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.dir), () => ({
+  ...productionRegistry,
+  subscriptionCoreProvider: (id: string) => (id === "claude" ? CLAUDE : productionLookup(id)),
+}));
 
 const {
   bootstrapWorkspace,
@@ -173,7 +169,7 @@ async function ensureTestClaudeRegistration(): Promise<void> {
   const [row] = await shared.admin<{ registered: boolean }[]>`
     select exists (select 1 from opengeni_private.subscription_core_providers
       where provider = 'claude') as registered`;
-  if (!row!.registered) await admitTestSubscriptionCoreProvider(shared.admin, CLAUDE);
+  expect(row!.registered).toBe(true);
 }
 
 async function setSource(org: Org, inferenceSource: "automatic" | "workspace" | "organization") {
@@ -476,8 +472,24 @@ describe("the application role", () => {
 });
 
 describe("before the Claude cutover receipt (legacy route)", () => {
-  test("production registers no Claude binding", () => {
-    expect(productionProviderIds).not.toContain("claude");
+  let current: { shared: SharedTestDatabase; client: DbClient };
+  beforeAll(async () => {
+    current = { shared, client };
+    const legacy = await acquireSharedTestDatabase("claude-reads-before-cutover", {
+      withheldMigrations: ["0739_subscription_core_claude_cutover.sql"],
+    });
+    if (!legacy) throw new Error("Real PostgreSQL is required");
+    shared = legacy;
+    client = createDb(shared.appUrl, { max: 6 });
+  }, 180_000);
+  afterAll(async () => {
+    await client.close();
+    await shared.release();
+    ({ shared, client } = current);
+  }, 60_000);
+
+  test("the production binding does not bypass the missing cutover receipt", () => {
+    expect(productionProviderIds).toContain("claude");
   });
 
   test("the route is legacy and organization admission keeps its v1 rule", async () => {
@@ -517,8 +529,8 @@ describe("before the Claude cutover receipt (legacy route)", () => {
 });
 
 describe("on the Claude core route", () => {
-  test("the test registration admits the binding and its receipt", async () => {
-    await admitTestSubscriptionCoreProvider(shared.admin, CLAUDE);
+  test("the production migration admits the binding and its receipt", async () => {
+    await ensureTestClaudeRegistration();
     const org = await organization();
     await setCutover(org, true);
     expect(

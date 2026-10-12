@@ -919,6 +919,7 @@ export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
 export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
   codex: "0689_subscription_core_codex_cutover.sql",
   xai: "0738_subscription_core_xai_cutover.sql",
+  claude: "0739_subscription_core_claude_cutover.sql",
 };
 
 /**
@@ -1669,12 +1670,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "capability_operations",
   "capability_plugin_installations",
   "channels",
-  "claude_capacity_waiters",
-  "claude_credential_leases",
-  "claude_rotation_settings",
-  "claude_session_account_pins",
-  "claude_subscription_account_usage",
-  "claude_subscription_credentials",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -1857,6 +1852,14 @@ export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, read
       "xai_rotation_settings",
       "xai_session_account_pins",
       "xai_subscription_credentials",
+    ]),
+    claude: Object.freeze([
+      "claude_capacity_waiters",
+      "claude_credential_leases",
+      "claude_rotation_settings",
+      "claude_session_account_pins",
+      "claude_subscription_account_usage",
+      "claude_subscription_credentials",
     ]),
   });
 

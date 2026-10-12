@@ -2273,6 +2273,7 @@ describe("release schema contract", () => {
       "0735_subscription_core_owned_connection_usage.sql",
       "0730_subscription_core_personal_connection_versions.sql",
       "0738_subscription_core_xai_cutover.sql",
+      "0739_subscription_core_claude_cutover.sql",
       "0729_subscription_person_preferences_owner.sql",
       "0728_subscription_core_personal_connect_format.sql",
       "0727_subscription_core_ownerless_video_operations.sql",

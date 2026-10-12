@@ -795,23 +795,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     })
     .where(eq(schema.sessionTurns.id, current.id));
   if (current.status === "waiting_capacity") {
-    // SuperGrok's legacy waiters are read-only after its cutover receipt,
-    // which this binary requires: none can be waiting (the cutover moved or
-    // superseded every one), and its core waiters go below.
-    for (const waiters of [schema.claudeCapacityWaiters]) {
-      await db
-        .update(waiters)
-        .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
-        .where(
-          and(
-            eq(waiters.workspaceId, input.workspaceId),
-            eq(waiters.sessionId, input.sessionId),
-            eq(waiters.blockedTurnId, current.id),
-            eq(waiters.status, "waiting"),
-          ),
-        );
-    }
-    // The shared subscription core's waiter (of whichever provider) exists
+    // SuperGrok's and Claude's legacy waiters are read-only after their
+    // cutover receipts, which this binary requires: none can be waiting (each
+    // cutover moved or superseded every one). The shared subscription core's
+    // waiter (of whichever provider) exists
     // only while its turn waits; the Steer ends that wait, so the row goes
     // with it (its pending wake deliveries cascade).
     await deleteSubscriptionCoreWaitersForTurns(db, null, {

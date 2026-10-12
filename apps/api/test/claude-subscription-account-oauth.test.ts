@@ -21,10 +21,21 @@ import {
   completeClaudeSubscriptionOAuth,
   type ClaudeOAuthScope,
 } from "../src/claude-subscription-oauth";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 let shared: SharedTestDatabase, client: DbClient, deps: ApiRouteDeps;
 const encryptionKey = Buffer.alloc(32, 55);
 beforeAll(async () => {
-  const databaseFixture = await acquireSharedTestDatabase("claude-account-oauth");
+  const databaseFixture = await acquireSharedTestDatabase(
+    "claude-account-oauth",
+    LEGACY_CLAUDE_WORLD,
+  );
   if (!databaseFixture) throw new Error("Real PostgreSQL required");
   shared = databaseFixture;
   client = createDb(shared.appUrl);

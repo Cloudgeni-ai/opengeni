@@ -18,7 +18,137 @@
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "../environment-crypto";
-import type { SubscriptionCutoverConnection } from "./cutover-plan";
+import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import type {
+  SubscriptionCutoverConnection,
+  SubscriptionCutoverLegacyAuthority,
+  SubscriptionCutoverMembership,
+  SubscriptionCutoverWorkspace,
+} from "./cutover-plan";
+
+/** A stage error whose text is fixed and content-free by construction. */
+export class SubscriptionCutoverStageError extends Error {
+  readonly code: string | undefined;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "SubscriptionCutoverStageError";
+    this.code = code;
+  }
+}
+
+const SQLSTATE = /^[0-9A-Z]{5}$/;
+const IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
+const OWN_REFUSAL = /^\d{4} [a-z][A-Za-z0-9 ,:()_-]{0,300}$/;
+
+/**
+ * Driver errors carry the statement's parameters (ciphertext, labels, emails)
+ * and the server's detail text; neither may leave a cutover stage. Only the
+ * SQLSTATE and the violated constraint's name survive, plus the migration's
+ * own fixed refusals (`NNNN text`, SQLSTATE 55000). `providerLabel` is the
+ * provider's display name for the fixed fallback text.
+ */
+export function contentFreeSubscriptionCutoverError(error: unknown, providerLabel: string): Error {
+  if (error instanceof SubscriptionCutoverStageError) return error;
+  const source = (error ?? {}) as { code?: unknown; constraint_name?: unknown; message?: unknown };
+  const code = typeof source.code === "string" && SQLSTATE.test(source.code) ? source.code : null;
+  if (code === "55000" && typeof source.message === "string" && OWN_REFUSAL.test(source.message)) {
+    return new SubscriptionCutoverStageError(source.message, code);
+  }
+  const constraint =
+    typeof source.constraint_name === "string" && IDENTIFIER.test(source.constraint_name)
+      ? source.constraint_name
+      : null;
+  return new SubscriptionCutoverStageError(
+    `${providerLabel} subscription cutover could not write the shared core (SQLSTATE ${code ?? "unknown"}${
+      constraint ? `, ${constraint}` : ""
+    }); see the runbook`,
+    code ?? undefined,
+  );
+}
+
+/**
+ * The organization facts the provider-neutral planner reads for the given
+ * organizations: workspaces (and whether each is a member's Personal
+ * workspace), memberships, and the provider's legacy personal authorities
+ * (`legacyResourceKind`, the provider's legacy resource kind).
+ */
+export async function loadSubscriptionCutoverPlanContext(
+  tx: postgres.TransactionSql,
+  input: { accountIds: readonly string[]; legacyResourceKind: string },
+): Promise<{
+  workspaces: SubscriptionCutoverWorkspace[];
+  memberships: SubscriptionCutoverMembership[];
+  legacyAuthorities: SubscriptionCutoverLegacyAuthority[];
+}> {
+  const accountIds = [...new Set(input.accountIds)];
+  const workspaces = await tx<{ id: string; account_id: string; personal: boolean }[]>`
+    SELECT workspace.id::text, workspace.account_id::text,
+      EXISTS (SELECT 1 FROM organization_memberships membership
+        WHERE membership.account_id = workspace.account_id
+          AND membership.personal_workspace_id = workspace.id) AS personal
+    FROM workspaces workspace WHERE workspace.account_id = ANY(${accountIds}::uuid[])`;
+  const memberships = await tx<
+    {
+      id: string;
+      account_id: string;
+      subject_id: string;
+      active: boolean;
+      personal_workspace_id: string | null;
+    }[]
+  >`
+    SELECT id::text, account_id::text, subject_id,
+      (status = 'active' AND revoked_at IS NULL) AS active, personal_workspace_id::text
+    FROM organization_memberships WHERE account_id = ANY(${accountIds}::uuid[])`;
+  const authorities = await tx<
+    {
+      id: string;
+      account_id: string;
+      organization_membership_id: string;
+      resource_id: string;
+      generation: number | string;
+      active: boolean;
+    }[]
+  >`
+    SELECT id::text, account_id::text, organization_membership_id::text, resource_id::text,
+      generation, (status = 'active' AND revoked_at IS NULL) AS active
+    FROM organization_user_resource_authorities
+    WHERE account_id = ANY(${accountIds}::uuid[]) AND resource_kind = ${input.legacyResourceKind}`;
+  return {
+    workspaces: workspaces.map((workspace) => ({
+      id: workspace.id,
+      accountId: workspace.account_id,
+      personal: workspace.personal,
+    })),
+    memberships: memberships.map((membership) => ({
+      id: membership.id,
+      accountId: membership.account_id,
+      subjectId: membership.subject_id,
+      active: membership.active,
+      personalWorkspaceId: membership.personal_workspace_id,
+    })),
+    legacyAuthorities: authorities.map((authority) => ({
+      id: authority.id,
+      accountId: authority.account_id,
+      membershipId: authority.organization_membership_id,
+      resourceId: authority.resource_id,
+      generation: Number(authority.generation),
+      active: authority.active,
+    })),
+  };
+}
+
+/** The content-free refusal for a plan with conflicts (classes and organization count only). */
+export function subscriptionCutoverConflictError(
+  migrationOrdinal: string,
+  conflicts: readonly { accountId: string; conflictClass: string }[],
+): SubscriptionCutoverStageError {
+  const classes = [...new Set(conflicts.map((entry) => entry.conflictClass))].sort();
+  const organizations = new Set(conflicts.map((entry) => entry.accountId)).size;
+  return new SubscriptionCutoverStageError(
+    `${migrationOrdinal} refused ambiguous legacy state (${classes.join(", ")}) in ${organizations} organization(s); see the runbook`,
+    "55000",
+  );
+}
 
 /** One canonical connection with everything its provider's adapter mapped. */
 export type SubscriptionCutoverStagedConnection<Row> = {
@@ -125,7 +255,8 @@ function readabilityDigest(plaintext: string): string {
 export async function writeSubscriptionCutoverConnections<Row>(
   tx: postgres.TransactionSql,
   input: {
-    provider: string;
+    /** The provider's binding: its id and its registered connection kind. */
+    binding: SubscriptionCoreProvider;
     encryptionKey: Uint8Array;
     staged: readonly SubscriptionCutoverStagedConnection<Row>[];
     personalGenerations: ReadonlyMap<string, number>;
@@ -133,7 +264,8 @@ export async function writeSubscriptionCutoverConnections<Row>(
     now: Date;
   },
 ): Promise<void> {
-  const { provider, encryptionKey, now } = input;
+  const { encryptionKey, now } = input;
+  const provider = subscriptionCoreProviderId(input.binding);
   const dispositions = new Map<string, number>();
   for (const staged of input.staged) {
     const connection = staged.connection;

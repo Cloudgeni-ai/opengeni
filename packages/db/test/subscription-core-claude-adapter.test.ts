@@ -83,8 +83,8 @@ function scriptedTokenEndpoint(replies: Array<() => Response>) {
 }
 
 describe("Claude adapter", () => {
-  test("is not registered on the core before its cutover", () => {
-    expect(subscriptionCoreProviderIds()).not.toContain("claude");
+  test("is registered on the core with its cutover (0730)", () => {
+    expect(subscriptionCoreProviderIds()).toContain("claude");
     expect(SUBSCRIPTION_CORE_CLAUDE.adapter.provider).toBe("claude");
     expect(SUBSCRIPTION_CORE_CLAUDE.settings.primaryColumn).toBe("claude_primary_connection_id");
     expect(SUBSCRIPTION_CORE_CLAUDE.sessionCompactionLock).toBeNull();

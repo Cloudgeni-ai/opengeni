@@ -22,10 +22,48 @@ import {
   migrateXaiSubscriptionCoreCredentials,
 } from "./xai-subscription-core-cutover";
 import {
+  CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MARKER,
+  CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MIGRATION,
+  contentFreeClaudeCutoverError,
+  migrateClaudeSubscriptionCoreCredentials,
+} from "./claude-subscription-core-cutover";
+import {
   SKILL_METADATA_MIGRATION_MARKER,
   createSkillMetadataMigrationStage,
   stageSkillMetadataMigration,
 } from "./skill-metadata-migration";
+
+/**
+ * The drained M4 provider cutovers with a codec stage (design 5.3 "Cutover
+ * protocol"): each runs its migration's SQL prelude, the provider's stage
+ * and the SQL backfill in one transaction. `stageTable` is the temp table
+ * the migration's drain check requires, proving the codec-aware runner.
+ */
+const PROVIDER_CUTOVER_STAGES: readonly {
+  label: string;
+  marker: string;
+  migration: string;
+  stageTable: string;
+  run: (tx: postgres.TransactionSql, key: Uint8Array | undefined) => Promise<void>;
+  contentFree: (error: unknown) => Error;
+}[] = [
+  {
+    label: "SuperGrok",
+    marker: XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER,
+    migration: XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION,
+    stageTable: "xai_cutover_stage",
+    run: migrateXaiSubscriptionCoreCredentials,
+    contentFree: contentFreeXaiCutoverError,
+  },
+  {
+    label: "Claude",
+    marker: CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MARKER,
+    migration: CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MIGRATION,
+    stageTable: "claude_cutover_stage",
+    run: migrateClaudeSubscriptionCoreCredentials,
+    contentFree: contentFreeClaudeCutoverError,
+  },
+];
 
 const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni";
 const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
@@ -56,8 +94,9 @@ export interface ConcurrentIndexMigration {
 
 export type MigrationRuntimeOptions = {
   /**
-   * Existing operator key; used only by the closed Claude (0598) and Codex
-   * (0680) maintenance conversions.
+   * Existing operator key; used only by the closed maintenance conversions:
+   * Claude (0598), Codex (0680) and the provider cutover codec stages
+   * (0689, 0738, 0739).
    */
   environmentsEncryptionKey?: Uint8Array;
   maxNestedAgentDepth?: number;
@@ -254,34 +293,31 @@ export async function executeMigrationFile(
       });
     return;
   }
-  if (sqlText.includes(XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER)) {
-    if (file !== XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION)
-      throw new Error(
-        `SuperGrok subscription cutover is restricted to ${XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION}`,
-      );
-    const parts = sqlText.split(XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER);
+  for (const stage of PROVIDER_CUTOVER_STAGES) {
+    if (!sqlText.includes(stage.marker)) continue;
+    const ordinal = stage.migration.slice(0, 4);
+    if (file !== stage.migration)
+      throw new Error(`${stage.label} subscription cutover is restricted to migration ${ordinal}`);
+    const parts = sqlText.split(stage.marker);
     if (parts.length !== 2)
-      throw new Error(
-        `${XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION} requires exactly one SuperGrok cutover stage`,
-      );
+      throw new Error(`${ordinal} requires exactly one ${stage.label} cutover stage`);
     // Every failure leaves content-free, as for 0689.
     await sql
       .begin(async (transaction) => {
-        await transaction`CREATE TEMP TABLE xai_cutover_stage(completed boolean NOT NULL) ON COMMIT DROP`;
+        await transaction.unsafe(
+          `CREATE TEMP TABLE ${stage.stageTable}(completed boolean NOT NULL) ON COMMIT DROP`,
+        );
         await transaction`SELECT
         pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
         pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
         await transaction.unsafe(parts[0]!);
-        await migrateXaiSubscriptionCoreCredentials(
-          transaction,
-          options?.environmentsEncryptionKey,
-        );
-        await transaction`INSERT INTO pg_temp.xai_cutover_stage VALUES(true)`;
+        await stage.run(transaction, options?.environmentsEncryptionKey);
+        await transaction.unsafe(`INSERT INTO pg_temp.${stage.stageTable} VALUES(true)`);
         await transaction.unsafe(parts[1]!);
         await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
       })
       .catch((error: unknown) => {
-        throw contentFreeXaiCutoverError(error);
+        throw stage.contentFree(error);
       });
     return;
   }

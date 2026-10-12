@@ -15,8 +15,10 @@
  * (`claude_setup_token_v1`), which never renews: once Claude refuses it the
  * shared refresh marks the connection needs-relogin. The format is derived
  * from the decoded secret (`credential.format`) whenever the core decides
- * renewal; the stored `credential_format` column holds the encryption
- * envelope version the shared writers record. `provider_account_id` is
+ * renewal; the stored `credential_format` column is informational only
+ * (the cutover records `claude_oauth_v1` / `claude_setup_token_v1`, the
+ * shared connect and reconnect writers record the envelope version `v1`)
+ * and is never passed to `capabilitiesFor`. `provider_account_id` is
  * the Claude account UUID, else the `oauth:`/`setup:` HMAC id the writers
  * already derive; setup tokens report no email or plan.
  *

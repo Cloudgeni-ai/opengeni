@@ -22,6 +22,14 @@ import {
   retireOrganizationModelProviderCustomModel,
   type OrganizationClaudeModelAdmissionAuthority,
 } from "../src/organization-model-providers";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
+};
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -29,7 +37,10 @@ const organizationAuthority = { version: 1, scope: "organization" } as const;
 const encryptionKey = Buffer.alloc(32, 7);
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("organization-claude-model-admission");
+  const acquired = await acquireSharedTestDatabase(
+    "organization-claude-model-admission",
+    LEGACY_CLAUDE_WORLD,
+  );
   if (!acquired) throw new Error("Organization Claude admission tests require real PostgreSQL");
   shared = acquired;
   client = createDb(shared.appUrl);

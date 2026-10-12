@@ -50,9 +50,11 @@ setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const FENCES = "0717_subscription_authority_fences.sql";
 const XAI_CUTOVER = "0738_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0739_subscription_core_claude_cutover.sql";
 /** This binary requires the SuperGrok receipt, which the rolling state lacks. */
 const BEFORE_XAI_CUTOVER = [
   "database is missing the xai subscription-core cutover receipt (0738_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0739_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
 const EMPTY = { version: 2, personal: [] };
 const ORGANIZATION_CLAUDE = { version: 1, scope: "organization" };
@@ -694,7 +696,7 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER})`;
+    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {

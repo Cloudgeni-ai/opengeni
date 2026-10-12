@@ -2683,7 +2683,7 @@ or refresh call.
 | EP-T01, EP-T03 chat placement (both) | `selectScopedSubscriptionTurnCapacity` (`agent-turn/xai-capacity.ts`), `selectSubscriptionAccount`, factory pins, synthetic subject for shared pools | Core placement with `provider`, the turn's accepted authority (v2 entry or compatibility record, below), session owner and attempt fence, under `withSubscriptionCoreAcceptedTurn`; one session binding; core turn lease. xAI's pre-selection quota refresh becomes a core quota observation (adapter `fetchUsage`) through the connection seam, not a list-all refresh. |
 | EP-T04 materialization, refresh and request custody | Claude `resolveClaudeAccountCredential`; xAI `buildXaiTurnRequestAuthorization` / `materializeXaiCredentialForRun`; serialized legacy refresh | Core materialization and the core refresh seam (advisory key, exact turn and live lease, generation compare-and-swap); adapter `transport` and `refresh`. Every physical model request, including each xAI hosted-search continuation, reserves a `model` operation row as Codex does (`reserveSubscriptionCoreCodexRequest` generalized); an in-turn usage precheck uses `credential_request`. A request whose outcome is unknown is never replayed automatically; typed refusals (429, 529, SSE capacity terminals) are known outcomes. Claude's `user` snapshot is no longer labelled `workspace` in run settings; `credentialBinding.credentialVersion` becomes the refresh generation and the run sees only a connection id. |
 | Session-title requests | `sessionTitleXaiRequestContext`; Claude title path through `withClaudeUsage` (`run.ts`) | The core title-request path Codex uses (`titleRequests`): same lease, request custody and usage recording as a chat request. |
-| Claude `claudeAuthRecovery` turn metadata | `session_turns.metadata.claudeAuthRecovery {credentialId, credentialVersion}` read in `claim.ts` and `failure-settlement.ts` | Replaced by core turn-failure receipts. The cutover converts each live value into a `subscription_turn_failures` row for the alias-resolved connection with the recorded generation as recovery evidence, so the one-forced-refresh bound survives; the metadata stays as history and is no longer read. |
+| Claude `claudeAuthRecovery` turn metadata | `session_turns.metadata.claudeAuthRecovery {credentialId, credentialVersion}` read in `claim.ts` and `failure-settlement.ts` | Replaced by core turn-failure receipts. The cutover converts each live value that names a moved connection's canonical credential at its current generation into a `subscription_turn_failures` row (evidence `{refreshGeneration, refusals: 0}`); an alias's or older version's value is a disposition (C3 below). The metadata stays as history and is no longer read. |
 | EP-S18..S24 acceptance writers | `packages/core/src/domain/sessions.ts`, `domain/scheduled-tasks.ts`, `goal-admission.ts`, `session-queue-commands.ts`, `child-outbox-authority.ts`, `claim_session_system_update_outbox` (0234) | X2b/C2b: write the provider's v2 entry at acceptance, and copy compatibility records along every path listed under "Accepted authority across the cutover", dormant until the provider's receipt. |
 | EP-T05 lease heartbeat and dispatch fence | `ScopedSubscriptionTurnLease` keyed by subject | Core `SubscriptionTurnLease` (already shared); `ScopedSubscriptionTurnLease` deleted. |
 | EP-T07 failure settlement | `failure-settlement.ts` Claude/xAI arm, `classifyXaiCredentialFailure`, `classifyClaudeCredentialFailure`, legacy arm and reconcile | Adapter `classifyError` into shared outcomes; core turn-failure receipts, quarantine, failover bound and wait. Claude's `claude_token_renewed` / `claude_credential_changed` recovery becomes the core rule "unauthorized: one forced refresh under the lock, then retry the same connection if the generation advanced". Claude 529 stays in the provider-overload lane (`overloaded`), never account rotation. |
@@ -3071,7 +3071,7 @@ touches only that provider's rows.
 | Health and quota | Status 1:1. Both the connection `version` and `refresh_generation` start from the legacy `version`, for both providers. xAI `quota_used_percent`, `quota_reset_at` and `exhausted_until` become one quota window and `exhaustedUntil`, whose kind is `rate_limit` when the legacy `last_error` records a rate-limit refusal and `quota` otherwise. Claude usage windows and `model_cooldowns` move to the quota row; the observed generation is set only when the usage row's `credential_version` equals the credential `version`, else NULL (unknown, never exhausted). A usage `reconnect` flag is dropped: it is a response value derived at read time, and a needed sign-in is carried by the connection status (C2a). Allocator counters: `selection_count` is summed and `last_selected_at` maxed over the group into the connection's quota row; the rotation row's `fairness_cursor` has no core column and is a disposition (core `spread` orders by a per-session hash and keeps no cursor). |
 | Rotation settings | Only pools in effect map: the organization row to organization `rotation.<provider>`, workspace rows to workspace overrides. Rotation on (also when no row exists) is `spread`; off is `primary_first` with the alias-resolved active pointer as the provider primary. User-pool rotation rows have no equivalent (disposition). |
 | Source | Legacy acceptance used the workspace pool when the workspace had its own credentials, else the organization pool; it never admitted organization accounts while local accounts existed. A workspace with workspace-scope credentials of the provider gets `inference_source = workspace`; other workspaces get no override (`automatic`, which today admits only organization connections there). `enabled` stays true. This deliberately diverges from §5.2's Codex `automatic` row (no override, rotation to keep local first): legacy Codex `automatic` already mixed both pools, so leaving it automatic was exact, whereas freezing `workspace` is the exact preservation for SuperGrok and Claude and the strictest one. Release note: such workspaces stop using organization accounts only if an administrator later changes the source, as today. |
-| Session pins | One binding per session for this provider (D-32, 0733): another provider's binding is never read, replaced or counted, so a session with a Codex pin and a SuperGrok pin keeps both. The first provider cutover (planned: SuperGrok's) drops 0733's rolling index in its drained window, after the preflight and before it writes any binding (its inserts would otherwise hit the index on sessions with a Codex row), and enables its provider only after the drop; a later cutover tolerates the index's absence. The drop is safe only while no previous binary can run, because that binary's binding reads and Codex pin update carry no provider. A cutover that disables the table's triggers for its bulk move keeps `subscription_session_bindings_provider_fixed` enabled (a move never changes a row's provider), or asserts afterwards that no pre-existing row changed provider. Among this provider's pool rows, the row of the pool in the session's latest accepted v1 snapshot wins. A manual pin is `explicit` (owner-only, non-dispatching seam; kept when unhealthy); a policy pin, else the last account, is `automatic`. A personal target is kept only when the session owner owns it and the session is private or in their Personal workspace; otherwise disposition `pin_owner_ineligible`. An existing binding of this provider is kept and the legacy rows become dispositions. `last_model_call_at` comes from the latest model-call fact. |
+| Session pins | One binding per session and provider (D-32; requires the provider-keyed binding precursor). Among that provider's pool rows, the row of the pool in the session's latest accepted v1 snapshot wins. A manual pin is `explicit` (owner-only, non-dispatching seam; kept when unhealthy); a policy pin, else the last account, is `automatic`. A personal target is kept only when the session owner owns it and the session is private or in their Personal workspace; otherwise disposition `pin_owner_ineligible`. Every eligible pin in the effective pool moves regardless of the current model or other providers' bindings; other providers' rows remain exactly unchanged. An already-populated destination provider aborts preflight, and ambiguous effective-pool pins still abort. The first drained cutover drops the rolling session-only index before binding writes or activation; later cutovers tolerate its absence. Keep the provider-fixed trigger enabled throughout. `last_model_call_at` comes from the latest model-call fact. |
 | Leases | Live leases move with turn, holder, generation, expiry and the alias-resolved connection; parity compares exact tuples. Expired leases are a disposition; a live core lease on the same turn aborts (`lease_conflict`). |
 | Waiters | Only `waiting` rows whose blocked turn and generation equal the session's parked turn move; others collapse with a disposition. When several of the provider's pool waiters match the parked turn, the one for the pool of the turn's v1 snapshot moves (the `user` pool for a `user` snapshot). Preserve the legacy `id` as `waiter_id`, `generation`, `wake_revision`, `observed_wake_revision`, `next_check_at`, `earliest_reset_at`, `blocked_turn_generation`, the goal fence and `last_wake_reason`. `wait_reason` takes a core value derivable from the legacy row, which records no reason: `pinned_account_unavailable` when the session's moved binding is explicit, else `no_eligible_capacity`; the core reconcile sets a more specific reason at its next check; `reset_kind` takes the core's values: `authoritative` when a future reset is known, else `mutation_only`. `workflow_id` must equal the session's workflow id, else abort. Any existing core waiter for the session aborts the cutover (`waiter_conflict`); the migration never modifies another provider's waiter or lease. A pending wake (`wake_revision > observed_wake_revision`) gets a wake-outbox row. |
 | Accepted authority | Compatibility records on every carrier listed under "Accepted authority across the cutover" (live work plus each session's execution-context, latest accepted and child-parent turns, or `session_initial`). v1 columns and existing v2 values are not modified. |
@@ -5117,7 +5117,9 @@ several current generations (finding above) if the count is not zero.
 
 Claude (`claude`) joins the core as an adapter and binding
 (`packages/db/src/subscription-core-claude-adapter.ts`), unregistered until
-C3 adds its SQL registry row; a test asserts production registers nothing.
+C3 adds its SQL registry row (until then a test asserted production registered
+nothing; since C3 the binding is registered and the conformance suites run it
+as production does).
 Facts the adapter declares, each read from today's Claude path:
 
 - Credential. The stored plaintext is the legacy secret object unchanged
@@ -5826,6 +5828,127 @@ refusal; `SubscriptionPoolCore.listedAccountJson`; `deliverPoolCoreWake`
 takes only the binding. `SubscriptionCoreConnectionRow.version` and
 `readSubscriptionCorePersonalConnectionVersionsInTransaction` (0730) were
 designed here and are carried by C2a.
+
+#### C3: the drained Claude cutover
+
+Migration 0739 (`-- deployment-mode: maintenance`) is the Claude counterpart
+of 0738 and follows "Data mapping", "Accepted authority across the
+cutover", "Personal authority generations" and "Cutover protocol" above.
+The runbook is `docs/deployment.md`, "Claude on the shared subscription core
+(0739)". It reuses X3's machinery rather than forking it: the receipt,
+registry row, readiness, `subscription_cutover_report`, compatibility
+records, the neutral planner and `subscription-core/cutover-stage.ts`. C3
+generalizes the pieces X3 had inline: the migrator runs every provider's
+codec stage from one `PROVIDER_CUTOVER_STAGES` list (`migrate.ts`), and the
+stage's error, plan-context and conflict helpers move into
+`cutover-stage.ts`; the SuperGrok stage uses them unchanged in behaviour.
+The Claude stage (`packages/db/src/claude-subscription-core-cutover.ts`)
+holds only the Claude row shape, identity rules, usage mapping and catalog.
+Choices made where the plan left room, for reviewers:
+
+- **Provider-keyed pins.** C3 requires the `(workspace_id, session_id,
+  provider)` primary key and enabled
+  `subscription_session_bindings_provider_fixed` trigger. After both drain
+  checks it drops the rolling session-only index with `IF EXISTS`, before
+  any binding write or activation, and never disables that trigger.
+  `pool_in_effect AND eligible` is the complete move predicate: current
+  model and foreign bindings neither suppress nor displace a Claude pin.
+  The `other_provider_session_bindings` parity metric compares every field
+  of each pre-existing foreign row, including choice, version and cache
+  clock. `pin_other_provider_binding_kept` is no longer a Claude disposition.
+  The combined-provider regression keeps Codex and SuperGrok rows beside
+  Claude on the same sessions, with both explicit and automatic choices.
+  The precursor must precede X3 as well as C3 in the integrated ledger;
+  the combined-window ledger test refuses a stack that violates that order.
+- **Format.** The legacy plaintext is copied unchanged; the stage writes
+  `claude_oauth_v1` for a secret with `oauth` and `claude_setup_token_v1`
+  otherwise, the formats the adapter derives at runtime (as 0738 writes
+  `xai_oauth_v1`). The column is informational: no decision reads it, the
+  adapter derives the format from the decrypted secret, and the shared
+  connect and reconnect writers record the envelope version `v1`, so a
+  Claude row's value tells a migrated row from a newly connected one.
+  Recording the adapter format in the shared writers is a possible
+  follow-up outside C3.
+- **Identity.** The person is the token's `identity.accountUuid`. A stored
+  `provider_account_id` of the form `oauth:<hmac>` or `setup:<hmac>` (the
+  connect writers' derived id when the token reports no account) is its own
+  person key; any other stored value must equal the token's account, else
+  `provider_identity_mismatch` aborts. OAuth and setup-token rows never
+  merge, even for the same Claude account: they renew differently, and one
+  must not inherit the other's needs-relogin state.
+- **Usage.** Only a usage row of the credential's current version is read.
+  Its windows, request restrictions and per-model cooldowns map through
+  `decodeSubscriptionCoreClaudeQuota`, cooldowns re-keyed from upstream ids
+  to product ids under both Claude prefixes; an alias's live cooldowns join
+  its canonical connection's, ended ones are dropped. The observed refresh
+  generation is the credential version. The legacy `exhausted_until` becomes
+  a `quota` exhaustion only when there is no current reading (the reading
+  decides otherwise). A stale row (`usage_rows_stale`) or an undecodable
+  current row (`usage_snapshot_unreadable`) leaves usage unknown, which the
+  `usage_generations` parity metric counts as matching. The quota keeps
+  Claude's `refreshStatus` and `refreshCheckedAt`; a pending `reconnect` is
+  the `usage_reconnect_pending` disposition and never changes the
+  connection status (the next refresh decides).
+- **Catalog.** Cooldown re-keying and family limits use each organization's
+  catalog at the cutover: the default Claude models plus the organization's
+  and its workspaces' `claude_subscription` custom models that are not
+  retired.
+- **`claudeAuthRecovery`.** A live turn's value (`{credentialId,
+  credentialVersion}`, the one forced refresh it already spent) was kept per
+  credential by legacy. When it names the canonical credential of its moved
+  connection at that connection's current refresh generation it becomes an
+  `unauthorized` row in `subscription_turn_failures` for the turn and
+  connection, with evidence `{refreshGeneration: credentialVersion,
+  refusals: 0}`: the audited record of the renewal, which is not a refusal
+  and does not use the turn's failover bound
+  (`countSubscriptionCoreTurnRefusals` sums `refusals`). A value naming a
+  duplicate login (now an alias) or an older version is not about the
+  connection's current credential and writes no receipt
+  (`auth_recovery_not_current`), so a receipt never stands for another
+  credential's renewal. On the core, C1b's Claude transport runs the forced
+  refresh itself and settles a 401 after it as a sign-in quarantine, and no
+  core decision reads the old marker. Finished turns are
+  ignored; a value naming no moved credential is `auth_recovery_unmapped`, a
+  malformed one `auth_recovery_malformed`. The metadata stays as history.
+  (Review of #4137 found the first version attached an alias's renewal to
+  the canonical connection and counted it as a refusal.)
+- **Legacy model connections.** 0598 revoked and blanked every legacy
+  Claude model connection (`connections` with `credentialRole =
+  claude_subscription`, `organization_model_provider_connections` with
+  `provider_kind = claude_subscription`). Revoked ones stay untouched; one
+  that is not revoked or still holds a secret aborts
+  (`legacy_connection_not_revoked`), because the cutover would leave that
+  credential behind.
+- **Organization locks, Steer and Cancel, read-only legacy.** No
+  workspace override of a locked key is written and each such workspace is
+  listed. The drained-role preflight and owner window's `ACCESS EXCLUSIVE`
+  locks on `subscription_settings` and the other moved relations protect
+  the organization-lock reads and override writes until commit. Fence-checking
+  triggers are disabled and restored in that window, while the provider-fixed
+  trigger stays enabled. C3 takes no settings advisory locks after those table
+  locks: runtime writers take fences first, so a later wait would invert their
+  order. READ COMMITTED, Personal-workspace fallback handling, locked-key skips
+  and their parity checks remain required. The Steer path no longer supersedes legacy Claude waiters (core
+  cleanup only); Claude's six legacy tables, including
+  `claude_subscription_account_usage`, join
+  `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` with restrictive
+  `<table>_closed_insert` and `<table>_closed_update` policies (write
+  commands only: a restrictive policy that also covered SELECT would make
+  the lifecycle-facts backfill of 0565 refuse the table), and the legacy
+  disconnect refuses after the receipt.
+- **Together with SuperGrok.** 0738 and 0739 share no legacy table or key,
+  so one migrator run applies both in ledger order, each in its own
+  transaction with its own report and readiness gate; a Claude abort leaves
+  0738 committed and a rerun resumes at 0739. The combined-window ledger
+  test (`subscription-core-combined-cutover-ledger.test.ts`) proves this
+  and that only rolling migrations lie between them.
+- **Merge gates as ordinary tests.** The Claude seam integration test's
+  peek and reconcile cases need C1b's Claude core waits, and the 0739 test's
+  "a newer Claude usage reading that omits a still-exhausted window" case
+  needs C2a's `usageReadingsComplete: false`. They are ordinary tests, red
+  until those land in the base, so C3 cannot pass its exact-head validation
+  (and so cannot merge) ahead of the Claude core runtime. The response-header
+  variant of the usage case passes on #4120 alone.
 
 ### 5.4 Workspace-managed connections as organization accounts
 

@@ -34,6 +34,7 @@ import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
 import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
 
 const MIGRATION = "0738_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0739_subscription_core_claude_cutover.sql";
 const key = Buffer.alloc(32, 73);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const NIL = "00000000-0000-0000-0000-000000000000";
@@ -860,7 +861,7 @@ describe.skipIf(!realDb)(
       owned = fixture;
       owner = postgres(owned.ownerUrl, { max: 1 });
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${CLAUDE_CUTOVER})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
       await seed();
@@ -979,7 +980,7 @@ describe.skipIf(!realDb)(
       const connection = postgres(later.ownerUrl, { max: 1 });
       try {
         await connection`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await connection`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+        await connection`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${CLAUDE_CUTOVER})`;
         await migrate(later.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
         await connection`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
         await connection`DROP INDEX subscription_session_bindings_rolling_session_idx`;
@@ -1726,7 +1727,7 @@ describe.skipIf(!realDb)(
         // Only this provider's rows.
         const [others] =
           await owned.admin`SELECT count(*)::int AS total FROM opengeni_private.subscription_cutover_report
-          WHERE provider NOT IN ('xai', 'codex')`;
+          WHERE provider NOT IN ('xai', 'codex', 'claude')`;
         expect(others!.total).toBe(0);
       });
 
@@ -1743,7 +1744,7 @@ describe.skipIf(!realDb)(
           primary_column: "xai_primary_connection_id",
         });
         expect(state!.enabled).toBe(state!.accounts);
-        expect(subscriptionCoreProviderIds()).toEqual(["codex", "xai"]);
+        expect(subscriptionCoreProviderIds()).toEqual(["claude", "codex", "xai"]);
         const relaxed = await owned.admin`SELECT relname FROM pg_class
           WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' AND relrowsecurity
             AND NOT relforcerowsecurity
@@ -1802,7 +1803,9 @@ describe.skipIf(!realDb)(
         };
         const posture = await inspectRuntimeDatabasePosture(client.db, options);
         expect(posture.subscriptionProviderCutoverReceipts).toEqual(["codex", "xai"]);
-        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([
+          `database is missing the claude subscription-core cutover receipt (${CLAUDE_CUTOVER}); apply the pending migrations first`,
+        ]);
       }, 180_000);
 
       test("the legacy connect routine cannot write a SuperGrok account after the receipt", async () => {

@@ -18,6 +18,12 @@
 > exports remain as thin bindings. Module map:
 > [design §5.1.3](design/subscription-core-2026-10-07.md#513-m4-shared-typescript-core-and-the-adapter-interface).
 
+> C3 provider-keyed candidate: Claude pin migration now preserves every
+> eligible effective-pool pin beside existing Codex and SuperGrok bindings,
+> with exact foreign-row parity. It requires the D-32 binding precursor and
+> its provider-fixed trigger; source preparation is not cutover activation.
+> See design §5.3 and the Claude deployment runbook for the drain/index order.
+
 
 Baseline: `origin/main` at `0d7075e` (7 October 2026). Research and documentation only; no product code was changed.
 

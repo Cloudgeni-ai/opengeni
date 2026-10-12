@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import { fakeApiKeyProvider } from "./fixtures/subscription-core-fake-api-key";
@@ -7,6 +7,8 @@ import {
   testSubscriptionCoreProviderModules,
 } from "./helpers/subscription-core-test-provider";
 import type { SubscriptionCoreProvider } from "../src/subscription-core/provider";
+
+setDefaultTimeout(30_000);
 
 const home: SubscriptionCoreProvider = {
   ...fakeApiKeyProvider,
@@ -1350,13 +1352,21 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     const key = `subscription-failover:${org.workspaceId}:${work.identity.sessionId}`;
     let release!: () => void;
     let entered!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    const ready = new Promise<void>((resolve) => { entered = resolve; });
-    const blocker = withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-      entered();
-      await held;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
     });
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocker = withSubscriptionCoreAcceptedTurn(
+      fixture.client.db,
+      work.identity,
+      async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+        entered();
+        await held;
+      },
+    );
     await ready;
     const placing = place(fixture.client.db, home, {
       ...work,

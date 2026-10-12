@@ -3,11 +3,16 @@ import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { bootstrapWorkspace, createClaudeSubscriptionAccount, createDb } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
 import postgres from "postgres";
 
 // The genuine complete migration replay runs as a non-bypass owner.
 setDefaultTimeout(180_000);
 const migrationName = "0602_claude_account_lifecycle_facts.sql";
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: its ledger row is recorded and never run. Removed with the
+// legacy runtime.
+const claudeCutover = SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!;
 
 test("Claude account connection facts follow real insert, privacy and export boundaries without backfill", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("claude-lifecycle-dispatch");
@@ -20,6 +25,7 @@ test("Claude account connection facts follow real insert, privacy and export bou
     await owner`create table if not exists schema_migrations (
       name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${migrationName})`;
+    await owner`insert into schema_migrations(name) values (${claudeCutover})`;
     await migrate(owned.ownerUrl);
     await provisionRoles(owned.adminUrl, {
       appPassword: owned.appPassword,
