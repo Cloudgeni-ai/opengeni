@@ -30,8 +30,7 @@ import {
   readNativeBrokerBootstrap,
   initialNativeBrokerCommandSnapshot,
   projectNativeBrokerCommand,
-  retainedNativeBrokerCommandSnapshot,
-  nativeBrokerCommandFromSnapshot,
+  NativeBrokerRetainedCommand,
 } from "@opengeni/runtime/sandbox";
 import { encodeNativeBrokerCommandDefinition } from "../../runtime/src/sandbox/providers/native-command-broker-definition";
 import { createDurableNativeBrokerTransport } from "../src/native-command-broker-transport";
@@ -130,7 +129,7 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
 /** Test-only admission/holder seed. Physical bootstrap/qualification is not
  * inferred from these rows; this exercises the canonical receipt/output/exit
  * custody using the actual native process rather than a synthetic terminal. */
-async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderCommand) {
+async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderCommand, handle = 1) {
   const b = f.binding,
     processId = crypto.randomUUID(),
     admissionId = crypto.randomUUID(),
@@ -141,6 +140,7 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
     sessionId: f.sessionId,
     processId,
   };
+  await database.admin`update sandbox_leases set workspace_generation = greatest(workspace_generation, ${handle}) where id=${b.leaseId}`;
   await database.admin`insert into sandbox_lease_holders ${database.admin({
     account_id: b.accountId,
     workspace_id: b.workspaceId,
@@ -165,7 +165,7 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
     provider_instance_id: b.sandboxId,
     route_kind: "active",
     route_epoch: 0,
-    workspace_generation: 1,
+    workspace_generation: handle,
     operation: "terminalExec",
     provider_outcome: "retained",
   })}`;
@@ -185,7 +185,7 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
     provider_instance_id: b.sandboxId,
     route_kind: "active",
     route_epoch: 0,
-    provider_session_id: 1,
+    provider_session_id: handle,
     provider_binding_key: b.providerBindingKey,
     provider_binding: database.admin.json(JSON.parse(b.providerBindingKey)),
     provider_command: database.admin.json(command),
@@ -193,14 +193,14 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
   return {
     scope,
     persistence: retainedProviderCommandPersistence(client.db, scope),
-    settle: async () => {
+    settle: async (exitCode = 0) => {
       const expected = await getRetainedProcess(client.db, scope);
       if (!expected) throw new Error("Native retained fixture missing");
       return settleRetainedProcess(client.db, {
         ...scope,
         expected,
         outcome: "exited",
-        exitCode: 0,
+        exitCode,
         reason: "provider_exit_banner",
         idleGraceMs: 1000,
       });
@@ -278,6 +278,74 @@ test("registration requires exact attributed creation and never rewinds an exist
   await expect(
     registerNativeBrokerTransport(client.db, key, { ...f.binding, taskId: "other" }, f.initial),
   ).rejects.toThrow();
+});
+
+test("control reply index commits with its accepted request/frame and rejects conflicting replay", async () => {
+  const f = await fixture();
+  const active = await start(f);
+  await f
+    .service()
+    .captureOutput("0-0", page(f, Buffer.from(accepted(f, active.write.input)).toString()));
+  const request = {
+    ...fence(),
+    kind: "control" as const,
+    commandId: crypto.randomUUID(),
+    payload: Buffer.from("cancel"),
+  };
+  await f.service().reserve(active.writerId, active.writer.epoch, request);
+  const input = (await f
+    .service()
+    .dispatchIntent(active.writerId, active.writer.epoch, request.requestId))!;
+  const reply = {
+    direction: "response" as const,
+    brokerId: f.binding.brokerId,
+    ownerEpoch: 1,
+    sequence: 3,
+    requestId: request.requestId,
+    commandId: request.commandId,
+    kind: "error" as const,
+    offset: 0,
+    payload: Buffer.from('{"error":"control_unavailable"}'),
+  };
+  expect(await f.service().controlReply(request.requestId)).toBeNull();
+  // A response before native acceptance cannot create an authority-bearing index.
+  await expect(
+    f
+      .service()
+      .captureOutput(
+        "1-0",
+        page(f, Buffer.from(encodeNativeBrokerFrame({ ...reply, sequence: 2 })).toString(), "2-0"),
+      ),
+  ).rejects.toThrow();
+  expect((await f.service().read()).output.lastSequence).toBe(1);
+  await f
+    .service()
+    .captureOutput(
+      "1-0",
+      page(
+        f,
+        Buffer.concat([accepted(f, input.input, 2), encodeNativeBrokerFrame(reply)]).toString(),
+        "2-0",
+      ),
+    );
+  expect(await f.service().controlReply(request.requestId)).toEqual(reply);
+  const conflict = encodeNativeBrokerFrame({
+    ...reply,
+    sequence: 4,
+    payload: Buffer.from('{"error":"control_pressure"}'),
+  });
+  await expect(
+    f.service().captureOutput("2-0", page(f, Buffer.from(conflict).toString(), "3-0")),
+  ).rejects.toThrow();
+  expect((await f.service().read()).output.lastSequence).toBe(3);
+  expect(await f.service().controlReply(request.requestId)).toEqual(reply);
+  await expect(
+    withRlsContext(client.db, f.binding, (tx) =>
+      tx.execute(sql`DELETE FROM native_command_broker_entries
+    WHERE broker_id=${f.binding.brokerId} AND kind='control_reply'`),
+    ),
+  ).rejects.toThrow();
+  expect(await f.service().controlReply(request.requestId)).toEqual(reply);
 });
 
 test("concurrent writer claims elect one owner; stale and foreign owners cannot dispatch", async () => {
@@ -870,7 +938,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       const size = Buffer.alloc(4);
       size.writeUInt32BE(definition.length);
       const launchRequestId = crypto.randomUUID();
-      let retained = ModalBrokerProviderCommand.parse({
+      const retained = ModalBrokerProviderCommand.parse({
         kind: "modal-broker-v1",
         sandboxId: f.binding.sandboxId,
         taskId: f.binding.taskId,
@@ -943,35 +1011,17 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
           Buffer.from(frame.payload).toString().includes(receipt!.receiptId),
         ),
       ).toBe(true);
-      const beforeAck = await projectNativeBrokerCommand(
+      const controller = new NativeBrokerRetainedCommand(
+        retained,
+        custody.persistence,
         f.service(),
-        retainedNativeBrokerCommandSnapshot(retained, null),
-        128,
+        driver,
       );
-      expect(beforeAck.receipts).toHaveLength(1);
-      await custody.persistence.recordSupervisionReceipt(beforeAck.receipts[0]!);
-      const capture = async (
-        projection: Awaited<ReturnType<typeof projectNativeBrokerCommand>>,
-      ) => {
-        const next = nativeBrokerCommandFromSnapshot(retained, projection.snapshot);
-        const result = await custody.persistence.captureBrokerPage({
-          expected: retained,
-          command: next,
-          stdout: projection.chunks
-            .filter((chunk) => chunk.stream === "stdout")
-            .map((chunk) => chunk.text)
-            .join(""),
-          stderr: projection.chunks
-            .filter((chunk) => chunk.stream === "stderr")
-            .map((chunk) => chunk.text)
-            .join(""),
-        });
-        expect(result.captured).toBe(true);
-        retained = result.command;
-      };
-      await capture(beforeAck);
+      const beforeAck = await controller.capture(128);
+      expect(beforeAck.exitCode).toBeNull();
+      expect(await custody.persistence.loadSupervisionReceipt()).toEqual(receipt!);
       await expect(custody.settle()).rejects.toThrow();
-      await request("control", id, Buffer.from(`ack\t${receipt!.receiptId}`));
+      await controller.acknowledgeReceipt();
       await observeUntil(async () =>
         (await frames()).some((frame) => frame.commandId === id && frame.kind === "exit"),
       );
@@ -1015,17 +1065,81 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       expect(projection.chunks.map((chunk) => chunk.text).join("")).toBe(
         Buffer.from(binary).toString("utf8"),
       );
-      const afterAck = await projectNativeBrokerCommand(
+      // A fresh object reconstructs only canonical saved state after reconnect.
+      const afterAck = await new NativeBrokerRetainedCommand(
+        retained,
+        custody.persistence,
         f.service(),
-        retainedNativeBrokerCommandSnapshot(
-          retained,
-          await custody.persistence.loadSupervisionReceipt(),
-        ),
-        128,
-      );
-      await capture(afterAck);
+        driver,
+      ).capture(128);
+      expect(afterAck.exitCode).toBe(0);
       expect((await custody.settle()).settled).toBe(true);
       expect((await getRetainedProcess(client.db, custody.scope))?.state).toBe("exited");
+
+      // A second real command exercises controller-owned release, durable
+      // cancellation, repeated status and receipt ACK through a fresh object.
+      // This local seeded fixture is not the remote 2s/35s release canary.
+      const cancelId = crypto.randomUUID(),
+        cancelLaunchId = crypto.randomUUID();
+      const cancelLocator = ModalBrokerProviderCommand.parse({
+        ...retained,
+        execId: cancelId,
+        supervision: {
+          ...retained.supervision,
+          invocationId: cancelId,
+          launchRequestId: cancelLaunchId,
+          launchEpoch: 2,
+        },
+        capture: {
+          sequence: (await f.service().read()).output.lastSequence,
+          receiptAckObserved: false,
+        },
+      });
+      const cancellationCustody = await retainNativeFixture(f, cancelLocator, 2);
+      const cancelDefinition = encodeNativeBrokerCommandDefinition({
+        mode: "pipe",
+        cwd: directory,
+        argv: ["/bin/sh", "-c", "trap '' TERM; printf ready; while :; do sleep 1; done"],
+        env: [["PATH", "/usr/bin:/bin"]],
+        rows: 0,
+        columns: 0,
+      });
+      const cancelSize = Buffer.alloc(4);
+      cancelSize.writeUInt32BE(cancelDefinition.length);
+      await request("prepare", cancelId, cancelSize);
+      await request("definition", cancelId, cancelDefinition);
+      await request("launch", cancelId, new Uint8Array(), 0, cancelLaunchId);
+      const cancellation = new NativeBrokerRetainedCommand(
+        cancelLocator,
+        cancellationCustody.persistence,
+        f.service(),
+        driver,
+      );
+      await cancellation.release();
+      await observeUntil(async () =>
+        (await frames()).some((frame) => frame.commandId === cancelId && frame.kind === "stdout"),
+      );
+      await cancellation.capture(128);
+      await cancellation.cancel("explicit_stop");
+      expect(await cancellationCustody.persistence.cancellationRequested()).toBe(true);
+      await observeUntil(async () => !(await f.service().read()).input.pending);
+      let cancelledExit: number | null = null;
+      for (let attempt = 0; attempt < 64; attempt++) {
+        await observeUntil(async () => !(await f.service().read()).input.pending);
+        const view = await new NativeBrokerRetainedCommand(
+          cancelLocator,
+          cancellationCustody.persistence,
+          f.service(),
+          driver,
+        ).capture(128);
+        cancelledExit = view.exitCode;
+        if (cancelledExit !== null) break;
+        await cancellation.status();
+        const sequence = (await f.service().read()).output.lastSequence;
+        await observeUntil(async () => (await f.service().read()).output.lastSequence > sequence);
+      }
+      expect(cancelledExit).toBe(137);
+      expect((await cancellationCustody.settle(137)).settled).toBe(true);
     } finally {
       child.stdin.end();
       const stopped = await Promise.race([

@@ -100,6 +100,9 @@ Then open the smallest source files that answer the question:
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse
   that locator. Canonical retention is not bootstrap or release authority.
+  `native-command-broker-retained-command.ts` owns bounded capture and exact
+  retained controls. Its immutable `control_reply` journal index permits only
+  explicitly proven pre-dispatch rejection successors, never unknown replay.
   Journal capture/dispatch and a passing native fixture do not imply canonical
   application admission or old-group enrollment. Follow the remaining gates in
   `docs/design/native-command-broker.md` before enabling that path.

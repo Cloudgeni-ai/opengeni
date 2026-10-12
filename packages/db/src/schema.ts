@@ -10308,7 +10308,7 @@ export const nativeCommandBrokerEntries = pgTable(
     brokerId: uuid("broker_id").notNull(),
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
-    kind: text("kind", { enum: ["request", "frame", "page", "eof"] }).notNull(),
+    kind: text("kind", { enum: ["request", "frame", "page", "eof", "control_reply"] }).notNull(),
     entryKey: text("entry_key").notNull(),
     sequence: bigint("sequence", { mode: "number" }),
     sha256: text("sha256").notNull(),

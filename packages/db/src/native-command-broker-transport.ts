@@ -37,7 +37,7 @@ const bindingSchema = z
   })
   .strict();
 export type NativeBrokerTransportBinding = z.infer<typeof bindingSchema>;
-export type NativeBrokerEntryKind = "request" | "frame" | "page" | "eof";
+export type NativeBrokerEntryKind = "request" | "frame" | "page" | "eof" | "control_reply";
 export type NativeBrokerStoredEntry = {
   kind: NativeBrokerEntryKind;
   key: string;
@@ -386,16 +386,16 @@ function validateEntryIdentity(
   write: boolean,
 ) {
   if (
-    !["request", "frame", "page", "eof"].includes(kind) ||
+    !["request", "frame", "page", "eof", "control_reply"].includes(kind) ||
     typeof key !== "string" ||
     Buffer.byteLength(key) < 1 ||
     Buffer.byteLength(key) > 200
   )
     fenced();
-  if (kind === "request" && !uuid.safeParse(key).success) fenced();
+  if ((kind === "request" || kind === "control_reply") && !uuid.safeParse(key).success) fenced();
   if (kind === "frame" && !/^[1-9][0-9]*$/.test(key)) fenced();
   if (!write) return;
-  if (kind === "request" || kind === "frame") {
+  if (kind === "request" || kind === "frame" || kind === "control_reply") {
     if (
       sequence === null ||
       !Number.isSafeInteger(sequence) ||

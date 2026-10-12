@@ -5,7 +5,8 @@ current increments provide bounded framing, a native bootstrap preflight,
 input/output custody state machines, encrypted atomic transport storage, a
 private inherited supervisor channel, strict command-definition codec, native
 initial-process command multiplexer, journal-backed host transport driver and
-canonical retained-command descriptor/output fences.
+canonical retained-command descriptor/output fences and a retained-command
+control bridge.
 The native `broker` mode and host driver can launch fixture commands, but no
 application command-admission route selects this protocol.
 These increments do not change a production protocol tuple or qualify an
@@ -355,13 +356,40 @@ permission to launch. No application route selects broker execution yet. New
 creation/restore selection, release authority, the runtime command-session
 adapter and journal retirement remain separate integration requirements.
 
+`NativeBrokerRetainedCommand` bridges an already retained command to that
+canonical persistence. Each bounded read reconstructs its exact locator and
+receipt, projects committed frames, commits new receipts, then atomically saves
+output before exposing it. A losing capture discards its text. The bridge never
+launches, fences a writer, resends an ambiguous input, or treats initial-process
+EOF as a terminal command. Shared physical output collection remains outside
+the per-command bridge so it cannot serialize cancellation behind a log read.
+
+Release, cancellation and receipt ACK use deterministic request identities
+across reconnects. Durable cancellation precedes physical cancel dispatch and
+supersedes a later release. A confirmed cancel followed by a still-running
+response is polled with status, not treated as a permanent cached outcome. The
+input coordinator must resolve each pending acceptance before a different
+request; the command bridge cannot skip that shared transport fence.
+
+Rolling migration `0741` adds the `control_reply` journal kind: an immutable,
+request-keyed copy of a committed control response, bound to the accepted input
+and identical canonical frame. It commits with output and cursor, enabling a
+bounded reconnect lookup without decrypting the entire command history. The
+bridge permits a deterministic successor only for the exact native
+`control_unavailable`/`control_pressure` responses that precede private-channel
+dispatch, after the response is captured. Unknown outcomes, missing supervisors,
+malformed replies and exhausted rejection chains confer no retry authority.
+Transport acceptance alone is never reported as native control completion.
+
 The opt-in local static-ELF/real-PostgreSQL test in
 `packages/core/test/native-command-broker-transport.integration.test.ts` runs
 with `OPENGENI_NATIVE_BROKER_LOCAL=1` after building the static artifact with
 `make -C agent/native/command-supervisor test-static`. It checks unknown
 dispatch, exact replay, writer takeover, duplicate-release refusal, binary I/O,
 canonical receipt-before-ACK, atomic retained output and independent exit using
-the actual broker. Its admission/holder rows are explicitly test-seeded, not
+the actual broker. It also exercises the retained controller against a second
+TERM-ignoring command through cancellation, repeated status, reconnect, durable
+ACK and settlement. Its admission/holder rows are explicitly test-seeded, not
 evidence of product-reachable command admission. Ordinary CI does not require
 that local native build; the deterministic provider boundary
 and real database transport cases remain separate. This fixture does not

@@ -20,7 +20,7 @@ import {
 } from "./native-command-broker-output";
 import { NativeBrokerFrameDecoder, type NativeBrokerFrame } from "./native-command-broker-wire";
 
-type EntryKind = "request" | "frame" | "page" | "eof";
+type EntryKind = "request" | "frame" | "page" | "eof" | "control_reply";
 type Entry = {
   kind: EntryKind;
   key: string;
@@ -201,6 +201,31 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
               entry.frame,
             );
           }
+          // A control response is separately indexed for bounded reconnect
+          // reconciliation. Acceptance alone does not prove that the private
+          // control channel accepted the action. Store the exact response in
+          // the SAME transaction as its frame and provider cursor.
+          if (entry.frame.kind === "status" || entry.frame.kind === "error") {
+            const request = await tx.read("request", entry.frame.requestId);
+            if (request) {
+              const original = requestFromWire(request.value, identity);
+              if (original.kind === "control") {
+                if (
+                  original.sequence > state.input.lastAcceptedInputIndex ||
+                  original.commandId !== entry.frame.commandId ||
+                  original.ownerEpoch !== entry.frame.ownerEpoch ||
+                  entry.frame.offset !== 0
+                )
+                  invalid();
+                await tx.insert({
+                  kind: "control_reply",
+                  key: original.requestId,
+                  sequence: entry.frame.sequence,
+                  value: saved.value,
+                });
+              }
+            }
+          }
         }
         if (plan.page) {
           const saved = await tx.insert({
@@ -292,6 +317,39 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
         )
           invalid();
         return { frame, accepted, phase: accepted ? ("accepted" as const) : pending!.phase };
+      });
+    },
+    async controlReply(requestId: string) {
+      return store.transaction(async (tx) => {
+        const state = validate(tx.state, identity);
+        const entry = await tx.read("control_reply", requestId);
+        if (!entry) return null;
+        const request = await tx.read("request", requestId);
+        if (!request) invalid();
+        const original = requestFromWire(request.value, identity);
+        const decoder = new NativeBrokerFrameDecoder(identity.brokerId);
+        const frames = decoder.push(Buffer.from(entry.value));
+        decoder.finish();
+        const frame = frames[0];
+        if (
+          frames.length !== 1 ||
+          !frame ||
+          frame.direction !== "response" ||
+          !["status", "error"].includes(frame.kind) ||
+          frame.requestId !== requestId ||
+          original.kind !== "control" ||
+          original.commandId !== frame.commandId ||
+          original.ownerEpoch !== frame.ownerEpoch ||
+          original.sequence > state.input.lastAcceptedInputIndex ||
+          frame.offset !== 0 ||
+          entry.sequence !== frame.sequence ||
+          frame.sequence > state.output.lastSequence
+        )
+          invalid();
+        const canonical = await tx.read("frame", String(frame.sequence));
+        if (!canonical || canonical.value !== entry.value || canonical.sha256 !== entry.sha256)
+          invalid();
+        return frame;
       });
     },
   };

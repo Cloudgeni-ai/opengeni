@@ -65,6 +65,10 @@ projection readers verify distinct artifact, receipt, output and exit facts.
 `retained-provider-commands.ts` atomically captures the versioned broker locator
 and session output under the canonical native receipt/holder/settlement guards;
 the task-router adapter explicitly refuses that separate locator.
+`NativeBrokerRetainedCommand` joins protected persistence to bounded committed
+output and exact control requests. A request-keyed immutable control-reply index
+distinguishes positive pre-dispatch rejection from unknown control outcomes.
+This bridge does not yet select a protocol or admit application commands.
 The native supervisor's distinct `broker` mode multiplexes initial-process
 input/output and launches sealed per-command supervisors through its private
 `launch-channel` primitive, not a guest-path authentication fallback. Its native
