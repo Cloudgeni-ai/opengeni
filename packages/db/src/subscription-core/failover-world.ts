@@ -7,6 +7,8 @@ import {
 import {
   declaredCacheLifetimeMs,
   failoverCandidateModels,
+  fallbackOrderFor,
+  hasFallbackOrderEntry,
   modelPermitted,
   personalFallbackActive,
   subscriptionCoreModelPolicyProviderIds,
@@ -56,7 +58,32 @@ export type SubscriptionCoreFailoverWorld = {
   bindings: ReadonlyMap<string, SubscriptionSessionBinding | null>;
   serving: { provider: string; modelId: string; thisTurn: boolean };
   candidateProviders: string[];
+  noModelMapping: boolean;
 };
+
+/** Mapping is catalog/configuration, not live readiness, capacity or authority.
+ * A configured empty order intentionally disables fallback. Mapped but denied
+ * targets keep their existing policy/authority diagnostic, never "no mapping".
+ */
+export function missingCrossProviderModelMapping(input: PlacementInput): boolean {
+  if (
+    !input.settings.crossProviderFailover ||
+    input.session.compactionProviderLock ||
+    input.session.onlyThisModel ||
+    input.session.binding?.choice === "explicit"
+  )
+    return false;
+  const preferred = input.models.find((model) => model.id === input.session.preferredModelId);
+  if (!preferred) return false;
+  if (
+    hasFallbackOrderEntry(input.settings, preferred.id) &&
+    fallbackOrderFor(input.settings, preferred.id).length === 0
+  )
+    return false;
+  return !failoverCandidateModels(input).some((id) =>
+    input.models.some((model) => model.id === id && model.provider !== preferred.provider),
+  );
+}
 
 export function policyBinding(
   binding: SubscriptionSessionBinding | null,
@@ -213,15 +240,18 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
     if (!providers.has(homeId)) return { status: "home_only" } as const;
     if (new Set(request.models.map((model) => model.id)).size !== request.models.length)
       throw new Error("Duplicate failover catalog model");
-    const models = request.models
-      .filter((model) => providers.has(model.provider))
+    // Keep a separate code-catalog view for diagnostics: an unavailable route
+    // or missing receipt must not make an existing model mapping disappear.
+    const catalogModels = request.models
+      .filter((model) => subscriptionCoreProviderIds().includes(model.provider))
       .map((model) => {
         if (!model.upstreamModelId || !model.reasoningLevels.length)
           throw new Error("Incomplete failover model definition");
-        const tier = providers.get(model.provider)!.adapter.modelTier?.(model.id);
+        const tier = subscriptionCoreProvider(model.provider).adapter.modelTier?.(model.id);
         const { tier: _ignored, ...descriptor } = model;
         return { ...descriptor, ...(tier ? { tier } : {}) };
       });
+    const models = catalogModels.filter((model) => providers.has(model.provider));
     const preferred = models.find((model) => model.id === request.productModelId);
     if (
       !preferred ||
@@ -297,6 +327,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
       }
     }
     const candidates = failoverCandidateModels(input);
+    const noModelMapping = missingCrossProviderModelMapping({ ...input, models: catalogModels });
     const candidateIds = [
       ...new Set(
         models
@@ -359,7 +390,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
       request.productModelId,
       request.models,
     );
-    if (candidates.length <= 1 && serving.modelId === request.productModelId)
+    if (candidates.length <= 1 && serving.modelId === request.productModelId && !noModelMapping)
       return { status: "home_only" } as const;
     // Target pins filter only their provider, never authorize personal use.
     input.models = models.filter((model) => {
@@ -476,6 +507,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         providers,
         bindings,
         serving,
+        noModelMapping,
         candidateProviders: candidateIds.filter((id) =>
           input.models.some(
             (model) =>

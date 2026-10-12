@@ -331,6 +331,144 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     });
   });
 
+  test("B1 no-mapping diagnostic preserves home success and explicit untiered targets", async () => {
+    const original = target.adapter.modelTier;
+    Object.defineProperty(target.adapter, "modelTier", { configurable: true, value: () => null });
+    try {
+      const org = await fixture.organization();
+      const source = await fixture.connection(org, home);
+      const destination = await fixture.connection(org, target);
+      const work = await fixture.turn(org);
+      await fixture.admin`update subscription_settings set fallback_order = '{}'::jsonb where account_id = ${org.accountId}::uuid`;
+      expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
+        kind: "run",
+        connectionId: source,
+      });
+      expect(await place(fixture.client.db, home, work)).toMatchObject({
+        kind: "run",
+        connectionId: source,
+      });
+      await fixture.release(work);
+      await fixture.exhausted(org.accountId, source);
+      const diagnostic = { kind: "wait", reason: "failover_no_model_mapping" };
+      expect(await evaluate(fixture.client.db, home, work)).toMatchObject(diagnostic);
+      expect(await place(fixture.client.db, home, work)).toMatchObject(diagnostic);
+      expect(await fixture.binding(work, target.adapter.provider)).toBeNull();
+      expect(
+        await place(fixture.client.db, home, {
+          ...work,
+          executionGeneration: work.executionGeneration + 1,
+        }),
+      ).toMatchObject({ kind: "attempt_fenced" });
+      // Caller-supplied tiers cannot manufacture an approved mapping.
+      expect(
+        await evaluate(fixture.client.db, home, {
+          ...work,
+          models: work.models.map((model) => ({ ...model, tier: "standard" as const })),
+        }),
+      ).toMatchObject(diagnostic);
+      await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": ["target/missing"] })}::jsonb where account_id = ${org.accountId}::uuid`;
+      expect(await evaluate(fixture.client.db, home, work)).toMatchObject(diagnostic);
+      // Exact configured catalog IDs work even when the adapter declares no tier.
+      await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": ["target/model"] })}::jsonb where account_id = ${org.accountId}::uuid`;
+      expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
+        kind: "run",
+        connectionId: destination,
+      });
+      expect(await place(fixture.client.db, home, work)).toMatchObject({
+        kind: "run",
+        connectionId: destination,
+      });
+    } finally {
+      Object.defineProperty(target.adapter, "modelTier", { configurable: true, value: original });
+    }
+  });
+
+  test("B1 no-mapping diagnostic distinguishes empty order, disabled gates, pins and unavailable mapped targets", async () => {
+    const org = await fixture.organization();
+    const source = await fixture.connection(org, home);
+    const destination = await fixture.connection(org, target);
+    const work = await fixture.turn(org);
+    await fixture.exhausted(org.accountId, source);
+    const ordinaryWait = { kind: "wait", reason: "no_eligible_capacity" };
+    const checkWait = async () => {
+      expect(await evaluate(fixture.client.db, home, work)).toMatchObject(ordinaryWait);
+      expect(await place(fixture.client.db, home, work)).toMatchObject(ordinaryWait);
+    };
+    await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": [] })}::jsonb where account_id = ${org.accountId}::uuid`;
+    await checkWait();
+    await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": ["target/missing"] })}::jsonb, cross_provider_failover = false where account_id = ${org.accountId}::uuid`;
+    await checkWait();
+    await fixture.admin`update subscription_settings set cross_provider_failover = true where account_id = ${org.accountId}::uuid`;
+    expect(
+      await place(fixture.client.db, home, { ...work, crossProviderFailoverEnabled: false }),
+    ).toMatchObject(ordinaryWait);
+    await fixture.pin(org, work, home.adapter.provider, source, "home/model");
+    expect(await place(fixture.client.db, home, work)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+    });
+    await fixture.pin(org, work, home.adapter.provider, source, "home/model", false, "automatic");
+    await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": ["target/model"] })}::jsonb where account_id = ${org.accountId}::uuid`;
+    // Readiness is not mapping: committed registry/receipt with disabled live switch.
+    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
+    await checkWait();
+    await fixture.admin`update subscription_provider_cutovers set enabled = true where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
+    await fixture.admin.begin(async (tx) => {
+      // Reproduce pre-receipt state only in this disposable fixture clone.
+      await tx`set local session_replication_role = replica`;
+      await tx`delete from opengeni_private.subscription_provider_cutover_receipts where provider = ${target.adapter.provider}`;
+      // Uncommitted deletion must not affect the app's mapped target.
+      expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
+        kind: "run",
+        connectionId: destination,
+      });
+    });
+    try {
+      await checkWait();
+    } finally {
+      await fixture.admin`insert into opengeni_private.subscription_provider_cutover_receipts(provider, migration, committed_at, seed_rotation)
+        values (${target.adapter.provider}, '9999_failover_fixture.sql', '-infinity', '{"mode":"spread"}')`;
+    }
+    await fixture.exhausted(org.accountId, destination);
+    await checkWait();
+    // A mapped but policy-denied target is not an absent mapping.
+    await fixture.admin`insert into workspace_model_policies(account_id, workspace_id, allowed_models)
+      values (${org.accountId}::uuid, ${org.workspaceId}::uuid, array['home/model'])`;
+    await checkWait();
+    const privateOrg = await fixture.organization();
+    const privateSource = await fixture.connection(privateOrg, home);
+    await fixture.connection(privateOrg, target, { personal: true });
+    await fixture.exhausted(privateOrg.accountId, privateSource);
+    const privateWork = await fixture.turn(privateOrg);
+    expect(await place(fixture.client.db, home, privateWork)).toMatchObject(ordinaryWait);
+    expect(await evaluate(fixture.client.db, home, privateWork)).toMatchObject(ordinaryWait);
+  });
+
+  test("B1 no-mapping diagnostic preserves same-provider fallback and home maintenance", async () => {
+    const org = await fixture.organization();
+    const source = await fixture.connection(org, home, { allowedModelIds: ["home/second"] });
+    const work = await fixture.turn(org);
+    await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": ["home/second", "target/missing"] })}::jsonb where account_id = ${org.accountId}::uuid`;
+    expect(await place(fixture.client.db, home, work)).toMatchObject({
+      kind: "run",
+      modelId: "home/second",
+    });
+    await fixture.release(work);
+    await fixture.exhausted(org.accountId, source);
+    expect(await place(fixture.client.db, home, work)).toMatchObject({
+      kind: "wait",
+      reason: "failover_no_model_mapping",
+    });
+    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${home.adapter.provider}`;
+    expect(await place(fixture.client.db, home, work)).toMatchObject({
+      kind: "cutover_not_enabled",
+    });
+    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
+      kind: "cutover_not_enabled",
+    });
+  });
+
   test("D-46 home pin, deleted pin and only-model never cross", async () => {
     for (const mode of ["pin", "deleted", "only"] as const) {
       const org = await fixture.organization();

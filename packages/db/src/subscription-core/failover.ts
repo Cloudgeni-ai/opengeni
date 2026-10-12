@@ -44,10 +44,28 @@ import {
 export type SubscriptionCoreFailoverRequest = SubscriptionCorePlacementRequest &
   SubscriptionCoreFailoverWorldRequest;
 type Selection = { provider: string; modelId: string; reasoningLevel: string };
-export type SubscriptionCoreFailoverPlacement = SubscriptionCorePlacement &
+/** Dormant B1 boundary only. C2 must surface this configuration diagnostic
+ * instead of claiming all-provider capacity exhaustion; home retry deadlines
+ * remain valid. Do not synthesize a target, tier or new accepted authority.
+ */
+type WithMappingReason<T> = T extends { kind: "wait"; reason: string }
+  ? Omit<T, "reason"> & { reason: T["reason"] | "failover_no_model_mapping" }
+  : T;
+export type SubscriptionCoreFailoverPlacement = WithMappingReason<SubscriptionCorePlacement> &
   Partial<Selection> & { candidateProviders?: string[] };
-export type SubscriptionCoreFailoverEvaluation = SubscriptionCorePlacementEvaluation &
-  Partial<Selection> & { candidateProviders?: string[] };
+export type SubscriptionCoreFailoverEvaluation =
+  WithMappingReason<SubscriptionCorePlacementEvaluation> &
+    Partial<Selection> & { candidateProviders?: string[] };
+
+function failoverWaitReason(
+  reason: Extract<PlacementDecision, { kind: "wait" }>["reason"],
+  world: SubscriptionCoreFailoverWorld,
+) {
+  return world.noModelMapping &&
+    (reason === "no_eligible_capacity" || reason === "model_not_allowed")
+    ? ("failover_no_model_mapping" as const)
+    : reason;
+}
 
 class SubscriptionBindingConflict extends Error {}
 const BINDING_CONFLICT_RETRIES = 3;
@@ -295,7 +313,7 @@ async function placeFailoverOnce(
       if (decision.kind === "wait")
         return {
           kind: "wait",
-          reason: decision.reason,
+          reason: failoverWaitReason(decision.reason, world),
           earliestResetAt:
             decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
           healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, identity, world),
@@ -387,7 +405,7 @@ export async function evaluateSubscriptionCorePlacementWithFailover(
         ? { ...decision, candidateProviders: world.candidateProviders }
         : {
             kind: "wait",
-            reason: decision.reason,
+            reason: failoverWaitReason(decision.reason, world),
             earliestResetAt:
               decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
             healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, request.identity, world),
