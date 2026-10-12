@@ -93,6 +93,12 @@ Then open the smallest source files that answer the question:
   boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
   capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never
   reinterpret a legacy batch locator or infer exit from missing output.
+  The in-progress native initial-process broker is a separate versioned path:
+  inspect `sandbox/providers/native-command-broker-driver.ts`, its bootstrap and
+  per-command projection readers, and `packages/db/src/native-command-broker-transport.ts`.
+  Journal capture/dispatch and a passing native fixture do not imply canonical
+  application admission or old-group enrollment. Follow the remaining gates in
+  `docs/design/native-command-broker.md` before enabling that path.
   `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
   layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
   exposes on-demand filesystem copies. Repository Skill discovery is independent.

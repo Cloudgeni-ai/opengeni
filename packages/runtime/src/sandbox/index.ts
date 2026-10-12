@@ -9,7 +9,28 @@ export {
 export type {
   NativeBrokerTransportPort,
   NativeBrokerTransportState,
+  DurableNativeBrokerTransport,
 } from "./providers/native-command-broker-transport";
+export {
+  NativeBrokerDriver,
+  NativeBrokerDispatchUnknownError,
+} from "./providers/native-command-broker-driver";
+export type { NativeBrokerChannel } from "./providers/native-command-broker-driver";
+export { ModalNativeBrokerChannel } from "./providers/modal-native-broker-channel";
+export {
+  verifyNativeBrokerBootstrap,
+  readNativeBrokerBootstrap,
+} from "./providers/native-command-broker-bootstrap";
+export type { NativeBrokerArtifactPin } from "./providers/native-command-broker-bootstrap";
+export {
+  initialNativeBrokerCommandSnapshot,
+  projectNativeBrokerCommand,
+} from "./providers/native-command-broker-command";
+export type {
+  NativeBrokerCommandBinding,
+  NativeBrokerCommandSnapshot,
+  NativeBrokerCommandReceipt,
+} from "./providers/native-command-broker-command";
 export {
   ProviderCommandStartOutcomeUnknownError,
   ProviderCommandInputOutcomeUnknownError,

@@ -52,6 +52,7 @@ export type NativeBrokerTransportTransaction = {
   /** Only a physical-identity fact, never user command/release authority. */
   currentInstance: boolean;
   read(kind: NativeBrokerEntryKind, key: string): Promise<NativeBrokerStoredEntry | null>;
+  framesAfter(sequence: number, limit: number): Promise<NativeBrokerStoredEntry[]>;
   insert(entry: Omit<NativeBrokerStoredEntry, "sha256">): Promise<NativeBrokerStoredEntry>;
   /** The callback must apply the corresponding pure writer-epoch transition. */
   claimWriter(id: string): NativeBrokerWriter;
@@ -278,6 +279,43 @@ export function nativeBrokerTransportStore(
             ${entry.kind},${entry.key},${entry.sequence},${complete.sha256},
             ${seal(encryptionKey, binding, `${entry.kind}:${entry.key}`, entry.value)})`);
             return complete;
+          },
+          async framesAfter(sequence, limit) {
+            if (
+              !Number.isSafeInteger(sequence) ||
+              sequence < 0 ||
+              !Number.isInteger(limit) ||
+              limit < 1 ||
+              limit > 128
+            )
+              fenced();
+            const found = await rawRows(
+              dbtx,
+              sql`SELECT entry_key, sequence::text, sha256, value_encrypted
+              FROM native_command_broker_entries
+              WHERE broker_id = ${binding.brokerId}::uuid AND ${scoped(binding)}
+                AND kind = 'frame' AND sequence > ${sequence}
+              ORDER BY native_command_broker_entries.sequence LIMIT ${limit}`,
+            );
+            return found.map((entryRow) => {
+              const entrySequence = Number(entryRow.sequence);
+              const entryKey = String(entryRow.entry_key);
+              validateEntryIdentity("frame", entryKey, entrySequence, true);
+              const value = unseal(
+                encryptionKey,
+                binding,
+                `frame:${entryKey}`,
+                String(entryRow.value_encrypted),
+              );
+              if (sha(value) !== entryRow.sha256) fenced();
+              return {
+                kind: "frame",
+                key: entryKey,
+                sequence: entrySequence,
+                sha256: String(entryRow.sha256),
+                value,
+              };
+            });
           },
           claimWriter(id) {
             if (

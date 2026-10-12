@@ -59,10 +59,13 @@ The in-progress native command broker transport journal is separate from
 command admission: `packages/db/src/native-command-broker-transport.ts` owns
 scoped encrypted input/output custody, while the runtime's broker transport
 coordinator applies framing/replay rules and core composes the two packages.
+`native-command-broker-driver.ts` joins committed intent/capture with the
+separately owned Modal initial-process channel; broker bootstrap and per-command
+projection readers verify distinct artifact, receipt, output and exit facts.
 The native supervisor's distinct `broker` mode multiplexes initial-process
 input/output and launches sealed per-command supervisors through its private
 `launch-channel` primitive, not a guest-path authentication fallback. Its native
-implementation is still separate from authenticated runtime/provider admission;
+implementation and host driver are still separate from canonical command admission;
 it is not wired into application command execution. See
 [`native-command-broker.md`](design/native-command-broker.md) for its remaining
 qualification, lifecycle and activation requirements.

@@ -18,7 +18,7 @@ import {
   type NativeBrokerOutputSnapshot,
   type NativeBrokerOutputPage,
 } from "./native-command-broker-output";
-import { NativeBrokerFrameDecoder } from "./native-command-broker-wire";
+import { NativeBrokerFrameDecoder, type NativeBrokerFrame } from "./native-command-broker-wire";
 
 type EntryKind = "request" | "frame" | "page" | "eof";
 type Entry = {
@@ -38,6 +38,7 @@ export type NativeBrokerTransportPort = {
       writer: Writer;
       currentInstance: boolean;
       read(kind: EntryKind, key: string): Promise<Entry | null>;
+      framesAfter(sequence: number, limit: number): Promise<Entry[]>;
       insert(entry: Omit<Entry, "sha256">): Promise<Entry>;
       claimWriter(id: string): Writer;
       requireWriter(id: string, epoch: number): void;
@@ -231,5 +232,69 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
     async read() {
       return store.transaction(async (tx) => validate(tx.state, identity));
     },
+    /** Returned bytes have already committed, including late output from an
+     * obsolete physical instance. This is not command settlement or authority. */
+    async framesAfter(sequence: number, limit = 64) {
+      if (
+        !Number.isSafeInteger(sequence) ||
+        sequence < 0 ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > 128
+      )
+        invalid();
+      return store.transaction(async (tx) => {
+        const state = validate(tx.state, identity);
+        if (sequence > state.output.lastSequence) invalid();
+        const entries = await tx.framesAfter(sequence, limit);
+        const frames: NativeBrokerFrame[] = [];
+        for (const entry of entries) {
+          const decoder = new NativeBrokerFrameDecoder(identity.brokerId);
+          const decoded = decoder.push(Buffer.from(entry.value));
+          decoder.finish();
+          const frame = decoded[0];
+          if (
+            decoded.length !== 1 ||
+            !frame ||
+            frame.direction !== "response" ||
+            frame.sequence !== sequence + frames.length + 1 ||
+            entry.kind !== "frame" ||
+            entry.key !== String(frame.sequence) ||
+            entry.sequence !== frame.sequence ||
+            frame.sequence > state.output.lastSequence
+          )
+            invalid();
+          frames.push(frame);
+        }
+        if (frames.length < limit && sequence + frames.length !== state.output.lastSequence)
+          invalid();
+        return {
+          frames,
+          lastSequence: state.output.lastSequence,
+          providerEof: state.output.providerEof,
+        };
+      });
+    },
+    async request(requestId: string) {
+      return store.transaction(async (tx) => {
+        const state = validate(tx.state, identity);
+        const entry = await tx.read("request", requestId);
+        if (!entry) return null;
+        const frame = requestFromWire(entry.value, identity);
+        if (entry.sequence !== frame.sequence) invalid();
+        const accepted = frame.sequence <= state.input.lastAcceptedInputIndex;
+        const pending = state.input.pending;
+        if (
+          !accepted &&
+          (!pending ||
+            pending.providerInputIndex !== frame.sequence ||
+            Buffer.from(pending.frameBase64, "base64").toString("ascii") !== entry.value)
+        )
+          invalid();
+        return { frame, accepted, phase: accepted ? ("accepted" as const) : pending!.phase };
+      });
+    },
   };
 }
+
+export type DurableNativeBrokerTransport = ReturnType<typeof durableNativeBrokerTransport>;

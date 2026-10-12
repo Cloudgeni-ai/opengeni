@@ -3,9 +3,10 @@
 Status: implementation in progress; not an admitted runtime capability. The
 current increments provide bounded framing, a native bootstrap preflight,
 input/output custody state machines, encrypted atomic transport storage, a
-private inherited supervisor channel, strict command-definition codec and native
-initial-process command multiplexer. The native `broker` mode can launch test
-commands, but no runtime/provider adapter selects it for application commands.
+private inherited supervisor channel, strict command-definition codec, native
+initial-process command multiplexer and journal-backed host transport driver.
+The native `broker` mode and host driver can launch fixture commands, but no
+application command-admission route selects this protocol.
 These increments do not change a production protocol tuple or qualify an
 existing sandbox. The existing [command supervision](../command-supervision.md)
 and [native keeper](../../agent/native/command-supervisor/README.md) contracts
@@ -284,11 +285,59 @@ it never settles a process. Old physical-instance output remains collectible
 after replacement, but new input is refused. Initial-process EOF also fences
 input without converting it into a command exit. The current PostgreSQL
 integration tests exercise races, rollback, restart replay, exact scopes and
-partial-frame capture with the non-owner app role. No live command or provider
-adapter invokes this journal yet. Canonical command admissions, bootstrap
-binding, retention/purge lifecycle, and physical broker control remain required
+partial-frame capture with the non-owner app role. The host driver invokes this
+journal in explicit fixtures, not application sessions. Canonical command
+admissions, creation/bootstrap binding, retention/purge lifecycle and fully
+qualified physical control remain required
 before activation; an unresolved journal must not be deleted to unblock a lease
 or workspace teardown.
+
+### Host transport and command evidence
+
+`native-command-broker-driver.ts` composes committed journal transitions with an
+exact initial-process channel. A fresh input dispatch follows the actual intent
+commit. Re-entering an already-dispatched request returns a reconciliation state,
+not another physical write. Explicit `replayPending` preserves the original
+bytes, index and epoch; an expired writer first resolves that pending input, then
+sends its newer fence. A provider response or a timeout cannot clear the pending
+request. Local overlapping input calls refuse rather than queue stale release
+work; output collection runs independently of input dispatch.
+
+`modal-native-broker-channel.ts` owns a dedicated Modal 0.9.0 client using the
+verified non-retrying control-plane middleware. It addresses only the original
+sandbox stdin and stdout, checks the exact task before a write, preserves abort
+signals, and never sends initial EOF as a command operation. Closing this host
+client does not terminate the sandbox or close its initial stdin. Observation
+containment deadlines do not limit command lifetime. Initial stderr and creation
+provenance remain separate admission obligations, not guessed from empty stdout.
+
+Output pages commit before the driver asks for a successor. Restartable bounded
+frame reads verify immutable ciphertext/hash/scope and the numeric sequence
+order. `native-command-broker-bootstrap.ts` reconstructs only the initial hello
+and complete artifact prefix, checks actual bytes against the independently
+selected pin, and returns no command authority. A later hello, partial artifact,
+provider EOF or self-reported hash is not an authenticated initial admission.
+
+`native-command-broker-command.ts` projects each command from committed frames.
+It joins control evidence to the exact accepted immutable request and ties data,
+stream EOF and independent supervisor exit to the original launch epoch/request.
+The snapshot keeps UTF-8 suffixes and offsets separately for each stream. Native
+receipt, its exact ACK response, both stream EOFs and independently observed zero
+supervisor exit are distinct requirements. User output is always text; neither
+protocol-looking output nor initial-process EOF can settle a command. The caller
+must still atomically capture this projection and persist the receipt in
+canonical retained-process custody before ACK and holder/admission settlement.
+
+The opt-in local static-ELF/real-PostgreSQL test in
+`packages/core/test/native-command-broker-transport.integration.test.ts` runs
+with `OPENGENI_NATIVE_BROKER_LOCAL=1` after building the static artifact with
+`make -C agent/native/command-supervisor test-static`. It checks unknown
+dispatch, exact replay, writer takeover, duplicate-release refusal, binary I/O,
+receipt-before-ACK and independent exit using the actual broker. Ordinary CI
+does not require that local native build; the deterministic provider boundary
+and real database transport cases remain separate. This fixture does not
+establish Modal admission, image provenance, old-warm compatibility or release
+qualification. No runtime application session currently constructs the driver.
 
 Before any physical write, the control plane must persist the exact broker,
 physical instance, writer epoch, request ID, provider input index, body and
