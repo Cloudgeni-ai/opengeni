@@ -5255,7 +5255,7 @@ like C1a.
   checkpoints the lanes first (as the lease-lost and failover paths do), so
   the turn recovers; a lane with a request still without its response stays
   terminal. Codex and SuperGrok keep their existing gate (tested).
-  An unknown request outcome or a lost lease skips the step. The legacy
+  An unknown request outcome or a lost lease skips the refusal step. The legacy
   Claude receipts, refresh recovery, rotation and wait never run for a core
   turn, and the core never reads the v1 `claudeAuthRecovery` marker (the
   receipts replace it); the claim keeps reading it for legacy turns until

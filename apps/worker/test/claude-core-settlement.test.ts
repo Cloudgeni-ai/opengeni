@@ -696,6 +696,25 @@ describe("Claude refusal settlement on the core", () => {
     expect(order).toEqual(["observation", "wake", "refusal", "release"]);
   });
 
+  test("refusal settlement passes its cancellation signal: a stuck wake never holds a cancelled turn", async () => {
+    const runtime = coreRuntime({ refusals: 1 });
+    recoveringRecovery();
+    spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockImplementation(
+      (() => new Promise(() => undefined)) as never,
+    );
+    const { deps } = failureDeps(
+      anthropic(429, "rate_limit_error"),
+      core({ quota: { settled: () => Promise.resolve(true) } }),
+    );
+    const cancelled = new AbortController();
+    cancelled.abort();
+    deps.cancellationSignal = cancelled.signal as never;
+    // Without the signal the wake would hold settlement for the 30 second
+    // finalizer bound, far past this test's timeout.
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(runtime.apply).toHaveBeenCalledTimes(1);
+  });
+
   test("a joined observation chain wakes the account's Claude waiters once", async () => {
     const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockResolvedValue([]);
     const chain = Promise.resolve(true);
