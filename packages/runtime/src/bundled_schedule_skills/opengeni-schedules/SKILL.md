@@ -38,7 +38,8 @@ destination or a separate-agent mode.
   capability and exact operations. Follow returned connection/setup and approval
   requirements. Do not claim that discovery means the integration is ready.
 
-Select only the resources, Variable Set, and tools the task needs. Missing
+Select only the resources and tools the task needs; saved secrets are used by
+`{{secret:…}}` reference and need no attachment. Missing
 optional dependencies are not a reason to ask for unnecessary setup. If a
 required capability or authority is unavailable, explain the remaining setup
 briefly instead of inventing a tool or borrowing another person's connection.
@@ -54,7 +55,8 @@ Use `scheduled_tasks_create` with:
 - The requested cadence and time zone. Use the time zone supplied in the
   request unless the user explicitly chooses another. Inspect the current tool
   schema for supported schedule shapes rather than guessing cron fields.
-- For a separate agent, the required repository resources, Variable Set, and tool selections.
+- For a separate agent, the required repository resources, tool selections, and
+  any vault narrowing (`vaultPolicy`).
   Scheduled runs inherit the creating session's tool and permission ceiling;
   this Skill does not grant authority or change approvals.
 

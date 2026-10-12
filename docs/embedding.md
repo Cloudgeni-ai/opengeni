@@ -280,7 +280,7 @@ Sessions with an agent configuration (`CreateSessionRequest.agent`, the
 workspace's `settings.sessionAgentDefaults`, a scheduled task's
 `agentConfig.agent`, or a parent's configuration) freeze one resolved
 `sessions.agent_config`: `capabilities` (`"all"`, `"none"`, or a starting point
-plus toggles over thirteen capabilities), `identity`, `renderer`, and the
+plus toggles over fourteen capabilities, including `secrets`), `identity`, `renderer`, and the
 instructions alias. Workers gate every tool family and compose a modular prompt
 (identity, base behavior, runtime mechanics, then only the modules of enabled
 capabilities and attached resources) from it; `session.agent` and
@@ -305,7 +305,7 @@ Skill with the same name.
 
 For sessions without an agent configuration, a host has two system-level instruction scopes, composed as **deployment default
 template → workspace persona → per-session instructions**, with the
-non-bypassable CORE (goal-loop ownership + variable set block) always
+non-bypassable CORE (goal-loop ownership) always
 substituted in. Exact-message application context does not enter this prefix.
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
@@ -759,8 +759,9 @@ mutates the manifest.
 The former `sandboxSecrets` leg is removed. A host that owns its own secret
 store passes `vaultProvider` (a `VaultProvider` from `@opengeni/vaults`) on
 `connectionCredentials`; Opengeni links it as a `source: "host"` vault and
-resolves values from it live, so the host never returns Variable Set plaintext
-through the credential port.
+resolves values from it live when a `{{secret:…}}` reference runs, so the host
+never returns secret plaintext through the credential port. See
+[`secrets.md`](secrets.md#providers).
 
 A standalone product can supply the same material without embedding: a
 workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
@@ -769,11 +770,10 @@ resolver, in place of the injected port.
 
 `runCredentials` is the session-aware seam for credentials that programs inside
 the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,
-or equivalent host-owned material. It is independent of `variableSetId`; the
-request includes a variable-set id/name only as informational context. An
-embedding host should resolve the Opengeni session through its own durable
-session binding instead of creating a marker variable set or copying host
-connection rows into Opengeni.
+or equivalent host-owned material. It is independent of vaults. An embedding
+host should resolve the Opengeni session through its own durable session
+binding instead of creating a marker vault item or copying host connection
+rows into Opengeni.
 
 Every request carries account/workspace/session, parent and root session,
 the shared `sandboxGroupId`,
@@ -856,7 +856,7 @@ references. See [MCP connection cutover](remote-mcp-credentials.md) for account
 selection, refresh, and migration behavior.
 
 `runCredentials` has no standalone fallback because ordinary standalone sandbox
-credentials continue to come from variable sets and existing lifecycle hooks. This port does
+credentials come from `{{secret:…}}` references and existing lifecycle hooks. This port does
 **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in
 `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with
 `signDelegatedAccessToken(settings.delegationSecret, ...)`.
@@ -913,7 +913,7 @@ MCP-server replacement makes an inherited strict tool ref invalid, the create
 fails validation; replace `tools` in the same request rather than silently
 dropping a strict tool. A top-level create has no parent snapshot: omitted
 resources, skills, and MCP servers remain empty, while omitted tools continue to receive
-workspace-default capability MCP refs. Variable sets, sandbox environments, model selection,
+workspace-default capability MCP refs. Vault policy, sandbox environments, model selection,
 persona instructions, goals, and sandbox placement retain their own existing
 resolution rules and are not part of this context snapshot.
 

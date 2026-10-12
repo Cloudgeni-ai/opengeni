@@ -1006,8 +1006,9 @@ All producers use the ordinary session/turn runtime:
 - a **child session** is a normal session with explicit lineage, depth, compute,
   visibility, and initiating-authority rules. Omitted child resources inherit
   repositories only; file attachments require explicit selection, and an
-  omitted Sandbox Environment or Variable Set selection resolves like any new
-  session rather than copying the parent's (see
+  omitted Sandbox Environment or vault policy resolves like any new
+  session rather than copying the parent's, though a child's vault policy can
+  never be wider than its parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
 Schedule indicators include authorized reusable-session targets and paused schedules; the API filters by `sessionId`.
@@ -1148,14 +1149,15 @@ Text-only turns need no compute provisioning/Connected Machine contact.
 Filesystem/process/Git/browser/computer tools resolve exact current targets
 and validate epochs/authority.
 
-Explicit Variable Sets freeze in ascending precedence. Reconfiguration requires
-quiescence and rotates managed compute, never hot-swapping active credentials.
+Nothing from a vault is injected into compute. `{{secret:…}}` references in
+tool arguments resolve per call at the execution boundary, so vault and policy
+changes apply to the next command without restarting a box.
 
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
-[`connected-machines.md`](connected-machines.md). Variable Set lifecycle/ordering:
-[`variable-sets.md`](variable-sets.md).
+[`connected-machines.md`](connected-machines.md). Vaults, references and
+delivery: [`secrets.md`](secrets.md).
 
 Configured agents retain discovery; `media` gates image/video guidance.
 Unmatched `tool_list.namePrefix` returns empty pages plus bounded authorized
@@ -2089,7 +2091,7 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   Connected Machines retain their environment.
 
 Canonical: [`../SECURITY.md`](../SECURITY.md),
-[`credentials.md`](credentials.md), [`variable-sets.md`](variable-sets.md),
+[`credentials.md`](credentials.md), [`secrets.md`](secrets.md),
 [`session-mcp-servers.md`](session-mcp-servers.md),
 [`organization-tenancy.md`](organization-tenancy.md), and
 [`agent-session-authority.md`](agent-session-authority.md).
@@ -2196,7 +2198,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
 | Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
-| Variable Sets, ordered session attachment, or secret reads | `packages/core/src/`, `packages/db/src/`, `apps/api/src/routes/` | [`variable-sets.md`](variable-sets.md) |
+| Vaults, `{{secret:…}}` references, secret delivery, or secret reads | `packages/contracts/src/vaults.ts`, `packages/core/src/domain/vaults/`, `packages/db/src/vaults.ts`, `packages/vaults/`, `apps/api/src/routes/vaults.ts` | [`secrets.md`](secrets.md) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
 | Integration policy | `packages/db/src/organization-integration-policy.ts`, `apps/api/src/routes/organization-integration-policy.ts` | [`organization-integration-policy.md`](organization-integration-policy.md) |
 

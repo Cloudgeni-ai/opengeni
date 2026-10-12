@@ -389,7 +389,7 @@ mints a read-only master key: it inventories shared workspaces and reads their
 sessions, events, and files, but cannot create sessions, send messages, or mint
 keys. This legacy `access: "read"` tier is distinct from the broader explicit
 `read_only` preset, which includes every read/list/view/search permission
-except the secret-value reads `secrets:read` and `variable-sets:read`.
+except the secret-value read `secrets:read`.
 
 Create or edit with `policy: { preset, permissions, workspaceScope }` for exact
 grants. `OrganizationAccessPreset` is `"read_only" | "full" | "custom"`;

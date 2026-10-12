@@ -60,14 +60,15 @@ const { apiKey, token } = await adminClient.createOrganizationApiKey(organizatio
 
 | Policy preset | Permissions                                                                                        |
 | ------------- | -------------------------------------------------------------------------------------------------- |
-| `read_only`   | Every read/list/view/search permission except secret values (`secrets:read`, `variable-sets:read`) |
+| `read_only`   | Every read/list/view/search permission except secret values (`secrets:read`)                       |
 | `full`        | Every non-deprecated permission                                                                    |
 | `custom`      | Only the permissions you choose                                                                    |
 
 The preset is a label. The server grants only the permissions you send and
 recomputes the label from them. Each permission, including `workspace:admin`,
 is granted individually. To give a backend plaintext secret values, add
-`secrets:read` or `variable-sets:read` to a custom list.
+`secrets:read` to a custom list. The old `variable-sets:*` names still work as
+aliases of the matching `secrets:*` permissions.
 
 Scope `{ kind: "all" }` covers every current and future shared workspace in the
 organization. `{ kind: "selected", workspaceIds }` takes up to 500 shared
@@ -139,7 +140,7 @@ To choose permissions yourself, call `addExternalWorkspaceMember` before the use
 - Keep organization keys on your server. Never embed one in a client.
 - A delegated token cannot grant more than the host is configured to delegate, and it never reaches a user's Personal workspace.
 - A credential for one workspace does not reach another.
-- Secrets agents use at runtime (provider tokens, MCP headers, variable sets) are encrypted at rest, readable only with explicit permissions, and never written to audit rows.
+- Secrets agents use at runtime (provider tokens, MCP headers, vault items) are encrypted at rest, readable only with explicit permissions, and never written to audit rows. Agents use vault items by `{{secret:…}}` reference, so the values never enter the model context.
 
 ## Deployment access modes
 
