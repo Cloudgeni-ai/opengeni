@@ -2223,19 +2223,6 @@
     },
     {
       "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
-      "sdk": [
-        "OpenGeniClient.protectedBrowserAuthFill"
-      ],
-      "request": [
-        "ProtectedAuthFillRequest"
-      ],
-      "response": [
-        "ProtectedAuthFillResponse"
-      ]
-    },
-    {
-      "method": "POST",
       "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report",
       "sdk": [
         "OpenGeniClient.reportBrowserAuthRun"
@@ -9959,8 +9946,6 @@
         "$.interventionId": "string! null",
         "$.methodId": "string! null",
         "$.operationId": "string!",
-        "$.pendingFields": "array!",
-        "$.pendingFields[]": "ref(AuthRunPendingField)",
         "$.purpose": "enum!=[\"\\\"authenticate\\\"\",\"\\\"health_check\\\"\",\"\\\"repair\\\"\"]",
         "$.settledAt": "string! null",
         "$.siteAuthConnectionId": "string!",
@@ -10018,24 +10003,12 @@
         "$.run": "ref(AuthRun)!"
       }
     },
-    "AuthRunPendingField": {
-      "io": [
-        "input",
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.id": "string!",
-        "$.label": "string!",
-        "$.purpose": "ref(SiteAuthFieldPurpose)!"
-      }
-    },
     "AuthRunState": {
       "io": [
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"awaiting_choice\\\"\",\"\\\"awaiting_external_action\\\"\",\"\\\"awaiting_secret\\\"\",\"\\\"cancelled\\\"\",\"\\\"discovering\\\"\",\"\\\"failed\\\"\",\"\\\"verified\\\"\",\"\\\"working\\\"\"]"
+        "$": "enum=[\"\\\"awaiting_choice\\\"\",\"\\\"awaiting_external_action\\\"\",\"\\\"cancelled\\\"\",\"\\\"discovering\\\"\",\"\\\"failed\\\"\",\"\\\"verified\\\"\",\"\\\"working\\\"\"]"
       }
     },
     "AutomationRun": {
@@ -10292,6 +10265,7 @@
         "$|type=fill.value": "string!",
         "$|type=type": "object",
         "$|type=type.locator": "ref(BrowserLocator)?",
+        "$|type=type.mode": "enum?=[\"\\\"insert\\\"\",\"\\\"keys\\\"\"]",
         "$|type=type.text": "string!",
         "$|type=type.type": "const!=[\"\\\"type\\\"\"]",
         "$|type=press": "object",
@@ -13661,7 +13635,13 @@
         "$": "object",
         "$.accountLabel": "string!",
         "$.authorities": "array!",
-        "$.authorities[]": "ref(SiteAuthAuthority)",
+        "$.authorities[]": "object",
+        "$.authorities[].adapterId": "string!",
+        "$.authorities[].connectionId": "string!",
+        "$.authorities[].credential": "ref(InteractionCredentialAuthorityRef)! null",
+        "$.authorities[].id": "string!",
+        "$.authorities[].kind": "const!=[\"\\\"external_provider\\\"\"]",
+        "$.authorities[].label": "string!",
         "$.healthPolicy": "ref(SiteAuthHealthPolicy)!",
         "$.loginUrl": "string! null",
         "$.methods": "array!",
@@ -16962,7 +16942,8 @@
     },
     "InteractionCredentialAuthorityRef": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "object",
@@ -20804,54 +20785,6 @@
         "$|kind=definition_edit.payload": "ref(RigDefinitionEditPayload)!"
       }
     },
-    "ProtectedAuthField": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.fieldId": "string!",
-        "$.locator": "ref(BrowserLocator)!"
-      }
-    },
-    "ProtectedAuthFillRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.authorityId": "string!",
-        "$.expectedDocumentGeneration": "string! null",
-        "$.expectedFrameId": "string! null",
-        "$.expectedTargetGeneration": "string!",
-        "$.expectedVersion": "integer!",
-        "$.fields": "array!",
-        "$.fields[]": "ref(ProtectedAuthField)",
-        "$.operationId": "string!",
-        "$.submit": "union?=[\"type=click\",\"type=none\",\"type=press\"]",
-        "$.submit|type=none": "object",
-        "$.submit|type=none.type": "const!=[\"\\\"none\\\"\"]",
-        "$.submit|type=click": "object",
-        "$.submit|type=click.locator": "ref(BrowserLocator)!",
-        "$.submit|type=click.type": "const!=[\"\\\"click\\\"\"]",
-        "$.submit|type=press": "object",
-        "$.submit|type=press.key": "string!",
-        "$.submit|type=press.locator": "ref(BrowserLocator)?",
-        "$.submit|type=press.type": "const!=[\"\\\"press\\\"\"]"
-      }
-    },
-    "ProtectedAuthFillResponse": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.operationId": "string!",
-        "$.replayed": "boolean!",
-        "$.run": "ref(AuthRun)!",
-        "$.status": "enum!=[\"\\\"failed\\\"\",\"\\\"needs_human\\\"\",\"\\\"stale\\\"\",\"\\\"submitted\\\"\",\"\\\"working\\\"\"]"
-      }
-    },
     "PtyCloseRequest": {
       "io": [
         "input"
@@ -21145,9 +21078,7 @@
         "$.failureCode": "string? null",
         "$.methodId": "string?",
         "$.operationId": "string!",
-        "$.pendingFields": "array?",
-        "$.pendingFields[]": "ref(AuthRunPendingField)",
-        "$.state": "enum!=[\"\\\"awaiting_choice\\\"\",\"\\\"awaiting_external_action\\\"\",\"\\\"awaiting_secret\\\"\",\"\\\"cancelled\\\"\",\"\\\"failed\\\"\",\"\\\"working\\\"\"]"
+        "$.state": "enum!=[\"\\\"awaiting_choice\\\"\",\"\\\"awaiting_external_action\\\"\",\"\\\"cancelled\\\"\",\"\\\"failed\\\"\",\"\\\"working\\\"\"]"
       }
     },
     "RepositoryResourceRef": {
@@ -23560,43 +23491,6 @@
         "$.rigId": "string! null"
       }
     },
-    "SiteAuthAuthority": {
-      "io": [
-        "input",
-        "output"
-      ],
-      "shape": {
-        "$": "union=[\"kind=connection_fields\",\"kind=external_provider\",\"kind=human\"]",
-        "$|kind=connection_fields": "object",
-        "$|kind=connection_fields.credential": "ref(InteractionCredentialAuthorityRef)!",
-        "$|kind=connection_fields.fields": "array!",
-        "$|kind=connection_fields.fields[]": "object",
-        "$|kind=connection_fields.fields[].algorithm": "enum?=[\"\\\"sha1\\\"\",\"\\\"sha256\\\"\",\"\\\"sha512\\\"\"]",
-        "$|kind=connection_fields.fields[].credentialKey": "string!",
-        "$|kind=connection_fields.fields[].digits": "integer?",
-        "$|kind=connection_fields.fields[].id": "string!",
-        "$|kind=connection_fields.fields[].periodSeconds": "integer?",
-        "$|kind=connection_fields.fields[].purpose": "ref(SiteAuthFieldPurpose)!",
-        "$|kind=connection_fields.id": "string!",
-        "$|kind=connection_fields.kind": "const!=[\"\\\"connection_fields\\\"\"]",
-        "$|kind=connection_fields.label": "string!",
-        "$|kind=human": "object",
-        "$|kind=human.fields": "array!",
-        "$|kind=human.fields[]": "object",
-        "$|kind=human.fields[].id": "string!",
-        "$|kind=human.fields[].purpose": "ref(SiteAuthFieldPurpose)!",
-        "$|kind=human.id": "string!",
-        "$|kind=human.kind": "const!=[\"\\\"human\\\"\"]",
-        "$|kind=human.label": "string!",
-        "$|kind=external_provider": "object",
-        "$|kind=external_provider.adapterId": "string!",
-        "$|kind=external_provider.connectionId": "string!",
-        "$|kind=external_provider.credential": "ref(InteractionCredentialAuthorityRef)! null",
-        "$|kind=external_provider.id": "string!",
-        "$|kind=external_provider.kind": "const!=[\"\\\"external_provider\\\"\"]",
-        "$|kind=external_provider.label": "string!"
-      }
-    },
     "SiteAuthConnection": {
       "io": [
         "output"
@@ -23606,7 +23500,13 @@
         "$.accountId": "string!",
         "$.accountLabel": "string!",
         "$.authorities": "array!",
-        "$.authorities[]": "ref(SiteAuthAuthority)",
+        "$.authorities[]": "object",
+        "$.authorities[].adapterId": "string!",
+        "$.authorities[].connectionId": "string!",
+        "$.authorities[].credential": "ref(InteractionCredentialAuthorityRef)! null",
+        "$.authorities[].id": "string!",
+        "$.authorities[].kind": "const!=[\"\\\"external_provider\\\"\"]",
+        "$.authorities[].label": "string!",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string!",
         "$.healthPolicy": "ref(SiteAuthHealthPolicy)!",
@@ -23655,14 +23555,6 @@
         "$.connection": "ref(SiteAuthConnection)!",
         "$.operationId": "string!",
         "$.replayed": "boolean!"
-      }
-    },
-    "SiteAuthFieldPurpose": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"identifier\\\"\",\"\\\"password\\\"\",\"\\\"secret\\\"\",\"\\\"totp\\\"\"]"
       }
     },
     "SiteAuthHealthPolicy": {
@@ -25967,7 +25859,13 @@
         "$": "object",
         "$.accountLabel": "string?",
         "$.authorities": "array?",
-        "$.authorities[]": "ref(SiteAuthAuthority)",
+        "$.authorities[]": "object",
+        "$.authorities[].adapterId": "string!",
+        "$.authorities[].connectionId": "string!",
+        "$.authorities[].credential": "ref(InteractionCredentialAuthorityRef)! null",
+        "$.authorities[].id": "string!",
+        "$.authorities[].kind": "const!=[\"\\\"external_provider\\\"\"]",
+        "$.authorities[].label": "string!",
         "$.expectedVersion": "integer!",
         "$.healthPolicy": "ref(SiteAuthHealthPolicy)?",
         "$.loginUrl": "string? null",
@@ -29215,8 +29113,6 @@
       "PromotionalCreditBalance": "type",
       "PromotionalCreditScope": "type",
       "ProposeRigChangeRequest": "type",
-      "ProtectedAuthFillRequest": "type",
-      "ProtectedAuthFillResponse": "type",
       "proxySessionEventStream": "value",
       "ProxySessionEventStreamOptions": "type",
       "PrReviewAppRegistration": "type",
@@ -29463,7 +29359,6 @@
       "SiteAuthConnectionListResponse": "type",
       "SiteAuthConnectionMutationResponse": "type",
       "SiteAuthConnectionResource": "value",
-      "SiteAuthFieldPurpose": "type",
       "SiteAuthHealthPolicy": "type",
       "SiteAuthMethod": "type",
       "SiteToolBridge": "type",
@@ -30452,8 +30347,6 @@
       "OpenGeniInteractionClient": "value",
       "parseBrowserFrameMetadata": "value",
       "parseComputerFrameMetadata": "value",
-      "ProtectedAuthFillRequest": "type",
-      "ProtectedAuthFillResponse": "type",
       "PublishBrowserRevisionRequest": "type",
       "PublishBrowserRevisionResponse": "type",
       "ReportAuthRunRequest": "type",
@@ -30466,7 +30359,6 @@
       "SiteAuthConnectionListResponse": "type",
       "SiteAuthConnectionMutationResponse": "type",
       "SiteAuthConnectionResource": "value",
-      "SiteAuthFieldPurpose": "type",
       "SiteAuthHealthPolicy": "type",
       "SiteAuthMethod": "type",
       "StartAuthRunRequest": "type",
@@ -32765,7 +32657,6 @@
       "advanceExternal",
       "get",
       "openExternalFlow",
-      "protectedFill",
       "report",
       "verify"
     ],
@@ -33482,7 +33373,6 @@
       "processNextTranscriptionRecordingSegment",
       "promoteRigChange",
       "proposeRigChange",
-      "protectedBrowserAuthFill",
       "publishBrowserRevision",
       "publishSandboxFileArtifact",
       "publishWorkspaceArtifactVersion",
@@ -34149,7 +34039,6 @@
       "processNextTranscriptionRecordingSegment",
       "promoteRigChange",
       "proposeRigChange",
-      "protectedBrowserAuthFill",
       "publishBrowserRevision",
       "publishSandboxFileArtifact",
       "putOrganizationWorkspaceMember",
@@ -34850,7 +34739,6 @@
       "processNextTranscriptionRecordingSegment",
       "promoteRigChange",
       "proposeRigChange",
-      "protectedBrowserAuthFill",
       "publishBrowserRevision",
       "publishSandboxFileArtifact",
       "publishWorkspaceArtifactVersion",
@@ -35180,9 +35068,6 @@
       ],
       "openExternalFlow": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalAuthInteractiveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalAuthInteractiveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
-      "protectedFill": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "report": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ReportAuthRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AuthRunMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -36986,9 +36871,6 @@
       ],
       "proposeRigChange": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProposeRigChangeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RigChange\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
-      "protectedBrowserAuthFill": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "publishBrowserRevision": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39221,9 +39103,6 @@
       "proposeRigChange": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProposeRigChangeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RigChange\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
-      "protectedBrowserAuthFill": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
       "publishBrowserRevision": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -41285,9 +41164,6 @@
       ],
       "proposeRigChange": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProposeRigChangeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RigChange\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
-      "protectedBrowserAuthFill": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "publishBrowserRevision": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -43537,9 +43413,6 @@
       "proposeRigChange": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProposeRigChangeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RigChange\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
-      "protectedBrowserAuthFill": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
       "publishBrowserRevision": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45619,9 +45492,6 @@
       "proposeRigChange": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProposeRigChangeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RigChange\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
-      "protectedBrowserAuthFill": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
       "publishBrowserRevision": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PublishBrowserRevisionResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -46367,9 +46237,6 @@
       ],
       "openExternalFlow": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalAuthInteractiveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalAuthInteractiveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
-      "protectedFill": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ProtectedAuthFillResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "report": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ReportAuthRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AuthRunMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

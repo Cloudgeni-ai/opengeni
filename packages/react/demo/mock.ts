@@ -109,8 +109,6 @@ import type {
   NetworkRouteListOptions,
   NetworkRouteListResponse,
   NetworkRouteMutationResponse,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   PtyOpenResponse,
   SessionCapabilities,
   TerminalExecResponse,
@@ -1840,7 +1838,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       authorityId: request.authorityId ?? null,
       state: "discovering",
       choices: [],
-      pendingFields: [],
       externalAction: null,
       interventionId: null,
       verifiedUrl: null,
@@ -1876,7 +1873,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       authorityId: request.authorityId ?? current.authorityId,
       state: request.state,
       choices: request.choices ?? [],
-      pendingFields: request.pendingFields ?? [],
       externalAction: request.externalAction ?? null,
       failureCode: request.failureCode ?? null,
       version: current.version + 1,
@@ -1885,35 +1881,6 @@ export class MockOpenGeniClient implements SessionClientLike {
     };
     this.authRuns.set(run.id, run);
     return { run, operationId: request.operationId, replayed: false };
-  }
-
-  async protectedBrowserAuthFill(
-    _workspaceId: string,
-    browserSessionId: string,
-    authRunId: string,
-    request: ProtectedAuthFillRequest,
-  ): Promise<ProtectedAuthFillResponse> {
-    const current = await this.getAuthRun(WORKSPACE_ID, authRunId);
-    if (
-      current.browserSessionId !== browserSessionId ||
-      current.version !== request.expectedVersion
-    ) {
-      throw new Error("AuthRun changed");
-    }
-    const run: AuthRun = {
-      ...current,
-      authorityId: request.authorityId,
-      state: "working",
-      version: current.version + 1,
-      updatedAt: new Date().toISOString(),
-    };
-    this.authRuns.set(run.id, run);
-    return {
-      run,
-      status: "working",
-      operationId: request.operationId,
-      replayed: false,
-    };
   }
 
   async verifyBrowserAuthRun(

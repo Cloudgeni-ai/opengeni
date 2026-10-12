@@ -244,7 +244,6 @@ const INTERACTION_OPERATIONS = new Set([
   "attach",
   "auth_start",
   "auth_report",
-  "auth_fill",
   "auth_verify",
   "intervention_create",
   "intervention_resolve",
@@ -320,7 +319,6 @@ const INTERACTION_MODES = new Set([
 const INTERACTION_AUTH_STATES = new Set([
   "discovering",
   "awaiting_choice",
-  "awaiting_secret",
   "awaiting_external_action",
   "working",
   "verified",

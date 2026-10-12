@@ -28,6 +28,8 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
+/** The only root browser e2e that drives the real browserd (BR-7). */
+const SECRETS_FAKE_LOGIN_E2E = "test/e2e/secrets-fake-login.browser.e2e.ts";
 const CLAUDE_SUBSCRIPTION_E2E = "test/e2e/claude-subscription.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
@@ -343,6 +345,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
       "test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+      "test/e2e/secrets-fake-login.browser.e2e.ts",
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-conversation-controller.browser.e2e.ts",
@@ -591,7 +594,7 @@ describe("fail-closed change impact", () => {
     const plan = createImpactPlan(["packages/browserd/src/index.ts"]);
     expect(plan.mode).toBe("focused");
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
-    expect(plan.e2eTests).toEqual([]);
+    expect(plan.e2eTests).toEqual([SECRETS_FAKE_LOGIN_E2E]);
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
   });
@@ -699,7 +702,7 @@ describe("fail-closed change impact", () => {
     for (const path of ["packages/browserd/src/index.ts"]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode, path).toBe("focused");
-      expect(plan.e2eTests, path).toEqual([]);
+      expect(plan.e2eTests, path).toEqual([SECRETS_FAKE_LOGIN_E2E]);
     }
   });
 
@@ -760,7 +763,9 @@ describe("fail-closed change impact", () => {
       expect(plan.unitTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
       expect(plan.integrationTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
     }
-    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([]);
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([
+      SECRETS_FAKE_LOGIN_E2E,
+    ]);
   });
 
   test("connector account controls follow web dependencies without widening leaf plans", () => {
@@ -906,6 +911,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
       "test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+      "test/e2e/secrets-fake-login.browser.e2e.ts",
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-conversation-controller.browser.e2e.ts",

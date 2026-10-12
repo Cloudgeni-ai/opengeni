@@ -5354,17 +5354,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "protectedBrowserAuthFill",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
-    "request": [
-      "ProtectedAuthFillRequest"
-    ],
-    "response": [
-      "ProtectedAuthFillResponse"
-    ]
-  },
-  {
     "id": "publishBrowserRevision",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/revisions",

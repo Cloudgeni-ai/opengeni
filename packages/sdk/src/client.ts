@@ -184,8 +184,6 @@ import {
   type NetworkRouteListOptions,
   type NetworkRouteListResponse,
   type NetworkRouteMutationResponse,
-  type ProtectedAuthFillRequest,
-  type ProtectedAuthFillResponse,
   type PublishBrowserRevisionRequest,
   type PublishBrowserRevisionResponse,
   type ReportAuthRunRequest,
@@ -4013,22 +4011,6 @@ export class OpenGeniClient {
     return await this.requestJson<AuthRunMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/report`,
-      request,
-      {},
-      options,
-    );
-  }
-
-  async protectedBrowserAuthFill(
-    workspaceId: string,
-    browserSessionId: string,
-    authRunId: string,
-    request: ProtectedAuthFillRequest,
-    options: OpenGeniRequestOptions = {},
-  ): Promise<ProtectedAuthFillResponse> {
-    return await this.requestJson<ProtectedAuthFillResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/protected-fill`,
       request,
       {},
       options,
