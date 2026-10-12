@@ -705,7 +705,7 @@ describe("BrowserSession route discipline", () => {
       new Error("unexpected"),
       new BrowserControlRequestError(403, {
         code: "permission_denied",
-        message: "protected authentication",
+        message: "browser action denied",
         retryable: false,
       }),
       new BrowserControlRequestError(409, {
@@ -843,7 +843,6 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report"',
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
@@ -947,28 +946,10 @@ describe("BrowserSession route discipline", () => {
     );
   });
 
-  test("brokers protected auth outside model-visible browser actions", async () => {
+  test("serves no brokered credential fill route; logins use secret references in actions", async () => {
     const source = await readFile(routeUrl, "utf8");
-    const start = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
-    );
-    const end = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
-      start,
-    );
-    const route = source.slice(start, end);
-    expect(route.indexOf("if (replay?.response)")).toBeLessThan(
-      route.indexOf("withActiveBrowserController"),
-    );
-    expect(route.indexOf("getProtectedAuthFillPreparation")).toBeLessThan(
-      route.indexOf("loadBoundBrowserCredential"),
-    );
-    expect(route.indexOf("dispatchProtectedAuthFill")).toBeLessThan(
-      route.indexOf("sessionClient.protectedAuthFill"),
-    );
-    expect(route).toContain("resolveProtectedAuthFieldValues");
-    expect(route).toContain("protectedAuthReceipt");
-    expect(route).not.toContain("BrowserActionCommand.parse");
+    expect(source).not.toContain("/protected-fill");
+    expect(source).not.toContain("protectedAuth");
   });
 
   test("keeps provider auth durable while gating its hosted flow to humans", async () => {

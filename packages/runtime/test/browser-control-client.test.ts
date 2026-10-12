@@ -603,7 +603,7 @@ describe("BrowserControlClient", () => {
       for (const error of [
         { status: 404, code: "target_not_found", message: "browser target not found" },
         { status: 404, code: "resource_not_found", message: "browser session not found" },
-        { status: 403, code: "permission_denied", message: "protected authentication is active" },
+        { status: 403, code: "permission_denied", message: "browser action denied" },
       ]) {
         rejected = error;
         await expect(browser.readDom(command.targetId, read)).rejects.toMatchObject({
@@ -719,8 +719,7 @@ describe("BrowserControlClient", () => {
         routes.push(`${httpRequest.method} ${url.pathname}`);
         if (url.pathname.endsWith("/state")) return success(responseState);
         expect(await httpRequest.json()).toEqual(request);
-        if (denyRead)
-          return failure(403, "permission_denied", "protected authentication is active");
+        if (denyRead) return failure(403, "permission_denied", "browser action denied");
         return success({
           ...responseState,
           kind: "element",
@@ -1182,7 +1181,6 @@ describe("BrowserControlClient", () => {
     const stateOperationId = randomUUID();
     const workspaceFileOperationId = randomUUID();
     const workspaceFileId = randomUUID();
-    const protectedAuthOperationId = randomUUID();
     const externalAuthOperationId = randomUUID();
     const authRunId = randomUUID();
     const controllerGeneration = "controller-1";
@@ -1257,21 +1255,6 @@ describe("BrowserControlClient", () => {
             updatedAt: "2026-08-10T12:00:00.000Z",
           });
         }
-        if (url.pathname.endsWith("/protected-auth-fills") && request.method === "POST") {
-          const body = (await request.json()) as { operationId: string };
-          return success({
-            protocolVersion: 1,
-            operationId: body.operationId,
-            browserSessionId,
-            controllerGeneration,
-            targetId: target.id,
-            state: "completed",
-            dispatchedAt: "2026-08-10T12:00:00.000Z",
-            settledAt: "2026-08-10T12:00:01.000Z",
-            observation: { target, status: "submitted" },
-            error: null,
-          });
-        }
         if (url.pathname.endsWith("/external-auth") && request.method === "POST") {
           const body = (await request.json()) as {
             operationId: string;
@@ -1302,23 +1285,6 @@ describe("BrowserControlClient", () => {
             operationId: body.operationId,
             fileIds: body.files.map((file) => file.fileId),
             replayed: false,
-          });
-        }
-        if (
-          url.pathname.endsWith(`/protected-auth-operations/${protectedAuthOperationId}`) &&
-          request.method === "GET"
-        ) {
-          return success({
-            protocolVersion: 1,
-            operationId: protectedAuthOperationId,
-            browserSessionId,
-            controllerGeneration,
-            targetId: target.id,
-            state: "completed",
-            dispatchedAt: "2026-08-10T12:00:00.000Z",
-            settledAt: "2026-08-10T12:00:01.000Z",
-            observation: { target, status: "submitted" },
-            error: null,
           });
         }
         if (url.pathname === "/v1/failure") {
@@ -1487,37 +1453,6 @@ describe("BrowserControlClient", () => {
         fileIds: [workspaceFileId],
         replayed: false,
       });
-      const protectedAuthCommand = {
-        protocolVersion: 1 as const,
-        operationId: protectedAuthOperationId,
-        browserSessionId,
-        controllerGeneration,
-        targetId: target.id,
-        expectedTargetGeneration: target.targetGeneration,
-        expectedDocumentGeneration: target.documentGeneration!,
-        expectedFrameId: observation.frameId!,
-        actor: { kind: "system" as const, subjectId: "credential-broker" },
-        authorityId: "password-authority",
-        credentialVersion: 1,
-        allowedOrigins: ["https://example.test"],
-        fields: [
-          {
-            fieldId: "password",
-            locator: { kind: "css" as const, selector: "#password" },
-            purpose: "password" as const,
-            value: "placement-private-password",
-          },
-        ],
-        submit: { type: "press" as const, key: "Enter" },
-      };
-      expect(await browserSession.protectedAuthFill(protectedAuthCommand)).toMatchObject({
-        operationId: protectedAuthOperationId,
-        state: "completed",
-      });
-      expect(await browserSession.protectedAuthReceipt(protectedAuthOperationId)).toMatchObject({
-        operationId: protectedAuthOperationId,
-        state: "completed",
-      });
       expect(
         await browserSession.externalAuth({
           browserSessionId,
@@ -1574,9 +1509,6 @@ describe("BrowserControlClient", () => {
       expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
       expect(placement.commands.every((command) => !command.includes(controlToken))).toBe(true);
       expect(placement.commands.every((command) => !command.includes(viewToken))).toBe(true);
-      expect(
-        placement.commands.every((command) => !command.includes("placement-private-password")),
-      ).toBe(true);
       expect(placement.commands.every((command) => !command.includes("route-password"))).toBe(true);
       expect(
         placement.commands.every((command) => !command.includes(restoreKey.toString("base64"))),

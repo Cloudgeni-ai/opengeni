@@ -1,1 +1,46 @@
-[]
+[
+  {
+    "ids": [
+      "route:POST /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
+      "schema:AuthRun:$.pendingFields",
+      "schema:CreateSiteAuthConnectionRequest:$.authorities[]",
+      "schema:CreateSiteAuthConnectionRequest:$.authorities[].adapterId",
+      "schema:CreateSiteAuthConnectionRequest:$.authorities[].connectionId",
+      "schema:CreateSiteAuthConnectionRequest:$.authorities[].credential",
+      "schema:CreateSiteAuthConnectionRequest:$.authorities[].id",
+      "schema:CreateSiteAuthConnectionRequest:$.authorities[].kind",
+      "schema:CreateSiteAuthConnectionRequest:$.authorities[].label",
+      "schema:ReportAuthRunRequest:$.pendingFields",
+      "schema:ReportAuthRunRequest:$.state",
+      "schema:SiteAuthConnection:$.authorities[]",
+      "schema:UpdateSiteAuthConnectionRequest:$.authorities[]",
+      "schema:UpdateSiteAuthConnectionRequest:$.authorities[].adapterId",
+      "schema:UpdateSiteAuthConnectionRequest:$.authorities[].connectionId",
+      "schema:UpdateSiteAuthConnectionRequest:$.authorities[].credential",
+      "schema:UpdateSiteAuthConnectionRequest:$.authorities[].id",
+      "schema:UpdateSiteAuthConnectionRequest:$.authorities[].kind",
+      "schema:UpdateSiteAuthConnectionRequest:$.authorities[].label",
+      "export:@opengeni/sdk:ProtectedAuthFillRequest",
+      "export:@opengeni/sdk:ProtectedAuthFillResponse",
+      "export:@opengeni/sdk:SiteAuthFieldPurpose",
+      "export:@opengeni/sdk/interaction:ProtectedAuthFillRequest",
+      "export:@opengeni/sdk/interaction:ProtectedAuthFillResponse",
+      "export:@opengeni/sdk/interaction:SiteAuthFieldPurpose",
+      "member:AuthRunResource.protectedFill",
+      "member:OpenGeniClient.protectedBrowserAuthFill",
+      "member:OpenGeniDocumentAuthorityClient.protectedBrowserAuthFill",
+      "member:OpenGeniEmbeddingClient.protectedBrowserAuthFill",
+      "signature:@opengeni/sdk:AuthRunResource.protectedFill",
+      "signature:@opengeni/sdk:OpenGeniClient.protectedBrowserAuthFill",
+      "signature:@opengeni/sdk/artifacts:OpenGeniClient.protectedBrowserAuthFill",
+      "signature:@opengeni/sdk/browser:OpenGeniBrowserClient.protectedBrowserAuthFill",
+      "signature:@opengeni/sdk/core:OpenGeniCoreClient.protectedBrowserAuthFill",
+      "signature:@opengeni/sdk/document-authority:OpenGeniDocumentAuthorityClient.protectedBrowserAuthFill",
+      "signature:@opengeni/sdk/interaction:AuthRunResource.protectedFill"
+    ],
+    "deprecation": ".changeset/remove-protected-fill-site-auth.md",
+    "removedInMajor": 2,
+    "sunset": "2026-10-12",
+    "reason": "Protected-fill site authentication is removed; agents log in by typing {{secret:...}} references with ordinary browser fill/type actions, and site-auth connections keep only external_provider authorities (SDK 2.0.0 exception to the 90-day deprecation window)."
+  }
+]

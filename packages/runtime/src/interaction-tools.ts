@@ -49,8 +49,6 @@ import {
   ExternalAuthRunResponse,
   InteractionIntervention,
   InteractionPlacement,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
   ReportAuthRunPayload,
   RequestHumanInteractionToolInput,
@@ -483,14 +481,6 @@ const BrowserAuthInput = z.discriminatedUnion("operation", [
   }),
   z
     .object({
-      operation: z.literal("protected_fill"),
-      browserSessionId: z.string().uuid(),
-      authRunId: z.string().uuid(),
-    })
-    .extend(ProtectedAuthFillRequest.omit({ operationId: true }).shape)
-    .strict(),
-  z
-    .object({
       operation: z.literal("advance_external"),
       browserSessionId: z.string().uuid(),
       authRunId: z.string().uuid(),
@@ -524,7 +514,6 @@ const BrowserAuthOutput = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("get_run"), result: AuthRun }).strict(),
   z.object({ operation: z.literal("start"), result: AuthRunMutationResponse }).strict(),
   z.object({ operation: z.literal("report"), result: AuthRunMutationResponse }).strict(),
-  z.object({ operation: z.literal("protected_fill"), result: ProtectedAuthFillResponse }).strict(),
   z.object({ operation: z.literal("advance_external"), result: ExternalAuthRunResponse }).strict(),
   z.object({ operation: z.literal("verify"), result: AuthRunMutationResponse }).strict(),
 ]);
@@ -1184,7 +1173,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "auth"],
     title: "Authenticate browser session",
     description:
-      "List configured site-auth connections and durable auth runs, or start, report, provider-advance, protected-fill, and verify one exact BrowserSession authentication run. Use advance_external for an external_provider authority. Provider secrets and hosted-login URLs never enter model tool arguments or results. If an operation returns needs_human, call interaction_request_human with the returned intervention id.",
+      "Log in to sites by typing {{secret:...}} references with browser_act fill or type; browser_auth is for provider-managed (external_provider) logins. List configured site-auth connections and durable auth runs, or start, report, provider-advance with advance_external, and verify one exact BrowserSession authentication run. Provider secrets and hosted-login URLs never enter model tool arguments or results. If an operation returns needs_human, call interaction_request_human with the returned intervention id.",
     input: BrowserAuthInput,
     output: BrowserAuthOutput,
     readOnly: false,
@@ -1240,18 +1229,6 @@ export function createInteractionAttemptToolDefinitions(
         return {
           operation: value.operation,
           result: await input.transport.reportBrowserAuthRun(
-            input.workspaceId,
-            browserSessionId,
-            authRunId,
-            { operationId: context.operationId, ...request },
-          ),
-        };
-      }
-      if (value.operation === "protected_fill") {
-        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
-        return {
-          operation: value.operation,
-          result: await input.transport.protectedBrowserAuthFill(
             input.workspaceId,
             browserSessionId,
             authRunId,

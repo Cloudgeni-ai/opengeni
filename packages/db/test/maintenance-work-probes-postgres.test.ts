@@ -294,21 +294,20 @@ describe("maintenance work probes", () => {
       verificationUrlPrefixes: ["https://example.com/app"],
       authorities: [
         {
-          id: "human",
-          kind: "human" as const,
-          label: "Ask the user",
-          fields: [
-            { id: "email", purpose: "identifier" as const },
-            { id: "password", purpose: "password" as const },
-          ],
+          id: "kernel-managed",
+          kind: "external_provider" as const,
+          label: "Kernel managed sign-in",
+          adapterId: "kernel",
+          connectionId: "kernel-connection-1",
+          credential: null,
         },
       ],
       methods: [
         {
-          id: "password",
-          kind: "password" as const,
-          label: "Email and password",
-          authorityIds: ["human"],
+          id: "kernel-managed",
+          kind: "external" as const,
+          label: "Managed sign-in",
+          authorityIds: ["kernel-managed"],
         },
       ],
       preferredIdentityId: null,
