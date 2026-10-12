@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "@opengeni/react";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SubscriptionPoolSettings } from "@opengeni/sdk";
 import { ApiError } from "@/api";
 import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "@/lib/shared-query";
 
 export type SubscriptionPoolAccount = {
   id: string;
@@ -89,16 +89,23 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   });
   const pendingMutation = useRef<{ epoch: Epoch; token: object } | null>(null);
   const relatedQueryPrefixes = input.relatedQueryPrefixes;
-  // Retry, sign-in completion and every account change re-read this list and
-  // make every other retained list of this provider re-read on its next mount.
+  // Every account change re-reads this list and makes every other retained list
+  // of this provider re-read on its next mount. Bound to the client the change
+  // went through, and run whether or not this page is still mounted.
+  const invalidateLists = useCallback(
+    () =>
+      Promise.all(
+        [subscriptionPoolQueryPrefix(input.providerName), ...(relatedQueryPrefixes ?? [])].map(
+          (prefix) => invalidateSharedQueries(current.client, prefix),
+        ),
+      ).then(() => undefined),
+    [current, input.providerName, relatedQueryPrefixes],
+  );
+  // Retry and sign-in completion from this page.
   const refresh = useCallback(async () => {
     if (!current.enabled || !current.active) return;
-    await Promise.all(
-      [subscriptionPoolQueryPrefix(input.providerName), ...(relatedQueryPrefixes ?? [])].map(
-        (prefix) => invalidateSharedQueries(input.client, prefix),
-      ),
-    );
-  }, [current, input.client, input.providerName, relatedQueryPrefixes]);
+    await invalidateLists();
+  }, [current, invalidateLists]);
   useEffect(() => {
     current.active = true;
     return () => {
@@ -121,8 +128,11 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
       setMutation({ epoch: current, working: key });
       try {
         await operation();
+        // The change happened: no retained list may keep the old rows, even
+        // after this page has gone. Only the toast needs the page.
+        const invalidated = invalidateLists();
         if (!current.active) return;
-        await refresh();
+        await invalidated;
         if (current.active) toast.success(success);
       } catch (error) {
         if (!current.active) return;
@@ -138,7 +148,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
         }
       }
     },
-    [current, input.canManage, input.providerName, refresh],
+    [current, input.canManage, input.providerName, invalidateLists],
   );
   // A failed read shows its error, never the rows retained from before it.
   const unavailable =

@@ -12,6 +12,7 @@ import {
   useClaudeUsage,
   type ClaudeUsageState,
 } from "./claude-usage";
+import { peekSharedQuery, retainSharedQueries } from "@/lib/shared-query";
 
 let root: Root, container: HTMLDivElement;
 beforeAll(() => {
@@ -315,6 +316,8 @@ test("a revisit shows the last reading at once and never another credential's", 
       return await new Promise<ClaudeSubscriptionUsage>((resolve) => (release = resolve));
     },
   } as unknown as OpenGeniBrowserClient;
+  // The console keeps reads across navigation for its live client.
+  const retained = retainSharedQueries(client);
   const firstFrames: (ClaudeUsageState | null)[] = [];
   let state!: ClaudeUsageState;
   function Harness({ version }: { version: number }) {
@@ -324,8 +327,9 @@ test("a revisit shows the last reading at once and never another credential's", 
       scopeId: "workspace",
       enabled: true,
       connected: true,
+      credentialId: "claude-connection",
       credentialVersion: version,
-      canManage: false,
+      canManage: true,
     });
     if (firstFrames.length === 0) firstFrames.push(state);
     return null;
@@ -347,4 +351,106 @@ test("a revisit shows the last reading at once and never another credential's", 
   await act(async () => root.render(<Harness version={2} />));
   expect(firstFrames[0]?.value).toBeNull();
   expect(firstFrames[0]?.loading).toBe(true);
+  retained();
+});
+
+function revisitHarness(input: {
+  client: OpenGeniBrowserClient;
+  credentialId?: string;
+  accountPool?: boolean;
+  frames: ClaudeUsageState[];
+}) {
+  return function Harness() {
+    const state = useClaudeUsage({
+      client: input.client,
+      scope: "workspace",
+      scopeId: "workspace",
+      enabled: true,
+      connected: true,
+      credentialId: input.credentialId,
+      credentialVersion: input.credentialId ? 1 : undefined,
+      canManage: Boolean(input.credentialId),
+      accountPool: input.accountPool ?? false,
+    });
+    input.frames.push(state);
+    return null;
+  };
+}
+
+test("a reading whose credential is unknown (people who can't manage it) is never retained", async () => {
+  const client = {
+    getWorkspaceClaudeSubscriptionUsage: async () => usage(1),
+  } as unknown as OpenGeniBrowserClient;
+  const retained = retainSharedQueries(client);
+  const frames: ClaudeUsageState[] = [];
+  const Harness = revisitHarness({ client, frames });
+  await act(async () => root.render(<Harness />));
+  expect(frames.at(-1)?.value?.credentialVersion).toBe(1);
+  await act(async () => root.render(<></>));
+  frames.length = 0;
+  await act(async () => root.render(<Harness />));
+  // A replaced credential could not be told apart, so the revisit starts cold.
+  expect(frames[0]?.value).toBeNull();
+  expect(frames[0]?.loading).toBe(true);
+  retained();
+});
+
+test("an access refusal drops the retained reading", async () => {
+  let refuse = false;
+  const client = {
+    getWorkspaceClaudeSubscriptionUsage: async () => {
+      if (refuse) throw Object.assign(new Error("Forbidden"), { status: 403 });
+      return usage(1);
+    },
+  } as unknown as OpenGeniBrowserClient;
+  const retained = retainSharedQueries(client);
+  const frames: ClaudeUsageState[] = [];
+  const Harness = revisitHarness({ client, credentialId: "claude-connection", frames });
+  await act(async () => root.render(<Harness />));
+  expect(frames.at(-1)?.value?.credentialVersion).toBe(1);
+  await act(async () => root.render(<></>));
+  refuse = true;
+  frames.length = 0;
+  await act(async () => root.render(<Harness />));
+  // The retained reading shows while re-reading, then the refusal removes it.
+  expect(frames[0]?.value?.credentialVersion).toBe(1);
+  expect(frames.at(-1)?.value).toBeNull();
+  expect(frames.at(-1)?.error).toBe(true);
+  expect(
+    peekSharedQuery(client, [
+      "claude-usage",
+      "workspace",
+      "workspace",
+      "connection",
+      "claude-connection",
+      1,
+    ]),
+  ).toBeNull();
+  await act(async () => root.render(<></>));
+  frames.length = 0;
+  await act(async () => root.render(<Harness />));
+  expect(frames[0]?.value).toBeNull();
+  retained();
+});
+
+test("a pool account's reading and the connection's reading never share an entry", async () => {
+  const client = {
+    getWorkspaceClaudeSubscriptionUsage: async () => usage(1),
+    getClaudeSubscriptionAccountUsage: async () => usage(1),
+  } as unknown as OpenGeniBrowserClient;
+  const retained = retainSharedQueries(client);
+  const frames: ClaudeUsageState[] = [];
+  const Connection = revisitHarness({ client, credentialId: "shared-id", frames });
+  await act(async () => root.render(<Connection />));
+  await act(async () => root.render(<></>));
+  frames.length = 0;
+  const PoolAccount = revisitHarness({
+    client,
+    credentialId: "shared-id",
+    accountPool: true,
+    frames,
+  });
+  await act(async () => root.render(<PoolAccount />));
+  expect(frames[0]?.value).toBeNull();
+  retained();
 });

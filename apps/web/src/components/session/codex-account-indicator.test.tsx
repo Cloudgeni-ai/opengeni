@@ -13,6 +13,7 @@ import { fakeClient, WORKSPACE_ID } from "../../../../../packages/react/test/fak
 }
 const { OpenGeniProvider } = await import("@opengeni/react");
 const { CodexAccountIndicator } = await import("./codex-account-indicator");
+const { retainSharedQueries } = await import("@/lib/shared-query");
 afterAll(() => GlobalRegistrator.unregister());
 
 test("running accepted account remains labeled while the switcher offers only the new pool", async () => {
@@ -362,6 +363,9 @@ test("navigating back and reopening keeps the last account and live usage on scr
   const weeklyBar = () =>
     document.querySelector<HTMLElement>('[role="progressbar"][aria-label="Week remaining"]');
 
+  // The console retains reads for its client above the routed pages, so
+  // leaving the session page (and its provider subtree) keeps them.
+  const release = retainSharedQueries(client);
   const first = document.createElement("div");
   document.body.append(first);
   const firstRoot = createRoot(first);
@@ -418,5 +422,6 @@ test("navigating back and reopening keeps the last account and live usage on scr
   } finally {
     await act(async () => secondRoot.unmount());
     second.remove();
+    release();
   }
 });

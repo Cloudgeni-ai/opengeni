@@ -5,7 +5,7 @@ import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner } from "./internal";
 import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "./shared-query";
 
-/** Shared-cache key for a workspace's SuperGrok accounts (see `useSharedQuery`). */
+/** Shared-cache key for a workspace's SuperGrok accounts (internal; see `useSharedQuery`). */
 export const superGrokAccountsQueryKey = (workspaceId: string) =>
   ["supergrok-accounts", workspaceId] as SharedQueryKey;
 
@@ -68,11 +68,15 @@ export function useSuperGrokAccounts(
   const activate = useCallback(
     async (accountId: string): Promise<boolean> => {
       if (!supergrokClient.activateSuperGrokAccount) return false;
+      const invalidated: { current: Promise<void> | null } = { current: null };
       const result = await run(async () => {
         await supergrokClient.activateSuperGrokAccount!(workspaceId, accountId);
+        // Invalidate even if this component unmounted meanwhile (the runner
+        // then resolves null): other surfaces must not keep the old primary.
+        invalidated.current = invalidateSharedQueries(supergrokClient, ["supergrok-accounts"]);
         return true;
       });
-      if (result) await invalidateSharedQueries(supergrokClient, ["supergrok-accounts"]);
+      if (result) await invalidated.current;
       return result === true;
     },
     [run, supergrokClient, workspaceId],

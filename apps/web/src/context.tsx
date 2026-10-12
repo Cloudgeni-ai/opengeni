@@ -8,6 +8,11 @@ import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redire
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
+import {
+  invalidateSubscriptionAccountQueries,
+  MODEL_CONNECTIONS_CHANGED,
+  retainSharedQueries,
+} from "@/lib/shared-query";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -23,11 +28,7 @@ import type {
   SessionEvent,
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import {
-  clearSharedQueries,
-  composerSubmissionErrorMessage,
-  type SessionEventsConnectionState,
-} from "@opengeni/react";
+import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import type { BrowserAccountTransition } from "@opengeni/react/accounts";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -826,9 +827,18 @@ export function RootRouteComponent() {
     void accessKeyVersion;
     return createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
   }, [accessKeyVersion, sessionChannelProjectionAuthority]);
-  // Account lists and usage limits are retained per client (see useSharedQuery).
-  // A retired client's identity is gone: drop what it read right away.
-  useEffect(() => () => clearSharedQueries(client), [client]);
+  // Account lists and usage limits read through this client stay across
+  // navigation (see useSharedQuery). They live under this exact client, which
+  // is replaced on every identity change; releasing a retired client clears
+  // everything it read.
+  useEffect(() => retainSharedQueries(client), [client]);
+  // An "Available in" or default change can change which accounts a workspace
+  // sees: every retained account list re-reads (mounted) or is dropped.
+  useEffect(() => {
+    const changed = () => void invalidateSubscriptionAccountQueries(client);
+    window.addEventListener(MODEL_CONNECTIONS_CHANGED, changed);
+    return () => window.removeEventListener(MODEL_CONNECTIONS_CHANGED, changed);
+  }, [client]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =

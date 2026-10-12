@@ -1,29 +1,40 @@
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 
 /**
  * A small client-scoped stale-while-revalidate store for read models that many
- * surfaces show (subscription accounts, their usage limits). Scoping:
+ * surfaces show (subscription accounts, their usage limits). Internal to
+ * `@opengeni/react`: hosts reach it only through the hooks built on it and the
+ * `OpenGeniProvider` `retainReadsAcrossMounts` opt-in.
+ *
+ * Scoping:
  *
  * - Every entry lives under the exact client object that read it (a WeakMap),
- *   like `createDiscoveryCache`. A host that signs in someone else must hand
- *   hooks a new client (the Opengeni console rotates its client on every
- *   identity or actor change), so another person's rows are never reachable.
- *   `clearSharedQueries(client)` drops a scope explicitly.
- * - The key names the exact read (`["codex-accounts", workspaceId, sessionId]`).
+ *   like `createDiscoveryCache`; the key names the exact read
+ *   (`["codex-accounts", workspaceId, "session", sessionId]`).
+ * - By default nothing outlives its readers: mounted readers of one key share
+ *   one request and one snapshot, and the entry is dropped as soon as the last
+ *   reader unmounts. Only a scope a host retains (`retainSharedQueries`, used
+ *   by the provider opt-in) keeps unmounted entries for `retainMs`, so a host
+ *   that reuses one client for different people never serves one person's rows
+ *   to the next mount. Ending the last retention clears the scope.
+ * - `clearSharedQueries(scope)` drops every row at once. Mounted readers stay
+ *   subscribed and read again; writes from operations that started before the
+ *   clear are discarded.
  *
  * Semantics:
  *
  * - A mount with retained data renders it immediately and revalidates in the
- *   background once it is older than `staleTimeMs`; concurrent readers share one
- *   in-flight request.
+ *   background once it is older than `staleTimeMs`.
+ * - A loader is bound to its key when the render that supplied it commits, so a
+ *   render that never commits (a transition) or a key change cannot run one
+ *   key's loader for another key's entry.
  * - Failures are never cached. An access refusal (401/403/404) also drops the
- *   retained data; another failure keeps it beside the error so the caller can
- *   decide what to show.
- * - `invalidateSharedQueries` re-reads mounted entries and evicts unmounted
- *   ones, so a later mount never shows rows a mutation has made wrong.
- * - Unmounted entries are dropped after `retainMs` (default 10 minutes).
+ *   retained data; another failure keeps it beside the error.
+ * - `invalidateSharedQueries` supersedes any read in flight (its result is
+ *   discarded), re-reads mounted entries and evicts unmounted ones, so a later
+ *   mount never shows rows a mutation has made wrong.
  */
 
 export type SharedQueryKey = readonly (string | number | boolean | null)[];
@@ -40,12 +51,13 @@ export type SharedQuerySnapshot<T> = {
 };
 
 export type SharedQueryOptions = {
+  /** False: never read, and show no data (not even retained rows). */
   enabled?: boolean | undefined;
   /** Poll while mounted and the page is visible. Shortest interval wins. */
   pollIntervalMs?: number | undefined;
   /** Retained data younger than this is not re-read on mount. Default 10s. */
   staleTimeMs?: number | undefined;
-  /** How long an unmounted entry is retained. Default 10 minutes. */
+  /** How long an unmounted entry is retained in a retained scope. Default 10 minutes. */
   retainMs?: number | undefined;
 };
 
@@ -54,13 +66,18 @@ export type SharedQueryResult<T> = SharedQuerySnapshot<T> & {
   refresh: () => Promise<void>;
 };
 
+/** Records data read some other way; false when the write was refused. */
+export type SharedQueryWriter = <T>(parts: SharedQueryKey, data: T) => boolean;
+
 const DEFAULT_STALE_TIME_MS = 10_000;
 const DEFAULT_RETAIN_MS = 10 * 60_000;
 
 type Loader<T> = (signal: AbortSignal) => Promise<T>;
+type LoaderBinding = { key: string; load: Loader<unknown> };
 
 type Subscriber = {
-  load: { current: Loader<unknown> };
+  /** The committed loader and the key it reads; null for subscribe-only readers. */
+  binding: { current: LoaderBinding } | null;
   enabled: boolean;
   pageLive: boolean;
   pollIntervalMs: number | undefined;
@@ -69,6 +86,7 @@ type Subscriber = {
 };
 
 type Entry = {
+  key: string;
   parts: SharedQueryKey;
   snapshot: SharedQuerySnapshot<unknown>;
   listeners: Set<() => void>;
@@ -77,19 +95,30 @@ type Entry = {
   trailing: Promise<void> | null;
   abort: AbortController | null;
   generation: number;
-  /** A mutation made the retained data wrong; the next reconcile re-reads. */
+  /** The retained data may be wrong; the next reconcile re-reads. */
   invalidated: boolean;
   timer: ReturnType<typeof setTimeout> | null;
+  /** The interval `timer` was armed with. */
+  timerInterval: number | null;
   retainTimer: ReturnType<typeof setTimeout> | null;
 };
 
-const scopes = new WeakMap<object, Map<string, Entry>>();
+type Scope = {
+  entries: Map<string, Entry>;
+  /** Bumped by every clear; writers from an earlier epoch are refused. */
+  epoch: number;
+  /** Active retentions; unmounted entries are kept only while positive. */
+  retainers: number;
+  releaseTimer: ReturnType<typeof setTimeout> | null;
+};
 
-function idle<T>(enabled: boolean): SharedQuerySnapshot<T> {
-  return { data: null, loading: enabled, fetching: false, error: null, updatedAt: null };
+const scopes = new WeakMap<object, Scope>();
+
+function idle<T>(loading: boolean): SharedQuerySnapshot<T> {
+  return { data: null, loading, fetching: false, error: null, updatedAt: null };
 }
-const IDLE_ENABLED = idle<never>(true);
-const IDLE_DISABLED = idle<never>(false);
+const IDLE_LOADING = idle<never>(true);
+const IDLE = idle<never>(false);
 
 function serialize(parts: SharedQueryKey): string {
   return JSON.stringify(parts);
@@ -102,13 +131,13 @@ export function isSharedQueryAccessRefusal(cause: unknown): boolean {
   return status === 401 || status === 403 || status === 404;
 }
 
-function entries(scope: object): Map<string, Entry> {
-  let map = scopes.get(scope);
-  if (!map) {
-    map = new Map();
-    scopes.set(scope, map);
+function scopeState(scope: object): Scope {
+  let state = scopes.get(scope);
+  if (!state) {
+    state = { entries: new Map(), epoch: 0, retainers: 0, releaseTimer: null };
+    scopes.set(scope, state);
   }
-  return map;
+  return state;
 }
 
 function setSnapshot(entry: Entry, next: SharedQuerySnapshot<unknown>): void {
@@ -116,8 +145,15 @@ function setSnapshot(entry: Entry, next: SharedQuerySnapshot<unknown>): void {
   for (const listener of entry.listeners) listener();
 }
 
+/** Readers allowed to read now: enabled, on a live page, and bound to this key. */
 function activeSubscribers(entry: Entry): Subscriber[] {
-  return [...entry.subscribers].filter((each) => each.enabled && each.pageLive);
+  return [...entry.subscribers].filter(
+    (each) => each.enabled && each.pageLive && each.binding?.current.key === entry.key,
+  );
+}
+
+function mounted(entry: Entry): boolean {
+  return entry.subscribers.size > 0 || entry.listeners.size > 0;
 }
 
 function stopTimer(entry: Entry): void {
@@ -125,33 +161,62 @@ function stopTimer(entry: Entry): void {
     clearTimeout(entry.timer);
     entry.timer = null;
   }
+  entry.timerInterval = null;
 }
 
-function arm(entry: Entry): void {
+function stopRetainTimer(entry: Entry): void {
+  if (entry.retainTimer !== null) {
+    clearTimeout(entry.retainTimer);
+    entry.retainTimer = null;
+  }
+}
+
+/** Any read in flight or queued is superseded: its result is never stored. */
+function supersedeReads(entry: Entry): void {
+  entry.generation += 1;
+  entry.abort?.abort();
+  entry.abort = null;
+  entry.inFlight = null;
+  entry.trailing = null;
+}
+
+function evict(state: Scope, entry: Entry): void {
+  supersedeReads(entry);
   stopTimer(entry);
+  stopRetainTimer(entry);
+  if (state.entries.get(entry.key) === entry) state.entries.delete(entry.key);
+}
+
+/** Poll at the shortest interval among active readers; keep a timer already armed for it. */
+function arm(entry: Entry): void {
   let interval: number | undefined;
   for (const each of activeSubscribers(entry)) {
     if (each.pollIntervalMs === undefined || each.pollIntervalMs <= 0) continue;
     interval =
       interval === undefined ? each.pollIntervalMs : Math.min(interval, each.pollIntervalMs);
   }
+  if (entry.timer !== null && entry.timerInterval === interval) return;
+  stopTimer(entry);
   if (interval === undefined) return;
+  entry.timerInterval = interval;
   entry.timer = setTimeout(() => {
     entry.timer = null;
+    entry.timerInterval = null;
     void run(entry).finally(() => arm(entry));
   }, interval);
 }
 
 async function runFresh(entry: Entry): Promise<void> {
   const subscriber = activeSubscribers(entry).at(-1);
-  if (!subscriber) return;
+  if (!subscriber?.binding) return;
+  const { load } = subscriber.binding.current;
   const ticket = ++entry.generation;
   const abort = new AbortController();
   entry.abort = abort;
   entry.invalidated = false;
   if (!entry.snapshot.fetching) setSnapshot(entry, { ...entry.snapshot, fetching: true });
   try {
-    const data = await subscriber.load.current(abort.signal);
+    const data = await load(abort.signal);
     if (ticket !== entry.generation) return;
     setSnapshot(entry, {
       data,
@@ -179,19 +244,21 @@ async function runFresh(entry: Entry): Promise<void> {
 function run(entry: Entry, force = false): Promise<void> {
   if (entry.inFlight) {
     if (!force) return entry.inFlight;
-    // A forced read issued during another read (a mutation just settled)
-    // must observe the mutation, so queue exactly one successor read.
+    // A forced read issued during another read must observe whatever changed
+    // since that read started, so queue exactly one successor read.
     if (entry.trailing) return entry.trailing;
     const predecessor = entry.inFlight;
     let trailing!: Promise<void>;
-    trailing = predecessor
-      .then(() => {
-        if (entry.trailing === trailing) entry.trailing = null;
-        if (activeSubscribers(entry).length > 0) return run(entry);
-      })
-      .finally(() => {
-        if (entry.trailing === trailing) entry.trailing = null;
-      });
+    trailing = predecessor.then(() => {
+      // Superseded meanwhile: the read that replaced it is the newer one.
+      if (entry.trailing !== trailing) return entry.inFlight ?? undefined;
+      entry.trailing = null;
+      if (activeSubscribers(entry).length > 0) return run(entry);
+      // Nobody can read now: what the predecessor stored is not known to be
+      // current, so the next mount or resume re-reads.
+      entry.invalidated = true;
+      return undefined;
+    });
     entry.trailing = trailing;
     return trailing;
   }
@@ -229,33 +296,31 @@ function reconcile(entry: Entry): void {
     void run(entry).finally(() => arm(entry));
     return;
   }
-  if (entry.timer === null) arm(entry);
+  // A reader joined or left: the shortest interval may have changed.
+  arm(entry);
 }
 
-function scheduleRelease(scope: object, key: string, entry: Entry, retainMs: number): void {
-  if (entry.retainTimer !== null) clearTimeout(entry.retainTimer);
+function scheduleRelease(state: Scope, entry: Entry, retainMs: number): void {
+  stopRetainTimer(entry);
+  // Even an unretained entry waits one task, so StrictMode's immediate
+  // unmount/remount keeps sharing the read it already started.
   entry.retainTimer = setTimeout(() => {
     entry.retainTimer = null;
-    if (entry.subscribers.size > 0) return;
-    const map = scopes.get(scope);
-    if (map?.get(key) === entry) map.delete(key);
+    if (!mounted(entry)) evict(state, entry);
   }, retainMs);
 }
 
-function getOrCreate(scope: object, parts: SharedQueryKey, enabled: boolean): Entry {
-  const map = entries(scope);
-  const key = serialize(parts);
-  const existing = map.get(key);
+function getOrCreate(scope: object, key: string, loading: boolean): Entry {
+  const state = scopeState(scope);
+  const existing = state.entries.get(key);
   if (existing) {
-    if (existing.retainTimer !== null) {
-      clearTimeout(existing.retainTimer);
-      existing.retainTimer = null;
-    }
+    stopRetainTimer(existing);
     return existing;
   }
   const created: Entry = {
-    parts,
-    snapshot: idle(enabled),
+    key,
+    parts: JSON.parse(key) as SharedQueryKey,
+    snapshot: idle(loading),
     listeners: new Set(),
     subscribers: new Set(),
     inFlight: null,
@@ -264,10 +329,26 @@ function getOrCreate(scope: object, parts: SharedQueryKey, enabled: boolean): En
     generation: 0,
     invalidated: false,
     timer: null,
+    timerInterval: null,
     retainTimer: null,
   };
-  map.set(key, created);
+  state.entries.set(key, created);
   return created;
+}
+
+function unsubscribe(scope: object, entry: Entry, subscriber: Subscriber, retainMs: number): void {
+  entry.subscribers.delete(subscriber);
+  if (entry.subscribers.size > 0) {
+    reconcile(entry);
+    return;
+  }
+  // Only the poll stops: in a retained scope a read in flight still lands
+  // for the next mount. Otherwise the entry goes with its last reader.
+  stopTimer(entry);
+  if (entry.snapshot.loading) setSnapshot(entry, { ...entry.snapshot, loading: false });
+  const state = scopes.get(scope);
+  if (!state || state.entries.get(entry.key) !== entry) return;
+  scheduleRelease(state, entry, state.retainers > 0 ? retainMs : 0);
 }
 
 /** The retained snapshot for a key, without subscribing or reading. */
@@ -275,70 +356,120 @@ export function peekSharedQuery<T>(
   scope: object,
   parts: SharedQueryKey,
 ): SharedQuerySnapshot<T> | null {
-  return (scopes.get(scope)?.get(serialize(parts))?.snapshot as SharedQuerySnapshot<T>) ?? null;
+  return (
+    (scopes.get(scope)?.entries.get(serialize(parts))?.snapshot as
+      | SharedQuerySnapshot<T>
+      | undefined) ?? null
+  );
 }
 
 /**
- * Record data a caller read some other way (for example the result of a live
- * provider refresh). Mounted readers render it at once.
+ * A writer for data read some other way (for example a live provider refresh).
+ * Create it BEFORE starting that read: a clear in between refuses the write,
+ * so a retired identity's late result is never recorded. Mounted readers
+ * render a write at once; with no reader, only a retained scope keeps it.
  */
-export function setSharedQueryData<T>(scope: object, parts: SharedQueryKey, data: T): void {
-  const map = entries(scope);
-  const key = serialize(parts);
-  const entry = map.get(key) ?? getOrCreate(scope, parts, false);
-  // A read already in flight started before this write; its result is older.
-  entry.generation += 1;
-  entry.abort?.abort();
-  entry.abort = null;
-  entry.invalidated = false;
-  setSnapshot(entry, { data, loading: false, fetching: false, error: null, updatedAt: Date.now() });
-  if (entry.subscribers.size === 0) scheduleRelease(scope, key, entry, DEFAULT_RETAIN_MS);
+export function sharedQueryWriter(scope: object): SharedQueryWriter {
+  const state = scopeState(scope);
+  const epoch = state.epoch;
+  return <T>(parts: SharedQueryKey, data: T): boolean => {
+    if (state.epoch !== epoch) return false;
+    const key = serialize(parts);
+    const existing = state.entries.get(key);
+    if (!(existing && mounted(existing)) && state.retainers === 0) return false;
+    const entry = existing ?? getOrCreate(scope, key, false);
+    // A read already in flight started before this write; its result is older.
+    supersedeReads(entry);
+    entry.invalidated = false;
+    setSnapshot(entry, {
+      data,
+      loading: false,
+      fetching: false,
+      error: null,
+      updatedAt: Date.now(),
+    });
+    if (!mounted(entry)) scheduleRelease(state, entry, DEFAULT_RETAIN_MS);
+    return true;
+  };
 }
 
 /**
- * Mark every entry whose key starts with `prefix` as wrong. Mounted entries
- * re-read now (keeping their rows on screen meanwhile); unmounted entries are
+ * Mark every entry whose key starts with `prefix` as wrong. Reads in flight are
+ * superseded. Mounted entries re-read now (keeping their rows on screen
+ * meanwhile); paused ones re-read when they resume; unmounted entries are
  * evicted so the next mount never renders them.
  */
 export function invalidateSharedQueries(scope: object, prefix: SharedQueryKey): Promise<void> {
-  const map = scopes.get(scope);
-  if (!map) return Promise.resolve();
+  const state = scopes.get(scope);
+  if (!state) return Promise.resolve();
   const reads: Promise<void>[] = [];
-  for (const [key, entry] of [...map]) {
+  for (const entry of [...state.entries.values()]) {
     if (!prefix.every((part, index) => entry.parts[index] === part)) continue;
+    if (!mounted(entry)) {
+      evict(state, entry);
+      continue;
+    }
+    supersedeReads(entry);
+    entry.invalidated = true;
     if (activeSubscribers(entry).length > 0) {
-      entry.invalidated = true;
-      reads.push(run(entry, true).finally(() => arm(entry)));
+      reads.push(run(entry).finally(() => arm(entry)));
       continue;
     }
-    if (entry.subscribers.size > 0) {
-      // Mounted but paused (hidden page or disabled): re-read when it resumes.
-      entry.invalidated = true;
-      entry.generation += 1;
-      entry.abort?.abort();
-      setSnapshot(entry, { ...idle(false), error: null });
-      continue;
-    }
-    entry.generation += 1;
-    entry.abort?.abort();
-    if (entry.retainTimer !== null) clearTimeout(entry.retainTimer);
-    map.delete(key);
+    // Mounted but paused (hidden page or disabled): re-read when it resumes.
+    stopTimer(entry);
+    setSnapshot(entry, IDLE);
   }
   return Promise.all(reads).then(() => undefined);
 }
 
-/** Drop everything retained for a client (for hosts that reuse one client across people). */
+/**
+ * Drop everything retained for a client. Unmounted entries go; mounted ones
+ * are reset in place (their readers stay subscribed) and active ones read
+ * again. Writes from operations that began before the clear are refused.
+ */
 export function clearSharedQueries(scope: object): void {
-  const map = scopes.get(scope);
-  if (!map) return;
-  for (const entry of map.values()) {
-    entry.generation += 1;
-    entry.abort?.abort();
+  const state = scopes.get(scope);
+  if (!state) return;
+  state.epoch += 1;
+  for (const entry of [...state.entries.values()]) {
+    if (!mounted(entry)) {
+      evict(state, entry);
+      continue;
+    }
+    supersedeReads(entry);
     stopTimer(entry);
-    if (entry.retainTimer !== null) clearTimeout(entry.retainTimer);
-    setSnapshot(entry, idle(false));
+    stopRetainTimer(entry);
+    entry.invalidated = true;
+    const active = activeSubscribers(entry).length > 0;
+    setSnapshot(entry, active ? IDLE_LOADING : IDLE);
+    if (active) void run(entry).finally(() => arm(entry));
   }
-  scopes.delete(scope);
+}
+
+/**
+ * Keep unmounted entries for this client until the returned release is
+ * called. Releasing the last retention clears the client's entries (after one
+ * task, so StrictMode's immediate remount keeps them).
+ */
+export function retainSharedQueries(scope: object): () => void {
+  const state = scopeState(scope);
+  state.retainers += 1;
+  if (state.releaseTimer !== null) {
+    clearTimeout(state.releaseTimer);
+    state.releaseTimer = null;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    state.retainers -= 1;
+    if (state.retainers > 0) return;
+    if (state.releaseTimer !== null) clearTimeout(state.releaseTimer);
+    state.releaseTimer = setTimeout(() => {
+      state.releaseTimer = null;
+      if (state.retainers === 0) clearSharedQueries(scope);
+    }, 0);
+  };
 }
 
 /**
@@ -354,17 +485,22 @@ export function useSharedQuery<T>(
   const enabled = options.enabled ?? true;
   const pageLive = usePageLiveActivity();
   const key = serialize(parts);
-  const loadRef = useRef<Loader<unknown>>(load);
-  loadRef.current = load;
-  const partsRef = useRef(parts);
-  partsRef.current = parts;
+  // The loader is bound to its key only when the render that supplied both
+  // commits. A render React discards (a transition) or the interval between a
+  // key change's layout and passive effects must never let another key's
+  // loader fill this entry: subscribers whose binding names another key are
+  // ignored by every read.
+  const binding = useRef<LoaderBinding>({ key, load: load as Loader<unknown> });
+  useLayoutEffect(() => {
+    binding.current = { key, load: load as Loader<unknown> };
+  }, [key, load]);
   const staleTimeMs = options.staleTimeMs ?? DEFAULT_STALE_TIME_MS;
   const retainMs = options.retainMs ?? DEFAULT_RETAIN_MS;
   const pollIntervalMs = options.pollIntervalMs;
 
   const subscribe = useCallback(
     (listener: () => void) => {
-      const entry = getOrCreate(scope, partsRef.current, enabled);
+      const entry = getOrCreate(scope, key, enabled);
       entry.listeners.add(listener);
       return () => {
         entry.listeners.delete(listener);
@@ -376,16 +512,16 @@ export function useSharedQuery<T>(
   );
   const getSnapshot = useCallback(
     () =>
-      (scopes.get(scope)?.get(key)?.snapshot as SharedQuerySnapshot<T> | undefined) ??
-      (enabled ? IDLE_ENABLED : IDLE_DISABLED),
+      (scopes.get(scope)?.entries.get(key)?.snapshot as SharedQuerySnapshot<T> | undefined) ??
+      (enabled ? IDLE_LOADING : IDLE),
     [scope, key, enabled],
   );
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   useEffect(() => {
-    const entry = getOrCreate(scope, partsRef.current, enabled);
+    const entry = getOrCreate(scope, key, enabled);
     const subscriber: Subscriber = {
-      load: loadRef,
+      binding,
       enabled,
       pageLive,
       pollIntervalMs,
@@ -394,26 +530,56 @@ export function useSharedQuery<T>(
     };
     entry.subscribers.add(subscriber);
     reconcile(entry);
-    return () => {
-      entry.subscribers.delete(subscriber);
-      if (entry.subscribers.size > 0) {
-        reconcile(entry);
-        return;
-      }
-      // Let an in-flight read land in the cache for the next mount; only the
-      // poll stops. Unmounted entries are released after `retainMs`.
-      stopTimer(entry);
-      if (entry.snapshot.loading) setSnapshot(entry, { ...entry.snapshot, loading: false });
-      scheduleRelease(scope, key, entry, retainMs);
-    };
+    return () => unsubscribe(scope, entry, subscriber, retainMs);
   }, [scope, key, enabled, pageLive, pollIntervalMs, staleTimeMs, retainMs]);
 
   const refresh = useCallback((): Promise<void> => {
-    const entry = scopes.get(scope)?.get(key);
+    const entry = scopes.get(scope)?.entries.get(key);
     if (!entry || activeSubscribers(entry).length === 0) return Promise.resolve();
     return run(entry, true).finally(() => arm(entry));
   }, [scope, key]);
 
-  const visible = enabled ? snapshot : { ...snapshot, loading: false };
-  return { ...visible, refresh };
+  // A disabled reader shows nothing, not even rows retained by other readers.
+  return enabled ? { ...snapshot, refresh } : { ...IDLE, refresh };
+}
+
+/**
+ * Subscribe to an entry that is only ever written (`sharedQueryWriter`), never
+ * read: it renders whatever is recorded and keeps the entry while mounted.
+ */
+export function useSharedQueryValue<T>(
+  scope: object,
+  parts: SharedQueryKey,
+): SharedQuerySnapshot<T> {
+  const key = serialize(parts);
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      const entry = getOrCreate(scope, key, false);
+      entry.listeners.add(listener);
+      return () => {
+        entry.listeners.delete(listener);
+      };
+    },
+    [scope, key],
+  );
+  const getSnapshot = useCallback(
+    () =>
+      (scopes.get(scope)?.entries.get(key)?.snapshot as SharedQuerySnapshot<T> | undefined) ?? IDLE,
+    [scope, key],
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  useEffect(() => {
+    const entry = getOrCreate(scope, key, false);
+    const subscriber: Subscriber = {
+      binding: null,
+      enabled: false,
+      pageLive: true,
+      pollIntervalMs: undefined,
+      staleTimeMs: DEFAULT_STALE_TIME_MS,
+      retainMs: DEFAULT_RETAIN_MS,
+    };
+    entry.subscribers.add(subscriber);
+    return () => unsubscribe(scope, entry, subscriber, DEFAULT_RETAIN_MS);
+  }, [scope, key]);
+  return snapshot;
 }

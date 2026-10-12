@@ -7,12 +7,12 @@ import type {
   OrganizationCodexAccountsResponse,
 } from "@opengeni/sdk";
 import { pollDeviceAuthorization } from "@opengeni/connect";
-import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { codexAccountName, planLabel } from "@/components/codex-connection";
 import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
 
 // The organization's shared Codex (ChatGPT) accounts: the data and every
 // mutation. Organization settings > Models presents them with the same rows
@@ -103,7 +103,12 @@ export function useOrganizationCodexSubscriptions({
           signal: controller.signal,
         })
           .then(async (result) => {
-            if (!result || controller.signal.aborted || cancelled.current) return;
+            if (!result || controller.signal.aborted) return;
+            // Organization accounts feed every workspace that inherits them:
+            // retained Codex lists go stale even if this page has been left.
+            if (result.status === "connected")
+              void invalidateSharedQueries(client, ["codex-accounts"]);
+            if (cancelled.current) return;
             setPending(null);
             if (result.status === "expired") {
               recordOutcome("expired");

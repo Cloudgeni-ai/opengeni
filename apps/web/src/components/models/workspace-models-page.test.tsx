@@ -112,9 +112,12 @@ let accounts: CodexAccountsResponse = {
 const client = {
   listCodexAccounts: mock(async (_workspaceId: string) => accounts),
   codexOverview: mock(async (_workspaceId: string) => overviewFor("acct-1", 75)),
-  codexConnectStart: mock(async (_workspaceId: string) => {
+  codexConnectStart: mock(async (_workspaceId: string): Promise<unknown> => {
     throw new Error("Device authorization unavailable in fixture");
   }),
+  codexConnectPoll: mock(
+    async (_workspaceId: string, _state: string): Promise<unknown> => ({ status: "pending" }),
+  ),
   setCodexAccountAllocator: mock(async () => ({})),
   setCodexRotationSettings: mock(async () => ({})),
   disconnectCodexAccount: mock(async () => ({})),
@@ -418,7 +421,7 @@ beforeAll(() => undefined);
 
 beforeEach(async () => {
   // Account lists are retained per client between mounts; every test starts cold.
-  const { clearSharedQueries } = await import("@opengeni/react");
+  const { clearSharedQueries } = await import("@/lib/shared-query");
   clearSharedQueries(client);
   organizationAdmin = false;
   organizationList = false;
@@ -621,6 +624,9 @@ describe("Codex rows", () => {
   });
 
   test("a revisit shows the last accounts and live usage at once while re-reading", async () => {
+    // The console retains reads for its client (OpenGeniProvider retainReadsAcrossMounts).
+    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
     const first = await render();
     try {
       expect(first.container.textContent).toContain("75% left");
@@ -649,14 +655,49 @@ describe("Codex rows", () => {
       expect(second.container.textContent).toContain("40% left");
     } finally {
       await cleanup(second);
+      release();
+    }
+  });
+
+  test("a revisit whose live read fails says Usage unavailable, not the older reading", async () => {
+    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
+    const first = await render();
+    try {
+      expect(first.container.textContent).toContain("75% left");
+    } finally {
+      await cleanup(first);
+    }
+    let reject!: (error: Error) => void;
+    client.codexOverview.mockImplementation(
+      () =>
+        new Promise<CodexOverviewResponse>((_yes, no) => {
+          reject = no;
+        }),
+    );
+    const second = await render();
+    try {
+      // While this visit's read runs, the last live reading stands in.
+      expect(second.container.textContent).toContain("75% left");
+      await act(async () => reject(new Error("Provider unavailable")));
+      await flush();
+      // The read failed: the row no longer presents the old reading as current.
+      expect(second.container.textContent).toContain("Usage unavailable");
+      expect(second.container.textContent).not.toContain("75% left");
+      expect(second.container.textContent).not.toContain("10% left");
+    } finally {
+      await cleanup(second);
+      release();
     }
   });
 
   test("an account change elsewhere is never shown stale on the next visit", async () => {
+    const { invalidateSharedQueries, peekSharedQuery, retainSharedQueries } =
+      await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
     const first = await render();
     await cleanup(first);
     const reads = client.listCodexAccounts.mock.calls.length;
-    const { invalidateSharedQueries, peekSharedQuery } = await import("@opengeni/react");
     // e.g. the session switcher pinned another account for this workspace.
     await invalidateSharedQueries(client, ["codex-accounts", "workspace-a"]);
     expect(peekSharedQuery(client, ["codex-accounts", "workspace-a"])).toBeNull();
@@ -666,6 +707,7 @@ describe("Codex rows", () => {
       expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 2);
     } finally {
       await cleanup(second);
+      release();
     }
   });
 
@@ -1136,6 +1178,52 @@ describe("Connect Codex", () => {
       }
     });
   }
+
+  test("a sign-in that finishes after leaving Settings refreshes every Codex list for the workspace", async () => {
+    const { codexAccountsQueryKey, peekSharedQuery, retainSharedQueries, sharedQueryWriter } =
+      await import("@/lib/shared-query");
+    const release = retainSharedQueries(client);
+    const originalOpen = window.open;
+    window.open = (() => null) as typeof window.open;
+    client.codexConnectStart.mockImplementationOnce(async () => ({
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://auth.example.test/device",
+      state: "device-state",
+      intervalSeconds: 2,
+    }));
+    let signedIn = false;
+    client.codexConnectPoll.mockImplementation(async () =>
+      signedIn ? { status: "connected", plan: "pro", accountId: "acct-2" } : { status: "pending" },
+    );
+    const sessionKey = codexAccountsQueryKey("workspace-a", "session-1");
+    try {
+      const view = await render();
+      try {
+        await act(async () => navigateTo({ view: "connect:codex" }));
+        await flush();
+        await act(async () => button(view.container, "Sign in with ChatGPT")!.click());
+        await flush();
+        expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a");
+      } finally {
+        // The person leaves Settings to finish signing in elsewhere.
+        await cleanup(view);
+      }
+      // The session's account switcher had read its choices meanwhile.
+      expect(sharedQueryWriter(client)(sessionKey, { accounts: [] })).toBe(true);
+      expect(peekSharedQuery(client, codexAccountsQueryKey("workspace-a"))).not.toBeNull();
+      signedIn = true;
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 2_300)));
+      await flush();
+      expect(client.codexConnectPoll).toHaveBeenCalledWith("workspace-a", "device-state");
+      // Neither the session's choices nor Settings' list can come back stale.
+      expect(peekSharedQuery(client, sessionKey)).toBeNull();
+      expect(peekSharedQuery(client, codexAccountsQueryKey("workspace-a"))).toBeNull();
+    } finally {
+      window.open = originalOpen;
+      client.codexConnectPoll.mockImplementation(async () => ({ status: "pending" }));
+      release();
+    }
+  }, 10_000);
 });
 
 describe("Opengeni credits", () => {

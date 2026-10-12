@@ -188,7 +188,7 @@ const { OrgCodexAccountPage, reachesWorkspace } =
   await import("./models/organization-codex-models");
 const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
 const { modelsScopeLabels } = await import("./models/models-ui");
-const { clearSharedQueries } = await import("@opengeni/react");
+const { clearSharedQueries } = await import("@/lib/shared-query");
 
 // Account lists are retained per client between mounts; every test starts cold.
 beforeEach(() => clearSharedQueries(context.client));

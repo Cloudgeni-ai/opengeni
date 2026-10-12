@@ -95,7 +95,11 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
           ? caught
           : new Error("Couldn't save. Nothing was changed.", { cause: caught });
       }
-      if (generation.current !== current) return;
+      if (generation.current !== current) {
+        // Left meanwhile: other model lists and retained account lists still follow the save.
+        window.dispatchEvent(new Event("model-connections-changed"));
+        return;
+      }
       await load();
       window.dispatchEvent(new Event("model-connections-changed"));
       toast.success("Saved");
