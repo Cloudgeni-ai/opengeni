@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import type { RetainedArtifactReference } from "@opengeni/sdk";
+import type { RetainedArtifactMetadata, RetainedArtifactReference } from "@opengeni/sdk";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "@opengeni/react/artifacts";
 import { createWorkspaceRetainedArtifactLoader, useLightboxOptional } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { Link } from "@tanstack/react-router";
 import { DeferredChatMedia } from "@opengeni/react/artifacts";
+import {
+  cachedRetainedArtifactLoader,
+  cachedRetainedMetadata,
+  retainedImageCache,
+  retainedImageScope,
+} from "./retained-image-cache";
 
 const CHAT_IMAGE_HEIGHT = 360;
 
@@ -50,31 +56,42 @@ function InlineChatImageBody({
   fromSession,
 }: InlineChatImageProps) {
   const { client, accessKeyVersion } = useAppContext();
+  const cache = retainedImageCache(client);
+  const scope = retainedImageScope(accessKeyVersion, workspaceId, artifactId);
+  // A remount (tab switch, search, scroll) starts from what this page already has.
   const [loaded, setLoaded] = useState<{
     client: typeof client;
     workspaceId: string;
     accessKeyVersion: number;
     artifact: RetainedArtifactReference;
-  } | null>(null);
+  } | null>(() => {
+    const artifact = cache.peek<RetainedArtifactMetadata>(`${scope}meta`);
+    return artifact && usableImage(artifact, artifactId)
+      ? { client, workspaceId, accessKeyVersion, artifact }
+      : null;
+  });
   const [error, setError] = useState(false);
   const [retry, setRetry] = useState(0);
   useEffect(() => {
     let active = true;
-    setLoaded(null);
     setError(false);
-    void client
-      .getRetainedArtifact(workspaceId, artifactId)
+    void cachedRetainedMetadata(retainedImageCache(client), scope, () =>
+      client.getRetainedArtifact(workspaceId, artifactId),
+    )
       .then((artifact) => {
         if (!active) return;
-        if (
-          !artifact.available ||
-          artifact.artifactId !== artifactId ||
-          !isRetainedImageContentType(artifact.contentType)
-        ) {
+        if (!usableImage(artifact, artifactId)) {
           setError(true);
           return;
         }
-        setLoaded({ client, workspaceId, accessKeyVersion, artifact });
+        setLoaded((current) =>
+          current?.artifact === artifact &&
+          current.client === client &&
+          current.workspaceId === workspaceId &&
+          current.accessKeyVersion === accessKeyVersion
+            ? current
+            : { client, workspaceId, accessKeyVersion, artifact },
+        );
       })
       .catch(() => {
         if (active) setError(true);
@@ -82,17 +99,29 @@ function InlineChatImageBody({
     return () => {
       active = false;
     };
-  }, [client, workspaceId, accessKeyVersion, artifactId, retry]);
+  }, [client, workspaceId, accessKeyVersion, artifactId, scope, retry]);
   const load = useMemo(
-    () => createWorkspaceRetainedArtifactLoader(client, workspaceId),
-    [client, workspaceId],
+    () =>
+      cachedRetainedArtifactLoader(
+        retainedImageCache(client),
+        accessKeyVersion,
+        workspaceId,
+        createWorkspaceRetainedArtifactLoader(client, workspaceId),
+      ),
+    [client, workspaceId, accessKeyVersion],
   );
+  // Retry means "fetch again": never answer it from the cache.
+  const retryFresh = () => {
+    cache.forget(scope);
+    setLoaded(null);
+    setRetry((v) => v + 1);
+  };
   if (error)
     return (
       <span role="status" className="max-w-full break-words p-2 text-sm">
         {alt || "Image"} unavailable.{" "}
         {!thumbnail ? (
-          <Button variant="ghost" size="sm" onClick={() => setRetry((v) => v + 1)}>
+          <Button variant="ghost" size="sm" onClick={retryFresh}>
             Retry
           </Button>
         ) : null}
@@ -118,7 +147,7 @@ function InlineChatImageBody({
       alt={alt}
       thumbnail={thumbnail}
       viewer={viewer}
-      onRetry={() => setRetry((v) => v + 1)}
+      onRetry={retryFresh}
     />
   );
   return (
@@ -141,6 +170,18 @@ function InlineChatImageBody({
     </>
   );
 }
+
+function usableImage(
+  artifact: RetainedArtifactMetadata,
+  artifactId: string,
+): artifact is RetainedArtifactReference {
+  return (
+    artifact.available &&
+    artifact.artifactId === artifactId &&
+    isRetainedImageContentType(artifact.contentType)
+  );
+}
+
 function LoadedImage({
   artifact,
   load,
