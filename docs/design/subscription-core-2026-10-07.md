@@ -4273,6 +4273,140 @@ Fail-closed choices:
 - The route is read when the turn's capacity phase runs, not at claim time:
   a turn claimed before the cutover and placed after it places on the core.
 
+##### X1b: settlement, waits and wakes
+
+X1b replaces the first two fail-closed choices above: a core wait parks the
+same turn on a durable core waiter, and a definitive refusal re-places it.
+An unknown request outcome stays terminal for SuperGrok (see below).
+
+Generalized (Codex keeps every export, stage name, event, reason, metric name
+and label; its names are thin bindings of the shared code):
+
+| Codex-named (M3) | Provider-neutral |
+| --- | --- |
+| `failOverCoreCodexTurn`, `coreCodexFailoverDisposition`, `SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT` (`codex-core-failover.ts`) | `failOverCoreSubscriptionTurn`, `coreFailoverDisposition`, `SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT` with a `CoreFailoverBinding` (display name, lease, refusal count, recovery reason and provider label, metrics) in `subscription-core-failover.ts` |
+| `parkCoreCodexTurn` | `parkCoreSubscriptionTurn` (`subscription-core-capacity.ts`) |
+| wake delivery, blocked-turn evaluation, health recovery with wake, and reconcile in `subscription-core-codex-waits.ts` | the same steps over a `CoreWaitBinding`: `wakeSubscriptionCoreWaitersAndDeliver`, `evaluateCoreBlockedTurn`, `recoverCoreHealthAndWake`, `reconcileCoreCapacityWait` |
+| `armSubscriptionCoreCodexCapacityWait`, `reconcileSubscriptionCoreCodexCapacityWait` | `armSubscriptionCoreCapacityWait(db, provider, input)` and `reconcileSubscriptionCoreCapacityWait` (which uses the waiter's own provider), with one session-event vocabulary per provider |
+| `wakeSubscriptionCoreCodexCapacityWaiters` | `wakeSubscriptionCoreProviderCapacityWaiters(db, provider, input)`, over the provider-neutral workspace enumeration (PR 0c) |
+| `deleteSubscriptionCoreCodexWaitersForTurns` (file removed) | `deleteSubscriptionCoreWaitersForTurns(db, null, ...)`: Steer, Cancel and queue supersession remove a blocked turn's core waiter of any provider |
+| the Codex-only `capacity_waiter` session classification and peek | `getSubscriptionCoreCapacityWaitForSession`, `getSubscriptionCoreCapacityWaitById` and `subscriptionCoreCapacityWaitRef` (any provider; the ref names `provider` only when it is not Codex, so Codex refs are unchanged) |
+| the refusal step of `settleSubscriptionCoreOutcome` | `applySubscriptionCoreRefusal`, exported with `subscriptionCoreSettlement` |
+| (new, no Codex counterpart: Codex keeps its M3 refusal kinds) | `settleCoreSubscriptionRefusal(deps, core, binding)` and `finalizeCoreSubscriptionTurn` with a `CoreRefusalBinding` (provider, display name, classifier, lease, disconnect check, failover binding) in `subscription-core-settlement.ts`; `subscriptionCoreFailoverMetrics(provider)` in `subscription-core-failover.ts`. The Claude track binds the same steps. |
+
+SuperGrok on the core:
+
+- Classification: `classifyXaiProviderError` maps a failed request to a
+  shared `ProviderErrorOutcome` (relogin or marked 401 `unauthorized`,
+  marked 403 `forbidden`, marked 429 or HTTP 200 capacity terminal
+  `rate_limited` with the provider's retry time, or null so the binding's
+  fallback applies). It holds the rules `classifyXaiCredentialFailure` had;
+  the legacy function is now its view, with the same output. It sits next to
+  the Codex classifier in the worker because it needs the worker's safety
+  refusal and Retry-After parsing; the core binding has no classification
+  hook (step F's adapters classify in their transport too).
+- Settlement (`settleCoreSubscriptionRefusal` with `XAI_CORE_REFUSAL`): a
+  refusal is recorded against the leased connection through
+  `planSubscriptionCoreRefusal` and
+  `applySubscriptionCoreRefusal` (failure receipt plus quota, cooldown or
+  quarantine), fenced on the refresh generation the refused bearer carried.
+  Only the conversation lane writes that generation, at its physical
+  dispatch; the session-title lane resolves and refreshes through its own
+  token functions, so a title refresh in flight never moves the main
+  lane's refusal fence. The binding declares its credential
+  (`CoreRefusalCredential`): renewable, and refreshed before refusal. The
+  transport already refreshed and retried an unauthorized request once; a
+  marked 403 is also settled as refreshed, which keeps the legacy SuperGrok
+  behaviour (switch accounts and quarantine the connection for the forbidden
+  window) instead of a refresh round trip the transport never makes for a
+  403. The same turn then re-places within
+  the shared per-turn bound (4 refusals): another account, or a durable
+  wait. A graceful source disconnect re-places without a refusal or a
+  count. A sign-in, forbidden or access-lost refusal that could not
+  re-place (not recorded, or no durable checkpoint) fails the turn with
+  typed SuperGrok copy and idles the session; a rate limit that could not
+  re-place takes the generic provider-failure path. The legacy SuperGrok
+  refusal settlement never runs for a core turn.
+- Failover recovery reason `xai_credential_failover` with provider label
+  `supergrok-subscription`; metrics
+  `opengeni_subscription_core_failover_checkpoints_total` and
+  `opengeni_subscription_core_failover_settlements_total` labelled
+  `provider="xai"` (Codex keeps `opengeni_codex_failover_*` with
+  `workspace_key`).
+- Waits: the placement's wait parks the turn on a core waiter (provider
+  `xai`). Its session events keep the legacy SuperGrok vocabulary
+  (`turn.capacity_waiting` with `recovery: "provider_capacity"`,
+  `turn.recovery.requested` with reason `xai_capacity_available`,
+  `turn.superseded`; status reason `xai_capacity`), so clients and the
+  workflow see one vocabulary across the cutover. A health recovery wakes
+  the account's other SuperGrok waiters.
+- New SuperGrok behaviour at the cutover: the core waiter brings the shared
+  false-resumption breaker. A resumed turn that parks again without a
+  completed model request with meaningful output counts one false
+  resumption and backs off (30 seconds to 15 minutes, jittered); at 10 the
+  turn fails with the new terminal code `xai_capacity_recovery_exhausted`
+  (`recoveryExhausted: true`, which clients already render generically).
+  The SuperGrok transport now reports `meaningfulOutput` on its `completed`
+  request event (assistant text, a complete tool call or an image, the
+  Codex rule), so a productive resume resets the breaker exactly as for
+  Codex; the field is inert on the legacy route, whose turns never carry
+  the breaker. Human Retry clears the breaker and the goal suppression for
+  every core-waiter exhausted code (`SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES`),
+  not only Codex's. A stopped arm deletes the existing waiter by id, so no
+  other provider's row is left behind.
+- Workflow: no workflow code changes. The peek returns a core waiter first
+  (with `provider: "xai"`, the shape the legacy SuperGrok peek already
+  returns), and a reconcile with `provider: "xai"` looks the core waiter up
+  by its exact id and generation before the legacy table, so a history
+  that recorded a legacy reference reconciles against the waiter X3 moves
+  with the same id and generation.
+- Finalization: a completed conversation-lane model call moves the binding's
+  cache clock before the core lease is released (a title request does not).
+  The per-turn SuperGrok quota call runs
+  only on the legacy route; on the core, quota is observed on refusal (and
+  by X2a's billing re-read of exhausted shared connections, which runs
+  before placement and before each reconcile of a parked SuperGrok core
+  turn). A connection that re-read finds recovered wakes the SuperGrok core
+  waiters through the same provider-neutral database wake as X1b's health
+  recovery (`wakeSubscriptionCoreCapacityWaiters`); the generic session
+  workflow wake committed with it reaches the waiter, so that wake does not
+  depend on the typed signal being drained.
+- Waits that can end before their reset: a SuperGrok billing read can end a
+  quota exhaustion before its stored reset (the adapter's
+  `usageReadEndsQuotaExhaustion`). Its core waiter therefore rechecks on the
+  bounded control-plane backoff, 60 seconds doubling to 15 minutes and
+  capped at the reset and at a sooner quarantine end
+  (`reset_kind = bounded_refresh`). Its reconcile
+  (`CoreWaitBinding.refreshBeforeReconcile`) re-reads billing for the
+  workspace's exhausted shared connections before placement evaluates,
+  under the parked turn's exact accepted identity
+  (`readSubscriptionCoreTurnIdentity`, never a synthetic one; without it the
+  evaluation revokes and nothing is read), as the legacy waiter re-read
+  billing. Without this, a parked turn in a quiet
+  organization would sleep until the end of the credit period after credits
+  were back. A personal connection is never probed out of turn (X2a, shared
+  only); its exhaustion stands until its stored deadline (X2a). Codex
+  waiters are unchanged: they sleep until an authoritative reset. The waiter
+  vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
+  conformance suite checks that the two agree.
+- Compaction: X1b adds no compaction change. A compaction turn whose
+  placement waits is still cancelled with its request preserved (as for
+  Codex) and never parks; a test asserts it arms no waiter.
+- Follow-ups recorded, not in X1b: (1) Codex has the same shared-slot shape
+  for its refusal fence (its title lane shares the tracked token functions).
+  The imprecision is bounded and goes both ways: a newer generation can be
+  quarantined or limited, or a rare race can fence the refusal on an older
+  generation so its health record is dropped. The turn still fails over and
+  authority is never widened. It is left for a Codex-owned change that gives
+  Codex the SuperGrok shape, so this PR keeps Codex byte-for-byte. (2) Moving the waiter
+  vocabulary into the provider registry and the wait steps out of the
+  Codex-named module is a rename left until the Claude track has landed on
+  these files.
+- Unknown outcomes stay terminal. Codex's bounded own-interruption recovery
+  is not extended to SuperGrok: the legacy path already refuses to replay
+  an idle-timed-out stream or a stalled hosted-search continuation, because
+  hosted tools run on the provider and a replay may repeat them.
+
 ##### X2a: media and probes
 
 Every consumer reads the organization's SuperGrok route

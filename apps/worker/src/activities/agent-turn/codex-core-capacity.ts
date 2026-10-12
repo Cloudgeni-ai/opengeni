@@ -6,10 +6,8 @@
  * enabled; missing or disabled cutover state fails closed.
  */
 import {
-  armSubscriptionCoreCodexCapacityWait,
   assertModelConnectionAllowsTurn,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
-  getSessionGoal,
   CodexCredentialLeaseAttemptFencedError,
   SubscriptionCoreCodexLeaseLostError,
   SubscriptionCoreCodexSourceDisconnectedError,
@@ -25,18 +23,18 @@ import type { Settings } from "@opengeni/config";
 import { refreshCoreCodexModelEntitlements } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
+  CODEX_CORE_WAIT_BINDING,
   recoverCoreCodexHealthAndWake,
-  reconcileCoreCodexCapacityWait,
   wakeSubscriptionCoreCodexWaitersAndDeliver,
   type CoreCodexWakeServices,
 } from "../subscription-core-codex-waits";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
-import { subscriptionCoreCapacityWaitPayload } from "./codex-core-errors";
 import type { CodexTurnLease } from "./credential-leases";
 import {
   assertCoreSourceConnected,
   coreLeaseRef,
   guardCoreTokenResolver,
+  parkCoreSubscriptionTurn,
   selectCoreSubscriptionTurnCapacity,
   type CoreTurnPlacementProvider,
 } from "./subscription-core-capacity";
@@ -178,81 +176,10 @@ export async function selectCoreCodexTurnCapacity(
   return await selectCoreSubscriptionTurnCapacity(deps, CODEX_CORE_TURN_PROVIDER);
 }
 
-/**
- * Arm the session's core waiter for this attempt's turn and re-evaluate it at
- * once: a capacity change that committed before the waiter existed could not
- * wake it, so the arm closes that edge itself (as the legacy Codex arm does).
- */
+/** Park on the durable core waiter (the shared park, Codex's waiter entry points). */
 async function parkCoreCodexTurn(
   deps: CapacityPhaseDeps,
   wait: Extract<SubscriptionCoreCodexPlacement, { kind: "wait" }>,
 ): Promise<CapacityPhaseOutcome> {
-  const {
-    input,
-    db,
-    bus,
-    control,
-    attempt,
-    claimedResult,
-    acknowledgeLostAttemptOwnership,
-    signalCodexCapacityWorkflow,
-  } = deps;
-  const turnId = attempt.turnId!;
-  const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
-  const activeGoal = goal?.status === "active" ? goal : null;
-  const armed = await armSubscriptionCoreCodexCapacityWait(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    turnId,
-    attemptId: input.attemptId,
-    goalId: activeGoal?.id ?? null,
-    goalVersion: activeGoal?.version ?? null,
-    waitReason: wait.reason,
-    earliestResetAt: wait.earliestResetAt,
-    healthRetryAt: wait.healthRetryAt,
-    failurePayload: subscriptionCoreCapacityWaitPayload(wait.reason, wait.earliestResetAt),
-  });
-  await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
-  if (armed.action === "stopped") {
-    control.turnMetricOutcome = "failed";
-    control.activityStatus = armed.sessionStatus === "queued" ? "idle" : "failed";
-    return { exit: claimedResult({ status: control.activityStatus }) };
-  }
-  if (armed.action === "waiting") {
-    const evaluated = await reconcileCoreCodexCapacityWait(
-      { db, bus, signalCodexCapacityWorkflow },
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        waiterId: armed.waiter.waiterId,
-        generation: armed.waiter.generation,
-      },
-    );
-    if (evaluated?.action === "resumed") {
-      control.turnMetricOutcome = "recovering";
-      control.activityStatus = "recovering";
-      return { exit: claimedResult({ status: "recovering" }) };
-    }
-    if (evaluated?.action === "waiting") {
-      control.turnMetricOutcome = "recovering";
-      control.activityStatus = "waiting_capacity";
-      return {
-        exit: claimedResult({
-          status: "waiting_capacity",
-          capacityWait: {
-            waiterId: evaluated.waiterId,
-            generation: evaluated.generation,
-            nextCheckAt: evaluated.nextCheckAt,
-            wakeRevision: evaluated.wakeRevision,
-          },
-        }),
-      };
-    }
-  }
-  acknowledgeLostAttemptOwnership();
-  control.turnMetricOutcome = "cancelled";
-  control.activityStatus = "cancelled";
-  return { exit: claimedResult({ status: "cancelled" }) };
+  return await parkCoreSubscriptionTurn(deps, wait, CODEX_CORE_WAIT_BINDING, "Codex");
 }

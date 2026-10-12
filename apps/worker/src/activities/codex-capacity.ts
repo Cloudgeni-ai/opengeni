@@ -1,6 +1,6 @@
 import {
-  getSubscriptionCoreCodexCapacityWaitForSession,
-  subscriptionCoreCodexCapacityWaitRef,
+  getSubscriptionCoreCapacityWaitForSession,
+  subscriptionCoreCapacityWaitRef,
   getXaiCapacityWaitForSession,
   getClaudeCapacityWaitForSession,
   resolveClaudeWaiterSubject,
@@ -10,7 +10,11 @@ import {
 } from "@opengeni/db";
 
 import { refreshExhaustedXaiQuota } from "./xai-quota";
-import { reconcileCoreCodexCapacityWait } from "./subscription-core-codex-waits";
+import {
+  reconcileCoreCapacityWait,
+  reconcileCoreCodexCapacityWait,
+} from "./subscription-core-codex-waits";
+import { XAI_CORE_WAIT_BINDING } from "./subscription-core-xai-waits";
 
 import type {
   ControlActivityServices,
@@ -22,14 +26,16 @@ import type {
 export function createCodexCapacityActivities(services: () => Promise<ControlActivityServices>) {
   async function getCodexCapacityWait(input: GetCodexCapacityWaitInput) {
     const { db } = await services();
-    // A core Codex waiter (shared subscription core, M3) keeps the legacy
-    // Codex reference shape and is the only waiter written after cutover.
-    const coreWaiter = await getSubscriptionCoreCodexCapacityWaitForSession(
+    // A core waiter (shared subscription core) is the only waiter written
+    // after its provider's cutover. A Codex one keeps the legacy Codex
+    // reference shape; a SuperGrok one carries `provider: "xai"`, so its
+    // reconcile also looks the core up first.
+    const coreWaiter = await getSubscriptionCoreCapacityWaitForSession(
       db,
       input.workspaceId,
       input.sessionId,
     );
-    if (coreWaiter) return subscriptionCoreCodexCapacityWaitRef(coreWaiter);
+    if (coreWaiter) return subscriptionCoreCapacityWaitRef(coreWaiter);
     const xaiWaiter = await getXaiCapacityWaitForSession(db, input.workspaceId, input.sessionId);
     const claudeWaiter = xaiWaiter
       ? null
@@ -61,6 +67,19 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     input: ReconcileCodexCapacityWaitInput,
   ): Promise<ReconcileCodexCapacityWaitResult> {
     const resolved = await services();
+    if (input.provider === "xai") {
+      // The core waiter by its exact id and generation first: a SuperGrok
+      // waiter the cutover moved to the core keeps both, so a history that
+      // recorded the legacy reference reconciles against the core waiter.
+      const core = await reconcileCoreCapacityWait(resolved, XAI_CORE_WAIT_BINDING, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waiterId: input.waiterId,
+        generation: input.generation,
+      });
+      if (core) return core;
+    }
     if (input.provider === "xai" || input.provider === "claude") {
       const claude = input.provider === "claude";
       const getWaiter = claude ? getClaudeCapacityWaitForSession : getXaiCapacityWaitForSession;

@@ -294,3 +294,70 @@ describe("SuperGrok request custody hooks", () => {
     expect(h.order).toEqual(["admit:request-1:1", "send:1", "settle:request-1:1:refused"]);
   });
 });
+
+describe("SuperGrok progress signal for the shared capacity breaker", () => {
+  const assistantText = {
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "done" }],
+  };
+  const toolCall = {
+    type: "function_call",
+    status: "completed",
+    name: "shell",
+    call_id: "call-1",
+    arguments: '{"cmd":"ls"}',
+  };
+  const completedFlag = async (response: () => Response): Promise<unknown> => {
+    const h = harness([response]);
+    const events: Array<{ phase: string; meaningfulOutput?: boolean }> = [];
+    await drain(await h.send({ onModelRequestEvent: (event) => void events.push(event) }));
+    const completed = events.filter((event) => event.phase === "completed");
+    expect(completed).toHaveLength(1);
+    return completed[0]!.meaningfulOutput;
+  };
+
+  test("a streamed response with assistant text or a tool call is meaningful", async () => {
+    expect(
+      await completedFlag(() =>
+        sse({ type: "response.completed", response: { output: [assistantText] } }),
+      ),
+    ).toBe(true);
+    expect(
+      await completedFlag(() =>
+        sse(
+          { type: "response.output_item.done", item: toolCall },
+          { type: "response.completed", response: { output: [] } },
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  test("reasoning-only, empty or incomplete output is not progress", async () => {
+    expect(
+      await completedFlag(() =>
+        sse({
+          type: "response.completed",
+          response: {
+            output: [
+              { type: "reasoning", summary: [] },
+              { ...assistantText, status: "incomplete" },
+              { ...assistantText, content: [{ type: "output_text", text: "  " }] },
+            ],
+          },
+        }),
+      ),
+    ).toBe(false);
+    expect(await completedFlag(() => sse({ type: "response.completed", response: {} }))).toBe(
+      false,
+    );
+  });
+
+  test("a non-streamed JSON response reads its output", async () => {
+    expect(await completedFlag(() => Response.json({ id: "r1", output: [assistantText] }))).toBe(
+      true,
+    );
+    expect(await completedFlag(() => Response.json({ id: "r1", output: [] }))).toBe(false);
+  });
+});

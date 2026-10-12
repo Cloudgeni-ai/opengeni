@@ -8,7 +8,10 @@ import {
 import { and, desc, eq, sql } from "drizzle-orm";
 import { rawRows, type Database, type SessionActivityDatabase } from "./database";
 import * as schema from "./schema";
-import { clearCodexCapacityRecovery } from "./codex-capacity-recovery";
+import {
+  clearCodexCapacityRecovery,
+  isSubscriptionCoreWaitExhaustedCode,
+} from "./codex-capacity-recovery";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
@@ -228,7 +231,8 @@ async function retryFailedSessionInTransaction(
     failurePayload !== null &&
     typeof failurePayload === "object" &&
     !Array.isArray(failurePayload) &&
-    (failurePayload as Record<string, unknown>).code === "codex_capacity_recovery_exhausted";
+    // Every core waiter's breaker (Codex and SuperGrok) shares this state.
+    isSubscriptionCoreWaitExhaustedCode((failurePayload as Record<string, unknown>).code);
   // Only this explicitly authorized, exact failure-event Retry may replenish
   // the breaker. Preserve accepted credential policy/refusal ledgers and all
   // unrelated recovery budgets. Receipt replay returned above cannot reset it.

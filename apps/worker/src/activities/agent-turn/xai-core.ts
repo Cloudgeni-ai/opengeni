@@ -23,21 +23,30 @@ import type { XaiSubscriptionRequestContext } from "@opengeni/xai-subscription";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import { subscriptionCoreCutoverDisabledFailure } from "./codex-core-errors";
 import type { XaiTurnLease } from "./credential-leases";
+import { classifyXaiProviderError } from "./errors";
 import {
   assertCoreSourceConnected,
   coreLeaseRef,
   guardCoreTokenResolver,
+  parkCoreSubscriptionTurn,
   selectCoreSubscriptionTurnCapacity,
   type CoreTurnPlacementProvider,
 } from "./subscription-core-capacity";
 import {
+  SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT,
+  subscriptionCoreFailoverMetrics,
+} from "./subscription-core-failover";
+import {
   createCoreSubscriptionRequests,
   type CoreSubscriptionRequests,
 } from "./subscription-core-requests";
+import type { CoreRefusalBinding } from "./subscription-core-settlement";
 import type { SubscriptionCoreTurn } from "./turn-context";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { selectXaiTurnCapacity } from "./xai-capacity";
 import { refreshExhaustedXaiCoreQuota } from "../xai-quota";
+import { recoverCoreHealthAndWake } from "../subscription-core-codex-waits";
+import { XAI_CORE_WAIT_BINDING } from "../subscription-core-xai-waits";
 
 const XAI = SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider;
 const DISPLAY_NAME = "SuperGrok";
@@ -53,12 +62,13 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   leaseTtlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
   lease: (deps) => deps.leases.xai,
   place: (db, request) => subscriptionCoreTurns(XAI).placeSubscriptionCoreTurn(db, request),
-  // Waiter wakes after a recovery arrive with the SuperGrok waits (X1b). As
-  // for Codex, a failed recovery is best effort and never fails placement.
-  recoverHealth: async ({ db }, identity) => {
-    await subscriptionCoreTurns(XAI)
-      .recoverSubscriptionCoreConnectionHealth(db, identity)
-      .catch(() => 0);
+  // A recovery wakes the account's other SuperGrok waiters too.
+  recoverHealth: async ({ db, signalCodexCapacityWorkflow }, identity) => {
+    await recoverCoreHealthAndWake(
+      { db, signalCodexCapacityWorkflow },
+      XAI_CORE_WAIT_BINDING,
+      identity,
+    );
   },
   // Re-read billing for exhausted shared connections before placement
   // trusts a stored exhaustion, as the legacy path did (EP-N22, X2a).
@@ -77,7 +87,8 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
     providerTurn.xaiRotationEnabled = false;
     providerTurn.xaiAuthoritySnapshot = null;
   },
-  // No `park` until X1b: a core wait is a terminal capacity failure.
+  // A wait parks the same turn on the durable core waiter (EP-T09).
+  park: (deps, wait) => parkCoreSubscriptionTurn(deps, wait, XAI_CORE_WAIT_BINDING, DISPLAY_NAME),
   isSourceDisconnected: (db, identity, connectionId) =>
     subscriptionCoreRequests(XAI).isSubscriptionCoreSourceDisconnected(db, identity, connectionId),
   sourceDisconnectedError: () => XAI.errors.sourceDisconnected(),
@@ -132,6 +143,12 @@ export function createCoreXaiRequests(
 export type XaiCoreRequestAuthorization = {
   getToken: XaiSubscriptionRequestContext["getToken"];
   refresh: XaiSubscriptionRequestContext["refresh"];
+  /**
+   * The same bearer for session-title requests. A title request never moves
+   * the main lane's refusal fence (`core.credentialVersion`).
+   */
+  titleGetToken: XaiSubscriptionRequestContext["getToken"];
+  titleRefresh: XaiSubscriptionRequestContext["refresh"];
   /** The dispatch fence every physical request passes before its reservation. */
   assertDispatch: () => Promise<void>;
   beforeProviderDispatch: NonNullable<XaiSubscriptionRequestContext["beforeProviderDispatch"]>;
@@ -169,19 +186,31 @@ export function buildXaiCoreRequestAuthorization(input: {
     await lease.assertCurrentForDispatch();
   };
   const requests = core.requests;
+  // The refusal settlement fences its health write on the generation the
+  // refused bearer carried: the main lane records the generation of the
+  // bearer it obtained when that physical request is dispatched. Main-lane
+  // requests are sequential, so at settlement the slot holds the refused
+  // request's generation; title requests (their own lane) never write it.
+  let mainLaneGeneration: number | null = null;
+  type Snapshot = { accessToken: string; userId: string; credentialVersion: number };
+  const bearer = (snapshot: Snapshot) => ({
+    accessToken: snapshot.accessToken,
+    userId: snapshot.userId,
+  });
+  const mainLane = (snapshot: Snapshot) => {
+    mainLaneGeneration = snapshot.credentialVersion;
+    return bearer(snapshot);
+  };
   return {
-    getToken: async () => {
-      const { accessToken, userId } = await resolver.getToken();
-      return { accessToken, userId };
-    },
-    refresh: async () => {
-      const { accessToken, userId } = await resolver.refresh();
-      return { accessToken, userId };
-    },
+    getToken: async () => mainLane(await resolver.getToken()),
+    refresh: async () => mainLane(await resolver.refresh()),
+    titleGetToken: async () => bearer(await resolver.getToken()),
+    titleRefresh: async () => bearer(await resolver.refresh()),
     assertDispatch,
     beforeProviderDispatch: async (request) => {
       await assertDispatch();
       await requests.reserve(request);
+      if (mainLaneGeneration !== null) core.credentialVersion = mainLaneGeneration;
     },
     onProviderRequestSettled: requests.observe,
   };
@@ -194,19 +223,33 @@ export function buildXaiCoreRequestAuthorization(input: {
  */
 export function xaiCoreTitleCustody(
   core: Pick<SubscriptionCoreTurn, "titleRequests"> | null,
-  authorization: Pick<XaiCoreRequestAuthorization, "assertDispatch"> | null,
-): { assertDispatch: () => Promise<void>; requests: CoreSubscriptionRequests } | undefined {
+  authorization: Pick<
+    XaiCoreRequestAuthorization,
+    "assertDispatch" | "titleGetToken" | "titleRefresh"
+  > | null,
+):
+  | {
+      assertDispatch: () => Promise<void>;
+      requests: CoreSubscriptionRequests;
+      getToken: XaiSubscriptionRequestContext["getToken"];
+      refresh: XaiSubscriptionRequestContext["refresh"];
+    }
+  | undefined {
   if (!core) return undefined;
   if (!authorization || !core.titleRequests)
     throw new Error("A SuperGrok turn on the shared core has no session-title request custody");
-  return { assertDispatch: authorization.assertDispatch, requests: core.titleRequests };
+  return {
+    assertDispatch: authorization.assertDispatch,
+    requests: core.titleRequests,
+    getToken: authorization.titleGetToken,
+    refresh: authorization.titleRefresh,
+  };
 }
 
 /**
  * The terminal unknown-outcome failure of a core SuperGrok turn, or null: an
  * earlier or own request whose outcome is unknown is never replayed
- * automatically (the bounded own-interruption recovery Codex has arrives
- * with the SuperGrok settlement, X1b).
+ * automatically.
  */
 export function xaiCoreRequestOutcomeUnknown(
   error: unknown,
@@ -237,3 +280,25 @@ export async function xaiCoreLanesRecoverAfterCheckpoint(
     return false;
   }
 }
+
+/** SuperGrok's in-turn failover and refusal settlement on the core (X1b). */
+export const XAI_CORE_REFUSAL: CoreRefusalBinding = {
+  provider: XAI,
+  displayName: DISPLAY_NAME,
+  // OAuth credentials renew, and the transport refreshes and retries an
+  // unauthorized request once before it surfaces as a refusal.
+  credential: { renewable: true, refreshedBeforeRefusal: true },
+  classify: classifyXaiProviderError,
+  lease: (deps) => deps.leases.xai,
+  isSourceDisconnected: XAI_CORE_TURN_PROVIDER.isSourceDisconnected,
+  failover: {
+    displayName: DISPLAY_NAME,
+    lease: (deps) => deps.leases.xai,
+    countRefusals: (db, identity) =>
+      subscriptionCoreTurns(XAI).countSubscriptionCoreTurnRefusals(db, identity),
+    refusalLimit: SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT,
+    recoveryReason: "xai_credential_failover",
+    recoveryProvider: "supergrok-subscription",
+    metrics: subscriptionCoreFailoverMetrics("xai"),
+  },
+};

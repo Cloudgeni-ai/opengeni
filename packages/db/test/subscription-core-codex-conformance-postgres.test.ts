@@ -65,4 +65,12 @@ describeSubscriptionCoreConformance<CodexTokens>({
   expiresAt: () => new Date(Date.now() + 24 * 60 * 60 * 1000),
   upstream,
   denyNetwork: installNetworkDenialGuard,
+  sessionWaits: {
+    provider: "codex",
+    events: {
+      waiting: "codex.capacity.waiting",
+      resumed: "codex.capacity.resumed",
+      superseded: "codex.capacity.superseded",
+    },
+  },
 });

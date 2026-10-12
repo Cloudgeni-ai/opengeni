@@ -103,7 +103,12 @@ import type {
   TurnControlState,
 } from "./turn-context";
 import type { createCoreCodexRequests } from "./codex-core-requests";
-import { xaiCoreLanesRecoverAfterCheckpoint, xaiCoreRequestOutcomeUnknown } from "./xai-core";
+import {
+  XAI_CORE_REFUSAL,
+  xaiCoreLanesRecoverAfterCheckpoint,
+  xaiCoreRequestOutcomeUnknown,
+} from "./xai-core";
+import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
@@ -632,7 +637,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // exact core placement and its generation fence.
   const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
   // A SuperGrok turn on the shared core: unknown request outcomes are never
-  // replayed (its refusal settlement arrives with X1b).
+  // replayed, and refusals settle through the shared core (X1b) instead of
+  // the legacy SuperGrok wait below.
   const coreXai = billingState.isXaiTurn ? (providerTurn.xaiSubscriptionCore ?? null) : null;
   // The transport may settle an ambiguous request before the SDK throws a plain
   // HTTP error. That custody evidence must survive classification.
@@ -809,8 +815,17 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
               ? subscriptionCoreAccountRefusedFailure("entitlement")
               : null;
   }
+  // A definitive SuperGrok account refusal on a core turn: recorded against
+  // the leased connection, then the same turn re-places within the shared
+  // bound, or fails with typed copy that idles the session (settled below).
+  let coreXaiRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreXai && !coreRequestOutcomeUnknown && !leases.xai.lost) {
+    const settled = await settleCoreSubscriptionRefusal(deps, coreXai, XAI_CORE_REFUSAL);
+    if (settled.result) return settled.result;
+    coreXaiRefusal = settled.failure;
+  }
   const xaiFailure =
-    billingState.isXaiTurn && providerTurn.effectiveXaiCredentialId
+    billingState.isXaiTurn && !coreXai && providerTurn.effectiveXaiCredentialId
       ? classifyXaiCredentialFailure(error)
       : null;
   const claudeFailure =
@@ -1255,7 +1270,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         )
       : error instanceof SubscriptionCoreCodexTurnError
         ? error
-        : coreAccountRefusal;
+        : (coreAccountRefusal ?? coreXaiRefusal);
   if (
     coreTurnFailure &&
     !coreTurnFailure.payload.retryable &&

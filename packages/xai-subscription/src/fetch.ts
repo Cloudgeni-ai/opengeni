@@ -13,6 +13,7 @@ import {
   XaiSubscriptionStreamingTerminalError,
 } from "./errors";
 import { normalizeXaiResponseEventJson, normalizeXaiSubscriptionRequestBody } from "./normalize";
+import { hasMeaningfulXaiOutput } from "./meaningful-output";
 import {
   type XaiFinalContextUsage,
   type XaiModelRequestEvent,
@@ -68,6 +69,8 @@ type RequestAudit = {
   refused: boolean;
   /** The stream carried an event beyond the response lifecycle preamble. */
   outputObserved: boolean;
+  /** The response carried real work (see `hasMeaningfulXaiOutput`). */
+  meaningfulOutput: boolean;
 };
 
 /** SSE terminal codes that are a capacity refusal: the provider did no model work. */
@@ -169,6 +172,7 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
         settlement: null,
         refused: false,
         outputObserved: false,
+        meaningfulOutput: false,
       };
       let response: Response | undefined;
       try {
@@ -273,6 +277,7 @@ async function normalizeResponse(
       phase: "completed",
       responseObserved: true,
       status: response.status,
+      meaningfulOutput: false,
       ...providerRequestIdFields(response.headers),
     });
     return response;
@@ -292,10 +297,16 @@ async function normalizeResponse(
       normalized.value && typeof normalized.value === "object" && !Array.isArray(normalized.value)
         ? (normalized.value as Record<string, unknown>).response
         : value;
+    audit.meaningfulOutput ||= hasMeaningfulXaiOutput(
+      responseValue && typeof responseValue === "object"
+        ? (responseValue as Record<string, unknown>).output
+        : undefined,
+    );
     await emitRequestEvent(audit, {
       phase: "completed",
       responseObserved: true,
       status: response.status,
+      meaningfulOutput: audit.meaningfulOutput,
       ...providerRequestIdFields(response.headers),
     });
     return Response.json(responseValue, {
@@ -397,6 +408,7 @@ async function normalizeResponse(
             if (!progress.eventType || !PREAMBLE_SSE_EVENT_TYPES.has(progress.eventType)) {
               if (progress.terminal !== "failed") audit.outputObserved = true;
             }
+            observeMeaningfulOutput(audit, progress);
             silenceStartedAt = now;
             if (audit.eventCount === 1) {
               await emitRequestEvent(audit, {
@@ -443,6 +455,7 @@ async function normalizeResponse(
                 phase: "completed",
                 responseObserved: true,
                 status: response.status,
+                meaningfulOutput: audit.meaningfulOutput,
                 ...providerRequestIdFields(response.headers),
               });
               closeStream();
@@ -501,6 +514,18 @@ async function normalizeResponse(
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+function observeMeaningfulOutput(audit: RequestAudit, progress: SseProgress): void {
+  if (audit.meaningfulOutput || !progress.payload) return;
+  if (progress.eventType === "response.output_item.done") {
+    audit.meaningfulOutput = hasMeaningfulXaiOutput([progress.payload.item]);
+  } else if (progress.terminal === "completed") {
+    const final = progress.payload.response;
+    audit.meaningfulOutput = hasMeaningfulXaiOutput(
+      final && typeof final === "object" ? (final as Record<string, unknown>).output : undefined,
+    );
+  }
 }
 
 function sseProgress(block: string): SseProgress {

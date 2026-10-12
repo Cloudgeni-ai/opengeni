@@ -333,6 +333,7 @@ export {
 // missing from the registry fails closed at every entry point.
 export {
   subscriptionCoreTurns,
+  readSubscriptionCoreTurnModel,
   type SubscriptionCoreCredential,
   type SubscriptionCoreLeaseRef,
   type SubscriptionCorePlacement,
@@ -342,6 +343,10 @@ export {
   subscriptionCoreRequests,
   type SubscriptionCoreRequestOutcome,
 } from "./subscription-core/requests";
+export {
+  subscriptionCoreSettlement,
+  type SubscriptionCoreSettlement,
+} from "./subscription-core/settlement";
 export {
   listSubscriptionCoreServingConnections,
   subscriptionCoreConnectionAllowlist,
@@ -410,6 +415,7 @@ import {
   readCodexCapacityRecovery,
   codexFalseResumptionBackoffMs,
   clearCodexCapacityRecovery,
+  SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES,
 } from "./codex-capacity-recovery";
 import {
   projectSessionAdmissionBlock,
@@ -22107,10 +22113,11 @@ export async function updateSessionVariableSets(
                   and goal_row.session_id = ${input.sessionId}
                   and goal_row.status = 'active')
               then 'active_goal'
+            -- A blocked turn's core waiter of any provider keeps the session
+            -- busy (fail closed), including providers without a wait vocabulary.
             when exists (select 1 from subscription_capacity_waiters core_waiter
                 where core_waiter.workspace_id = ${input.workspaceId}::uuid
-                  and core_waiter.session_id = ${input.sessionId}::uuid
-                  and core_waiter.provider = 'codex')
+                  and core_waiter.session_id = ${input.sessionId}::uuid)
               or exists (select 1 from ${schema.xaiCapacityWaiters} xai_waiter
                 where xai_waiter.workspace_id = ${input.workspaceId}
                   and xai_waiter.session_id = ${input.sessionId}
@@ -25098,10 +25105,140 @@ export function codexCapacityRefreshBackoffMs(attempt: number): number {
 // a core waiter is addressed by the same { waiterId, generation, nextCheckAt,
 // wakeRevision } reference as a legacy Codex waiter, and the activities look
 // the waiter id up in the core table first, then in the legacy table.
+//
+// The state machine is provider-neutral (SuperGrok track X1b): the waiter's
+// `provider` selects only the session-event vocabulary below, which keeps
+// each provider's shipped event types, reasons and codes. The Codex-named
+// entry points are Codex's bindings and are unchanged.
 // ---------------------------------------------------------------------------
+
+/**
+ * A provider whose chat turns park on the shared core waiter. Derived from
+ * the exhausted-code table, so a waiter provider cannot exist (nor get a wait
+ * vocabulary) without the terminal code that human Retry replenishes.
+ */
+export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES;
+
+/**
+ * The session-event vocabulary of one provider's core waiter. Codex keeps
+ * the names its core waiter shipped with (M3); SuperGrok keeps the names of
+ * its legacy waiter, so a wait reads the same before and after its cutover.
+ */
+type SubscriptionCoreWaitVocabulary<
+  P extends SubscriptionCoreWaiterProvider = SubscriptionCoreWaiterProvider,
+> = {
+  /** Product name in internal error texts. */
+  label: string;
+  waitingEventType: "codex.capacity.waiting" | "turn.capacity_waiting";
+  /** Payload fields that name the wait's recovery (and the provider, when the type does not). */
+  waitingPayload: Record<string, unknown>;
+  /** `session.status.changed` reason while waiting and when resuming. */
+  statusReason: string;
+  /** Why pending tool calls close when the turn parks. */
+  closeToolsReason: string;
+  /** The false-resumption limit's terminal code (also the status reason). */
+  exhaustedCode: (typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES)[P];
+  resumedEvent: (waiter: SubscriptionCoreCodexCapacityWait) => {
+    type: "codex.capacity.resumed" | "turn.recovery.requested";
+    payload: Record<string, unknown>;
+  };
+  supersededEvent: (
+    waiter: SubscriptionCoreCodexCapacityWait,
+    reason: string,
+  ) => { type: "codex.capacity.superseded" | "turn.superseded"; payload: Record<string, unknown> };
+  /** `session_turns.cancelled_by` of a superseded blocked turn. */
+  cancelledBy: string;
+  /**
+   * The provider's usage read can end a quota exhaustion before its stored
+   * reset (its adapter's `usageReadEndsQuotaExhaustion`; a test keeps the two
+   * equal), so a waiter rechecks on the bounded backoff, capped at the reset,
+   * instead of sleeping until the reset.
+   */
+  recheckBeforeReset: boolean;
+};
+
+const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
+  [P in SubscriptionCoreWaiterProvider]: SubscriptionCoreWaitVocabulary<P>;
+} = {
+  codex: {
+    label: "Codex",
+    waitingEventType: "codex.capacity.waiting",
+    waitingPayload: { recovery: "codex_capacity", retryable: true, rotated: true },
+    statusReason: "codex_capacity",
+    closeToolsReason: "codex_capacity_wait",
+    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.codex,
+    resumedEvent: (waiter) => ({
+      type: "codex.capacity.resumed",
+      payload: {
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        wakeRevision: waiter.wakeRevision,
+        goalId: waiter.goalId,
+        goalVersion: waiter.goalVersion,
+        blockedTurnGeneration: waiter.blockedTurnGeneration,
+        policyHash: null,
+        diagnostic: null,
+      },
+    }),
+    supersededEvent: (waiter, reason) => ({
+      type: "codex.capacity.superseded",
+      payload: { waiterId: waiter.waiterId, generation: waiter.generation, reason },
+    }),
+    cancelledBy: "codex_capacity_reconcile",
+    recheckBeforeReset: false,
+  },
+  xai: {
+    label: "SuperGrok",
+    waitingEventType: "turn.capacity_waiting",
+    waitingPayload: {
+      provider: "supergrok-subscription",
+      recovery: "provider_capacity",
+      retryable: true,
+    },
+    statusReason: "xai_capacity",
+    closeToolsReason: "xai_capacity_wait",
+    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.xai,
+    resumedEvent: (waiter) => ({
+      type: "turn.recovery.requested",
+      payload: {
+        reason: "xai_capacity_available",
+        provider: "supergrok-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        wakeRevision: waiter.wakeRevision,
+      },
+    }),
+    supersededEvent: (waiter, reason) => ({
+      type: "turn.superseded",
+      payload: {
+        provider: "supergrok-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        reason,
+      },
+    }),
+    cancelledBy: "xai_capacity_reconcile",
+    recheckBeforeReset: true,
+  },
+};
+
+/** Whether a provider's core waiter rechecks before its stored reset (see the vocabulary). */
+export function subscriptionCoreWaiterRechecksBeforeReset(
+  provider: SubscriptionCoreWaiterProvider,
+): boolean {
+  return subscriptionCoreWaitVocabulary(provider).recheckBeforeReset;
+}
+
+function subscriptionCoreWaitVocabulary(provider: string): SubscriptionCoreWaitVocabulary {
+  const vocabulary = SUBSCRIPTION_CORE_WAIT_VOCABULARY[provider as SubscriptionCoreWaiterProvider];
+  if (!vocabulary) throw new Error("Core capacity waiter has an unsupported provider");
+  return vocabulary;
+}
 
 export type SubscriptionCoreCodexCapacityWait = {
   waiterId: string;
+  /** The provider whose turn waits (the Codex-named readers return only Codex rows). */
+  provider: SubscriptionCoreWaiterProvider;
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -25128,6 +25265,7 @@ export type SubscriptionCoreCodexCapacityWait = {
 
 type SubscriptionCoreCodexWaiterRow = {
   waiter_id: string;
+  provider: string;
   account_id: string;
   workspace_id: string;
   session_id: string;
@@ -25149,17 +25287,34 @@ type SubscriptionCoreCodexWaiterRow = {
 };
 
 const SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS = sql.raw(`waiter_id::text as waiter_id,
-  account_id::text as account_id, workspace_id::text as workspace_id,
+  provider, account_id::text as account_id, workspace_id::text as workspace_id,
   session_id::text as session_id, turn_id::text as turn_id, blocked_turn_generation,
   generation, wake_revision, observed_wake_revision, wait_reason, reset_kind,
   refresh_attempt, earliest_reset_at, next_check_at, goal_id::text as goal_id,
   goal_version, last_wake_reason, updated_at`);
+
+/**
+ * The providers whose turns park on the core waiter: exactly those with a
+ * wait vocabulary. A row of any other provider is never read as a session's
+ * core wait (the provider-neutral readers filter on this list) and fails
+ * closed if it is ever mapped.
+ */
+const SUBSCRIPTION_CORE_WAITER_PROVIDERS = Object.keys(
+  SUBSCRIPTION_CORE_WAIT_VOCABULARY,
+) as SubscriptionCoreWaiterProvider[];
+
+function subscriptionCoreWaiterProvider(provider: string): SubscriptionCoreWaiterProvider {
+  if (!(SUBSCRIPTION_CORE_WAITER_PROVIDERS as string[]).includes(provider))
+    throw new Error("Core capacity waiter has an unsupported provider");
+  return provider as SubscriptionCoreWaiterProvider;
+}
 
 function mapSubscriptionCoreCodexWaiter(
   row: SubscriptionCoreCodexWaiterRow,
 ): SubscriptionCoreCodexCapacityWait {
   return {
     waiterId: row.waiter_id,
+    provider: subscriptionCoreWaiterProvider(row.provider),
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
@@ -25192,12 +25347,15 @@ function mapSubscriptionCoreCodexWaiter(
  * sleeping on it until its next check.
  */
 export function subscriptionCoreCodexCapacityWaitRef(wait: SubscriptionCoreCodexCapacityWait): {
+  /** Absent for Codex (the legacy peek's "absent means Codex"); every other provider names itself. */
+  provider?: Exclude<SubscriptionCoreWaiterProvider, "codex">;
   waiterId: string;
   generation: number;
   nextCheckAt: string;
   wakeRevision: number;
 } {
   return {
+    ...(wait.provider !== "codex" ? { provider: wait.provider } : {}),
     waiterId: wait.waiterId,
     generation: wait.generation,
     nextCheckAt:
@@ -25208,9 +25366,22 @@ export function subscriptionCoreCodexCapacityWaitRef(wait: SubscriptionCoreCodex
   };
 }
 
-async function readSubscriptionCoreCodexWaiterInTransaction(
+/** The workflow reference of any provider's core waiter (Codex's carries no `provider`). */
+export const subscriptionCoreCapacityWaitRef = subscriptionCoreCodexCapacityWaitRef;
+
+/**
+ * The session's core waiter (one per session, whatever its provider), or
+ * only `provider`'s when given. A waiter id looks the exact row up.
+ */
+async function readSubscriptionCoreWaiterInTransaction(
   tx: Database,
-  input: { workspaceId: string; sessionId: string; waiterId?: string; forUpdate?: boolean },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    waiterId?: string;
+    forUpdate?: boolean;
+    provider?: SubscriptionCoreWaiterProvider;
+  },
 ): Promise<SubscriptionCoreCodexCapacityWait | null> {
   const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
     tx,
@@ -25224,7 +25395,11 @@ async function readSubscriptionCoreCodexWaiterInTransaction(
         ) as blocked_turn_live
       from subscription_capacity_waiters w
       where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
-        and provider = 'codex'
+        ${
+          input.provider
+            ? sql`and provider = ${input.provider}`
+            : sql`and provider = any(${`{${SUBSCRIPTION_CORE_WAITER_PROVIDERS.join(",")}}`}::text[])`
+        }
         ${input.waiterId ? sql`and waiter_id = ${input.waiterId}::uuid` : sql``}
       ${input.forUpdate ? sql`for update` : sql``}`,
   );
@@ -25238,7 +25413,11 @@ export async function getSubscriptionCoreCodexCapacityWaitForSession(
   sessionId: string,
 ): Promise<SubscriptionCoreCodexCapacityWait | null> {
   return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
-    readSubscriptionCoreCodexWaiterInTransaction(scopedDb, { workspaceId, sessionId }),
+    readSubscriptionCoreWaiterInTransaction(scopedDb, {
+      workspaceId,
+      sessionId,
+      provider: "codex",
+    }),
   );
 }
 
@@ -25248,7 +25427,33 @@ export async function getSubscriptionCoreCodexCapacityWaitById(
   input: { workspaceId: string; sessionId: string; waiterId: string },
 ): Promise<SubscriptionCoreCodexCapacityWait | null> {
   return await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
-    readSubscriptionCoreCodexWaiterInTransaction(scopedDb, input),
+    readSubscriptionCoreWaiterInTransaction(scopedDb, { ...input, provider: "codex" }),
+  );
+}
+
+/** The session's core waiter of any provider (the provider-neutral workflow peek). */
+export async function getSubscriptionCoreCapacityWaitForSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    readSubscriptionCoreWaiterInTransaction(scopedDb, { workspaceId, sessionId }),
+  );
+}
+
+/**
+ * A core waiter of any provider by the exact id a workflow history recorded.
+ * The reconcile looks a waiter up by id and generation whatever `provider`
+ * the history carries: a SuperGrok waiter the cutover moved to the core keeps
+ * its id and generation.
+ */
+export async function getSubscriptionCoreCapacityWaitById(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; waiterId: string },
+): Promise<SubscriptionCoreCodexCapacityWait | null> {
+  return await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
+    readSubscriptionCoreWaiterInTransaction(scopedDb, input),
   );
 }
 
@@ -25256,23 +25461,35 @@ export async function getSubscriptionCoreCodexCapacityWaitById(
  * When a core waiter checks again: at the earliest known reset when there is
  * one (authoritative), else at a quarantine's end when sooner than the bounded
  * control-plane backoff (no provider call is made at a check, only placement).
+ * For a provider whose usage read can end an exhaustion early
+ * (`rechecksBeforeReset`), a future reset only caps the bounded backoff
+ * (`bounded_refresh`): its waiter's reconcile re-reads usage first, so it
+ * never sleeps until the end of a credit period after credits are back.
  */
 export function subscriptionCoreCodexNextCheckAt(input: {
   earliestResetAt: Date | null;
   healthRetryAt: Date | null;
   refreshAttempt: number;
   now: Date;
-}): { nextCheckAt: Date; resetKind: "authoritative" | "mutation_only" } {
+  rechecksBeforeReset?: boolean;
+}): { nextCheckAt: Date; resetKind: CodexCapacityResetKind } {
   const { now } = input;
+  const retryAt = input.healthRetryAt?.getTime();
+  const futureRetryAt = retryAt !== undefined && retryAt > now.getTime() ? retryAt : null;
   if (input.earliestResetAt && input.earliestResetAt.getTime() > now.getTime()) {
+    if (input.rechecksBeforeReset === true) {
+      // A quarantine that ends sooner than the bounded check moves it earlier.
+      const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
+      const bounded = futureRetryAt !== null ? Math.min(futureRetryAt, backoff) : backoff;
+      if (bounded < input.earliestResetAt.getTime()) {
+        return { nextCheckAt: new Date(bounded), resetKind: "bounded_refresh" };
+      }
+    }
     return { nextCheckAt: input.earliestResetAt, resetKind: "authoritative" };
   }
   const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
-  const retryAt = input.healthRetryAt?.getTime();
   return {
-    nextCheckAt: new Date(
-      retryAt !== undefined && retryAt > now.getTime() ? Math.min(retryAt, backoff) : backoff,
-    ),
+    nextCheckAt: new Date(futureRetryAt !== null ? Math.min(futureRetryAt, backoff) : backoff),
     resetKind: "mutation_only",
   };
 }
@@ -25292,23 +25509,39 @@ export type ArmSubscriptionCoreCodexCapacityWaitResult =
  */
 export async function armSubscriptionCoreCodexCapacityWait(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    goalId?: string | null;
-    goalVersion?: number | null;
-    waitReason: string;
-    earliestResetAt: Date | null;
-    healthRetryAt?: Date | null;
-    failurePayload: Record<string, unknown>;
-    /** The live core lease a reactive refusal still holds; released atomically. */
-    leaseFence?: { connectionId: string; holderId: string; generation: number };
-    now?: Date;
-  },
+  input: ArmSubscriptionCoreCapacityWaitInput,
 ): Promise<ArmSubscriptionCoreCodexCapacityWaitResult> {
+  return await armSubscriptionCoreCapacityWait(db, "codex", input);
+}
+
+export type ArmSubscriptionCoreCapacityWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  goalId?: string | null;
+  goalVersion?: number | null;
+  waitReason: string;
+  earliestResetAt: Date | null;
+  healthRetryAt?: Date | null;
+  failurePayload: Record<string, unknown>;
+  /** The live core lease a reactive refusal still holds; released atomically. */
+  leaseFence?: { connectionId: string; holderId: string; generation: number };
+  now?: Date;
+};
+
+/**
+ * The provider-neutral arm: `provider` names the core lease, the waiter row
+ * and the cutover it requires, and selects its session-event vocabulary.
+ */
+export async function armSubscriptionCoreCapacityWait(
+  db: Database,
+  provider: SubscriptionCoreWaiterProvider,
+  input: ArmSubscriptionCoreCapacityWaitInput,
+): Promise<ArmSubscriptionCoreCodexCapacityWaitResult> {
+  const vocabulary = subscriptionCoreWaitVocabulary(provider);
+  const label = vocabulary.label;
   const now = input.now ?? new Date();
   const goalId = input.goalId ?? null;
   const goalVersion = input.goalVersion ?? null;
@@ -25316,24 +25549,29 @@ export async function armSubscriptionCoreCodexCapacityWait(
     (goalId === null) !== (goalVersion === null) ||
     (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
   ) {
-    throw new Error("Core Codex capacity goal fence must be absent or contain a positive version");
+    throw new Error(
+      `Core ${label} capacity goal fence must be absent or contain a positive version`,
+    );
   }
   if (!/^[a-z][a-z0-9_]{0,127}$/.test(input.waitReason)) {
-    throw new Error("Core Codex wait reason must be a bounded identifier");
+    throw new Error(`Core ${label} wait reason must be a bounded identifier`);
   }
   return await retrySessionActivityRls(
     db,
     input.workspaceId,
     {
-      stage: "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait",
-      eventTypes: ["codex.capacity.waiting", "turn.failed", "session.status.changed"],
+      stage:
+        provider === "codex"
+          ? "session_lifecycle_outbox.arm_subscription_core_codex_capacity_wait"
+          : "session_lifecycle_outbox.arm_subscription_core_capacity_wait",
+      eventTypes: [vocabulary.waitingEventType, "turn.failed", "session.status.changed"],
       maxAttempts: 3,
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
         const cutover = await readCoreProviderCutoverState(tx, {
           accountId: input.accountId,
-          provider: "codex",
+          provider,
         });
         if (cutover !== "enabled") return { action: "stale", events: [] } as const;
         const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
@@ -25370,13 +25608,13 @@ export async function armSubscriptionCoreCodexCapacityWait(
                 where account_id = ${input.accountId}::uuid
                   and workspace_id = ${input.workspaceId}::uuid
                   and session_id = ${input.sessionId}::uuid
-                  and turn_id = ${input.turnId}::uuid and provider = 'codex'
+                  and turn_id = ${input.turnId}::uuid and provider = ${provider}
                   and connection_id = ${input.leaseFence.connectionId}::uuid
                   and leased_until > clock_timestamp()
                 for update`,
             )
           : [];
-        const existing = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+        const existing = await readSubscriptionCoreWaiterInTransaction(tx, {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           forUpdate: true,
@@ -25475,6 +25713,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
           healthRetryAt: input.healthRetryAt ?? null,
           refreshAttempt: 0,
           now,
+          rechecksBeforeReset: vocabulary.recheckBeforeReset,
         });
         const nextCheckAt = new Date(
           Math.max(
@@ -25484,9 +25723,13 @@ export async function armSubscriptionCoreCodexCapacityWait(
         );
         let waiter: SubscriptionCoreCodexCapacityWait | null = null;
         if (stopped) {
-          await tx.execute(sql`delete from subscription_capacity_waiters
-            where workspace_id = ${input.workspaceId}::uuid
-              and session_id = ${input.sessionId}::uuid and provider = 'codex'`);
+          // The session's waiter row, whatever provider armed it (`existing`
+          // is read without a provider).
+          if (existing)
+            await tx.execute(sql`delete from subscription_capacity_waiters
+              where workspace_id = ${input.workspaceId}::uuid
+                and session_id = ${input.sessionId}::uuid
+                and waiter_id = ${existing.waiterId}::uuid`);
         } else {
           // Arming follows a placement evaluation, so this generation has
           // already observed its own initial revision; only a later capacity
@@ -25502,7 +25745,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
                 blocked_turn_generation, goal_id, goal_version, last_wake_reason, updated_at
               ) values (
                 ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
-                ${input.turnId}::uuid, 'codex', ${input.waitReason}, null,
+                ${input.turnId}::uuid, ${provider}, ${input.waitReason}, null,
                 ${scheduled.resetKind}, 0, null,
                 ${input.earliestResetAt?.toISOString() ?? null}::timestamptz,
                 ${generation}, ${wakeRevision}, ${wakeRevision},
@@ -25525,7 +25768,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
                 where subscription_capacity_waiters.account_id = excluded.account_id
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
           );
-          if (!row) throw new Error("Core Codex capacity wait arm returned no waiter row");
+          if (!row) throw new Error(`Core ${label} capacity wait arm returned no waiter row`);
           waiter = mapSubscriptionCoreCodexWaiter(row);
         }
 
@@ -25535,7 +25778,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
-          reason: "codex_capacity_wait",
+          reason: vocabulary.closeToolsReason,
           sequence,
           now,
           preserveInterruptionRows: !stopped,
@@ -25551,12 +25794,10 @@ export async function armSubscriptionCoreCodexCapacityWait(
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   sequence: ++sequence,
-                  type: stopped ? "turn.failed" : "codex.capacity.waiting",
+                  type: stopped ? "turn.failed" : vocabulary.waitingEventType,
                   payload: {
                     ...input.failurePayload,
-                    recovery: "codex_capacity",
-                    retryable: true,
-                    rotated: true,
+                    ...vocabulary.waitingPayload,
                     waiterId: waiter?.waiterId ?? existing?.waiterId ?? null,
                     generation: waiter?.generation ?? existing?.generation ?? null,
                     goalId,
@@ -25571,11 +25812,11 @@ export async function armSubscriptionCoreCodexCapacityWait(
                       ? {
                           error:
                             "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.",
-                          code: "codex_capacity_recovery_exhausted",
+                          code: vocabulary.exhaustedCode,
                           recovery: "user_message",
                           recoveryExhausted: true,
                           retryable: false,
-                          rotated: false,
+                          ...("rotated" in vocabulary.waitingPayload ? { rotated: false } : {}),
                         }
                       : {}),
                   },
@@ -25593,7 +25834,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
                   type: "session.status.changed",
                   payload: {
                     status: sessionStatus,
-                    reason: stopped ? "codex_capacity_recovery_exhausted" : "codex_capacity",
+                    reason: stopped ? vocabulary.exhaustedCode : vocabulary.statusReason,
                   },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
@@ -25626,7 +25867,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
             ),
           )
           .returning({ id: schema.sessionTurns.id });
-        if (!waitingTurn) throw new Error("Core Codex capacity blocked turn changed during arm");
+        if (!waitingTurn) throw new Error(`Core ${label} capacity blocked turn changed during arm`);
         const [waitingSession] = await tx
           .update(schema.sessions)
           .set({
@@ -25645,7 +25886,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
             ),
           )
           .returning({ id: schema.sessions.id });
-        if (!waitingSession) throw new Error("Core Codex capacity session changed during arm");
+        if (!waitingSession) throw new Error(`Core ${label} capacity session changed during arm`);
         if (stopped) {
           await cancelTurnInteractionInterventionsInTransaction(tx, input);
           await settleSessionMaintenanceInTransaction(tx, input);
@@ -25678,7 +25919,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
             waiterId: waiter!.waiterId,
-            provider: "codex",
+            provider,
             nextCheckAt,
           });
         }
@@ -25687,7 +25928,7 @@ export async function armSubscriptionCoreCodexCapacityWait(
             where account_id = ${input.accountId}::uuid
               and workspace_id = ${input.workspaceId}::uuid
               and session_id = ${input.sessionId}::uuid
-              and turn_id = ${input.turnId}::uuid and provider = 'codex'
+              and turn_id = ${input.turnId}::uuid and provider = ${provider}
               and connection_id = ${input.leaseFence.connectionId}::uuid
               and holder_id = ${input.leaseFence.holderId}
               and generation = ${input.leaseFence.generation}`);
@@ -25747,6 +25988,29 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
     now?: Date;
   },
 ): Promise<ReconcileSubscriptionCoreCodexCapacityWaitResult> {
+  return await reconcileSubscriptionCoreCapacityWait(db, { ...input, provider: "codex" });
+}
+
+/**
+ * The provider-neutral reconcile: the waiter is looked up by its exact id
+ * and generation (of `provider` only, when given) and settles with its own
+ * provider's session-event vocabulary.
+ */
+export async function reconcileSubscriptionCoreCapacityWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    waiterId: string;
+    generation: number;
+    /** The waiter's wake revision when the evaluation started. */
+    evaluatedWakeRevision: number;
+    evaluation: SubscriptionCoreCodexWaitEvaluation;
+    provider?: SubscriptionCoreWaiterProvider;
+    now?: Date;
+  },
+): Promise<ReconcileSubscriptionCoreCodexCapacityWaitResult> {
   const now = input.now ?? new Date();
   return await withSessionActivityRlsContext(
     db,
@@ -25757,14 +26021,16 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
           workspaceId: input.workspaceId,
           controlLock: "share",
         });
-        const waiterRead = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+        const waiterRead = await readSubscriptionCoreWaiterInTransaction(tx, {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           waiterId: input.waiterId,
+          ...(input.provider ? { provider: input.provider } : {}),
         });
         if (!waiterRead || waiterRead.generation !== input.generation) {
           return { action: "stale", events: [] } as const;
         }
+        const vocabulary = subscriptionCoreWaitVocabulary(waiterRead.provider);
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
           controlLock: "already_locked",
@@ -25793,10 +26059,11 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
               .for("update")
               .limit(1)
           : [];
-        const waiter = await readSubscriptionCoreCodexWaiterInTransaction(tx, {
+        const waiter = await readSubscriptionCoreWaiterInTransaction(tx, {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           waiterId: input.waiterId,
+          provider: waiterRead.provider,
           forUpdate: true,
         });
         if (
@@ -25866,12 +26133,15 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
           const authoritative =
             waitEvaluation.earliestResetAt !== null &&
             waitEvaluation.earliestResetAt.getTime() > now.getTime();
-          const refreshAttempt = authoritative ? 0 : waiter.refreshAttempt + 1;
+          // A provider that rechecks before its reset backs off across checks.
+          const refreshAttempt =
+            authoritative && !vocabulary.recheckBeforeReset ? 0 : waiter.refreshAttempt + 1;
           const scheduled = subscriptionCoreCodexNextCheckAt({
             earliestResetAt: waitEvaluation.earliestResetAt,
             healthRetryAt: waitEvaluation.healthRetryAt,
             refreshAttempt,
             now,
+            rechecksBeforeReset: vocabulary.recheckBeforeReset,
           });
           // Capacity changes can prompt a recheck but never bypass a persisted
           // false-resumption delay.
@@ -25914,17 +26184,7 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   sequence: session.lastSequence + 1,
-                  type: "codex.capacity.resumed",
-                  payload: {
-                    waiterId: waiter.waiterId,
-                    generation: waiter.generation,
-                    wakeRevision: waiter.wakeRevision,
-                    goalId: waiter.goalId,
-                    goalVersion: waiter.goalVersion,
-                    blockedTurnGeneration: waiter.blockedTurnGeneration,
-                    policyHash: null,
-                    diagnostic: null,
-                  },
+                  ...vocabulary.resumedEvent(waiter),
                   turnId: blockedTurn.id,
                   turnGeneration: blockedTurn.executionGeneration,
                   turnAssociation: "current",
@@ -25936,7 +26196,7 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
                   sessionId: input.sessionId,
                   sequence: session.lastSequence + 2,
                   type: "session.status.changed",
-                  payload: { status: "recovering", reason: "codex_capacity" },
+                  payload: { status: "recovering", reason: vocabulary.statusReason },
                   turnId: blockedTurn.id,
                   turnGeneration: blockedTurn.executionGeneration,
                   turnAssociation: "current",
@@ -25956,7 +26216,8 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
               and waiter_id = ${waiter.waiterId}::uuid and generation = ${waiter.generation}
             returning waiter_id::text as waiter_id`,
         );
-        if (deleted.length !== 1) throw new Error("Core Codex waiter changed during atomic resume");
+        if (deleted.length !== 1)
+          throw new Error(`Core ${vocabulary.label} waiter changed during atomic resume`);
         const [recoveringTurn] = await tx
           .update(schema.sessionTurns)
           .set({
@@ -25984,7 +26245,9 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
           )
           .returning({ id: schema.sessionTurns.id });
         if (!recoveringTurn) {
-          throw new Error("Core Codex capacity blocked turn changed during atomic resume");
+          throw new Error(
+            `Core ${vocabulary.label} capacity blocked turn changed during atomic resume`,
+          );
         }
         const [recoveringSession] = await tx
           .update(schema.sessions)
@@ -26004,7 +26267,7 @@ export async function reconcileSubscriptionCoreCodexCapacityWait(
           )
           .returning({ id: schema.sessions.id });
         if (!recoveringSession) {
-          throw new Error("Core Codex capacity session changed during atomic resume");
+          throw new Error(`Core ${vocabulary.label} capacity session changed during atomic resume`);
         }
         return { action: "resumed", events: events.map(mapEvent) } as const;
       }),
@@ -26021,6 +26284,7 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
     now: Date;
   },
 ): Promise<{ action: "superseded"; events: SessionEvent[] }> {
+  const vocabulary = subscriptionCoreWaitVocabulary(input.waiter.provider);
   const deleted = await rawRows<{ waiter_id: string }>(
     tx,
     sql`delete from subscription_capacity_waiters
@@ -26038,7 +26302,7 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       .set({
         status: terminalTurnStatus,
         activeAttemptId: null,
-        cancelledBy: "codex_capacity_reconcile",
+        cancelledBy: vocabulary.cancelledBy,
         cancelReason: input.reason,
         version: input.blockedTurn.version + 1,
         finishedAt: input.now,
@@ -26055,7 +26319,9 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       )
       .returning({ id: schema.sessionTurns.id });
     if (!supersededTurn) {
-      throw new Error("Core Codex capacity blocked turn changed during atomic supersession");
+      throw new Error(
+        `Core ${vocabulary.label} capacity blocked turn changed during atomic supersession`,
+      );
     }
   }
   const [queued] = turnWasCurrent
@@ -26079,12 +26345,7 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       workspaceId: input.session.workspaceId,
       sessionId: input.session.id,
       sequence: input.session.lastSequence + 1,
-      type: "codex.capacity.superseded",
-      payload: {
-        waiterId: input.waiter.waiterId,
-        generation: input.waiter.generation,
-        reason: input.reason,
-      },
+      ...vocabulary.supersededEvent(input.waiter, input.reason),
       turnId: input.blockedTurn.id,
       turnGeneration: input.blockedTurn.executionGeneration,
       ...(turnWasCurrent ? { turnAssociation: "current" } : {}),
@@ -26130,7 +26391,8 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       ),
     )
     .returning({ id: schema.sessions.id });
-  if (!updatedSession) throw new Error("Core Codex capacity session changed during supersession");
+  if (!updatedSession)
+    throw new Error(`Core ${vocabulary.label} capacity session changed during supersession`);
   return { action: "superseded", events: inserted.map(mapEvent) };
 }
 
@@ -26182,6 +26444,28 @@ export async function wakeSubscriptionCoreCodexCapacityWaiters(
   return await wakeSubscriptionCoreCapacityWaiters(
     db,
     SUBSCRIPTION_CORE_CODEX_PROVIDER,
+    input,
+    enqueueSessionWorkflowWakeInTransaction,
+  );
+}
+
+/**
+ * The same wake for any provider on the core (the generic session workflow
+ * wake included). Refused for a provider without a registered binding.
+ */
+export async function wakeSubscriptionCoreProviderCapacityWaiters(
+  db: Database,
+  provider: SubscriptionCoreWaiterProvider,
+  input: {
+    accountId: string;
+    reason: string;
+    workspaceIds?: readonly string[];
+    sessionIds?: readonly string[];
+  },
+): Promise<SubscriptionCoreWakeScope[]> {
+  return await wakeSubscriptionCoreCapacityWaiters(
+    db,
+    provider,
     input,
     enqueueSessionWorkflowWakeInTransaction,
   );
@@ -65330,9 +65614,9 @@ export async function getSessionGoalWithContinuation(
         )
         .limit(1);
 
-      // A shared-core Codex waiter for the same goal fence (the only kind
-      // written after 0680; the legacy table is frozen).
-      const coreCapacityWait = await readSubscriptionCoreCodexWaiterInTransaction(
+      // A shared-core waiter (any provider) for the same goal fence: the
+      // only kind written after that provider's cutover.
+      const coreCapacityWait = await readSubscriptionCoreWaiterInTransaction(
         tx as unknown as Database,
         {
           workspaceId,
@@ -68289,8 +68573,8 @@ export async function materializeGoalContinuation(
           } as const;
         }
 
-        // A shared-core Codex waiter (the only kind written after 0680).
-        const coreCapacityWait = await readSubscriptionCoreCodexWaiterInTransaction(
+        // A shared-core waiter of any provider (the only kind written after its cutover).
+        const coreCapacityWait = await readSubscriptionCoreWaiterInTransaction(
           tx as unknown as Database,
           {
             workspaceId: input.workspaceId,
@@ -72664,8 +72948,8 @@ export async function claimSessionWorkForAttempt(
               }
             }
             if (activeTurn.status === "waiting_capacity") {
-              // A shared-core Codex waiter (the only kind written after 0680).
-              const coreWaiter = await readSubscriptionCoreCodexWaiterInTransaction(
+              // A shared-core waiter of any provider (the only kind written after its cutover).
+              const coreWaiter = await readSubscriptionCoreWaiterInTransaction(
                 tx as unknown as Database,
                 {
                   workspaceId,
@@ -75634,12 +75918,13 @@ export async function peekSessionWork(
 
     if (session.admissionBlock) return { kind: "admission-blocked" };
 
-    // A core Codex waiter (M3) is the only waiter written after the Codex
-    // cutover; it keeps the legacy Codex reference shape, so the workflow
+    // A core waiter (any provider) is the only waiter written after its
+    // provider's cutover; it keeps that provider's legacy reference shape
+    // (`provider: "xai"` for SuperGrok, none for Codex), so the workflow
     // waits on it exactly as on a legacy waiter. A row that no longer belongs
     // to the session's active waiting turn becomes an immediate check, whose
     // reconcile deletes it, rather than a sleep until its next check.
-    const coreCapacityWait = await readSubscriptionCoreCodexWaiterInTransaction(scopedDb, {
+    const coreCapacityWait = await readSubscriptionCoreWaiterInTransaction(scopedDb, {
       workspaceId,
       sessionId,
     });
@@ -76500,8 +76785,8 @@ export async function failSessionWorkBeforeAttemptClaim(
               return { action: "stale", turnId: null, events: [] } as const;
             }
             if (turn.status === "waiting_capacity") {
-              // A shared-core Codex waiter (the only kind written after 0680).
-              const coreWaiter = await readSubscriptionCoreCodexWaiterInTransaction(
+              // A shared-core waiter of any provider (the only kind written after its cutover).
+              const coreWaiter = await readSubscriptionCoreWaiterInTransaction(
                 tx as unknown as Database,
                 {
                   workspaceId,
