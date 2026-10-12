@@ -560,7 +560,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       sql`select current_user::text as role`,
     );
     expect(identity!.role).toBe("opengeni_app");
-    // 0723 (the personal connect writer with a credential format) is held
+    // 0728 (the personal connect writer with a credential format) is held
     // back here with every later migration, so this binary's posture reports
     // exactly the two routines it adds, and nothing else.
     const heldBack = [

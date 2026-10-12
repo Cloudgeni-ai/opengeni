@@ -341,7 +341,7 @@ export async function copySubscriptionAuthorityCompatInTransaction(
   if (providers.length === 0) return;
   for (const carrier of carriers) {
     const revision = carrier.taskAuthorityRevision ?? null;
-    // Task revisions are not readable by the application role, so 0719's
+    // Task revisions are not readable by the application role, so 0728's
     // owner-run predicate answers "inserted by this transaction" for them: a
     // replayed or detached materialization returns an earlier revision, which
     // already holds whatever record its insertion copied.

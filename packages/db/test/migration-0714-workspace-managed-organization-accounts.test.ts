@@ -27,7 +27,7 @@ const MIGRATION = "0714_subscription_workspace_managed_organization_accounts.sql
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 // The format-aware personal connect writer is built from the live connect
 // writer 0715 rewrites: held back with 0715 and replayed after it.
-const PERSONAL_CONNECT_FORMAT = "0719_subscription_core_personal_connect_format.sql";
+const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 83);
 const MODEL = "codex/gpt-5.5";

@@ -24,7 +24,7 @@ const providerKeyedReach = "0713_subscription_core_provider_keyed_reach.sql";
 const workspaceManagedAccounts = "0714_subscription_workspace_managed_organization_accounts.sql";
 const apiKeyConnections = "0715_subscription_core_api_key_connections.sql";
 // Built from the connect writer withheld 0715 rewrites; it follows 0715.
-const personalConnectFormat = "0719_subscription_core_personal_connect_format.sql";
+const personalConnectFormat = "0728_subscription_core_personal_connect_format.sql";
 // 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
 const compat = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.

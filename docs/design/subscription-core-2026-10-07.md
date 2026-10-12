@@ -3175,7 +3175,7 @@ the plan left room, for reviewers:
   envelope version in `credential_format`; they no longer touch it, so an
   adapter format such as a setup token's survives refresh. Codex stores
   `v1` either way. The neutral connect writers take the format from X2b on
-  (`credentialFormat`, and 0719's personal writer overload); `v1` when
+  (`credentialFormat`, and 0728's personal writer overload); `v1` when
   omitted, as Codex does.
 - **Adapter.** `SubscriptionCoreAdapter.capabilitiesFor(format)` and
   `credential.format(credential)` let `autoRenews` depend on the credential
@@ -4457,12 +4457,12 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   and the person. `scope: "user"` creates a personal connection only in the
   person's own Personal workspace and is refused elsewhere, never turned
   into a shared one (the strictest reading of "personal connections only in
-  the owner's private session or Personal workspace"). Migration 0719 adds
+  the owner's private session or Personal workspace"). Migration 0728 adds
   the personal writer overload that takes the format; Codex keeps the 0707
   writer and `v1`. The format is the adapter codec's
   (`credential.format`); a malformed one is a caller defect, thrown by the
   neutral writer before any write on every path (never a refusal or the
-  maintenance 503). A test compares the two live overloads after 0719's
+  maintenance 503). A test compares the two live overloads after 0728's
   four substitutions, so a later fix to one that misses the other fails.
   A shared workspace's connect is step W's shape
   ([§5.4](#54-workspace-managed-connections-as-organization-accounts)): an
@@ -4484,7 +4484,7 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   carrier an upsert did not insert is skipped, and so is a task revision an
   earlier transaction inserted (a replayed or detached reusable-session
   materialization returns the existing head): the application role cannot
-  read revisions, so 0719's owner-run
+  read revisions, so 0728's owner-run
   `subscription_authority_carrier_inserted_now` answers for them.
 - **v1 after the receipt.** The SuperGrok v1 resolvers return the column
   default once the `xai` receipt exists; derived rows already copy v1

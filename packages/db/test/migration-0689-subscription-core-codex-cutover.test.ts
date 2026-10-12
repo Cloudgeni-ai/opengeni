@@ -53,7 +53,7 @@ const WORKSPACE_MANAGED_ACCOUNTS = "0714_subscription_workspace_managed_organiza
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 // The format-aware personal connect writer is built from the live connect
 // writer 0715 rewrites: held back with 0715 and replayed after it.
-const PERSONAL_CONNECT_FORMAT = "0719_subscription_core_personal_connect_format.sql";
+const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
 // 0716 builds on 0712's receipts and patches its helpers; it follows 0712.
 const COMPAT = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.

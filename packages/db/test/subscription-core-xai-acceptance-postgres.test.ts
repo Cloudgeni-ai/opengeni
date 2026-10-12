@@ -316,7 +316,7 @@ describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () =
         }),
       ).rejects.toThrow("subscription core credential format is malformed");
     }
-    // The 0719 writer keeps its own check for a direct call.
+    // The 0728 writer keeps its own check for a direct call.
     const direct = await db.withSessionRlsActorContext({ subjectId: org!.subjectId }, () =>
       withRlsContext(
         client!.db,

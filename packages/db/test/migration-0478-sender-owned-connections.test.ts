@@ -86,7 +86,7 @@ const withheldMigrations = [
   // Patches the acceptance writers withheld 0688 and 0707 define.
   "0726_subscription_personal_acceptance_reads.sql",
   // Built from the connect writer withheld 0715 rewrites; it follows 0715.
-  "0719_subscription_core_personal_connect_format.sql",
+  "0728_subscription_core_personal_connect_format.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

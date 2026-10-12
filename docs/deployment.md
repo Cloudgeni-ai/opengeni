@@ -5059,9 +5059,9 @@ GROUP BY 1, 2
 HAVING count(DISTINCT authority.generation) = 1;
 ```
 
-### Personal connect writer with a credential format (0719)
+### Personal connect writer with a credential format (0728)
 
-Migration `0719_subscription_core_personal_connect_format.sql` is
+Migration `0728_subscription_core_personal_connect_format.sql` is
 **rolling**: deploy it like any release, without draining. Design record:
 [subscription core, SuperGrok track](design/subscription-core-2026-10-07.md#x2b-routes-and-writers).
 It adds one overload of the neutral personal connect writer,

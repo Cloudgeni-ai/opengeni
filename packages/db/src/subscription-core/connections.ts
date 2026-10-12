@@ -133,7 +133,7 @@ async function isOrganizationAdministrator(tx: Database, accountId: string): Pro
   return row?.admin === true;
 }
 
-/** A stored `credential_format` name, as 0719's personal writer checks it. */
+/** A stored `credential_format` name, as 0728's personal writer checks it. */
 const SUBSCRIPTION_CORE_CREDENTIAL_FORMAT = /^[a-z][a-z0-9_]{0,63}$/u;
 
 /**
@@ -182,7 +182,7 @@ async function connectPersonal(
   const [row] = await rawRows<{ outcome: string; connection_id: string | null; is_new: boolean }>(
     tx,
     // The `v1` format keeps the 0707 writer (the format it stores); any
-    // other format takes the 0719 overload.
+    // other format takes the 0728 overload.
     input.credentialFormat === undefined || input.credentialFormat === "v1"
       ? sql`select outcome, connection_id::text as connection_id, is_new
       from opengeni_private.connect_subscription_core_personal(${subscriptionCoreProviderId(provider)},
