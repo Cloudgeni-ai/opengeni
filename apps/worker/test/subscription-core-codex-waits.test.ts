@@ -636,53 +636,6 @@ describe("capacity activities accept both waiter shapes", () => {
     expect(XAI_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeFunction();
     expect(CODEX_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeUndefined();
   });
-});
-
-describe("core waiter recheck schedule", () => {
-  const now = new Date("2030-01-01T00:00:00.000Z");
-  const at = (ms: number) => new Date(now.getTime() + ms);
-
-  test("a provider that rechecks before its reset backs off from 60 s to 15 min, capped at the reset", () => {
-    const resetAt = at(6 * 3_600_000);
-    const schedule = (refreshAttempt: number, earliestResetAt = resetAt) =>
-      db.subscriptionCoreCodexNextCheckAt({
-        earliestResetAt,
-        healthRetryAt: null,
-        refreshAttempt,
-        now,
-        rechecksBeforeReset: true,
-      });
-    expect(schedule(0)).toEqual({ nextCheckAt: at(60_000), resetKind: "bounded_refresh" });
-    expect(schedule(1)).toEqual({ nextCheckAt: at(120_000), resetKind: "bounded_refresh" });
-    expect(schedule(9)).toEqual({ nextCheckAt: at(15 * 60_000), resetKind: "bounded_refresh" });
-    expect(schedule(9, at(30_000))).toEqual({
-      nextCheckAt: at(30_000),
-      resetKind: "authoritative",
-    });
-    // A quarantine that ends sooner than the bounded check moves it earlier.
-    expect(
-      db.subscriptionCoreCodexNextCheckAt({
-        earliestResetAt: resetAt,
-        healthRetryAt: at(90_000),
-        refreshAttempt: 9,
-        now,
-        rechecksBeforeReset: true,
-      }),
-    ).toEqual({ nextCheckAt: at(90_000), resetKind: "bounded_refresh" });
-  });
-
-  test("any other provider sleeps until its reset, unchanged", () => {
-    expect(
-      db.subscriptionCoreCodexNextCheckAt({
-        earliestResetAt: at(6 * 3_600_000),
-        healthRetryAt: null,
-        refreshAttempt: 0,
-        now,
-      }),
-    ).toEqual({ nextCheckAt: at(6 * 3_600_000), resetKind: "authoritative" });
-    expect(db.subscriptionCoreWaiterRechecksBeforeReset("codex")).toBe(false);
-    expect(db.subscriptionCoreWaiterRechecksBeforeReset("xai")).toBe(true);
-  });
 
   test("a core waiter of another provider never reconciles through the Claude binding", async () => {
     // The exact id names a SuperGrok core waiter: the Claude reference does
@@ -822,5 +775,53 @@ describe("core waiter recheck schedule", () => {
     expect(coreReconcile).not.toHaveBeenCalled();
     expect(coreIdentity).not.toHaveBeenCalled();
     expect(coreWake).not.toHaveBeenCalled();
+  });
+});
+
+describe("core waiter recheck schedule", () => {
+  const now = new Date("2030-01-01T00:00:00.000Z");
+  const at = (ms: number) => new Date(now.getTime() + ms);
+
+  test("a provider that rechecks before its reset backs off from 60 s to 15 min, capped at the reset", () => {
+    const resetAt = at(6 * 3_600_000);
+    const schedule = (refreshAttempt: number, earliestResetAt = resetAt) =>
+      db.subscriptionCoreCodexNextCheckAt({
+        earliestResetAt,
+        healthRetryAt: null,
+        refreshAttempt,
+        now,
+        rechecksBeforeReset: true,
+      });
+    expect(schedule(0)).toEqual({ nextCheckAt: at(60_000), resetKind: "bounded_refresh" });
+    expect(schedule(1)).toEqual({ nextCheckAt: at(120_000), resetKind: "bounded_refresh" });
+    expect(schedule(9)).toEqual({ nextCheckAt: at(15 * 60_000), resetKind: "bounded_refresh" });
+    expect(schedule(9, at(30_000))).toEqual({
+      nextCheckAt: at(30_000),
+      resetKind: "authoritative",
+    });
+    // A quarantine that ends sooner than the bounded check moves it earlier.
+    expect(
+      db.subscriptionCoreCodexNextCheckAt({
+        earliestResetAt: resetAt,
+        healthRetryAt: at(90_000),
+        refreshAttempt: 9,
+        now,
+        rechecksBeforeReset: true,
+      }),
+    ).toEqual({ nextCheckAt: at(90_000), resetKind: "bounded_refresh" });
+  });
+
+  test("any other provider sleeps until its reset, unchanged", () => {
+    expect(
+      db.subscriptionCoreCodexNextCheckAt({
+        earliestResetAt: at(6 * 3_600_000),
+        healthRetryAt: null,
+        refreshAttempt: 0,
+        now,
+      }),
+    ).toEqual({ nextCheckAt: at(6 * 3_600_000), resetKind: "authoritative" });
+    expect(db.subscriptionCoreWaiterRechecksBeforeReset("codex")).toBe(false);
+    expect(db.subscriptionCoreWaiterRechecksBeforeReset("xai")).toBe(true);
+    expect(db.subscriptionCoreWaiterRechecksBeforeReset("claude")).toBe(false);
   });
 });
