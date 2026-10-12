@@ -114,7 +114,7 @@ describe("provider mirror planning", () => {
     expect(plan.items[0]?.fields.map((field) => field.name)).toEqual([
       "password",
       "Password (2)",
-      "otp-code",
+      "otp code",
     ]);
     expect(plan.items[0]?.hasTotp).toBe(true);
   });

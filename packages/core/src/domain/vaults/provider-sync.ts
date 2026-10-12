@@ -183,7 +183,7 @@ export function planProviderMirror(
           field.name,
           field.kind === "totp" ? "one-time password" : "field",
         );
-        if (nameKey(fieldName) === "otp") fieldName = "otp-code";
+        if (nameKey(fieldName) === "otp") fieldName = "otp code";
         return {
           externalFieldId: field.externalFieldId,
           name: uniqueProviderName(fieldName, takenFields),
