@@ -100,6 +100,29 @@ inbox, rather than an in-memory parser, decides whether they are exact duplicate
 
 ## Durable transport obligations
 
+The pure input transitions in `native-command-broker-input.ts` serialize a
+single pending input and require a committed dispatch intent before yielding
+provider write bytes. A provider RPC acknowledgement does not clear that input.
+Only the exact broker acceptance does. A replacement writer retains the old
+pending epoch, index and body verbatim, resolves it, then appends its own fence
+before any new command request. Modal 0.9.0 serializes the provider index as
+`uint32`; the transitions refuse exhaustion rather than wrapping. Command EOF
+is an encoded request and never closes the initial broker stdin.
+
+The output planner in `native-command-broker-output.ts` keeps all command
+frames and the incomplete framing suffix in one atomic capture plan for the
+initial stdout cursor. It requires exact durable hashes for frame replay,
+rejects conflicting pages and sequence gaps, and keeps provider EOF separate
+from command settlement. Real Modal V1 cursor-less EOF batches preserve the
+last data cursor and gain a separate observation. The independently read initial
+stderr stream cannot advance that cursor or claim its EOF.
+
+Neither module persists data or grants writer authority. Their integration
+requires scoped transactional row locks/CAS, an immutable unique-request
+outbox, an immutable frame/page inbox, and the existing admission and lease
+fences. Their unit fixtures are not proof that those database or provider
+integration obligations have been satisfied.
+
 Before any physical write, the control plane must persist the exact broker,
 physical instance, writer epoch, request ID, provider input index, body and
 outcome state. A single durable per-instance writer owns indexed input. New
