@@ -60,6 +60,10 @@ const subscriptionCoreMigrations = [
   "0716_subscription_authority_compat.sql",
   // Requires 0716's routines; it follows 0716.
   "0717_subscription_authority_fences.sql",
+  // Adds a trigger on the session bindings table from withheld 0642.
+  "0723_subscription_binding_cache_clock.sql",
+  // Adds checks and triggers on the settings table from withheld 0642.
+  "0724_subscription_settings_locks.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
