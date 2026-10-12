@@ -4430,6 +4430,11 @@ disabled) answers the typed 503 `subscription_core_cutover_disabled`.
   workspace, and the owner cannot make an organization account its
   primary. Without a private account the organization pool's 409 applies,
   as legacy; the 409 for activate applies to shared accounts.
+- **Organization settings locks bind these writes.** The rotation and
+  activate routes write through the neutral settings writers, so an
+  organization lock on `rotation` (0724) refuses them with the 409
+  `setting_locked` and writes nothing, as for Codex; this includes the owner's
+  Personal workspace override above.
 - **Private accounts live in the Personal workspace.** On the core, every
   route that manages a private (`user`) account (connect start and poll,
   listing personal rows, rename, allocator, activate, disconnect, rotation)

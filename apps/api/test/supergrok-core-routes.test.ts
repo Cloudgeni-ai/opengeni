@@ -47,6 +47,8 @@ const { Hono } = await import("hono");
 const { registerSuperGrokRoutes } = await import("../src/routes/supergrok");
 const { registerModelConnectionAccessRoutes } =
   await import("../src/routes/model-connection-access");
+const { subscriptionSettingsLockedHttpError } =
+  await import("../src/routes/model-account-settings");
 const { synchronizeCanonicalHumanLoginBindings } =
   await import("@opengeni/db/canonical-human-identities");
 
@@ -157,8 +159,10 @@ beforeAll(async () => {
   } as never;
   registerSuperGrokRoutes(app, deps);
   registerModelConnectionAccessRoutes(app, deps);
-  // The typed errors as the API renders them (code and details).
-  const renderTyped = (error: Error, c: Context) => {
+  // The typed errors as the API renders them (code and details), with the
+  // app's central settings-lock mapping.
+  const renderTyped = (raw: Error, c: Context) => {
+    const error: Error = subscriptionSettingsLockedHttpError(raw) ?? raw;
     const typed = error as { status?: number; code?: string; details?: Record<string, unknown> };
     return c.json(
       { code: typed.code ?? null, message: error.message, ...(typed.details ?? {}) },
@@ -541,6 +545,59 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect(await rotation.json()).toMatchObject({
       rotationEnabled: false,
       activeCredentialId: connected.accountId,
+    });
+
+    // An organization lock on rotation (0724) binds the SuperGrok core writers
+    // as it binds Codex's. Locking clears the workspace's rotation map (its
+    // primary column stays but is inert without a rotation entry), so the
+    // listing shows the organization's values; rotation and activate are then
+    // refused as a lock (the API renders the 409 `setting_locked`) and write
+    // nothing.
+    const lockRotation = async (locked: string[]) => {
+      const updated = await shared!.admin`
+        update subscription_settings set locked_settings = ${locked}::text[]
+        where account_id = ${accountId}::uuid and workspace_id is null`;
+      if (updated.count === 0) {
+        await shared!.admin`
+          insert into subscription_settings (account_id, workspace_id, locked_settings)
+          values (${accountId}::uuid, null, ${locked}::text[])`;
+      }
+    };
+    const storedOverride = async () =>
+      await shared!.admin<{ rotation: unknown; primary: string | null }[]>`
+        select rotation, xai_primary_connection_id::text as primary from subscription_settings
+        where account_id = ${accountId}::uuid and workspace_id = ${workspaceId}::uuid`;
+    await lockRotation(["rotation"]);
+    try {
+      const lockedOverride = await storedOverride();
+      expect(lockedOverride).toEqual([{ rotation: null, primary: connected.accountId }]);
+      expect(await listed()).toMatchObject({
+        activeAccountId: null,
+        settings: { rotationEnabled: true, activeCredentialId: null },
+      });
+      for (const [path, method, body] of [
+        ["/supergrok/settings", "PATCH", { rotationEnabled: false }],
+        [`/supergrok/accounts/${connected.accountId}/activate`, "POST", undefined],
+      ] as const) {
+        const locked = await request(path, { method, body });
+        expect({ path, status: locked.status, body: await locked.json() }).toMatchObject({
+          path,
+          status: 409,
+          body: { code: "conflict", reason: "setting_locked", settings: ["rotation"] },
+        });
+      }
+      expect(await storedOverride()).toEqual(lockedOverride);
+    } finally {
+      await lockRotation([]);
+    }
+    // Unlocked, the workspace may override again.
+    const reactivated = await request(`/supergrok/accounts/${connected.accountId}/activate`, {
+      method: "POST",
+    });
+    expect(reactivated.status).toBe(200);
+    expect(await listed()).toMatchObject({
+      activeAccountId: connected.accountId,
+      settings: { activeCredentialId: connected.accountId },
     });
 
     // The access policy is the core connection's (the legacy row is never read).
