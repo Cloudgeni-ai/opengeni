@@ -71,7 +71,7 @@ export type XaiStatusPayload<Model> = {
  * API keys), is a personal connection the effective account (legacy scope
  * `user`),
  * validated by one live usage read as its owner there; that read also
- * applies the organization's personal-connections rule (0731). Any other
+ * applies the organization's personal-connections rule (0735). Any other
  * caller gets the stored count only, with no live read and no wake.
  * Another person's personal connections are never listed.
  */

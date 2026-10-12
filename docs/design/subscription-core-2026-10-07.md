@@ -4632,7 +4632,7 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   `active` one, scope `user` as on the legacy path), validated by one live
   billing read as its owner through the administered `personal_owner`
   probe, which also applies the organization's personal-connections rule
-  (0731). Any other caller (a read-only agent, a plain bearer, the
+  (0735). Any other caller (a read-only agent, a plain bearer, the
   person's own API keys, read-only or full) gets the stored count with
   `valid: false`, and nothing is read live, recorded or woken. That reading is
   stored like any usage observation; when it ends an exhaustion the status
@@ -4659,7 +4659,7 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   choice can still pass over such an account (outside the Personal workspace
   it needs fallback consent or an explicit binding, and the provider switch
   applies in every workspace); the re-read is then the owner's own billing
-  read under the 0731 owner checks, which widens nothing. Inside the
+  read under the 0735 owner checks, which widens nothing. Inside the
   accepted turn, placement's own `authorizeSubscriptionCoreFrozenPersonal`
   (`authorize_subscription_personal_placement_access`) requires the turn's
   initiating human to be the session owner, a private session or the
