@@ -1,19 +1,25 @@
 import { createRoot } from "react-dom/client";
 import type { SessionEvent } from "@opengeni/sdk";
+import { buildTimeline } from "@opengeni/react";
 import { MessageTimeline } from "@opengeni/react/session-ui";
 // @ts-expect-error -- dev-only: the demo Vite alias resolves this to the web app's source.
 import { FailedSessionBanner } from "@/components/session/failed-session-banner";
+// @ts-expect-error -- dev-only: the demo Vite alias resolves this to the web app's source.
+import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import "../../../apps/web/src/styles.css";
 
 /*
  * A turn whose automatic compaction the model provider rejected, replayed
  * through the production MessageTimeline and the console's failed-session
- * banner with the web app's stylesheet. Synthetic events only, no API calls.
- * `?theme=light|dark` picks the theme the way the console's index.html does.
+ * banner, composed the way the session route composes them, with the web app's
+ * stylesheet. Synthetic events only, no API calls.
+ * `?theme=light|dark` picks the theme the way the console's index.html does;
+ * `?scenario=cleared` hides history (Clear view), so the banner owns the failure.
  */
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
+const cleared = params.get("scenario") === "cleared";
 document.documentElement.dataset.ogTheme = theme;
 document.documentElement.classList.toggle("dark", theme === "dark");
 
@@ -78,26 +84,42 @@ const events: SessionEvent[] = [
   ),
 ];
 
+const failedEvent = events.at(-1)!;
+const items = cleared ? [] : buildTimeline(events);
+
 function App() {
+  const banner = (
+    <FailedSessionBanner
+      failure={{
+        reason: RECORDED,
+        recordedDetail: RECORDED,
+        failureCode: "context_compaction_failed",
+        failedAt: failedEvent.occurredAt,
+        failureEventId: failedEvent.id,
+        consecutiveRecoveryCount: null,
+      }}
+      shownInTimeline={timelineShowsFailure(items, {
+        failureEventId: failedEvent.id,
+        turnId: failedEvent.turnId,
+      })}
+      actions={{
+        failureId: failedEvent.id,
+        retryBlocker: null,
+        onRetry: async () => false,
+      }}
+    />
+  );
   return (
     <div className="flex h-screen flex-col bg-bg text-fg">
       <div className="min-h-0 min-w-0 flex-1">
         <MessageTimeline
           className="h-full"
+          items={items}
           events={events}
           status="failed"
           turnSummary={{ rolling: true }}
-          trailingState={
-            <FailedSessionBanner
-              failure={{
-                reason: RECORDED,
-                recordedDetail: RECORDED,
-                failureCode: "context_compaction_failed",
-                failedAt: events.at(-1)!.occurredAt,
-                consecutiveRecoveryCount: null,
-              }}
-            />
-          }
+          trailingState={banner}
+          emptyState={banner}
         />
       </div>
     </div>

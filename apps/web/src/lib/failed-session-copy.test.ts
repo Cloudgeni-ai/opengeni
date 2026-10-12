@@ -302,6 +302,7 @@ test("a provider-rejected compaction names the outcome and keeps the raw text be
     reason:
       "Couldn’t compact conversation history. If the next message fails too, start a new session.",
     unavailableModel: false,
+    compaction: true,
     detail: recorded,
   });
 });

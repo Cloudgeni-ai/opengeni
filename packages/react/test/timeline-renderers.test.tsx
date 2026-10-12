@@ -294,7 +294,15 @@ describe("context compaction rendering", () => {
         (element) => element.textContent?.includes("Couldn’t compact conversation history"),
       );
       expect(status?.textContent).toContain("Couldn’t compact conversation history · Auto");
-      expect(status?.textContent).toContain("Chat history is unchanged.");
+      expect(status?.textContent).toContain(
+        "Chat history is unchanged. If your next message fails too, start a new session.",
+      );
+      // One failure, one Details control: no separate notice repeats it.
+      expect(
+        Array.from(r.container.querySelectorAll("button, summary")).filter(
+          (control) => control.textContent?.trim() === "Details",
+        ),
+      ).toHaveLength(1);
       // No raw provider text or identifiers in the visible summary.
       const panel = r.container.querySelector<HTMLElement>("[data-og-compaction-details]");
       expect(panel?.hidden).toBe(true);
@@ -321,7 +329,7 @@ describe("context compaction rendering", () => {
       );
       expect(panel?.textContent).toContain("input[116].status");
       expect(panel?.textContent).toContain("req_7f3a");
-      expect(panel?.textContent).toContain("start a new session");
+      expect(panel?.textContent).toContain("rejects this request the same way");
     } finally {
       await r.unmount();
     }

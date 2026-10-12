@@ -2154,11 +2154,11 @@ describe("buildTimeline", () => {
     const projected = items[0];
     if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
     expect(compactionSkipSubtitle("summarization_failed", projected.providerRejection)).toBe(
-      "Chat history is unchanged.",
+      "Chat history is unchanged. If your next message fails too, start a new session.",
     );
-    // Identifiers and guidance move behind Details instead of the subtitle.
+    // Identifiers move behind Details instead of the subtitle.
     expect(compactionFailureDetails(projected)).toEqual({
-      note: "The provider rejects this request the same way until the conversation changes. If your next message fails too, start a new session.",
+      note: "The provider rejects this request the same way until the conversation changes.",
       facts: [
         { label: "Response", value: "HTTP 400 · invalid_request_error" },
         { label: "Parameter", value: "input[12].encrypted_content" },
@@ -2169,6 +2169,17 @@ describe("buildTimeline", () => {
       "Request it again to retry. Chat history is unchanged.",
     );
     expect(compactionFailureDetails({ ...projected, providerRejection: null })).toBeNull();
+    // Any other failure shows the turn's recorded text instead.
+    expect(
+      compactionFailureDetails({
+        ...projected,
+        providerRejection: null,
+        failureDetail: "compaction summarization failed: timeout",
+      }),
+    ).toEqual({
+      note: null,
+      facts: [{ label: "Error", value: "compaction summarization failed: timeout" }],
+    });
     // A malformed record without a numeric status is not a rejection.
     const malformed = buildTimeline([
       event("session.context.compaction.skipped", {
@@ -2194,16 +2205,37 @@ describe("buildTimeline", () => {
     expect(presentTurnFailureText(undefined)).toBeNull();
   });
 
-  test("a compaction turn failure without activity never repeats raw provider text", () => {
+  test("a compaction turn failure is shown once, on its own landmark", () => {
     reset();
     const recorded = "compaction summarization failed: 400 Missing required parameter.";
     const failed = { error: recorded, code: "context_compaction_failed" };
-    // Its own landmark already names the failure.
+    // Its own landmark names the failure and receives the recorded text.
     const withLandmark = buildTimeline([
       event("session.context.compaction.skipped", { reason: "summarization_failed" }),
       event("turn.failed", failed),
     ]);
     expect(withLandmark.filter((item) => item.kind === "notice")).toEqual([]);
+    expect(withLandmark.find((item) => item.kind === "context-compaction")).toMatchObject({
+      phase: "skipped",
+      failureDetail: recorded,
+    });
+    // Another turn's landmark is not this failure.
+    reset();
+    const otherTurn = buildTimeline([
+      event(
+        "session.context.compaction.skipped",
+        { reason: "summarization_failed" },
+        { turnId: "turn-0" },
+      ),
+      event("turn.failed", failed),
+    ]);
+    expect(otherTurn.find((item) => item.kind === "context-compaction")).not.toHaveProperty(
+      "failureDetail",
+    );
+    expect(otherTurn.find((item) => item.kind === "notice")).toMatchObject({
+      id: "evt-2",
+      text: "Couldn’t compact conversation history",
+    });
     // Without one, the notice is short and keeps the recorded text as details.
     reset();
     const alone = buildTimeline([event("turn.failed", failed)]);

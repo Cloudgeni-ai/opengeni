@@ -3,14 +3,14 @@ import type { ContextCompactionItem } from "./types";
 /** Headline for a compaction that could not produce a checkpoint. */
 export const COMPACTION_FAILURE_TITLE = "Couldn’t compact conversation history";
 
-/** What to do after a definitive provider rejection; shown behind Details. */
-export const COMPACTION_REJECTION_GUIDANCE =
-  "The provider rejects this request the same way until the conversation changes. If your next message fails too, start a new session.";
+/** Why a definitive provider rejection repeats; shown behind Details. */
+export const COMPACTION_REJECTION_NOTE =
+  "The provider rejects this request the same way until the conversation changes.";
 
 /**
- * Subtitle for a settled compaction landmark. Kept to one short sentence: a
- * definitive provider rejection withholds the generic retry promise and moves
- * its identifiers and guidance behind Details ({@link compactionFailureDetails}).
+ * Subtitle for a settled compaction landmark. Kept short: a definitive provider
+ * rejection withholds the generic retry promise, names the one recovery step,
+ * and moves its identifiers behind Details ({@link compactionFailureDetails}).
  */
 export function compactionSkipSubtitle(
   reason: string | null,
@@ -27,7 +27,7 @@ export function compactionSkipSubtitle(
       return "Checkpoint made no progress";
     case "summarization_failed":
       return providerRejection
-        ? "Chat history is unchanged."
+        ? "Chat history is unchanged. If your next message fails too, start a new session."
         : "Request it again to retry. Chat history is unchanged.";
     default:
       return "Compaction was not needed. Chat history is unchanged.";
@@ -35,22 +35,25 @@ export function compactionSkipSubtitle(
 }
 
 export type CompactionFailureDetails = {
-  /** One plain sentence: why it failed and what to do next. */
-  note: string;
-  /** Content-free provider identifiers, in display order. */
+  /** One plain sentence on why it failed, when known. */
+  note: string | null;
+  /** Provider identifiers or the recorded error text, in display order. */
   facts: Array<{ label: string; value: string }>;
 };
 
 /**
- * Technical diagnostics for a definitive provider rejection of a compaction
- * request, or null when the landmark has none. Presentation only.
+ * Technical diagnostics for a failed compaction landmark, or null when it has
+ * none: a definitive provider rejection lists its content-free identifiers;
+ * any other failure shows the turn's recorded error text. Presentation only.
  */
 export function compactionFailureDetails(
-  item: Pick<ContextCompactionItem, "phase" | "skipReason" | "providerRejection">,
+  item: Pick<ContextCompactionItem, "phase" | "skipReason" | "providerRejection" | "failureDetail">,
 ): CompactionFailureDetails | null {
+  if (item.phase !== "skipped" || item.skipReason !== "summarization_failed") return null;
   const rejection = item.providerRejection;
-  if (item.phase !== "skipped" || item.skipReason !== "summarization_failed" || !rejection) {
-    return null;
+  if (!rejection) {
+    const recorded = item.failureDetail?.trim();
+    return recorded ? { note: null, facts: [{ label: "Error", value: recorded }] } : null;
   }
   const facts = [
     {
@@ -62,7 +65,7 @@ export function compactionFailureDetails(
   ];
   if (rejection.param) facts.push({ label: "Parameter", value: rejection.param });
   if (rejection.requestId) facts.push({ label: "Request ID", value: rejection.requestId });
-  return { note: COMPACTION_REJECTION_GUIDANCE, facts };
+  return { note: COMPACTION_REJECTION_NOTE, facts };
 }
 
 const COMPACTION_TURN_FAILURE_PREFIX = "compaction summarization failed:";

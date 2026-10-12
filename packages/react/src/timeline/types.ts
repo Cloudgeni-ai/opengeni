@@ -459,6 +459,11 @@ export type ContextCompactionItem = {
    * definitively rejected the compaction request. Content-free identifiers.
    */
   providerRejection: ContextCompactionProviderRejection | null;
+  /**
+   * The same turn's recorded failure text, when that turn failed because this
+   * compaction did. Diagnostics shown behind Details only.
+   */
+  failureDetail?: string;
   /** Provider implementation id for debug disclosure only. */
   implementation: string | null;
   occurredAt: string;

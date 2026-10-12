@@ -1474,32 +1474,41 @@ export function buildTimeline(
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
+        // A compaction failure names its outcome and keeps the recorded
+        // provider text behind Details. The turn's own failed compaction
+        // landmark is the one place that shows it: it receives the recorded
+        // text, and no separate notice repeats it.
+        const failure = allowance ? null : presentTurnFailureText(failureText);
+        let landmarkIndex = -1;
+        if (failure?.detail !== undefined && turnId !== null) {
+          for (let index = items.length - 1; index >= 0; index -= 1) {
+            const item = items[index];
+            if (
+              item?.kind === "context-compaction" &&
+              item.turnId === turnId &&
+              item.phase === "skipped" &&
+              item.skipReason === "summarization_failed"
+            ) {
+              landmarkIndex = index;
+              break;
+            }
+          }
+        }
+        const landmark = landmarkIndex >= 0 ? items[landmarkIndex] : undefined;
+        if (landmark?.kind === "context-compaction" && failure?.detail !== undefined) {
+          items[landmarkIndex] = { ...landmark, failureDetail: failure.detail };
+        }
         if (allowance) {
           allowanceNotice(event, turnId);
-        } else if (!hadActivity) {
-          // A compaction failure names its outcome and keeps the recorded
-          // provider text behind Details; when the turn's own compaction
-          // landmark already says so, the notice would only repeat it.
-          const failure = presentTurnFailureText(failureText);
-          const repeatsLandmark =
-            failure?.detail !== undefined &&
-            turnId !== null &&
-            items.some(
-              (item) =>
-                item.kind === "context-compaction" &&
-                item.turnId === turnId &&
-                item.phase === "skipped",
-            );
-          if (!repeatsLandmark) {
-            items.push({
-              kind: "notice",
-              id: event.id,
-              tone: "failed",
-              text: failure?.summary ?? "The turn failed.",
-              ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
-              occurredAt: event.occurredAt,
-            });
-          }
+        } else if (!hadActivity && !landmark) {
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "failed",
+            text: failure?.summary ?? "The turn failed.",
+            ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
+            occurredAt: event.occurredAt,
+          });
         }
         break;
       }

@@ -4233,17 +4233,20 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
         : null;
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
   const details = compactionFailureDetails(item);
-  const pill =
-    item.phase === "skipped" && item.skipReason === "summarization_failed"
-      ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
-      : item.phase === "started"
-        ? WAITING_PILL_CLASS
-        : NEUTRAL_PILL;
+  const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
+  const pill = failed
+    ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
+    : item.phase === "started"
+      ? WAITING_PILL_CLASS
+      : NEUTRAL_PILL;
   return (
     <div className={cn(enter && "animate-og-enter", "flex min-w-0 flex-col items-center gap-1.5")}>
       <div
         className={cn(
-          "inline-flex min-w-0 max-w-full flex-col items-center gap-0.5 rounded-full border px-3 py-1.5 text-og-sm",
+          "inline-flex min-w-0 max-w-full flex-col items-center gap-0.5 border px-3 py-1.5 text-og-sm",
+          // A failure's recovery step may wrap on narrow screens; a full pill
+          // radius would pinch its second line.
+          failed ? "rounded-og-lg" : "rounded-full",
           pill,
         )}
         role="status"
@@ -4256,8 +4259,16 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           </span>
         </span>
         {subtitle || details ? (
-          <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-og-xs">
-            {subtitle ? <span className="min-w-0 truncate opacity-80">{subtitle}</span> : null}
+          <span
+            className={cn(
+              "min-w-0 max-w-full text-og-xs",
+              failed ? "text-balance text-center" : "inline-flex items-center gap-1",
+            )}
+          >
+            {subtitle ? (
+              <span className={cn("opacity-80", !failed && "min-w-0 truncate")}>{subtitle}</span>
+            ) : null}
+            {subtitle && details && failed ? " " : null}
             {details ? (
               <button
                 type="button"
@@ -4265,7 +4276,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
                 aria-controls={detailsId}
                 onClick={() => setDetailsOpen((open) => !open)}
                 className={cn(
-                  "inline-flex shrink-0 items-center gap-0.5 rounded-og-sm font-medium underline-offset-2",
+                  "inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-og-sm align-baseline font-medium underline-offset-2",
                   "hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current/40",
                   "pointer-coarse:-my-2 pointer-coarse:px-1 pointer-coarse:py-2",
                 )}
@@ -4287,12 +4298,14 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           data-og-compaction-details=""
           className="w-full max-w-md rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-left text-og-xs text-og-fg-muted"
         >
-          <p>{details.note}</p>
-          <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+          {details.note ? <p className="mb-2">{details.note}</p> : null}
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
             {details.facts.map((fact) => (
               <Fragment key={fact.label}>
                 <dt className="text-og-fg-subtle">{fact.label}</dt>
-                <dd className="min-w-0 break-words font-mono">{fact.value}</dd>
+                <dd className="max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono">
+                  {fact.value}
+                </dd>
               </Fragment>
             ))}
           </dl>

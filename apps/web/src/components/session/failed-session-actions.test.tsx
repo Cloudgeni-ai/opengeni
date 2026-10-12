@@ -772,3 +772,63 @@ test("unavailable recovery chunk preserves error and composer draft", async () =
   expect(container.querySelector('[role="alert"]')!.textContent).toBe("Connection failed.");
   expect(container.querySelector("textarea")!.value).toBe("My draft");
 });
+
+test("a compaction failure the timeline already shows keeps only its recovery action", async () => {
+  const recorded =
+    "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+  const compaction = {
+    ...failure,
+    reason: recorded,
+    recordedDetail: recorded,
+    failureCode: "context_compaction_failed",
+  };
+  const shown = await render(
+    <FailedSessionBanner failure={compaction} actions={actions} shownInTimeline />,
+  );
+  // No second headline or Details: the timeline landmark owns both.
+  expect(shown.querySelector('[data-testid="failed-session-banner"]')).toBeNull();
+  expect(shown.querySelector("details")).toBeNull();
+  expect(shown.textContent).not.toContain("Couldn’t compact");
+  expect(shown.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Nothing to offer: nothing renders.
+  const empty = await render(<FailedSessionBanner failure={compaction} shownInTimeline />);
+  expect(empty.innerHTML).toBe("");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Absent from the visible timeline (e.g. a cleared view), the banner keeps it.
+  const absent = await render(<FailedSessionBanner failure={compaction} actions={actions} />);
+  expect(absent.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "Couldn’t compact conversation history. If the next message fails too, start a new session.",
+  );
+  expect(absent.querySelector("details p")!.textContent).toBe(recorded);
+});
+
+test("the timeline flag never hides a failure the timeline cannot own", async () => {
+  // Another failure kind keeps its banner even if the caller claims ownership.
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} shownInTimeline />,
+  );
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+  // A compaction failure on an exhausted quota keeps its limit headline.
+  const quota = await render(
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "compaction summarization failed: 429",
+        failureCode: "context_compaction_failed",
+        quotaScope: "daily",
+      }}
+      shownInTimeline
+    />,
+  );
+  expect(quota.querySelector('[data-testid="failed-session-banner"]')).not.toBeNull();
+  expect(quota.textContent).toContain("daily limit");
+});

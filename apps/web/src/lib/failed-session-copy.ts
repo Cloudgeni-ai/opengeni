@@ -204,6 +204,8 @@ export function failedSessionCopy(
   detail?: string;
   /** A daily allowance is spent; the banner may name the deployment's free model. */
   dailyLimit?: true;
+  /** The compaction-failure headline; the timeline's own landmark can carry it instead. */
+  compaction?: true;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -322,6 +324,7 @@ export function failedSessionCopy(
     return {
       reason: COMPACTION_FAILURE,
       unavailableModel: false,
+      compaction: true,
       ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
