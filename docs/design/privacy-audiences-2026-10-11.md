@@ -96,9 +96,9 @@ everyone using this app."
 
 A Site's audience (`visibility`: `private` or `workspace`) is stored on the
 Site with its owner, the person it was published for. A new Site takes an
-explicit choice when one is given and otherwise starts shared; Sites agents
-publish start shared, owned by the person the agent acts for. Only me needs a
-person who may start Only me work here. Sharing is always allowed; limiting a shared
+explicit choice when one is given; otherwise a Site published from an Only me
+chat starts Only me, and anything else starts shared. Only me needs a person
+who may start Only me work here. Sharing is always allowed; limiting a shared
 Site needs Only me to be allowed. Only the owner changes the audience, from
 the Site page (`PUT .../published-artifacts/{id}/visibility`); agents cannot.
 Every read and change of a Site, including the artifact library, Site tools
