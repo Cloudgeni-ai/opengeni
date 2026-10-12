@@ -5605,7 +5605,10 @@ export class OpenGeniClient {
     );
   }
 
-  /** Your own model-account preferences in an organization. */
+  /**
+   * Your own model-account preferences in an organization. For a person (a
+   * signed-in browser, or an agent acting as one); other callers get 404.
+   */
   async getModelAccountPreferences(organizationId: string): Promise<ModelAccountPreferences> {
     return await this.requestJson<ModelAccountPreferences>(
       "GET",
@@ -5613,7 +5616,10 @@ export class OpenGeniClient {
     );
   }
 
-  /** Change your own personal-fallback opt-in in an organization. */
+  /**
+   * Change your own personal-fallback opt-in in an organization. Only a person
+   * can: a same-origin browser, or an agent acting as one with full access.
+   */
   async updateModelAccountPreferences(
     organizationId: string,
     request: UpdateModelAccountPreferencesRequest,

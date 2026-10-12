@@ -45,6 +45,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  deliverSubscriptionCoreProviderWakes,
   enqueueSessionWorkflowWakeInTransaction,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
@@ -4518,6 +4519,8 @@ export function describeSubscriptionCoreConformance<Credential>(
         ).toEqual({
           outcome: "written",
           preferences: { personalFallbackOptIn: false, version: 2 },
+          // Turning the opt-in off wakes nothing (no forced move).
+          wakes: [],
         });
         expect(
           await writeSubscriptionPersonPreferences(db(), {
@@ -4541,7 +4544,10 @@ export function describeSubscriptionCoreConformance<Credential>(
             personalFallbackOptIn: true,
             expectedVersion: 0,
           }),
-        ).toEqual({ outcome: "written", preferences: { personalFallbackOptIn: true, version: 1 } });
+        ).toMatchObject({
+          outcome: "written",
+          preferences: { personalFallbackOptIn: true, version: 1 },
+        });
         expect(
           (
             await writeSubscriptionPersonPreferences(db(), {
@@ -4625,6 +4631,119 @@ export function describeSubscriptionCoreConformance<Credential>(
           fallbackAllowed: true,
           fallbackOptIn: true,
         });
+      });
+
+      test("SUB-SEL-02, D-26: the picker offers nothing an ownerless session or a provider switched off for the workspace could use", async () => {
+        const org = await organization();
+        const pooled = await sharedConnection(org, `none-shared-${crypto.randomUUID()}`);
+        const personal = await personalConnection(org, `none-personal-${crypto.randomUUID()}`);
+        // An ownerless session (for example a scheduled run started with an
+        // API key): the binding guard admits no explicit choice, so nothing
+        // is offered as choosable, and a choice is refused.
+        const ownerless = await runningTurn(org, { owner: "none" });
+        expect(await offered(ownerless, org.ownerSubjectId)).toEqual({
+          [pooled]: "session_has_no_owner",
+          [personal]: "session_has_no_owner",
+        });
+        expect((await choose(ownerless, org.ownerSubjectId, pooled)).outcome).toBe("refused");
+        // The provider switched off for the workspace: nothing is listed,
+        // shared or personal, and naming an account finds nothing.
+        const privateTurn = await runningTurn(org, {
+          visibility: "user_private",
+          personalAuthority: true,
+        });
+        const off = admin().json({ [providerId]: { enabled: false } });
+        const updated = await admin()`update subscription_settings
+          set providers = coalesce(providers, '{}'::jsonb) || ${off}::jsonb
+          where account_id = ${org.accountId}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid
+          returning 1`;
+        if (updated.length === 0)
+          await admin()`insert into subscription_settings (account_id, workspace_id, providers)
+            values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${off}::jsonb)`;
+        expect(await offered(privateTurn, org.ownerSubjectId)).toEqual({});
+        expect((await choose(privateTurn, org.ownerSubjectId, personal)).outcome).toBe("not_found");
+      });
+
+      test("SUB-WAIT-02, SUB-SEL-04: a choice for a waiting turn wakes it, and turning the fallback opt-in on wakes waiting turns", async () => {
+        const armWaiter = async (org: Org, turn: Turn): Promise<string> => {
+          const tenant = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
+          const waiter = await withRlsContext(db(), tenant, (tx) =>
+            upsertSubscriptionCapacityWaiter(tx, {
+              ...tenant,
+              sessionId: turn.identity.sessionId,
+              turnId: turn.identity.turnId,
+              waiterId: crypto.randomUUID(),
+              provider: providerId,
+              waitReason: "capacity",
+              generation: 1,
+              wakeRevision: 1,
+              observedWakeRevision: 1,
+              blockedTurnGeneration: turn.executionGeneration,
+            }),
+          );
+          if (!waiter) throw new Error("Fixture failed to arm a waiter");
+          return waiter.waiterId;
+        };
+        const revisionOf = async (waiterId: string) => {
+          const [row] = await admin()<{ wake_revision: string }[]>`
+            select wake_revision::text from subscription_capacity_waiters
+            where waiter_id = ${waiterId}::uuid`;
+          return Number(row!.wake_revision);
+        };
+
+        // A turn waiting for capacity: the choice applies to it at once.
+        const org = await organization();
+        const pooled = await sharedConnection(org, `wake-shared-${crypto.randomUUID()}`);
+        const turn = await runningTurn(org, { visibility: "user_private" });
+        await placeChecked(turn);
+        await admin()`update sessions set status = 'waiting_capacity'
+          where id = ${turn.identity.sessionId}::uuid`;
+        const waiter = await armWaiter(org, turn);
+        const chosen = await choose(turn, org.ownerSubjectId, pooled);
+        expect(chosen).toMatchObject({ outcome: "changed", appliedTo: "waiting_turn" });
+        expect(chosen.events[0]!.payload).toMatchObject({
+          appliedTo: "waiting_turn",
+          turnId: turn.identity.turnId,
+        });
+        await deliverSubscriptionCoreProviderWakes(db(), chosen.wakes);
+        expect(await revisionOf(waiter)).toBe(2);
+
+        // Only a personal account, and the owner has not opted in: the
+        // owner's private turn waits. Turning the opt-in on wakes it.
+        const fallback = await organization();
+        const personal = await personalConnection(fallback, `wake-personal-${crypto.randomUUID()}`);
+        const owner = { accountId: fallback.accountId, subjectId: fallback.ownerSubjectId };
+        await writeSubscriptionPersonPreferences(db(), { ...owner, personalFallbackOptIn: false });
+        const waiting = await runningTurn(fallback, {
+          visibility: "user_private",
+          personalAuthority: true,
+        });
+        expect(await placeChecked(waiting)).toMatchObject({ kind: "wait" });
+        const fallbackWaiter = await armWaiter(fallback, waiting);
+        const on = await writeSubscriptionPersonPreferences(
+          db(),
+          { ...owner, personalFallbackOptIn: true },
+          providers,
+        );
+        expect(on.outcome).toBe("written");
+        const wakes = on.outcome === "written" ? on.wakes : [];
+        expect(wakes.map((wake) => wake.provider)).toEqual([providerId]);
+        await deliverSubscriptionCoreProviderWakes(db(), wakes);
+        expect(await revisionOf(fallbackWaiter)).toBe(2);
+        expect(await placeChecked(waiting)).toMatchObject({
+          kind: "run",
+          connectionId: personal,
+          personal: true,
+        });
+        // Saving the same value again, or turning it off, wakes nothing (D-27).
+        for (const optIn of [true, false]) {
+          const again = await writeSubscriptionPersonPreferences(
+            db(),
+            { ...owner, personalFallbackOptIn: optIn },
+            providers,
+          );
+          expect(again.outcome === "written" ? again.wakes : null).toEqual([]);
+        }
       });
 
       test("concurrent choices and placements serialize on the binding and never lose a choice", async () => {

@@ -4190,7 +4190,8 @@ export type ModelAccountSettingsOverview = {
 export type ModelAccountChoiceRefusal =
   | "inactive"
   | "personal_not_allowed"
-  | "personal_not_owner_work";
+  | "personal_not_owner_work"
+  | "session_has_no_owner";
 
 /**
  * One account the model picker may list for a session: a shared account of

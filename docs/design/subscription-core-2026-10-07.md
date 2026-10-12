@@ -5011,10 +5011,14 @@ or provider on a shared account). This change does not alter either order.
    workspace pool's shared accounts and the caller's own personal accounts
    (never another person's), each with whether it can be chosen for this
    session and why not (`inactive`, `personal_not_allowed`,
-   `personal_not_owner_work`), the session's current binding (the account is
+   `personal_not_owner_work`, and `session_has_no_owner` for an ownerless
+   session, which may use only shared accounts through automatic
+   selection), the session's current binding (the account is
    hidden when the caller may not see it), and the effective personal
    settings plus the caller's opt-in. It is provider-neutral and iterates the
-   registered core providers.
+   registered core providers, skipping a provider whose cutover is not
+   enabled for the organization or that the workspace switched off (neither
+   its shared nor its personal accounts are offered).
 2. `chooseSubscriptionCoreSessionAccount`: one neutral entry point that sets
    an explicit choice or returns the session to automatic selection. It locks
    the binding, compares and swaps its version (bounded retries against a
@@ -5022,6 +5026,10 @@ or provider on a shared account). This change does not alter either order.
    refusal surfaces as `refused`, never as a silent fallback. A turn waiting
    for capacity is woken and re-placed at once; otherwise the choice applies
    from the next turn. It records `model_account.selection.changed`.
+   Saving a person's personal-fallback opt-in wakes the organization's
+   waiting turns of every enabled provider when the opt-in turns on, so a
+   turn already waiting can fall back at once. Turning it off wakes nothing
+   and moves no running turn (D-27).
 3. Migration 0727 (rolling) lets a person read and change only their own
    `subscription_person_preferences` row (see `docs/deployment.md`).
 4. API: `GET`/`PUT /v1/workspaces/{ws}/sessions/{id}/model-account` behind

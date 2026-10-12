@@ -19,6 +19,8 @@ export const ModelAccountChoiceRefusal = z.enum([
   "inactive",
   "personal_not_allowed",
   "personal_not_owner_work",
+  /** The session has no owner (for example a scheduled run started with an API key). */
+  "session_has_no_owner",
 ]);
 export type ModelAccountChoiceRefusal = z.infer<typeof ModelAccountChoiceRefusal>;
 

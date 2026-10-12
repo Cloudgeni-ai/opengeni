@@ -68,7 +68,12 @@ export type SubscriptionCoreAccountChoiceRefusal =
   /** Personal connections are not allowed in this workspace. */
   | "personal_not_allowed"
   /** A personal connection serves only its owner's private sessions and Personal workspace. */
-  | "personal_not_owner_work";
+  | "personal_not_owner_work"
+  /**
+   * The session has no owner (for example a run of a schedule created with an
+   * API key): the binding guard admits no explicit choice for it.
+   */
+  | "session_has_no_owner";
 
 export type SubscriptionCoreChoosableConnection = {
   provider: string;
@@ -122,6 +127,8 @@ function choiceRefusal(
   connectionsAllowed: boolean,
 ): SubscriptionCoreAccountChoiceRefusal | null {
   if (row.status !== "active") return "inactive";
+  // The binding guard refuses every explicit choice for an ownerless session.
+  if (session.ownerSubjectId === null) return "session_has_no_owner";
   if (!personal) return null;
   if (!connectionsAllowed) return "personal_not_allowed";
   const ownersWork =
@@ -221,9 +228,10 @@ async function listChoosableConnections(
         refusal,
       });
     };
-    if (pool.source.effectiveSource !== "disabled") {
-      for (const entry of pool.connections) add(entry.row, entry.source);
-    }
+    // A provider switched off for the workspace offers nothing, shared or
+    // personal: its turns wait as `model_not_allowed` whatever is chosen.
+    if (pool.source.effectiveSource === "disabled") continue;
+    for (const entry of pool.connections) add(entry.row, entry.source);
     // Only human subjects own personal connections; the reader returns
     // nothing for anyone else.
     for (const row of await listSubscriptionCorePersonalConnectionRowsInTransaction(
@@ -346,7 +354,11 @@ export type SubscriptionCoreSessionChoiceOutcome =
   | "not_found"
   /** The database refused the connection for this session (binding guard). */
   | "refused"
-  /** A concurrent placement kept moving the binding; retry. */
+  /**
+   * Defensive: the binding is locked before its version is compared, so this
+   * is not expected in practice. Clients may treat it like any other refusal
+   * to retry later.
+   */
   | "conflict";
 
 export type SubscriptionCoreSessionChoiceResult = {
@@ -673,8 +685,18 @@ export async function writeSubscriptionPersonPreferences(
     personalFallbackOptIn: boolean;
     expectedVersion?: number;
   },
+  providers: SubscriptionCoreChoiceProviders = registeredProviders(),
 ): Promise<
-  | { outcome: "written"; preferences: SubscriptionPersonPreferences }
+  | {
+      outcome: "written";
+      preferences: SubscriptionPersonPreferences;
+      /**
+       * Capacity wakes to deliver after commit: turning the opt-in on can
+       * make the person's own account eligible for a waiting turn. Turning
+       * it off wakes nothing (D-27: no forced move).
+       */
+      wakes: SubscriptionCoreProviderWake[];
+    }
   | { outcome: "conflict"; preferences: SubscriptionPersonPreferences }
   | { outcome: "not_member" }
 > {
@@ -723,12 +745,25 @@ export async function writeSubscriptionPersonPreferences(
         },
       };
     }
+    // Wake the organization's waiters of every provider on the core when the
+    // opt-in turns on. The wake is organization-wide (waiters recheck and
+    // keep waiting when nothing changed for them); the person's waiting
+    // turns are among them.
+    const wakes: SubscriptionCoreProviderWake[] =
+      row.personal_fallback_opt_in && !own.optIn
+        ? (await enabledProviders(tx, input.accountId, providers)).map((binding) => ({
+            provider: binding.adapter.provider,
+            accountId: input.accountId,
+            reason: subscriptionCoreWakeReason(binding, "person_preferences_changed"),
+          }))
+        : [];
     return {
       outcome: "written" as const,
       preferences: {
         personalFallbackOptIn: row.personal_fallback_opt_in,
         version: Number(row.version),
       },
+      wakes,
     };
   });
 }

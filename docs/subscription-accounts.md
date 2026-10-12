@@ -189,7 +189,7 @@ for it until the matching requirement below is implemented:
   allowance can replace automatic extra-credit spending.
   Verification: pending (shared-core).
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
-  that account instead of moving. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
+  that account instead of moving. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
   reservations cannot oversubscribe the primary account or bypass fairness.
   Verification: pending (verification-suite).
