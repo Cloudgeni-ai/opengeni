@@ -98,6 +98,12 @@ export const VAULT_PROVIDER_ERROR_CODES = [
   "provider_unavailable",
   "provider_conflict",
   "provider_not_found",
+  /**
+   * The provider refused the operation for this credential (for example a
+   * write into a 1Password vault the service account can only read). The vault
+   * service reports `vault_read_only` for writes, `vault_permission_denied` otherwise.
+   */
+  "provider_permission_denied",
 ] as const;
 export type VaultProviderErrorCode = (typeof VAULT_PROVIDER_ERROR_CODES)[number];
 
