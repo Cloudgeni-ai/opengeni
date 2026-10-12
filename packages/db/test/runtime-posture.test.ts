@@ -1547,6 +1547,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0725 adds organization privacy preferences with full runtime DML.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0696 adds the workspace-isolated single-use enroll-token ledger.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -1720,6 +1726,7 @@ describe("runtime database posture evaluator", () => {
         tableCount +
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
+          1 + // 0725 organization privacy preferences.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -1729,6 +1736,7 @@ describe("runtime database posture evaluator", () => {
         tableCount +
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
+          1 + // 0725 organization privacy preferences.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
