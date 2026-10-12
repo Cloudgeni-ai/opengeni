@@ -192,9 +192,18 @@ export async function listOwnConnectionAccountsForGrant(
 
 async function listOwnConnectionMetadata(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string; includeInactive?: boolean },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    includeInactive?: boolean;
+    /** Read only these owned accounts (a live target fence); omit for all. */
+    connectionIds?: ReadonlySet<string>;
+  },
 ): Promise<ConnectionMetadata[]> {
-  const accounts = await listOwnedConnectionAccounts(db, input);
+  const accounts = (await listOwnedConnectionAccounts(db, input)).filter(
+    (account) => !input.connectionIds || input.connectionIds.has(account.connectionId),
+  );
   const connections: ConnectionMetadata[] = [];
   // The caller may supply a transaction handle (for example, credential
   // rotation). Each metadata read opens a nested RLS savepoint on that same
@@ -839,6 +848,48 @@ export async function visibleMcpAccountConnections(
       : [];
   const workspace = await listConnectionsMetadata(db, input.workspaceId, null);
   return [...workspace.filter((connection) => connection.subjectId === null), ...personal];
+}
+
+/**
+ * `visibleMcpAccountConnections` restricted to exact connection ids, for a live
+ * target fence. The same visibility rules apply (shared workspace accounts;
+ * the entitled owner's own active accounts while the owner still belongs to
+ * the workspace), but unrelated accounts are never read. An id read on the
+ * wrong side, or no longer visible, is simply absent.
+ */
+export async function visibleMcpAccountConnectionsByIds(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
+    workspaceConnectionIds: readonly string[];
+    personalConnectionIds: readonly string[];
+  },
+): Promise<ConnectionMetadata[]> {
+  const workspace: ConnectionMetadata[] = [];
+  // `db` may be one bounded transaction: these reads must not overlap.
+  for (const connectionId of new Set(input.workspaceConnectionIds)) {
+    const connection = await getConnectionMetadata(db, input.workspaceId, connectionId, null);
+    if (connection && connection.subjectId === null) workspace.push(connection);
+  }
+  const personalIds = new Set(input.personalConnectionIds);
+  const personal =
+    input.source.kind === "subject" &&
+    personalIds.size > 0 &&
+    (await ownerStillBelongsToWorkspace(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.source.subjectId,
+    }))
+      ? await listOwnConnectionMetadata(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.source.subjectId,
+          connectionIds: personalIds,
+        })
+      : [];
+  return [...workspace, ...personal];
 }
 
 /**

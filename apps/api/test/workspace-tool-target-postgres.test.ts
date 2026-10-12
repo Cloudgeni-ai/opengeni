@@ -23,6 +23,7 @@ import { accessGrantAuthorizationFromContext, type ApiRouteDeps } from "@opengen
 import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
 import {
   approveWorkspaceToolTarget,
+  createTargetFence,
   invokeWorkspaceToolTarget,
   type TargetGatewayOptions,
 } from "../src/workspace-tool-target";
@@ -112,11 +113,14 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
         });
       const args = kind === "raw" ? { query: "test" } : {};
       const provenance = async (legacy = false) => {
+        // Targeted preparation is always fenced; the fence closes after cleanup.
+        const fence = createTargetFence(deps, authorization, {}, true);
         const prepared = legacy
           ? await prepareWorkspaceToolGatewayForGrant(deps, grant, [identity])
           : await prepareWorkspaceToolGateway(deps, authorization, {
               target: { identity },
               firstPartySettings: "caller",
+              fence,
             });
         try {
           const call = await prepared.toolGateway.prepareCall(
@@ -132,6 +136,7 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
           return { effect: call.effectDigest, authority: call.approvalAuthorityDigest };
         } finally {
           await prepared.close();
+          fence.close();
         }
       };
       try {
@@ -287,7 +292,10 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
     let effects = 0;
     const options: TargetGatewayOptions = {
       authorizeSite: async () => undefined,
-      prepare: async () => {
+      prepare: async (_deps, _authorization, preparation) => {
+        // A hand-built gateway has no connector route; it installs an inert
+        // one because a targeted fence denies until its route is installed.
+        preparation?.fence?.setRoute(async () => undefined);
         const { gateway, catalog } = createWorkspaceToolGateway({
           ...grant,
           generation: 1,

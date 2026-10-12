@@ -188,20 +188,42 @@ Allow-only calls without approval provenance are not generally idempotent.
 Unknown dispatch outcomes never replay automatically.
 
 Only the selected provider is constructed, credentialed, connected or listed.
-Registry/account/integration inventory remains O(N) metadata; target execution
-does not imply constant-time database work. External targets skip unrelated
-model-catalog loading, while first-party handlers retain complete caller settings.
-Live caller, exact pinned Site, metadata and native credential checks run again
-at the installed physical-request boundary, including after awaited native
-preflight. Targeted current-human calls also re-read the selected action policy:
-Allow becoming Ask or Block before physical dispatch prevents the request.
-This does not change frozen worker/Codemode approval decisions. No
-credential cache, sticky session or cross-replica warm-up is required.
+Preparation still reads the registry/account/integration inventory once per
+request (O(N) metadata); target execution does not imply constant-time database
+work. External targets skip unrelated model-catalog loading, while first-party
+handlers retain complete caller settings.
+Each targeted, approval or manifest request owns one live fence
+(`apps/api/src/workspace-tool-target-fence.ts`) over the exact caller, pinned
+Site, selected route and, once decided, the selected action policy. Every
+installed physical provider request evaluates it once, after its last credential
+step (including awaited native preflight), with nothing awaited before dispatch;
+its database reads share one `statement_timeout`-bounded transaction. Before an
+execution-mode credential resolve, which may refresh a token or record use, only
+the caller is checked. The route part reads only the rows that can produce the
+selected servers (their capability installations and explicit `mcpServerId`
+claimants, integrations with those runtime keys, the selected connections under
+the same visibility rules, and the Codex designation only for a Codex target)
+and compares them through the preparation projections, so its cost does not
+grow with unrelated connectors. A verified organization key is re-read in one
+statement without a lock or write (admission alone records use); external
+actors keep their commit authorizer and people their fresh grant. Definition
+disclosure, approval issue, operation begin and the step before execute
+evaluate the fence again. Nothing is cached or shared between physical requests
+or requests, and after the awaited cleanup the fence admits nothing. Allow
+becoming Ask or Block before physical dispatch prevents the request (409 or 403
+when an application step observes it). Authority that
+cannot be read before the deadline is a 503 `tool_authority_unavailable`
+(retryable before operation begin), distinct from a provider's 502
+outcome-unknown; targets the caller cannot see stay `tool_unavailable`. This
+does not change frozen worker/Codemode approval decisions or legacy
+`tools/calls` and catalog requests. No credential cache, sticky session or
+cross-replica warm-up is required.
 `opengeni_tool_target_operations_total`,
-`opengeni_tool_target_duration_seconds` and `Server-Timing: gw-target`
-measure the bounded operation labels without identities or arguments. Compare
-cold replicas at increasing connector counts separately from selected-provider
-latency and metadata assembly cost.
+`opengeni_tool_target_duration_seconds`, `Server-Timing: gw-target` and
+`gw-fence` (summed fence time and evaluation count) measure the bounded
+operation labels without identities or arguments. Compare cold replicas at
+increasing connector counts separately from selected-provider latency and
+metadata assembly cost.
 
 Saved legacy Site bundles use `POST tools/manifest` (at most 256 requested
 identities) through an upgraded host, which translates retained manifest pins

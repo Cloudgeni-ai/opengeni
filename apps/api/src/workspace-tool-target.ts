@@ -22,6 +22,8 @@ import {
   issueToolGatewayApproval,
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
+  WorkspaceArtifactNotFoundError,
+  type Database,
 } from "@opengeni/db";
 import {
   digestCanonicalJson,
@@ -39,14 +41,18 @@ import {
   type PreparedWorkspaceToolGateway,
 } from "./workspace-tool-gateway";
 import { resolveSiteSessionOrigin } from "./site-session-origin";
+import { TargetAuthorityFence, targetFenceCaller } from "./workspace-tool-target-fence";
 
 export type TargetGatewayOptions = {
   signal?: AbortSignal;
+  /** The route's fresh human grant; organization keys and external actors use their own reads. */
   reauthorize?: () => Promise<void>;
   prepare?: typeof prepareWorkspaceToolGateway;
   begin?: typeof beginTargetToolGatewayCall;
   issue?: typeof issueToolGatewayApproval;
   authorizeSite?: typeof requireWorkspaceSiteToolAuthorization;
+  /** Observes the request's fence (statistics), never its authority. */
+  onFence?: (fence: TargetAuthorityFence) => void;
 };
 const unavailable = () => new HTTPException(404, { message: "tool_unavailable" });
 const key = (identity: ToolGatewayIdentity) =>
@@ -99,6 +105,26 @@ async function siteTarget(
   return { identity };
 }
 
+/**
+ * The request's single live fence. The owner closes it strictly after the
+ * awaited preparation cleanup. `targeted` requests must install their route.
+ */
+export function createTargetFence(
+  deps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+  options: TargetGatewayOptions,
+  targeted: boolean,
+): TargetAuthorityFence {
+  const fence = new TargetAuthorityFence({
+    db: deps.db,
+    targeted,
+    caller: targetFenceCaller(deps, authorization, options.reauthorize),
+    signal: options.signal,
+  });
+  options.onFence?.(fence);
+  return fence;
+}
+
 function resolvedTool(
   prepared: PreparedWorkspaceToolGateway,
   target: ToolGatewayTarget,
@@ -125,47 +151,55 @@ async function withTarget<T>(
   use: (
     prepared: PreparedWorkspaceToolGateway,
     tool: ToolGatewayResolvedTool,
-    reauthorize: () => Promise<void>,
+    fence: TargetAuthorityFence,
   ) => Promise<T>,
 ): Promise<T> {
   requireWorkspaceToolGatewayAuthorization(authorization);
   options.signal?.throwIfAborted();
-  await options.reauthorize?.();
-  const target = await siteTarget(deps, authorization, request, options);
-  // Preparation installs this exact callback at credential/physical request
-  // boundaries. A later outer check cannot fence an awaited native preflight.
-  const authorizeTarget = async () => {
-    options.signal?.throwIfAborted();
-    await options.reauthorize?.();
-    if (request.siteArtifactId && request.siteVersionId && "identity" in target)
-      await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
-        deps.db,
-        authorization.grant,
-        {
-          siteArtifactId: request.siteArtifactId,
-          siteVersionId: request.siteVersionId,
-          identity: target.identity,
-        },
-      );
-    options.signal?.throwIfAborted();
-  };
-  const prepared = await (options.prepare ?? prepareWorkspaceToolGateway)(deps, authorization, {
-    target,
-    firstPartySettings: "caller",
-    ...(options.signal ? { signal: options.signal } : {}),
-    reauthorize: authorizeTarget,
-  });
+  const fence = createTargetFence(deps, authorization, options, true);
+  let prepared: PreparedWorkspaceToolGateway | undefined;
   try {
-    options.signal?.throwIfAborted();
-    const tool = resolvedTool(prepared, target);
-    const reauthorize = async () => {
-      await prepared.reauthorize?.();
-      await authorizeTarget();
-    };
-    await reauthorize();
-    return await use(prepared, tool, reauthorize);
+    // Admission: the live caller, then the exact pinned Site entry.
+    await fence.admit();
+    const target = await siteTarget(deps, authorization, request, options);
+    if (request.siteArtifactId && request.siteVersionId && "identity" in target) {
+      const site = {
+        siteArtifactId: request.siteArtifactId,
+        siteVersionId: request.siteVersionId,
+        identity: target.identity,
+      };
+      fence.setSite(async (db) => {
+        await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
+          db,
+          authorization.grant,
+          site,
+        );
+      });
+    }
+    let tool: ToolGatewayResolvedTool;
+    try {
+      // Preparation installs the route part before any provider is built and
+      // evaluates the fence once at every physical-request boundary.
+      prepared = await (options.prepare ?? prepareWorkspaceToolGateway)(deps, authorization, {
+        target,
+        firstPartySettings: "caller",
+        ...(options.signal ? { signal: options.signal } : {}),
+        fence,
+      });
+      options.signal?.throwIfAborted();
+      tool = resolvedTool(prepared, target);
+    } catch (error) {
+      // A physical boundary that denied (or could not read) authority drops an
+      // optional connector silently or fails a required one; report that
+      // outcome instead of an opaque missing tool.
+      return await fence.settle(error);
+    }
+    return await use(prepared, tool, fence);
   } finally {
-    await closeTargetPreparation(deps, prepared);
+    if (prepared) await closeTargetPreparation(deps, prepared);
+    // Strictly after the awaited cleanup (whose session DELETE stays fenced):
+    // nothing is authorized once the request scope ends.
+    fence.close();
   }
 }
 
@@ -189,7 +223,11 @@ export async function resolveWorkspaceToolTarget(
   request: ToolGatewayResolveRequest,
   options: TargetGatewayOptions = {},
 ) {
-  return await withTarget(deps, authorization, request, options, async (_prepared, tool) => tool);
+  return await withTarget(deps, authorization, request, options, async (_prepared, tool, fence) => {
+    // The definition is disclosed only while the complete fence still holds.
+    await fence.check({ retryable: true });
+    return tool;
+  });
 }
 
 function assertDefinition(tool: ToolGatewayResolvedTool, expected: string | undefined) {
@@ -240,72 +278,73 @@ export async function invokeWorkspaceToolTarget(
   request: ToolGatewayInvokeRequest,
   options: TargetGatewayOptions = {},
 ) {
-  return await withTarget(
-    deps,
-    authorization,
-    request,
-    options,
-    async (prepared, tool, reauthorize) => {
-      assertDefinition(tool, request.expectedDefinitionDigest);
-      const meta: Record<string, unknown> = { approvalConfirmed: true, targetedCall: true };
-      let call: PreparedToolGatewayCall;
-      try {
-        call = await prepared.toolGateway.prepareCall(
-          {
-            operationId: request.operationId,
-            catalogDigest: prepared.toolGatewayCatalog.digest,
-            identity: tool.entry.identity,
-            arguments: request.arguments,
-            caller: { kind: "http", subjectId: authorization.grant.subjectId },
-          },
-          { transportMeta: meta, ...(options.signal ? { signal: options.signal } : {}) },
-        );
-        await reauthorize();
-        const approvalRequired =
-          call.approvalDecision === "ask" ||
-          (call.approvalDecision === undefined && tool.entry.approval === "human");
-        const accepted = await (options.begin ?? beginTargetToolGatewayCall)(deps.db, {
-          ...authorization.grant,
+  return await withTarget(deps, authorization, request, options, async (prepared, tool, fence) => {
+    assertDefinition(tool, request.expectedDefinitionDigest);
+    const meta: Record<string, unknown> = { approvalConfirmed: true, targetedCall: true };
+    let call: PreparedToolGatewayCall;
+    try {
+      call = await prepared.toolGateway.prepareCall(
+        {
           operationId: request.operationId,
+          catalogDigest: prepared.toolGatewayCatalog.digest,
           identity: tool.entry.identity,
-          targetBindingDigest: approvalBinding(call, request),
-          argumentsDigest: digestCanonicalJson(request.arguments),
-          approvalAuthorityDigest: call.approvalAuthorityDigest,
-          approvalRequired,
-          ...(request.approvalToken ? { tokenHash: hashToken(request.approvalToken) } : {}),
-        });
-        if (!accepted) throw new HTTPException(409, { message: "tool_gateway_approval_required" });
-        meta.approvalConfirmed = approvalRequired || request.approvalToken !== undefined;
-      } catch (error) {
-        approvalError(error);
-      }
-      const origin =
-        request.siteArtifactId && request.siteVersionId
-          ? await resolveSiteSessionOrigin(
-              deps.db,
-              authorization.grant.workspaceId,
-              request.siteArtifactId,
-              request.siteVersionId,
-            )
-          : null;
-      await reauthorize();
-      // Once dispatched, even output validation or cancellation cannot prove nonexecution.
-      try {
-        const result = await (origin
-          ? withSiteSessionOrigin(origin, () => call.execute())
-          : call.execute());
-        return ToolGatewayInvokeResponse.parse({ operationId: request.operationId, tool, result });
-      } catch {
-        throw new ApiHttpError(502, {
-          code: "upstream_unavailable",
-          message: "The tool call ended without a confirmed result. Reconcile before retrying.",
-          retryable: false,
-          outcomeUnknown: true,
-          details: { code: "tool_outcome_unknown" },
-        });
-      }
-    },
-  );
+          arguments: request.arguments,
+          caller: { kind: "http", subjectId: authorization.grant.subjectId },
+        },
+        { transportMeta: meta, ...(options.signal ? { signal: options.signal } : {}) },
+      );
+      // Caller, Site, route and the decided action policy, before admission.
+      await fence.check({ retryable: true });
+      const approvalRequired =
+        call.approvalDecision === "ask" ||
+        (call.approvalDecision === undefined && tool.entry.approval === "human");
+      const accepted = await (options.begin ?? beginTargetToolGatewayCall)(deps.db, {
+        ...authorization.grant,
+        operationId: request.operationId,
+        identity: tool.entry.identity,
+        targetBindingDigest: approvalBinding(call, request),
+        argumentsDigest: digestCanonicalJson(request.arguments),
+        approvalAuthorityDigest: call.approvalAuthorityDigest,
+        approvalRequired,
+        ...(request.approvalToken ? { tokenHash: hashToken(request.approvalToken) } : {}),
+      });
+      if (!accepted) throw new HTTPException(409, { message: "tool_gateway_approval_required" });
+      meta.approvalConfirmed = approvalRequired || request.approvalToken !== undefined;
+    } catch (error) {
+      approvalError(error);
+    }
+    const origin =
+      request.siteArtifactId && request.siteVersionId
+        ? await resolveSiteSessionOrigin(
+            deps.db,
+            authorization.grant.workspaceId,
+            request.siteArtifactId,
+            request.siteVersionId,
+          )
+        : null;
+    // The last application-level fence before dispatch. A remote provider
+    // request is fenced again at its own physical boundary.
+    try {
+      await fence.check({ retryable: false });
+    } catch (error) {
+      throwWorkspaceToolGatewayHttpError(error);
+    }
+    // Once dispatched, even output validation or cancellation cannot prove nonexecution.
+    try {
+      const result = await (origin
+        ? withSiteSessionOrigin(origin, () => call.execute())
+        : call.execute());
+      return ToolGatewayInvokeResponse.parse({ operationId: request.operationId, tool, result });
+    } catch {
+      throw new ApiHttpError(502, {
+        code: "upstream_unavailable",
+        message: "The tool call ended without a confirmed result. Reconcile before retrying.",
+        retryable: false,
+        outcomeUnknown: true,
+        details: { code: "tool_outcome_unknown" },
+      });
+    }
+  });
 }
 
 export async function approveWorkspaceToolTarget(
@@ -319,7 +358,7 @@ export async function approveWorkspaceToolTarget(
     authorization,
     { ...request, target: { identity: request.identity } },
     options,
-    async (prepared, tool, reauthorize) => {
+    async (prepared, tool, fence) => {
       assertDefinition(tool, request.expectedDefinitionDigest);
       try {
         const call = await prepared.toolGateway.prepareCall(
@@ -340,7 +379,7 @@ export async function approveWorkspaceToolTarget(
           !(call.approvalDecision === undefined && tool.entry.approval === "human")
         )
           throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
-        await reauthorize();
+        await fence.check({ retryable: true });
         const approvalToken = `ogta_${randomBytes(32).toString("base64url")}`;
         const expiresAt = new Date(Date.now() + 5 * 60_000);
         await (options.issue ?? issueToolGatewayApproval)(deps.db, {
@@ -377,45 +416,67 @@ export async function resolveWorkspaceToolManifest(
 ) {
   requireWorkspaceToolGatewayAuthorization(authorization);
   options.signal?.throwIfAborted();
-  await options.reauthorize?.();
   const identities = [
     ...new Map(request.identities.map((identity) => [key(identity), identity])).values(),
   ];
-  const authorizeManifest = async () => {
-    options.signal?.throwIfAborted();
-    await options.reauthorize?.();
-    if (identities.length === 0 && request.siteArtifactId && request.siteVersionId) {
+  const siteArtifactId = request.siteArtifactId;
+  const siteVersionId = request.siteVersionId;
+  // Every requested identity must still be on the pinned Site version; with
+  // none requested, the version itself must still be the active one.
+  const authorizeSite = async (db: Database) => {
+    if (!siteArtifactId || !siteVersionId) return;
+    if (identities.length === 0) {
+      let status: string;
+      let versionId: string;
       try {
-        const { status, version } = await getWorkspaceArtifactContentRef(
-          deps.db,
+        const content = await getWorkspaceArtifactContentRef(
+          db,
           authorization.grant.workspaceId,
-          request.siteArtifactId,
-          request.siteVersionId,
+          siteArtifactId,
+          siteVersionId,
         );
-        if (status !== "active" || version.id !== request.siteVersionId) throw unavailable();
-      } catch {
-        throw new HTTPException(403, { message: "site_tool_not_authorized" });
+        status = content.status;
+        versionId = content.version.id;
+      } catch (error) {
+        if (error instanceof WorkspaceArtifactNotFoundError)
+          throw new HTTPException(403, { message: "site_tool_not_authorized" });
+        throw error;
       }
+      if (status !== "active" || versionId !== siteVersionId)
+        throw new HTTPException(403, { message: "site_tool_not_authorized" });
     }
     for (const identity of identities)
-      await siteTarget(deps, authorization, { ...request, target: { identity } }, options);
-    options.signal?.throwIfAborted();
+      await (options.authorizeSite ?? requireWorkspaceSiteToolAuthorization)(
+        db,
+        authorization.grant,
+        { siteArtifactId, siteVersionId, identity },
+      );
   };
-  await authorizeManifest();
-  const prepared = await (options.prepare ?? prepareWorkspaceToolGateway)(deps, authorization, {
-    allowedIdentities: identities,
-    firstPartySettings: "caller",
-    ...(options.signal ? { signal: options.signal } : {}),
-    reauthorize: authorizeManifest,
-  });
+  const fence = createTargetFence(deps, authorization, options, false);
+  let prepared: PreparedWorkspaceToolGateway | undefined;
   try {
-    options.signal?.throwIfAborted();
-    await prepared.reauthorize?.();
-    await authorizeManifest();
-    const tools = prepared.toolGatewayCatalog.entries.map((entry) => ({
+    // Admission: the live caller, then the pinned Site entries.
+    await fence.admit();
+    await authorizeSite(deps.db);
+    fence.setSite(authorizeSite);
+    try {
+      prepared = await (options.prepare ?? prepareWorkspaceToolGateway)(deps, authorization, {
+        allowedIdentities: identities,
+        firstPartySettings: "caller",
+        ...(options.signal ? { signal: options.signal } : {}),
+        fence,
+      });
+      options.signal?.throwIfAborted();
+      // Definitions are disclosed only while the fence still holds.
+      await fence.check({ retryable: true });
+    } catch (error) {
+      return await fence.settle(error);
+    }
+    const catalog = prepared.toolGatewayCatalog;
+    const tools = catalog.entries.map((entry) => ({
       version: 1 as const,
       entry,
-      definitionDigest: digestToolGatewayDefinition(prepared.toolGatewayCatalog, entry),
+      definitionDigest: digestToolGatewayDefinition(catalog, entry),
     }));
     return {
       version: 1 as const,
@@ -423,6 +484,7 @@ export async function resolveWorkspaceToolManifest(
       tools,
     };
   } finally {
-    await closeTargetPreparation(deps, prepared);
+    if (prepared) await closeTargetPreparation(deps, prepared);
+    fence.close();
   }
 }

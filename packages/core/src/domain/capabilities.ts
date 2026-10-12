@@ -942,6 +942,8 @@ export async function settingsWithEnabledCapabilityMcpServers(
     subjectId?: string;
     personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /** Every enabled capability server read, before static-id shadowing. */
+    onResolvedCapabilityServers?: (servers: readonly EnabledMcpCapabilityServer[]) => void;
     /**
      * The Codex Apps designation the caller already resolves (a claim reads
      * its cutover once), or what it knows for resolving it here.
@@ -968,6 +970,53 @@ export async function settingsWithEnabledCapabilityMcpServers(
         : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {}),
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
+  options?.onResolvedCapabilityServers?.(enabled);
+  return settingsWithCodexAppsMcpServer(
+    settingsWithApiIntegrationServers(
+      settingsWithMcpCapabilityServers(settings, enabled),
+      apiIntegrations,
+    ),
+    codexAppsDesignation !== null,
+  );
+}
+
+/**
+ * `settingsWithEnabledCapabilityMcpServers` for a live target fence: only the
+ * rows that can produce `serverIds`. That is the capability installations that
+ * produced them at preparation plus any catalog item explicitly claiming one of
+ * those ids (shadowing), integrations with exactly those runtime keys (read
+ * with the same subject visibility), and the Codex designation only when Codex
+ * Apps itself is a target. Static servers come from `settings`, unchanged.
+ * Restricted to `serverIds`, the result equals the complete projection.
+ */
+export async function settingsWithEnabledCapabilityMcpServersForTargets(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  options: {
+    subjectId: string;
+    accountId: string;
+    serverIds: readonly string[];
+    capabilityIds: readonly string[];
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+  },
+): Promise<Settings> {
+  const serverIds = new Set(options.serverIds);
+  // One RLS scope at a time: `db` may be a single bounded transaction.
+  const enabled = (
+    await listEnabledMcpCapabilityServers(db, workspaceId, {
+      capabilityIds: options.capabilityIds,
+      serverIds: [...serverIds],
+    })
+  ).filter((server) => serverIds.has(server.id));
+  const apiIntegrations = await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [
+    ...serverIds,
+  ]);
+  const codexAppsDesignation =
+    settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
+      ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })
+      : null;
+  options.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
     settingsWithApiIntegrationServers(
       settingsWithMcpCapabilityServers(settings, enabled),

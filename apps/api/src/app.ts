@@ -15,6 +15,7 @@ import {
   approveWorkspaceToolTarget,
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
+import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
 import { recordWorkspaceToolTargetOperation } from "./workspace-tool-gateway-observability";
 import {
   CLIENT_ERRORS_PATH,
@@ -1868,8 +1869,11 @@ export function createAppComposition(deps: AppDependencies): {
         workspaceId,
         "workspace:read",
       );
+      let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
+        // Human callers keep their fresh grant. Organization keys and external
+        // actors are re-read by the request fence itself.
         reauthorize: async () => {
           const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
           const original = authorization.grant;
@@ -1880,6 +1884,9 @@ export function createAppComposition(deps: AppDependencies): {
             original.permissions.some((permission) => !hasPermission(live.permissions, permission))
           )
             throw new HTTPException(403, { message: "tool_access_changed" });
+        },
+        onFence: (created: TargetAuthorityFence) => {
+          fence = created;
         },
       };
       const body: unknown = await c.req.json().catch(() => null);
@@ -1927,7 +1934,10 @@ export function createAppComposition(deps: AppDependencies): {
                   );
         c.header(
           "server-timing",
-          `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"`,
+          `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"` +
+            (fence
+              ? `, gw-fence;dur=${fence.stats.durationMs.toFixed(1)};desc="${fence.stats.evaluations}"`
+              : ""),
         );
         outcome = "ok";
         return c.json(response, operation === "target-approvals" ? 201 : 200);
