@@ -16,8 +16,6 @@ import {
   BrowserActionCommand,
   BrowserActionReceipt,
   BrowserClipboard,
-  BrowserPasskeySyncRequest,
-  BrowserPasskeySyncResponse,
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
@@ -48,8 +46,6 @@ import {
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserActionReceipt as BrowserActionReceiptValue,
   type BrowserClipboard as BrowserClipboardValue,
-  type BrowserPasskeySyncRequest as BrowserPasskeySyncRequestValue,
-  type BrowserPasskeySyncResponse as BrowserPasskeySyncResponseValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
@@ -1853,40 +1849,6 @@ export class BrowserControlSessionClient {
       throw error;
     }
     return BrowserActionReceipt.parse(data);
-  }
-
-  /** API-only passkey path: loads vault passkeys into the session's virtual
-   * authenticators and drains registration and sign-count events. Private keys
-   * travel both ways; never pass this through model-visible surfaces or logs. */
-  async passkeySync(
-    request: BrowserPasskeySyncRequestValue,
-  ): Promise<BrowserPasskeySyncResponseValue> {
-    const parsed = BrowserPasskeySyncRequest.parse(request);
-    if (
-      parsed.browserSessionId !== this.reference.browserSessionId ||
-      parsed.controllerGeneration !== this.reference.controllerGeneration
-    ) {
-      throw new BrowserControlProtocolError(
-        "passkey sync targets another browser controller binding",
-      );
-    }
-    const response = BrowserPasskeySyncResponse.parse(
-      await this.parent.requestForSession({
-        method: "POST",
-        path: this.path("passkeys/sync"),
-        token: this.controlToken,
-        body: parsed,
-      }),
-    );
-    if (
-      response.browserSessionId !== this.reference.browserSessionId ||
-      response.controllerGeneration !== this.reference.controllerGeneration
-    ) {
-      throw new BrowserControlProtocolError(
-        "browser controller returned passkeys for another binding",
-      );
-    }
-    return response;
   }
 
   /** API-broker-only file authority path. Signed read URLs are materialized by
