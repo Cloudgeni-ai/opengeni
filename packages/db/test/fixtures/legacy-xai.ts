@@ -1,11 +1,12 @@
 /**
  * TEST ONLY: the retired SuperGrok (xAI) legacy account repository, used to
- * construct pre-cutover database states for the 0721 cutover tests. Snapshot
- * source: packages/db/src/xai-subscription.ts at
- * de002bb3260141048dcbb671d6fbf0f554278fe3, deleted with the legacy SuperGrok
- * runtime (M4 X4). Never import this module from production: the runtime
- * no-legacy guard enforces that boundary. After the 0721 receipt every write it
- * attempts is refused by the receipt-gated policies.
+ * construct pre-cutover database states for the SuperGrok cutover tests.
+ * Snapshot source: packages/db/src/xai-subscription.ts as it stood
+ * immediately before the legacy SuperGrok runtime was deleted (M4 X4; the
+ * deletion commit moved that file here). Never import this module from
+ * production: the runtime no-legacy guard enforces that boundary. After the
+ * SuperGrok cutover receipt every write it attempts is refused by the
+ * receipt-gated policies.
  */
 import * as schema from "../../src/schema";
 import { createSubscriptionAccountRepository } from "../../src/subscription-account-repository";

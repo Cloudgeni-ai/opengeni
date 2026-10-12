@@ -2,10 +2,10 @@ import type { LegacySubscriptionRetirement } from "./types";
 
 /**
  * SuperGrok (`xai`) decision state retired by M4 X4, after the drained X3
- * cutover (0721) moved it onto the shared subscription core. The five legacy
+ * cutover migration moved it onto the shared subscription core. The five legacy
  * tables stay for forensics (read-only once the receipt exists), their
  * routines stay until the retirement step drops them, and the codec stage
- * with the legacy secret decoder it calls stays for as long as 0721 ships:
+ * with the legacy secret decoder it calls stays for as long as that migration ships:
  * a fresh install and a one-window upgrade still run it.
  *
  * X4 deleted the v1 SuperGrok repository instance and every reader and
@@ -174,7 +174,7 @@ export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
         "moveXaiCredentialRows",
       ],
       reason:
-        "0721 codec stage: decodes the legacy rows before the atomic scrub and receipt; never a request fallback.",
+        "SuperGrok cutover codec stage: decodes the legacy rows before the atomic scrub and receipt; never a request fallback.",
     },
   },
 };

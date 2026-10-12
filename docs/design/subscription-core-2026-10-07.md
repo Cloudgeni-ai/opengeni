@@ -4426,9 +4426,10 @@ connect writer gains `credentialFormat` and `personal`.
   `*_authority_live`, `*_pool_visible`) and the synthetic subject.
   Exceptions: the schema declarations, the posture inventories
   (`FORCE_RLS_TABLES`, `SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES` and the
-  routine-signature constants of the posture contract) and the 0719 codec
-  stage, which reads the legacy rows before its scrub; the legacy secret
-  decoder it calls stays for as long as 0719 ships.
+  routine-signature constants of the posture contract) and the SuperGrok
+  cutover migration's codec stage, which reads the legacy rows before its
+  scrub; the legacy secret decoder it calls stays for as long as that
+  migration ships.
 - **What X4 deletes.** The xAI selector arm (the legacy branch after the
   provider's receipt check), the factory repository instance for `xai` and
   every v1 SuperGrok reader and writer that used it (connect, disconnect,
@@ -4458,10 +4459,28 @@ connect writer gains `credentialFormat` and `personal`.
     `scoped-subscription-capacity.ts` and serves Claude only.
   - Selector arm: every SuperGrok entry point (worker turn build and video,
     API status, connect and pool routes, transcription, realtime, model
-    connection access, catalog readiness, default session model and billing
-    funding) treats any route other than `core` as it treats `maintenance`:
-    it fails closed. The provider-neutral route readers are unchanged; the
-    API routes share `requireSubscriptionCoreRoute`.
+    connection access, catalog readiness and default session model) treats
+    any route other than `core` as it treats `maintenance`: it fails
+    closed. The provider-neutral route readers are unchanged; the API routes
+    share `requireSubscriptionCoreRoute`, which resolves the organization
+    (so authorization runs) before its typed maintenance refusal, also
+    without a receipt. Billing funding fails closed as unfunded rather than
+    as maintenance: off `core` a SuperGrok model is never funded without
+    credits, so admission may refuse it for credits or admit it and leave
+    the worker to refuse it with the maintenance error; no SuperGrok work is
+    funded off `core` either way. A typed "provider paused" admission
+    refusal would add a denial code to every admission consumer (goal
+    pause reasons, scheduled refusals, automations) for a per-organization
+    maintenance state; it is left to a later change.
+  - Chat Completions: the stateless single-call API neither lists nor
+    serves SuperGrok subscription models (`model_not_found`), because the
+    core's single-call `completion` kind stays Codex-only (PR 0b's kinds).
+    Before X4 the same call already answered 503 after the cutover, since
+    the deleted legacy path read only scrubbed rows.
+  - Video: a non-terminal SuperGrok video operation whose envelope is not a
+    shared-core connection reference (one the cutover did not convert, or a
+    restored row) is never decoded; like an unavailable connection it waits
+    until its recovery deadline and then ends.
   - Shared factory: `subscription-account-repository.ts` is parameterized by
     its provider options and names no `xai` routine; Claude's instance and
     `ScopedSubscriptionTurnLease` are unchanged.
@@ -4469,8 +4488,8 @@ connect writer gains `credentialFormat` and `personal`.
     (`{ version: 1, scope: "workspace" }`) and copied verbatim on derived
     rows; no reader derives it from live state or decides on it.
   - Kept, with reasons: the legacy secret decoder and the codec stage in
-    `xai-subscription-core-cutover.ts` (0721 still ships); the schema,
-    posture inventory and routine signatures (forensic tables and their
+    `xai-subscription-core-cutover.ts` (the SuperGrok cutover migration
+    still ships); the schema, posture inventory and routine signatures (forensic tables and their
     grants until the retirement step); `@opengeni/xai-subscription` (the
     protocol package the core adapter uses); the worker `xai-auth.ts`
     helper, now core-only; `XaiSubscriptionAccountMetadata` (the public
@@ -4478,10 +4497,13 @@ connect writer gains `credentialFormat` and `personal`.
     build them through the test-only `packages/db/test/fixtures/legacy-xai.ts`.
   - Guard: the SuperGrok entry additionally lists the deleted repository,
     waiter, quota, authorization and video-envelope names, the deleted
-    modules (relative specifiers only, so `@opengeni/xai-subscription`, the
-    transcription provider and the `*-core*` modules stay importable) and
-    `legacy-xai` as a test-only fixture. Its exceptions are unchanged:
-    schema declarations, posture inventories and the 0721 codec stage.
+    module files (`deletedPaths`: relative specifiers are resolved from the
+    importing file, and templates without substitutions count as literals,
+    so `@opengeni/xai-subscription`, the transcription provider and the
+    `*-core*` modules stay importable while any `./` or `../` form of a
+    deleted file is refused) and `legacy-xai` as a test-only fixture. Its
+    exceptions are unchanged: schema declarations, posture inventories and
+    the SuperGrok cutover migration's codec stage.
 
 #### Verification plan
 
