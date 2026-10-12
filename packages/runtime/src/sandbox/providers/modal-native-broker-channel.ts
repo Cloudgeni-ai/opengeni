@@ -79,6 +79,18 @@ export class ModalNativeBrokerChannel implements NativeBrokerChannel {
     if (typeof cursor !== "string" || !cursor.length || cursor.length > 200)
       throw new Error("Invalid native broker output cursor");
     const bounded = this.signal(signal);
+    const task = await this.port.sandboxGetTaskId(
+      { sandboxId: this.sandboxId, timeout: 10, waitUntilReady: true },
+      { signal: bounded },
+    );
+    // Page responses identify the sandbox, not its task. Do not relabel them
+    // with a caller-supplied task without checking the authenticated provider.
+    // A terminal exact task may still have retained output; it is not a new
+    // input target and this read does not certify command settlement.
+    if (task.taskId !== this.taskId)
+      throw new Error("Native broker initial task no longer matches");
+    bounded.throwIfAborted();
+    if (this.closed) throw new Error("Native broker channel is closed");
     for await (const page of this.port.sandboxGetLogs(
       {
         sandboxId: this.sandboxId,

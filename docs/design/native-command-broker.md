@@ -97,8 +97,8 @@ This is request binding and lifecycle ordering, not provider qualification.
 Neither the plan nor its in-memory proof grants command authority or verifies
 the initial stream. Application code does not yet select the opt-in. The frozen
 cohort/qualified image decision, durable plan/receipt binding, authenticated task
-and initial stdout/stderr verification, journal registration/recovery and session
-adapter must be composed before activation. Fake-provider lifecycle tests do not
+and initial stdout/stderr verification, the verified-prefix journal composition
+and session adapter must be connected before activation. Fake-provider lifecycle tests do not
 replace that physical proof, and this recipe cannot enroll an old warm sandbox
 or authorize a snapshot derivation.
 
@@ -291,6 +291,9 @@ rejects conflicting pages and sequence gaps, and keeps provider EOF separate
 from command settlement. Real Modal V1 cursor-less EOF batches preserve the
 last data cursor and gain a separate observation. The independently read initial
 stderr stream cannot advance that cursor or claim its EOF.
+The Modal channel checks the provider's exact task identity before opening
+stdout. A terminal exact task may still be read; a missing or changed task is
+never relabelled with the persisted task ID or interpreted as command exit.
 
 The database adapter in `packages/db/src/native-command-broker-transport.ts`
 and runtime coordinator in `native-command-broker-transport.ts` implement the
@@ -300,6 +303,22 @@ warming lease, creation operation, provider namespace and physical instance;
 the initial state hash and binding cannot be changed by registration replay.
 Neither registration nor a supplied bootstrap-evidence hash certifies the
 bootstrap or grants command authority.
+
+`native-command-broker-bootstrap-capture.ts` reads a bounded initial hello and
+complete artifact prefix before journal registration. It accepts only the exact
+initial stdout identity, no EOF or trailing partial frame, and sends no input or
+ACK. The core's `registerCapturedNativeBrokerBootstrap` verifies actual bytes
+against the independent artifact pin, then commits the complete frame/page
+receipts and their cursor with the attributed transport in one transaction.
+Registration retries verify the identical retained prefix and never rewind
+progressed state or fill missing receipts into an existing row. Recovery first
+checks the exact scoped durable binding and re-verifies its
+retained bytes; it does not require old provider pages to remain available.
+Missing or conflicting committed evidence fails closed without recapture.
+The read-only capture has a 30-second observation deadline, 128-page and 1-MiB bounds; these do
+not limit the broker or command lifetime. Initial stderr, creation provenance
+and qualification remain separate gates. The returned journal is not command
+authority and no application lifecycle selects this composition yet.
 
 Each database operation locks the lease before the scoped broker row. Input
 reservations, immutable unique request receipts and state changes commit
@@ -453,7 +472,8 @@ The opt-in local static-ELF/real-PostgreSQL test in
 `packages/core/test/native-command-broker-transport.integration.test.ts` runs
 with `OPENGENI_NATIVE_BROKER_LOCAL=1` after building the static artifact with
 `make -C agent/native/command-supervisor test-static`. It checks unknown
-dispatch, exact replay, writer takeover, duplicate-release refusal, atomically
+dispatch, verified initial-prefix registration without a placeholder evidence
+hash, exact replay, writer takeover, duplicate-release refusal, atomically
 admitted binary stdin,
 canonical receipt-before-ACK, atomic retained output and independent exit using
 the actual broker. It also exercises the retained controller against a second

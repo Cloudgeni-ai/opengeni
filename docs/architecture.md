@@ -62,6 +62,11 @@ coordinator applies framing/replay rules and core composes the two packages.
 `native-command-broker-driver.ts` joins committed intent/capture with the
 separately owned Modal initial-process channel; broker bootstrap and per-command
 projection readers verify distinct artifact, receipt, output and exit facts.
+`native-command-broker-bootstrap-capture.ts` verifies a bounded read-only initial
+prefix before registration. Core commits its complete frame/page receipts and
+cursor with the transport atomically; exact registration replay never rewinds
+progress or retrofits missing evidence. This does not authenticate creation,
+verify initial stderr or admit commands.
 `retained-provider-commands.ts` atomically captures the versioned broker locator
 and session output under the canonical native receipt/holder/settlement guards;
 the task-router adapter explicitly refuses that separate locator.

@@ -31,9 +31,13 @@ import {
   initialNativeBrokerCommandSnapshot,
   projectNativeBrokerCommand,
   NativeBrokerRetainedCommand,
+  captureNativeBrokerBootstrap,
 } from "@opengeni/runtime/sandbox";
 import { encodeNativeBrokerCommandDefinition } from "../../runtime/src/sandbox/providers/native-command-broker-definition";
-import { createDurableNativeBrokerTransport } from "../src/native-command-broker-transport";
+import {
+  createDurableNativeBrokerTransport,
+  registerCapturedNativeBrokerBootstrap,
+} from "../src/native-command-broker-transport";
 import {
   encodeNativeBrokerFrame,
   NativeBrokerFrameDecoder,
@@ -125,6 +129,239 @@ async function fixture(register = true) {
   return { binding, initial, store, service, sessionId: session.id };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+async function bootstrapFixture() {
+  const f = await fixture(false);
+  const binary = Buffer.alloc(64, 17);
+  const pin = {
+    artifactSha256: createHash("sha256").update(binary).digest("hex"),
+    byteSize: binary.length,
+    target: "linux-amd64" as const,
+  };
+  const bodies = [
+    {
+      kind: "hello" as const,
+      payload: Buffer.from(
+        JSON.stringify({
+          protocol: "native-command-broker-v1",
+          sealedExec: "execveat",
+          pipeCapability: "native-subreaper-broker-channel-v1",
+          ptyCapability: "native-subreaper-broker-channel-pty-v1",
+          artifact: {
+            byteSize: binary.length,
+            target: pin.target,
+            seals: 15,
+            device: "5",
+            inode: "20",
+          },
+        }),
+      ),
+    },
+    { kind: "artifact" as const, payload: binary },
+  ];
+  const text = Buffer.concat(
+    bodies.map((body, index) =>
+      encodeNativeBrokerFrame({
+        direction: "response",
+        brokerId: f.binding.brokerId,
+        ownerEpoch: 1,
+        sequence: index + 1,
+        requestId: f.binding.brokerId,
+        commandId: null,
+        offset: 0,
+        ...body,
+      }),
+    ),
+  ).toString("ascii");
+  const initialPage = page(f, text, "1-0");
+  const channel = {
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    async *output() {
+      yield initialPage;
+    },
+  };
+  const captured = await captureNativeBrokerBootstrap(channel, f.binding.brokerId, pin);
+  Object.assign(f.binding, {
+    artifactSha256: pin.artifactSha256,
+    bootstrapEvidenceSha256: captured.bootstrap.transcriptSha256,
+  });
+  return { f, pin, channel, captured };
+}
+
+test("initial bootstrap and all receipts commit together, survive concurrent replay and never rewind", async () => {
+  const { f, pin, channel, captured } = await bootstrapFixture();
+  const results = await Promise.all(
+    [1, 2].map(() =>
+      registerCapturedNativeBrokerBootstrap(client.db, key, f.binding, channel, pin),
+    ),
+  );
+  expect(results[0]!.binding).toEqual(f.binding);
+  expect(results[1]!.bootstrap).toEqual(captured.bootstrap);
+  const journal = results[0]!.journal;
+  expect(await journal.read()).toEqual(captured.initialState);
+  expect(await readNativeBrokerBootstrap(f.service(), pin)).toEqual(captured.bootstrap);
+  const entries = await database.admin`SELECT kind, count(*)::int AS count
+    FROM native_command_broker_entries WHERE broker_id=${f.binding.brokerId} GROUP BY kind ORDER BY kind`;
+  expect(entries).toEqual([
+    { kind: "frame", count: 2 },
+    { kind: "page", count: 1 },
+  ]);
+  const writerId = crypto.randomUUID();
+  await journal.claimWriter(writerId);
+  await journal.reserve(writerId, 1, {
+    requestId: crypto.randomUUID(),
+    commandId: null,
+    kind: "fence",
+    offset: 0,
+    payload: new Uint8Array(),
+  });
+  const progressed = await journal.read();
+  await registerCapturedNativeBrokerBootstrap(
+    client.db,
+    key,
+    f.binding,
+    {
+      ...channel,
+      output() {
+        throw new Error("initial provider pages no longer available");
+      },
+    },
+    pin,
+  );
+  expect(await journal.read()).toEqual(progressed);
+});
+
+test("initial entry insertion failure rolls back the transport and every receipt", async () => {
+  const { f, captured } = await bootstrapFixture();
+  // This exact fixture owns the isolated database. The conditional trigger
+  // injects a real SQL failure after transport insertion, not pre-validation.
+  await database.admin.unsafe(`CREATE FUNCTION fixture_bootstrap_insert_failure() RETURNS trigger
+    LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.broker_id = '${f.binding.brokerId}'::uuid AND NEW.kind = 'frame' AND NEW.sequence = 2 THEN
+        RAISE EXCEPTION 'fixture bootstrap insert failure';
+      END IF; RETURN NEW; END $$;
+    CREATE TRIGGER fixture_bootstrap_insert_failure BEFORE INSERT ON native_command_broker_entries
+    FOR EACH ROW EXECUTE FUNCTION fixture_bootstrap_insert_failure()`);
+  try {
+    const failure = await registerNativeBrokerTransport(
+      client.db,
+      key,
+      f.binding,
+      captured.initialState,
+      captured.entries,
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).cause).toMatchObject({
+      message: "fixture bootstrap insert failure",
+      code: "P0001",
+    });
+    expect(
+      await database.admin`SELECT id FROM native_command_broker_transports WHERE id=${f.binding.brokerId}`,
+    ).toHaveLength(0);
+    expect(
+      await database.admin`SELECT entry_key FROM native_command_broker_entries WHERE broker_id=${f.binding.brokerId}`,
+    ).toHaveLength(0);
+  } finally {
+    await database.admin
+      .unsafe(`DROP TRIGGER fixture_bootstrap_insert_failure ON native_command_broker_entries;
+      DROP FUNCTION fixture_bootstrap_insert_failure()`);
+  }
+  await registerNativeBrokerTransport(
+    client.db,
+    key,
+    f.binding,
+    captured.initialState,
+    captured.entries,
+  );
+  expect((await f.service().framesAfter(0)).frames).toHaveLength(2);
+});
+
+test("registration cannot retrofit omitted bootstrap receipts into an existing row", async () => {
+  const { f, captured, channel, pin } = await bootstrapFixture();
+  await registerNativeBrokerTransport(client.db, key, f.binding, captured.initialState);
+  await expect(
+    registerNativeBrokerTransport(
+      client.db,
+      key,
+      f.binding,
+      captured.initialState,
+      captured.entries,
+    ),
+  ).rejects.toThrow("fenced");
+  let providerReads = 0;
+  await expect(
+    registerCapturedNativeBrokerBootstrap(
+      client.db,
+      key,
+      f.binding,
+      {
+        ...channel,
+        output() {
+          providerReads++;
+          throw new Error("must not retrofit provider evidence");
+        },
+      },
+      pin,
+    ),
+  ).rejects.toThrow("durable transport is inconsistent or fenced");
+  expect(providerReads).toBe(0);
+  expect(
+    await database.admin`SELECT entry_key FROM native_command_broker_entries WHERE broker_id=${f.binding.brokerId}`,
+  ).toHaveLength(0);
+});
+
+test("bootstrap registration rejects incomplete, changed, duplicate and advanced evidence before mutation", async () => {
+  const { f, pin, channel, captured } = await bootstrapFixture();
+  for (const entries of [
+    captured.entries.slice(1),
+    [...captured.entries, captured.entries[0]!],
+    captured.entries.map((entry, index) =>
+      index ? entry : { ...entry, value: entry.value + "x" },
+    ),
+    captured.entries.map((entry) => (entry.kind === "page" ? { ...entry, key: "other" } : entry)),
+  ]) {
+    await expect(
+      registerNativeBrokerTransport(client.db, key, f.binding, captured.initialState, entries),
+    ).rejects.toThrow();
+  }
+  await expect(
+    registerNativeBrokerTransport(
+      client.db,
+      key,
+      f.binding,
+      {
+        ...captured.initialState,
+        input: { ...captured.initialState.input, lastReservedInputIndex: 1 },
+      },
+      captured.entries,
+    ),
+  ).rejects.toThrow();
+  await expect(
+    registerCapturedNativeBrokerBootstrap(
+      client.db,
+      key,
+      { ...f.binding, taskId: "ta-other" },
+      channel,
+      pin,
+    ),
+  ).rejects.toThrow("scope");
+  await expect(
+    registerCapturedNativeBrokerBootstrap(
+      client.db,
+      key,
+      { ...f.binding, artifactSha256: "f".repeat(64) },
+      channel,
+      pin,
+    ),
+  ).rejects.toThrow("artifact");
+  expect(
+    await database.admin`SELECT id FROM native_command_broker_transports WHERE id=${f.binding.brokerId}`,
+  ).toHaveLength(0);
+});
 
 /** Test-only admission/holder seed. Physical bootstrap/qualification is not
  * inferred from these rows; this exercises the canonical receipt/output/exit
@@ -714,6 +951,21 @@ test("nested savepoint handles cannot return a dispatch before the actual outer 
     await expect(registerNativeBrokerTransport(tx, key, f.binding, f.initial)).rejects.toThrow(
       "outer commit",
     );
+    await expect(
+      registerCapturedNativeBrokerBootstrap(
+        tx,
+        key,
+        f.binding,
+        {
+          sandboxId: f.binding.sandboxId,
+          taskId: f.binding.taskId,
+          output() {
+            throw new Error("provider read inside a transaction");
+          },
+        },
+        { artifactSha256: f.binding.artifactSha256, byteSize: 64, target: "linux-amd64" },
+      ),
+    ).rejects.toThrow("outer commit");
   });
 });
 
@@ -1126,7 +1378,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     const elf = await readFile(join(artifactRoot, "build/opengeni-command-supervisor"));
     expect(sha(elf)).toBe(manifest.artifactSha256);
     expect(elf.length).toBe(manifest.byteSize);
-    const f = await fixture();
+    const f = await fixture(false);
     const directory = await mkdtemp(join(tmpdir(), "opengeni-native-broker-"));
     const child = Bun.spawn(
       [
@@ -1150,6 +1402,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       byteSize: manifest.byteSize,
       target: manifest.target,
     };
+    f.binding.artifactSha256 = artifactPin.artifactSha256;
     const pages: NativeBrokerOutputPage[] = [];
     let wake = () => {},
       streamError: unknown,
@@ -1192,13 +1445,22 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
         child.stdin.write(input.input);
         await child.stdin.flush();
       },
-      async *output(cursor) {
+      async *output(cursor, signal) {
         let offset = Number(cursor.split("-")[0]);
         for (;;) {
+          signal?.throwIfAborted();
           while (offset >= pages.length) {
             if (streamError) throw streamError;
-            await new Promise<void>((resolve) => {
-              wake = resolve;
+            await new Promise<void>((resolve, reject) => {
+              const aborted = () => {
+                wake = () => {};
+                reject(signal!.reason);
+              };
+              wake = () => {
+                signal?.removeEventListener("abort", aborted);
+                resolve();
+              };
+              signal?.addEventListener("abort", aborted, { once: true });
             });
           }
           const next = pages[offset++]!;
@@ -1207,8 +1469,8 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
         }
       },
     };
-    let writerId = crypto.randomUUID(),
-      driver = new NativeBrokerDriver(f.service(), channel, writerId);
+    let writerId = crypto.randomUUID();
+    let driver: NativeBrokerDriver;
     const frames = async () => (await f.service().framesAfter(0, 128)).frames;
     async function observeUntil(predicate: () => Promise<boolean>) {
       for (let attempt = 0; attempt < 128; attempt++) {
@@ -1243,21 +1505,17 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     }
     const id = crypto.randomUUID();
     try {
-      await observeUntil(async () => {
-        try {
-          await readNativeBrokerBootstrap(f.service(), artifactPin);
-          return true;
-        } catch (error) {
-          const observed = await f.service().read();
-          if (
-            observed.output.lastSequence >= 1 + Math.ceil(manifest.byteSize / 8192) ||
-            observed.output.providerEof
-          )
-            throw error;
-          return false;
-        }
-      });
+      const registered = await registerCapturedNativeBrokerBootstrap(
+        client.db,
+        key,
+        f.binding,
+        channel,
+        artifactPin,
+      );
+      f.binding.bootstrapEvidenceSha256 = registered.binding.bootstrapEvidenceSha256;
+      driver = new NativeBrokerDriver(registered.journal, channel, writerId);
       const bootstrap = await readNativeBrokerBootstrap(f.service(), artifactPin);
+      expect(bootstrap.transcriptSha256).toBe(f.binding.bootstrapEvidenceSha256);
       expect(bootstrap.commandAdmission).toBe(false);
       await request("fence");
       const definition = encodeNativeBrokerCommandDefinition({

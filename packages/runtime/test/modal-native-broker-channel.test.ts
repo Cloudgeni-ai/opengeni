@@ -100,7 +100,8 @@ test("stdout pages retain exact cursor and empty cursor-less EOF without inventi
   const f = fixture();
   const pages = [];
   for await (const page of f.channel.output("1-0")) pages.push(page);
-  expect(f.calls[0]!.input).toEqual({
+  expect(f.calls.map((call) => call.kind)).toEqual(["task", "logs"]);
+  expect(f.calls[1]!.input).toEqual({
     sandboxId: "sb-exact",
     fileDescriptor: 1,
     timeout: 55,
@@ -124,6 +125,34 @@ test("stdout pages retain exact cursor and empty cursor-less EOF without inventi
       eof: true,
     },
   ]);
+});
+
+test("output refuses an unproven task before reading pages but preserves exact terminal output", async () => {
+  for (const task of [{ taskId: "other" }, {}]) {
+    const f = fixture({ sandboxGetTaskId: async () => task });
+    await expect(f.channel.output("0-0").next()).rejects.toThrow("no longer matches");
+    expect(f.calls).toHaveLength(0);
+  }
+  const exact = fixture({
+    sandboxGetTaskId: async () => ({
+      taskId: "ta-exact",
+      taskResult: { exitcode: 0 },
+    }),
+  });
+  const terminalOutput = exact.channel.output("0-0");
+  expect((await terminalOutput.next()).value).toMatchObject({ taskId: "ta-exact" });
+  await terminalOutput.return(undefined);
+  const interrupted = new AbortController();
+  const aborting = fixture({
+    sandboxGetTaskId: async () => {
+      interrupted.abort(new Error("interrupted output identity"));
+      return { taskId: "ta-exact" };
+    },
+  });
+  await expect(aborting.channel.output("0-0", interrupted.signal).next()).rejects.toThrow(
+    "interrupted output identity",
+  );
+  expect(aborting.calls).toHaveLength(0);
 });
 
 test("foreign descriptors cannot be relabelled as initial stdout", async () => {

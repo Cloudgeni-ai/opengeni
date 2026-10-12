@@ -40,6 +40,8 @@ const bindingSchema = z
   })
   .strict();
 export type NativeBrokerTransportBinding = z.infer<typeof bindingSchema>;
+const initialBindingSchema = bindingSchema.omit({ bootstrapEvidenceSha256: true });
+export type NativeBrokerInitialBinding = z.infer<typeof initialBindingSchema>;
 export type NativeBrokerEntryKind =
   | "request"
   | "frame"
@@ -55,6 +57,12 @@ export type NativeBrokerStoredEntry = {
   sha256: string;
   value: string;
 };
+export type NativeBrokerInitialEntry = Readonly<{
+  kind: "frame" | "page";
+  key: string;
+  sequence: number | null;
+  value: string;
+}>;
 export type NativeBrokerWriter = { id: string | null; epoch: number; live: boolean };
 export type NativeBrokerTransportTransaction = {
   state: unknown;
@@ -154,6 +162,146 @@ async function lockLease(db: Database, binding: NativeBrokerTransportBinding) {
   return rows[0]!;
 }
 
+/** Scoped read-only recovery after an unknown registration commit. The returned
+ * binding is not bootstrap verification or authority; callers must verify the
+ * actual retained prefix against its independent pin and this transcript hash. */
+export async function findNativeBrokerTransportBinding(
+  db: Database,
+  input: NativeBrokerInitialBinding,
+): Promise<NativeBrokerTransportBinding | null> {
+  if (isTransactionHandle(db))
+    throw new Error("Native broker bootstrap recovery requires an outer commit boundary");
+  const expected = initialBindingSchema.parse(input);
+  return withRlsContext(db, expected, async (tx) => {
+    const rows = await rawRows(
+      tx,
+      sql`SELECT binding FROM native_command_broker_transports
+      WHERE id = ${expected.brokerId}::uuid
+      AND account_id = ${expected.accountId}::uuid AND workspace_id = ${expected.workspaceId}::uuid`,
+    );
+    if (!rows.length) return null;
+    if (rows.length !== 1) fenced();
+    const binding = bindingSchema.parse(rows[0]!.binding);
+    const { bootstrapEvidenceSha256: _evidence, ...scope } = binding;
+    if (!isDeepStrictEqual(scope, expected)) fenced();
+    return binding;
+  });
+}
+
+function initialEntries(
+  binding: NativeBrokerTransportBinding,
+  state: unknown,
+  supplied?: readonly NativeBrokerInitialEntry[],
+): NativeBrokerStoredEntry[] {
+  if (supplied === undefined) return [];
+  const entries = z
+    .array(
+      z
+        .object({
+          kind: z.enum(["frame", "page"]),
+          key: z.string().min(1).max(200),
+          sequence: z.number().int().positive().safe().nullable(),
+          value: z.string().max(MAX_VALUE_BYTES),
+        })
+        .strict(),
+    )
+    .min(3)
+    .max(161)
+    .parse(supplied);
+  const keys = new Set<string>();
+  let size = 0;
+  for (const entry of entries) {
+    validateEntryIdentity(entry.kind, entry.key, entry.sequence, true);
+    size += Buffer.byteLength(entry.value);
+    const key = `${entry.kind}:${entry.key}`;
+    if (size > MAX_VALUE_BYTES || keys.has(key)) fenced();
+    keys.add(key);
+  }
+  const frames = entries
+    .filter((entry) => entry.kind === "frame")
+    .sort((a, b) => a.sequence! - b.sequence!);
+  const pages = entries.filter((entry) => entry.kind === "page");
+  if (frames.length < 2 || frames.length > 33 || !pages.length || pages.length > 128) fenced();
+  const transcript = createHash("sha256");
+  for (const [index, entry] of frames.entries()) {
+    if (entry.sequence !== index + 1) fenced();
+    transcript.update(entry.value);
+  }
+  if (transcript.digest("hex") !== binding.bootstrapEvidenceSha256) fenced();
+  // Semantic framing/artifact verification belongs to the runtime verifier.
+  // Storage checks the exact untouched input state and complete captured prefix,
+  // never accepts a pending dispatch or a cursor beyond the supplied receipts.
+  const initial = z
+    .object({
+      version: z.literal(1),
+      input: z.unknown(),
+      output: z
+        .object({
+          version: z.literal(1),
+          brokerId: z.literal(binding.brokerId),
+          sandboxId: z.literal(binding.sandboxId),
+          taskId: z.literal(binding.taskId),
+          cursor: z.string(),
+          lastPageSha256: digest,
+          revision: z.literal(pages.length),
+          lastSequence: z.literal(frames.length),
+          partialBase64: z.literal(""),
+          providerEof: z.literal(false),
+          providerEofSha256: z.null(),
+        })
+        .strict(),
+    })
+    .strict()
+    .parse(state);
+  if (
+    !isDeepStrictEqual(initial.input, {
+      version: 1,
+      brokerId: binding.brokerId,
+      revision: 0,
+      writerEpoch: 1,
+      acceptedWriterEpoch: 0,
+      lastReservedInputIndex: 0,
+      lastAcceptedInputIndex: 0,
+      pending: null,
+    })
+  )
+    fenced();
+  const lastPage = pages.find((entry) => entry.key === initial.output.cursor);
+  if (!lastPage || sha(lastPage.value) !== initial.output.lastPageSha256) fenced();
+  return entries.map((entry) => ({ ...entry, sha256: sha(entry.value) }));
+}
+
+async function verifyInitialEntries(
+  tx: Database,
+  encryptionKey: Uint8Array,
+  binding: NativeBrokerTransportBinding,
+  entries: readonly NativeBrokerStoredEntry[],
+) {
+  if (!entries.length) return;
+  const rows = await rawRows(
+    tx,
+    sql`SELECT kind, entry_key, sequence::text, sha256, value_encrypted
+    FROM native_command_broker_entries WHERE broker_id = ${binding.brokerId}::uuid
+    AND ${scoped(binding)} AND (${sql.join(
+      entries.map((entry) => sql`(kind = ${entry.kind} AND entry_key = ${entry.key})`),
+      sql` OR `,
+    )})`,
+  );
+  if (rows.length !== entries.length) fenced();
+  const found = new Map(rows.map((row) => [`${row.kind}:${row.entry_key}`, row]));
+  for (const entry of entries) {
+    const row = found.get(`${entry.kind}:${entry.key}`);
+    if (
+      !row ||
+      row.sha256 !== entry.sha256 ||
+      (row.sequence === null ? null : Number(row.sequence)) !== entry.sequence ||
+      unseal(encryptionKey, binding, `${entry.kind}:${entry.key}`, String(row.value_encrypted)) !==
+        entry.value
+    )
+      fenced();
+  }
+}
+
 /** Internal transport storage, not a public API or an admission capability.
  * The trusted caller first authenticates the initial-process bootstrap against
  * its independently selected artifact. Registration checks exact attributed
@@ -164,11 +312,13 @@ export async function registerNativeBrokerTransport(
   encryptionKey: Uint8Array,
   input: NativeBrokerTransportBinding,
   initialState: unknown,
+  capturedEntries?: readonly NativeBrokerInitialEntry[],
 ): Promise<void> {
   if (isTransactionHandle(db))
     throw new Error("Native broker transport requires an outer commit boundary");
   const binding = bindingSchema.parse(input);
   const plaintext = serialize(initialState);
+  const entries = initialEntries(binding, JSON.parse(plaintext), capturedEntries);
   const encrypted = seal(encryptionKey, binding, "state", plaintext);
   await withRlsContext(db, binding, async (tx) => {
     const lease = await lockLease(tx, binding);
@@ -184,6 +334,7 @@ export async function registerNativeBrokerTransport(
         existing[0]!.initial_state_sha256 !== sha(plaintext)
       )
         fenced();
+      await verifyInitialEntries(tx, encryptionKey, binding, entries);
       return;
     }
     if (
@@ -196,11 +347,27 @@ export async function registerNativeBrokerTransport(
       lease.provider_create_attempt?.instanceId !== binding.sandboxId
     )
       fenced();
-    await tx.execute(sql`INSERT INTO native_command_broker_transports
+    const inserted = await rawRows(
+      tx,
+      sql`INSERT INTO native_command_broker_transports
       (id,account_id,workspace_id,lease_id,sandbox_group_id,binding,initial_state_sha256,state_encrypted)
       VALUES (${binding.brokerId}::uuid,${binding.accountId}::uuid,${binding.workspaceId}::uuid,
         ${binding.leaseId}::uuid,${binding.sandboxGroupId}::uuid,${JSON.stringify(binding)}::jsonb,${sha(plaintext)},${encrypted})
-      ON CONFLICT DO NOTHING`);
+      ON CONFLICT DO NOTHING RETURNING id`,
+    );
+    if (inserted.length === 1 && entries.length) {
+      await tx.execute(sql`INSERT INTO native_command_broker_entries
+        (broker_id,account_id,workspace_id,kind,entry_key,sequence,sha256,value_encrypted)
+        VALUES ${sql.join(
+          entries.map(
+            (entry) => sql`(${binding.brokerId}::uuid,
+          ${binding.accountId}::uuid,${binding.workspaceId}::uuid,${entry.kind},${entry.key},
+          ${entry.sequence},${entry.sha256},
+          ${seal(encryptionKey, binding, `${entry.kind}:${entry.key}`, entry.value)})`,
+          ),
+          sql`, `,
+        )}`);
+    }
     const committed = await rawRows(
       tx,
       sql`SELECT binding, initial_state_sha256 FROM native_command_broker_transports
@@ -212,6 +379,9 @@ export async function registerNativeBrokerTransport(
       committed[0]!.initial_state_sha256 !== sha(plaintext)
     )
       fenced();
+    // A concurrent winner must already contain the entire identical prefix.
+    // Never fill missing evidence into an existing registration after the fact.
+    await verifyInitialEntries(tx, encryptionKey, binding, entries);
   });
 }
 

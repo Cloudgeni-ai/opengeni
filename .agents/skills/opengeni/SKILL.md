@@ -96,6 +96,10 @@ Then open the smallest source files that answer the question:
   The in-progress native initial-process broker is a separate versioned path:
   inspect `sandbox/providers/native-command-broker-driver.ts`, its bootstrap and
   per-command projection readers, and `packages/db/src/native-command-broker-transport.ts`.
+  Initial prefix capture is read-only in `native-command-broker-bootstrap-capture.ts`;
+  core registers its verified frame/page receipts and cursor atomically. Exact
+  replay cannot rewind state or retrofit missing evidence. Creation authority,
+  initial stderr and qualified application selection remain separate gates.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse

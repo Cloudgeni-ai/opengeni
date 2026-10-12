@@ -24,6 +24,8 @@ export {
   readNativeBrokerBootstrap,
 } from "./providers/native-command-broker-bootstrap";
 export type { NativeBrokerArtifactPin } from "./providers/native-command-broker-bootstrap";
+export { captureNativeBrokerBootstrap } from "./providers/native-command-broker-bootstrap-capture";
+export type { NativeBrokerBootstrapEntry } from "./providers/native-command-broker-bootstrap-capture";
 export {
   initialNativeBrokerCommandSnapshot,
   projectNativeBrokerCommand,
