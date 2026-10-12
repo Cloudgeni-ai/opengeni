@@ -63,9 +63,12 @@ afterEach(async () => {
   });
 });
 
-async function harness(options: { enabled?: boolean; kind?: string } = {}) {
-  const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
-  const client = createSandboxClientForBackend("local", settings) as {
+async function harness(
+  options: { enabled?: boolean; kind?: string; backend?: "local" | "docker" } = {},
+) {
+  const backend = options.backend ?? "local";
+  const settings = testSettings({ sandboxBackend: backend, webSearchEnabled: false });
+  const client = createSandboxClientForBackend(backend, settings) as {
     create(manifest?: unknown): Promise<LocalSession>;
   };
   const local = await client.create({});
@@ -89,7 +92,7 @@ async function harness(options: { enabled?: boolean; kind?: string } = {}) {
     resolveActiveBackend: async () => ({
       session: local as never,
       sandboxId: null,
-      kind: options.kind ?? "local",
+      kind: options.kind ?? backend,
       leaseEpoch: 1,
       providerInstanceId: "instance",
       activeEpoch: 0,
@@ -492,4 +495,53 @@ describe("connected-machine secretfile cleanup through the routing session", () 
     await routing.clearSecretFilesForAttempt();
     expect(cleared).toHaveLength(1);
   });
+});
+
+const dockerSandboxImage = (() => {
+  if (Bun.which("docker") === null) return false;
+  const image = testSettings({ sandboxBackend: "docker" }).dockerImage;
+  return (
+    Bun.spawnSync(["docker", "image", "inspect", image], { stdout: "ignore", stderr: "ignore" })
+      .exitCode === 0
+  );
+})();
+
+describe.skipIf(!dockerSandboxImage)("secret exec delivery on the docker backend", () => {
+  test("DL-1: the value reaches the command; the provider text holds only names", async () => {
+    const h = await harness({ backend: "docker" });
+    const output = await h.run('printf %s "{{secret:Canary}}" | sha256sum');
+    expect(output).toContain(sha256(CANARY));
+    const main = h.provider.commands.filter((cmd) => cmd.includes("sha256sum"));
+    expect(main).toHaveLength(1);
+    expect(main[0]).toContain('printf %s "${OPENGENI_SECRET_0}" | sha256sum');
+    expectNoCanary(h.provider.commands);
+    expect(h.provider.stdin.join("")).not.toContain("OGCANARY");
+  }, 120_000);
+
+  test("DL-7 / SEC-4: env file is 0600 in a 0700 directory and gone after success and failure", async () => {
+    const h = await harness({ backend: "docker" });
+    const exec = h.local.exec!;
+    const observed: string[] = [];
+    h.local.exec = async (args) => {
+      const match = /\. '([^']+\/env-[0-9a-f-]+)'/.exec(args.cmd);
+      if (match) {
+        const probe = (await exec({
+          cmd: `stat -c %a '${match[1]}' '${h.scopeDir}'`,
+          yield_time_ms: 10_000,
+        })) as { stdout?: string; output?: string } | string;
+        observed.push(typeof probe === "string" ? probe : (probe.stdout ?? probe.output ?? ""));
+      }
+      return await exec(args);
+    };
+    await h.run("true {{secret:Plain}}");
+    await h.run("printf %s {{secret:Plain}} >/dev/null; false");
+    expect(observed).toHaveLength(2);
+    for (const entry of observed) expect(entry).toMatch(/600\s+700/);
+    h.local.exec = exec;
+    const left = await h.run(`ls -A '${h.scopeDir}' | wc -l`);
+    expect(left).toMatch(/Output:\n0\n/);
+    await h.routing.clearSecretFilesForAttempt();
+    const gone = await h.run(`test -e '${h.scopeDir}' && echo present || echo gone`);
+    expect(gone).toContain("gone");
+  }, 120_000);
 });
