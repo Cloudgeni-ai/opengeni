@@ -1010,8 +1010,9 @@ const SettingsSchema = z.object({
   // instructions. Defaulting to DEFAULT_AGENT_INSTRUCTIONS keeps the composed
   // default pinned by runtime tests.
   agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
-  // A/B prompt experiment: Knowledge retrieval, correction and standing-preference guidance.
-  experimentKnowledgeRetrievalGuidance: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE
+  // Knowledge retrieval, correction and standing-preference guidance (on by default after the
+  // OPE-550 A/B; set false to disable).
+  experimentKnowledgeRetrievalGuidance: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),

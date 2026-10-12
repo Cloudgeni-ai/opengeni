@@ -177,7 +177,7 @@ describe("knowledge retrieval guidance experiment", () => {
     }).composed;
   }
 
-  test("is off by default in both compositions", () => {
+  test("is absent from both compositions when the flag is off", () => {
     const legacy = inspectPersistentAgentInstructions(
       testSettings({ sandboxBackend: "none" }),
       {},
