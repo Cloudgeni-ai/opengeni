@@ -699,6 +699,9 @@ function fullPlan(
       // A migration-time backfill over a FORCE-RLS table silently matches zero
       // rows for the non-superuser owner Opengeni migrates as.
       "migration-rls-backfills",
+      // A migration that waits for an advisory fence after a table lock
+      // deadlocks with application transactions during the rollout.
+      "migration-lock-order",
       // A migration missing from the release-schema forward list is framed by
       // the governed checkpoint input, so the pinned aggregate only breaks after
       // merge, on protected main.
@@ -922,7 +925,12 @@ export function createImpactPlan(
     "subscription-contract",
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
-    guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");
+    guards.push(
+      "migration-ordinals",
+      "migration-rls-backfills",
+      "migration-lock-order",
+      "migration-schema-contract",
+    );
   }
   if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
     guards.push("public-api", "sdk-compat");
