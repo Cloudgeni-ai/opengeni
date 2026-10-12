@@ -582,6 +582,22 @@ describe("Claude refusal settlement on the core", () => {
     expect(recovery).not.toHaveBeenCalled();
   });
 
+  test("an unknown outcome with an answered request awaiting its checkpoint stays terminal and unsettled", async () => {
+    const runtime = coreRuntime({});
+    const recovery = spy(db, "requestSessionTurnRecovery");
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const settles: string[] = [];
+    const lane = await answeredLane(settles, { continuesAfterResponse: true });
+    const error = new Error("stream broke", {
+      cause: db.SUBSCRIPTION_CORE_CLAUDE.errors.requestOutcomeUnknown(),
+    });
+    const { deps } = failureDeps(error, core({ requests: lane, titleRequests: undefined }));
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(settles).toEqual([]);
+    expect(runtime.apply).not.toHaveBeenCalled();
+    expect(recovery).not.toHaveBeenCalled();
+  });
+
   test("a lost core lease records nothing and never re-places", async () => {
     const runtime = coreRuntime({});
     const recovery = spy(db, "requestSessionTurnRecovery");
@@ -706,6 +722,27 @@ describe("Claude refusal settlement on the core", () => {
     const turn = core({ quota: { settled: () => Promise.resolve(true) } });
     await joinCoreClaudeObservations({ db: {} as db.Database }, turn, { wakeTimeoutMs: 10 });
     expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  test("a slow quota write is awaited in full; only the wake is bounded", async () => {
+    const order: string[] = [];
+    spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockImplementation((async () => {
+      order.push("wake");
+      return [];
+    }) as never);
+    const chain = new Promise<boolean>((resolve) =>
+      setTimeout(() => {
+        order.push("observation");
+        resolve(true);
+      }, 50),
+    );
+    await joinCoreClaudeObservations(
+      { db: {} as db.Database },
+      core({ quota: { settled: () => chain } }),
+      { wakeTimeoutMs: 10 },
+    );
+    order.push("joined");
+    expect(order).toEqual(["observation", "wake", "joined"]);
   });
 
   test("a cancelled settlement detaches the wake at once, after the queued writes", async () => {
