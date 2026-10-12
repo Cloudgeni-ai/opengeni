@@ -495,6 +495,7 @@ describe("capacity limit rows", () => {
   function blocked(
     options: {
       work?: boolean;
+      startupRunning?: boolean;
       wait?: { type: string; payload: Record<string, unknown> };
     } = {},
   ): SessionEvent[] {
@@ -512,6 +513,9 @@ describe("capacity limit rows", () => {
       at(0, "turn.queued", { turnId: "turn-1" }),
       at(1, "session.status.changed", { status: "running" }),
       at(1, "turn.started", {}),
+      ...(options.startupRunning
+        ? [at(1, "turn.startup.phase.started", { phase: "model_preparation" })]
+        : []),
       ...(options.work
         ? [
             at(1, "agent.toolCall.created", {
@@ -557,6 +561,32 @@ describe("capacity limit rows", () => {
       expect(header.closest("button")).toBeNull();
       expect(header.querySelector(".lucide-chevron-right")).toBeNull();
       expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+      await act(async () => header.click());
+      expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+      const section = header.closest("[data-og-work-section]");
+      expect(section?.querySelector("button, [aria-expanded]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a limit during a still-running startup phase offers no empty disclosure", async () => {
+    // The row's rail hides running phases, so they are not details to reveal.
+    const r = await renderComponent(
+      <MessageTimeline
+        events={blocked({ startupRunning: true })}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      const { status, header } = statusRow(r.container);
+      expect(status.textContent).toBe("Usage limit reached");
+      expect(r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent).toBe(
+        GUIDANCE,
+      );
+      expect(header.closest("button")).toBeNull();
+      expect(header.querySelector(".lucide-chevron-right")).toBeNull();
       await act(async () => header.click());
       expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
       const section = header.closest("[data-og-work-section]");

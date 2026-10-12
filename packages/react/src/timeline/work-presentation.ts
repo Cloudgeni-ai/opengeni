@@ -81,10 +81,11 @@ export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptio
 
 /**
  * Whether a readable turn's work row has anything to reveal when expanded.
- * Unless the host shows startup phases as details, a detail made only of
- * completed preparation steps (for example the queue phase before a turn was
- * parked on a usage limit) renders nothing, so it does not make the row
- * expandable. Running, failed, or cancelled phases stay visible and count.
+ * Unless the host shows startup phases as details, the work row's rail only
+ * renders failed or cancelled preparation steps, so a detail made only of
+ * completed or still-running steps (for example the queue phase before a turn
+ * was parked on a usage limit) renders nothing and does not make the row
+ * expandable.
  */
 export function readableWorkHasDetails(
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
@@ -97,7 +98,9 @@ export function readableWorkHasDetails(
       Boolean(detail.work) ||
       !detail.items.every(
         (item) =>
-          (item.kind === "startup-phase" && item.status === "complete") ||
+          (item.kind === "startup-phase" &&
+            item.status !== "failed" &&
+            item.status !== "cancelled") ||
           (item.kind === "reasoning" && !item.text.trim()),
       ),
   );
