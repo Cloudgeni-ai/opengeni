@@ -70,6 +70,7 @@ import {
 } from "@opengeni/subscriptions";
 import { resolveTurnExecutionPolicyV1, withCodexCatalogProvider } from "@opengeni/config";
 import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
+import { SUBSCRIPTION_CORE_CODEX } from "../../../packages/db/src/subscription-core-codex-adapter";
 
 const restores: Array<{ mockRestore(): void }> = [];
 beforeEach(() => {
@@ -681,6 +682,11 @@ describe("core Codex credential materialization in the worker", () => {
 });
 
 describe("core Codex usage, quota and refusal bookkeeping", () => {
+  // Match the shared operation/turn writers: completeness comes from the
+  // provider adapter, not from the observation's source alone.
+  const quotaOptions = {
+    usageReadingsComplete: SUBSCRIPTION_CORE_CODEX.adapter.usageReadingsComplete === true,
+  };
   const core: CodexSubscriptionCoreTurn = {
     identity,
     connectionId: "connection-core",
@@ -831,7 +837,11 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
         observedRefreshGeneration: 5,
         source: "refusal",
       });
-      const refused = applyQuotaObservation({ refreshGeneration: 5, quota: stored }, observation)!;
+      const refused = applyQuotaObservation(
+        { refreshGeneration: 5, quota: stored },
+        observation,
+        quotaOptions,
+      )!;
       expect(refused.windows).toContainEqual({
         id: "secondary",
         usedPercent: 100,
@@ -848,7 +858,11 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
         usedPercent: 40,
         resetsAt: weeklyReset,
       });
-      const replaced = applyQuotaObservation({ refreshGeneration: 5, quota: refused }, read)!;
+      const replaced = applyQuotaObservation(
+        { refreshGeneration: 5, quota: refused },
+        read,
+        quotaOptions,
+      )!;
       expect(replaced.windows).toEqual(read.windows);
       expect(quotaCapacity(replaced, now.getTime() + 240_000)).toEqual({ kind: "available" });
     },
@@ -864,7 +878,11 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
     expect(observation.windows).toEqual([
       { id: "included_usage", usedPercent: 100, resetsAt: holdUntil, status: "exhausted" },
     ]);
-    const held = applyQuotaObservation({ refreshGeneration: 5, quota: null }, observation)!;
+    const held = applyQuotaObservation(
+      { refreshGeneration: 5, quota: null },
+      observation,
+      quotaOptions,
+    )!;
     // A credit-funded or concurrent turn's headers report only primary and secondary.
     const headers = codexUsageHeadersQuotaObservation(
       {
@@ -876,19 +894,32 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
       },
       5,
     );
-    const afterHeaders = applyQuotaObservation({ refreshGeneration: 5, quota: held }, headers)!;
+    const afterHeaders = applyQuotaObservation(
+      { refreshGeneration: 5, quota: held },
+      headers,
+      quotaOptions,
+    )!;
     expect(afterHeaders.windows).toEqual([...headers.windows, observation.windows[0]]);
     expect(quotaCapacity(afterHeaders, now.getTime() + 3_600_000)).toEqual({
       kind: "exhausted",
       resetsAt: holdUntil,
     });
     expect(quotaCapacity(afterHeaders, holdUntil + 1)).toEqual({ kind: "available" });
-    // A usage reading is complete, so it ends the hold early.
+    // Codex declares its usage readings complete, so one ends the hold early.
+    expect(quotaOptions.usageReadingsComplete).toBe(true);
     const read = usageReading(now.getTime() + 120_000, {
       usedPercent: 5,
       resetsAt: now.getTime() + 86_400_000,
     });
-    const afterUsage = applyQuotaObservation({ refreshGeneration: 5, quota: afterHeaders }, read)!;
+    // Without the adapter declaration, the merge remains fail-closed/partial.
+    expect(
+      applyQuotaObservation({ refreshGeneration: 5, quota: afterHeaders }, read)!.windows,
+    ).toEqual([...read.windows, observation.windows[0]]);
+    const afterUsage = applyQuotaObservation(
+      { refreshGeneration: 5, quota: afterHeaders },
+      read,
+      quotaOptions,
+    )!;
     expect(afterUsage.windows).toEqual(read.windows);
     expect(quotaCapacity(afterUsage, now.getTime() + 180_000)).toEqual({ kind: "available" });
   });
