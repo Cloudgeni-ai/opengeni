@@ -23,6 +23,7 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
+import { presentTurnFailureText } from "./compaction-copy";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -1473,14 +1474,43 @@ export function buildTimeline(
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
+        // A compaction failure names its outcome and keeps the recorded
+        // provider text behind Details. The turn's own failed compaction
+        // landmark is the one place that shows it: it receives the recorded
+        // text, and no separate notice repeats it.
+        // Retry reopens the same logical turn, so only a landmark from this
+        // attempt (after the turn's previous settlement) can own this failure.
+        const failure = allowance ? null : presentTurnFailureText(failureText);
+        let landmarkIndex = -1;
+        if (failure?.detail !== undefined && turnId !== null) {
+          // Skip the turn-end just pushed for this failure.
+          for (let index = items.length - 2; index >= 0; index -= 1) {
+            const item = items[index];
+            if (item?.kind === "turn-end" && item.turnId === turnId) break;
+            if (
+              item?.kind === "context-compaction" &&
+              item.turnId === turnId &&
+              item.phase === "skipped" &&
+              item.skipReason === "summarization_failed"
+            ) {
+              landmarkIndex = index;
+              break;
+            }
+          }
+        }
+        const landmark = landmarkIndex >= 0 ? items[landmarkIndex] : undefined;
+        if (landmark?.kind === "context-compaction" && failure?.detail !== undefined) {
+          items[landmarkIndex] = { ...landmark, failureDetail: failure.detail };
+        }
         if (allowance) {
           allowanceNotice(event, turnId);
-        } else if (!hadActivity) {
+        } else if (!hadActivity && !landmark) {
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: failureText ?? "The turn failed.",
+            text: failure?.summary ?? "The turn failed.",
+            ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
             occurredAt: event.occurredAt,
           });
         }
