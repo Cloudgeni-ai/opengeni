@@ -14866,6 +14866,10 @@ export const NotificationLink = z
   .strict();
 export type NotificationLink = z.infer<typeof NotificationLink>;
 
+/** Why a posted notification reached no one in Opengeni. */
+export const NotificationUndeliveredReason = z.enum(["no_human_recipient"]);
+export type NotificationUndeliveredReason = z.infer<typeof NotificationUndeliveredReason>;
+
 export const SessionNotificationPostedPayload = z
   .object({
     key: NotificationKey,
@@ -14887,6 +14891,11 @@ export const SessionNotificationPostedPayload = z
       .object({ subjectId: z.string().min(1).max(300), label: z.string().min(1).max(200) })
       .strict()
       .optional(),
+    /**
+     * Set when Opengeni notified nobody: the session works for no person (an
+     * API key or service started it). Absent when a person was notified.
+     */
+    undeliveredReason: NotificationUndeliveredReason.optional(),
   })
   .strict();
 export type SessionNotificationPostedPayload = z.infer<typeof SessionNotificationPostedPayload>;

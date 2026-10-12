@@ -416,6 +416,28 @@ export function resolveFirstPartyMcpToolsForCreate(
   return currentAgentLearningToolSelection(inherited).filter((tool) => allowed.has(tool));
 }
 
+/**
+ * An explicit first-party tool selection is a promise, not a best-effort
+ * default: a tool the deployment disables fails the request, naming every such
+ * tool and the allowed set, instead of silently shrinking the selection.
+ * `retained` names tools the caller may echo from its stored selection; those
+ * stay deployment-filtered like any default, so a later policy change never
+ * blocks an unrelated edit.
+ */
+export function requireDeploymentFirstPartyMcpTools(
+  requested: readonly FirstPartyMcpToolName[],
+  allowed: readonly FirstPartyMcpToolName[],
+  retained: Iterable<FirstPartyMcpToolName> = [],
+): void {
+  const permitted = new Set([...allowed, ...retained]);
+  const disallowed = [...new Set(requested.filter((tool) => !permitted.has(tool)))];
+  if (disallowed.length > 0) {
+    throw new HTTPException(422, {
+      message: `first-party MCP tools are disabled by deployment policy: ${disallowed.join(", ")}. Allowed tools: ${allowed.join(", ") || "(none)"}.`,
+    });
+  }
+}
+
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
   if (denial.code === "nested_agent_depth_override_forbidden") {
     return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; workspace:admin is required to increase it`;
@@ -4969,7 +4991,22 @@ export async function updateSessionToolPolicy(
   const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(deps.settings);
   // Echoing the session's stored catalog (or create defaults) can include a
   // tool the deployment later removed. Runtime already strips those; failing
-  // the whole connector save would block unrelated MCP toggles.
+  // the whole connector save would block unrelated MCP toggles. A newly added
+  // disabled tool, however, is explicit intent and fails rather than vanishing.
+  if (explicitRequest) {
+    requireDeploymentFirstPartyMcpTools(
+      explicitRequest.firstPartyMcpTools,
+      deploymentFirstPartyMcpToolPolicy.allowed,
+      [
+        // A session without a stored selection was shown the unfiltered defaults.
+        ...(existingSession.firstPartyMcpTools ??
+          deps.settings.defaultFirstPartyMcpTools ??
+          DEFAULT_FIRST_PARTY_MCP_TOOLS),
+        ...(workspaceSessionToolDefaults?.firstPartyMcpTools ?? []),
+        ...(existingSession.toolPolicy.firstPartyAdditions ?? []),
+      ],
+    );
+  }
   const explicitRequestedFirstPartyTools = explicitRequest
     ? allowedFirstPartyMcpToolsForSession(deps.settings, explicitRequest.firstPartyMcpTools)
     : null;

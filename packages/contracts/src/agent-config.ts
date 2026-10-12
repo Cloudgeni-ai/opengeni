@@ -161,6 +161,11 @@ export const ResolvedAgentConfig = z
     from: AgentCapabilityStartingPoint,
     capabilities: ResolvedAgentCapabilities,
     unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
+    /**
+     * Why each `unavailable` capability is off, keyed by capability. Present
+     * whenever `unavailable` is non-empty; absent on historical configurations.
+     */
+    unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
     identity: AgentIdentity.nullable(),
     renderer: AgentRenderer,
     source: ResolvedAgentConfigSource,
@@ -940,9 +945,11 @@ function agentConfigFromCapabilities(input: {
   renderer: AgentRenderer;
   source: ResolvedAgentConfigSource;
   inheritedUnavailable?: readonly AgentCapabilityId[] | undefined;
+  inheritedUnavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
 }): ResolvedAgentConfig {
   const capabilities = { ...input.wanted };
   const unavailable = new Set<AgentCapabilityId>(input.inheritedUnavailable ?? []);
+  const unavailableReasons: Partial<Record<AgentCapabilityId, string>> = {};
   for (const id of AGENT_CAPABILITY_IDS) {
     const reason = input.deployment.unavailable[id];
     if (reason === undefined || !agentCapabilityEnabled(capabilities, id)) continue;
@@ -958,6 +965,10 @@ function agentConfigFromCapabilities(input: {
     else capabilities[id] = false;
   }
   for (const id of unavailable) {
+    unavailableReasons[id] =
+      input.deployment.unavailable[id] ??
+      input.inheritedUnavailableReasons?.[id] ??
+      "not available in the inherited configuration";
     if (id === "skills") capabilities.skills = false;
     else capabilities[id] = false;
   }
@@ -966,6 +977,7 @@ function agentConfigFromCapabilities(input: {
     from: input.from,
     capabilities,
     unavailable: AGENT_CAPABILITY_IDS.filter((id) => unavailable.has(id)),
+    ...(unavailable.size > 0 ? { unavailableReasons } : {}),
     identity: input.identity,
     renderer: input.renderer,
     source: input.source,
@@ -1092,6 +1104,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
     renderer: request.renderer ?? parentConfig?.renderer ?? defaultRenderer(input.creator),
     source: "request",
     inheritedUnavailable: parentConfig?.unavailable,
+    inheritedUnavailableReasons: parentConfig?.unavailableReasons,
   });
   return {
     config: withGoalImplication(config, input.goal, requested.toggles.goals === false, ceiling),
@@ -1225,6 +1238,7 @@ export function resolveAgentConfigUpdate(input: {
     inheritedUnavailable: current.unavailable.filter(
       (id) => input.deployment.unavailable[id] !== undefined,
     ),
+    inheritedUnavailableReasons: current.unavailableReasons,
   });
   return withGoalImplication(
     config,

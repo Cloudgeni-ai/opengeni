@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   type AccessGrant,
   type SessionToolPolicy,
@@ -734,6 +735,42 @@ describe("durable session tool-policy updates", () => {
     expect(updated.firstPartyMcpTools).toEqual(
       DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((tool) => tool !== "memory_search"),
     );
+  }, 180_000);
+
+  test("rejects newly added disabled first-party tools, naming each and the allowed set", async () => {
+    if (!available) return;
+    const owner = await workspace("disabled-first-party-addition");
+    const created = await session(firstDb, { ...owner, tools: [OPENGENI] });
+    const added = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+      (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
+    ).slice(0, 2);
+    expect(added).toHaveLength(2);
+    const restricted = testSettings({
+      mcpServers: settings.mcpServers,
+      allowedFirstPartyMcpTools: ["session_get", "session_create"],
+      defaultFirstPartyMcpTools: ["session_get"],
+    });
+
+    const failure = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus(), restricted),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      {
+        mode: "explicit",
+        tools: [OPENGENI],
+        firstPartyMcpTools: ["session_get", ...added],
+        expectedVersion: 1,
+      },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      status: 422,
+      message: `first-party MCP tools are disabled by deployment policy: ${added.join(", ")}. Allowed tools: session_get, session_create.`,
+    });
+    expect((await getSession(firstDb, owner.workspaceId, created.id))?.toolPolicyVersion).toBe(1);
   }, 180_000);
 
   test("does not expose a session from another workspace through the update path", async () => {
