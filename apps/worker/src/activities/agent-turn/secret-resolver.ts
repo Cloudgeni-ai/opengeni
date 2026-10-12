@@ -5,9 +5,24 @@
  * references through literally (AG-4).
  */
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { ResolvedAgentConfig, SecretPrincipal, SecretResolver } from "@opengeni/contracts";
-import { createSecretResolver } from "@opengeni/core";
+import {
+  VAULT_LIMITS,
+  type ResolvedAgentConfig,
+  type SecretPrincipal,
+  type SecretResolver,
+} from "@opengeni/contracts";
+import {
+  createSecretResolver,
+  createWorkspaceVaultProviderRegistry,
+  type OnePasswordVaultProviderFactory,
+} from "@opengeni/core";
 import { listVaultsForSubject, type Database } from "@opengeni/db";
+import {
+  createProviderCallBudget,
+  type ProviderCallBudget,
+  type VaultProvider,
+  type VaultProviderRegistry,
+} from "@opengeni/vaults";
 
 /**
  * Q-17: a frozen configuration without the key reads `from === "all"` (the
@@ -17,10 +32,42 @@ export function secretsCapabilityEnabled(agentConfig: ResolvedAgentConfig | null
   return agentConfig ? agentConfig.capabilities.secrets === true : true;
 }
 
+/**
+ * Connected-vault access for one attempt: the provider registry (1Password
+ * tokens load for the acting human, host vaults use the embedder port) and a
+ * single read budget shared by every resolver of the attempt (Q-18).
+ */
+export type AttemptVaultAccess = {
+  providers: VaultProviderRegistry;
+  attemptBudget: ProviderCallBudget;
+};
+
+export function createAttemptVaultAccess(input: {
+  db: Database;
+  settings: Settings;
+  workspaceId: string;
+  subjectId: string | null;
+  hostVaultProvider: VaultProvider | null | undefined;
+  onePasswordVaultProvider: OnePasswordVaultProviderFactory | null | undefined;
+}): AttemptVaultAccess {
+  return {
+    providers: createWorkspaceVaultProviderRegistry({
+      db: input.db,
+      settings: input.settings,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      hostVaultProvider: input.hostVaultProvider ?? null,
+      onePasswordVaultProvider: input.onePasswordVaultProvider ?? null,
+    }),
+    attemptBudget: createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt),
+  };
+}
+
 type AttemptSecretInput = {
   db: Database;
   settings: Settings;
   agentConfig: ResolvedAgentConfig | null | undefined;
+  vaultAccess?: AttemptVaultAccess | undefined;
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -29,7 +76,9 @@ type AttemptSecretInput = {
   executionGeneration: number;
 };
 
-function attemptPrincipal(input: Omit<AttemptSecretInput, "db" | "settings" | "agentConfig">) {
+function attemptPrincipal(
+  input: Omit<AttemptSecretInput, "db" | "settings" | "agentConfig" | "vaultAccess">,
+) {
   return {
     kind: "attempt",
     accountId: input.accountId,
@@ -43,9 +92,16 @@ function attemptPrincipal(input: Omit<AttemptSecretInput, "db" | "settings" | "a
 
 export function attemptSecretResolver(input: AttemptSecretInput): SecretResolver {
   return createSecretResolver(
-    { db: input.db, encryptionKey: environmentsEncryptionKeyBytes(input.settings) ?? null },
+    {
+      db: input.db,
+      encryptionKey: environmentsEncryptionKeyBytes(input.settings) ?? null,
+      ...(input.vaultAccess ? { providers: input.vaultAccess.providers } : {}),
+    },
     attemptPrincipal(input),
-    { capabilityEnabled: secretsCapabilityEnabled(input.agentConfig) },
+    {
+      capabilityEnabled: secretsCapabilityEnabled(input.agentConfig),
+      ...(input.vaultAccess ? { attemptBudget: input.vaultAccess.attemptBudget } : {}),
+    },
   );
 }
 
@@ -57,7 +113,7 @@ const SAVE_TO_OWNER = { user: "user", task: "task", workspace: "workspace" } as 
  * Returns a model-facing reason, or null when the vault can take the answer.
  */
 export function attemptQuestionVaultValidator(
-  input: Omit<AttemptSecretInput, "settings" | "agentConfig">,
+  input: Omit<AttemptSecretInput, "settings" | "agentConfig" | "vaultAccess">,
 ) {
   return async ({
     vault,

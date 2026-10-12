@@ -85,13 +85,19 @@ import type {
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
-import { createAttemptSecretResolver } from "./secret-resolver";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
-import { attemptQuestionVaultValidator, secretsCapabilityEnabled } from "./secret-resolver";
+import {
+  attemptQuestionVaultValidator,
+  createAttemptSecretResolver,
+  secretsCapabilityEnabled,
+  type AttemptVaultAccess,
+} from "./secret-resolver";
 
 export type BuildTurnAgentDeps = {
+  /** Connected-vault providers and the shared read budget for this attempt. */
+  vaultAccess: AttemptVaultAccess;
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
@@ -838,6 +844,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           attemptId: input.attemptId,
           executionGeneration: turn.executionGeneration,
           agent: session.agent,
+          vaultAccess: deps.vaultAccess,
         }),
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;

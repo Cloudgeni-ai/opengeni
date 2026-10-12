@@ -128,7 +128,7 @@ import {
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
-import { attemptSecretResolver } from "./secret-resolver";
+import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -157,6 +157,8 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  /** Connected-vault providers and the shared read budget for this attempt. */
+  vaultAccess: AttemptVaultAccess;
   fetchKnowledgeSource?:
     | ((
         input: import("../types").RunKnowledgeSourceSyncBatchInput,
@@ -1002,6 +1004,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           db,
           settings: githubRestMcp.settings,
           agentConfig: session.agent,
+          vaultAccess: deps.vaultAccess,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,

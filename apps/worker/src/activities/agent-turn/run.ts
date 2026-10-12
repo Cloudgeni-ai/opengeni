@@ -10,6 +10,7 @@ import {
   ClaudeSubscriptionReconnectRequired,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
@@ -1699,7 +1700,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ]),
             ).values(),
           ];
+          // Connected vaults (1Password, host) resolve under the acting human;
+          // one provider read budget covers every resolver of this attempt.
+          const vaultAccess = createAttemptVaultAccess({
+            db,
+            settings,
+            workspaceId: input.workspaceId,
+            subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? null,
+            hostVaultProvider: connectionCredentials?.vaultProvider,
+            onePasswordVaultProvider: resolvedServices.onePasswordVaultProvider,
+          });
           const toolRuntime = await prepareTurnToolRuntime({
+            vaultAccess,
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
@@ -1752,6 +1764,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } = toolRuntime;
 
           const builtAgent = await buildTurnAgent({
+            vaultAccess,
             skillCatalog: toolRuntime.skillCatalog,
             mcpServers: toolRuntime.mcpServers,
             input,
