@@ -124,6 +124,16 @@ function FieldValue({
   const label = fieldLabel(field.name).toLowerCase();
   const reveal = () => revealText(api, item.vaultId, item.id, field.id);
   const totp = useTotp(field.kind === "totp" ? (revealed ?? null) : null);
+  // Live codes show by default for people who may use the item (Q-34): one
+  // audited reveal of the seed per page load; codes are computed locally.
+  // A failure leaves the code hidden, and Reveal then says what went wrong.
+  const autoRevealed = useRef(false);
+  useEffect(() => {
+    if (field.kind !== "totp" || !canUse || autoRevealed.current) return;
+    autoRevealed.current = true;
+    revealText(api, item.vaultId, item.id, field.id).then(onRevealed, () => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per page load
+  }, [field.kind, canUse]);
 
   const toggle = async () => {
     if (revealed !== undefined) {
