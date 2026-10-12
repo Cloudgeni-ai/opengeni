@@ -85,6 +85,8 @@ async function coreAccessDisposition(
   if (kind === "codex") return await codexRouteDisposition(deps, accountId);
   if (kind === "supergrok")
     return await subscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
+  if (kind === "claude_subscription")
+    return await subscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
   return "legacy";
 }
 
@@ -117,12 +119,12 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         };
       }
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
-      // On the core a SuperGrok access policy is a shared connection's, which
+      // On the core a SuperGrok or Claude access policy is a shared connection's, which
       // the core editor authorizes; only the legacy pools have private rows.
-      const supergrokCore =
-        kind === "supergrok" &&
+      const sharedCore =
+        (kind === "supergrok" || kind === "claude_subscription") &&
         (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
-      if (kind === "supergrok" && !supergrokCore) {
+      if (kind === "supergrok" && !sharedCore) {
         const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
           workspaceId: scopeId,
           subjectId: grant.subjectId,
@@ -137,7 +139,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             });
         }
         if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
-      } else if (kind === "claude_subscription") {
+      } else if (kind === "claude_subscription" && !sharedCore) {
         const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
           workspaceId: scopeId,
           subjectId: grant.subjectId,
@@ -153,7 +155,12 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
           await requireSubscriptionScopeMutation(c, deps, scopeId, snapshot.scope, "Claude");
         }
-      } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
+      } else if (mutate) {
+        // A core Claude change keeps the legacy same-origin browser check.
+        if (kind === "claude_subscription" && !c.req.header("authorization"))
+          requireSameOriginBrowserMutation(c, deps);
+        await requireAccessGrant(c, deps, scopeId, "workspace:admin");
+      }
       if (
         kind === "vercel_gateway" ||
         kind === "openrouter" ||
@@ -174,8 +181,8 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           subjectId: grant.subjectId,
         },
         core:
-          kind === "supergrok"
-            ? supergrokCore
+          kind === "supergrok" || kind === "claude_subscription"
+            ? sharedCore
             : (await coreAccessDisposition(deps, kind, grant.accountId)) === "core",
       };
     }

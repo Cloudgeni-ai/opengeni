@@ -398,6 +398,7 @@ export {
 export * from "./subscription-core-xai-compat";
 export * from "./subscription-core-claude-adapter";
 export * from "./subscription-core-claude";
+export * from "./subscription-core-claude-compat";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,
