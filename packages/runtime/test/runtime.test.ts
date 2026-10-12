@@ -545,6 +545,35 @@ describe("structured human-input runtime boundary", () => {
   });
 
   test("serializes an ordinary question with an explicit null skill review", () => {
+    // A model filling the strict schema sends Other/options on a secret
+    // question; that must never fail the turn, and the stored card drops them.
+    const secret = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "secret-with-other",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [
+              {
+                id: "password",
+                kind: "secret",
+                prompt: "Password for the dashboard",
+                options: [],
+                allowOther: true,
+                secret: { item: "Dashboard", saveTo: "user" },
+              },
+            ],
+          }),
+        },
+      },
+    ]);
+    expect(secret[0]?.input.questions[0]).toMatchObject({
+      kind: "secret",
+      options: [],
+      allowOther: false,
+    });
+
     const serialized = serializeHumanInputRequests([
       {
         name: HUMAN_INPUT_TOOL_NAME,
