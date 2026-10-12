@@ -66,3 +66,30 @@ test("an older, unrelated or hidden failure never suppresses the banner", () => 
   // A cleared or paged-out view shows nothing.
   expect(timelineShowsFailure([], { failureEventId: "evt-2", turnId: "turn-1" })).toBe(false);
 });
+
+test("after Retry reopens the turn, only the new attempt's landmark owns its failure", () => {
+  const recovery = (sequence: number) =>
+    event(sequence, "turn.recovery.requested", { reason: "human_retry" }, "turn-1");
+  // The retried attempt failed without settling a new landmark: the old one
+  // belongs to the earlier failure. The newer failure still has its own notice
+  // only when the turn had no activity, so drop it to prove the landmark alone.
+  const stale = buildTimeline([
+    skipped(1, "turn-1"),
+    failed(2, "turn-1"),
+    recovery(3),
+    failed(4, "turn-1", "compaction summarization failed: 500 upstream"),
+  ]).filter((item) => item.kind !== "notice");
+  expect(timelineShowsFailure(stale, { failureEventId: "evt-4", turnId: "turn-1" })).toBe(false);
+  // The earlier failure is still owned by its own landmark.
+  expect(timelineShowsFailure(stale, { failureEventId: "evt-2", turnId: "turn-1" })).toBe(true);
+  // A landmark settled by the retried attempt owns the newer failure.
+  const fresh = buildTimeline([
+    skipped(1, "turn-1"),
+    failed(2, "turn-1"),
+    recovery(3),
+    event(4, "session.context.compaction.started", { trigger: "auto" }, "turn-1"),
+    skipped(5, "turn-1"),
+    failed(6, "turn-1"),
+  ]);
+  expect(timelineShowsFailure(fresh, { failureEventId: "evt-6", turnId: "turn-1" })).toBe(true);
+});

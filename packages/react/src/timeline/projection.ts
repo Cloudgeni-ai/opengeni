@@ -1478,11 +1478,15 @@ export function buildTimeline(
         // provider text behind Details. The turn's own failed compaction
         // landmark is the one place that shows it: it receives the recorded
         // text, and no separate notice repeats it.
+        // Retry reopens the same logical turn, so only a landmark from this
+        // attempt (after the turn's previous settlement) can own this failure.
         const failure = allowance ? null : presentTurnFailureText(failureText);
         let landmarkIndex = -1;
         if (failure?.detail !== undefined && turnId !== null) {
-          for (let index = items.length - 1; index >= 0; index -= 1) {
+          // Skip the turn-end just pushed for this failure.
+          for (let index = items.length - 2; index >= 0; index -= 1) {
             const item = items[index];
+            if (item?.kind === "turn-end" && item.turnId === turnId) break;
             if (
               item?.kind === "context-compaction" &&
               item.turnId === turnId &&

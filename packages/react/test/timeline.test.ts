@@ -2244,6 +2244,22 @@ describe("buildTimeline", () => {
       text: "Couldn’t compact conversation history",
       details: { label: "Details", value: recorded },
     });
+    // Retry reopens the turn: an earlier attempt's landmark never owns a newer
+    // failure, which keeps its own notice.
+    reset();
+    const newer = "compaction summarization failed: 500 upstream";
+    const retried = buildTimeline([
+      event("session.context.compaction.skipped", { reason: "summarization_failed" }),
+      event("turn.failed", failed),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      event("turn.failed", { ...failed, error: newer }),
+    ]);
+    expect(retried.find((item) => item.kind === "context-compaction")).toMatchObject({
+      failureDetail: recorded,
+    });
+    expect(retried.filter((item) => item.kind === "notice")).toMatchObject([
+      { id: "evt-4", details: { label: "Details", value: newer } },
+    ]);
   });
 
   test("hides same-turn recovery control evidence from the user timeline", () => {
