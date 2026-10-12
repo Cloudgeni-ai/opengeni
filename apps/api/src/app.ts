@@ -289,6 +289,7 @@ import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
 import { registerEnvironmentRoutes } from "./routes/environments";
+import { registerVaultRoutes } from "./routes/vaults";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
@@ -2188,6 +2189,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
   registerEnvironmentRoutes(app, routeDeps);
+  registerVaultRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerAutomationRoutes(app, routeDeps);
