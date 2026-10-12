@@ -36,8 +36,9 @@ independent design review (summarised in [section 9](#9-review-changes)).
    SQL, so a policy bug can at worst pick a worse account, never a forbidden
    one. Effective settings are resolved by SQL for enforcement, and a parity
    test pins the TypeScript copy to it.
-5. **The account belongs to the session.** One chat binding per session.
-   Explicit choice lives only on the binding, never in frozen turn authority.
+5. **The account belongs to the session.** One chat binding per session and
+   provider (D-32 of the contract, migration 0729). Explicit choice lives only
+   on the binding, never in frozen turn authority.
 6. **Accepted work freezes only personal authority**, per provider. Shared
    eligibility is checked live.
 7. **Spread is a deterministic hash** of the session id over eligible accounts
@@ -191,9 +192,24 @@ One row per connection with the shared quota model and placement statistics
 
 ### 3.4 `subscription_session_bindings`
 
-Primary key `(workspace_id, session_id)`: `provider`, `connection_id`,
+Primary key `(workspace_id, session_id, provider)`: `connection_id`,
 `model_id`, `choice` (`automatic` | `explicit`), `only_this_model`,
 `last_model_call_at`, `last_switch_reason`, `version`.
+
+- A session keeps one binding per provider (D-32): each provider's explicit
+  choice or automatic placement for that provider's models, as each provider
+  kept its own pin before the shared core. Placement, requests, pins and the
+  cache clock read and write only the row of their own provider, and a row
+  never changes provider (trigger `subscription_session_bindings_provider_fixed`).
+- Rolling window: migration `0729_subscription_session_bindings_per_provider.sql`
+  moved the key from `(workspace_id, session_id)` and keeps a unique index
+  `subscription_session_bindings_rolling_session_idx` on those two columns,
+  because the previous binary upserts with that conflict target. While it
+  exists a session still holds at most one row, so the previous binary always
+  reads the session's only row and can never meet a second provider's. The
+  next drained provider cutover (SuperGrok's) drops it after its preflight has
+  refused every other runtime login; from then on a leftover writer with the
+  old conflict target fails (42P10) instead of misreading a row.
 
 - `last_model_call_at` is the session's cache clock (M5 cache-aware
   stickiness, D-30 and D-31 of the contract). It advances, forward only and
@@ -345,11 +361,10 @@ reservation), which never block one another.
    (`pinned_account_unavailable`); a choice that can never serve the work
    waits as `pinned_account_ineligible` (D-24), including this provider's
    choice of a deleted account (its reference cleared by the foreign key).
-   A binding of another provider is not a choice for this provider's work
-   (D-32 of the contract): placement sees no binding, places automatically
-   among this provider's connections, and never writes over another
-   provider's explicit choice, so that provider's pin, clock and version
-   stay as stored. Another provider's automatic binding is replaced.
+   The binding read is this provider's own (D-32 of the contract): another
+   provider's pin is never read, written or cleared, so its account, clock
+   and version stay as stored and switching back to that provider's model
+   uses the pinned account.
 3. Candidate models: the preferred model, then the fallback order (same or
    other providers, the latter only if cross-provider failover is on), or
    only the preferred model when the session is "only this model"
@@ -634,9 +649,9 @@ writers concurrently.
    field as a derived API/SDK projection only. Do not synthesize a workspace
    model allowlist or alter connection scope to emulate source selection.
 5. Convert session pin and last-account columns into one
-   `subscription_session_bindings` row. A manual pin is `explicit`; otherwise
+   `subscription_session_bindings` row per provider (D-32). A manual pin is `explicit`; otherwise
    preserve the latest effective selected account as `automatic`. Resolve ids
-   through aliases, derive the current model provider, and set
+   through aliases, keep each row's provider, and set
    `last_model_call_at` from the latest model-call fact; if no fact exists,
    preserve an unknown timestamp for core coldness semantics. Never bind to a
    deleted alias. Preserve an unhealthy/ineligible explicit target through the
@@ -2550,7 +2565,7 @@ Codex Apps request reservation uses the shared
 | Codex `organization` | Workspace override `inference_source = organization` and compatibility projection `use_organization_accounts = true`. The workspace's local Codex connections are excluded from inference by the source filter, but retain their workspace scope for independent consumers such as an existing Codex Apps designation and can be selected again if the source changes. Only organization-classified accounts serve inference, as today. |
 | Codex `disabled` | Workspace override `enabled = false` for Codex; the legacy source endpoint continues to project `disabled`. |
 | Rotation rows | Only the rows for the pool currently in effect are mapped (organization row to organization settings, workspace rows to workspace overrides). Rotation off maps to `primary_first` (D-13). Personal-pool rotation rows have no equivalent and are dropped (documented). |
-| Codex session pin/last columns; xAI/Claude pin rows | One chat binding per session: a manual pin becomes `explicit`; otherwise the most recent pin or last account becomes `automatic` with `last_model_call_at` from the latest model call. Several per-pool rows collapse to the one for the session's current model provider. |
+| Codex session pin/last columns; xAI/Claude pin rows | One chat binding per session: a manual pin becomes `explicit`; otherwise the most recent pin or last account becomes `automatic` with `last_model_call_at` from the latest model call. Each provider keeps its own row (D-32, 0729): a session with both a Codex and a SuperGrok pin keeps both. Several pool rows of one provider collapse to the one for the session's current pool. |
 | Leases, waiters | Moved with generation and wake revision; several per-pool waiters on one session collapse to the waiting one for the blocked turn. Ownerless-session waits carry the exact session capability and remain shared-only during recovery. |
 | Codex Apps designation | `subscription_apps_designations (workspace_id, connection_id, version)`; any in-scope connection may be designated (§6.3). |
 
@@ -2935,7 +2950,7 @@ touches only that provider's rows.
 | Health and quota | Status 1:1. Both the connection `version` and `refresh_generation` start from the legacy `version`, for both providers. xAI `quota_used_percent`, `quota_reset_at` and `exhausted_until` become one quota window and `exhaustedUntil`, whose kind is `rate_limit` when the legacy `last_error` records a rate-limit refusal and `quota` otherwise. Claude usage windows and `model_cooldowns` move to the quota row; the observed generation is set only when the usage row's `credential_version` equals the credential `version`, else NULL (unknown, never exhausted). A usage `reconnect` flag stays a quota fact and does not change status. Allocator counters: `selection_count` is summed and `last_selected_at` maxed over the group into the connection's quota row; the rotation row's `fairness_cursor` has no core column and is a disposition (core `spread` orders by a per-session hash and keeps no cursor). |
 | Rotation settings | Only pools in effect map: the organization row to organization `rotation.<provider>`, workspace rows to workspace overrides. Rotation on (also when no row exists) is `spread`; off is `primary_first` with the alias-resolved active pointer as the provider primary. User-pool rotation rows have no equivalent (disposition). |
 | Source | Legacy acceptance used the workspace pool when the workspace had its own credentials, else the organization pool; it never admitted organization accounts while local accounts existed. A workspace with workspace-scope credentials of the provider gets `inference_source = workspace`; other workspaces get no override (`automatic`, which today admits only organization connections there). `enabled` stays true. This deliberately diverges from §5.2's Codex `automatic` row (no override, rotation to keep local first): legacy Codex `automatic` already mixed both pools, so leaving it automatic was exact, whereas freezing `workspace` is the exact preservation for SuperGrok and Claude and the strictest one. Release note: such workspaces stop using organization accounts only if an administrator later changes the source, as today. |
-| Session pins | One binding per session, for the session's current model provider. Among that provider's pool rows, the row of the pool in the session's latest accepted v1 snapshot wins. A manual pin is `explicit` (owner-only, non-dispatching seam; kept when unhealthy); a policy pin, else the last account, is `automatic`. A personal target is kept only when the session owner owns it and the session is private or in their Personal workspace; otherwise disposition `pin_owner_ineligible`. An existing binding for the current provider is kept and this provider's rows become dispositions; a binding for another provider is replaced only when the session's current model provider is this one. `last_model_call_at` comes from the latest model-call fact. |
+| Session pins | One binding per session for this provider (D-32, 0729): another provider's binding is never read, replaced or counted, so a session with a Codex pin and a SuperGrok pin keeps both. The cutover drops 0729's rolling index in its drained window, after the preflight. Among this provider's pool rows, the row of the pool in the session's latest accepted v1 snapshot wins. A manual pin is `explicit` (owner-only, non-dispatching seam; kept when unhealthy); a policy pin, else the last account, is `automatic`. A personal target is kept only when the session owner owns it and the session is private or in their Personal workspace; otherwise disposition `pin_owner_ineligible`. An existing binding of this provider is kept and the legacy rows become dispositions. `last_model_call_at` comes from the latest model-call fact. |
 | Leases | Live leases move with turn, holder, generation, expiry and the alias-resolved connection; parity compares exact tuples. Expired leases are a disposition; a live core lease on the same turn aborts (`lease_conflict`). |
 | Waiters | Only `waiting` rows whose blocked turn and generation equal the session's parked turn move; others collapse with a disposition. When several of the provider's pool waiters match the parked turn, the one for the pool of the turn's v1 snapshot moves (the `user` pool for a `user` snapshot). Preserve the legacy `id` as `waiter_id`, `generation`, `wake_revision`, `observed_wake_revision`, `next_check_at`, `earliest_reset_at`, `blocked_turn_generation`, the goal fence and `last_wake_reason`. `wait_reason` takes a core value: `pinned_account_unavailable` or `pinned_account_ineligible` for a pinned wait, `model_not_allowed` for a model policy refusal, else `no_eligible_capacity`; `reset_kind` `quota` only when a reset is known. `workflow_id` must equal the session's workflow id, else abort. Any existing core waiter for the session aborts the cutover (`waiter_conflict`); the migration never modifies Codex or other-provider core rows. A pending wake (`wake_revision > observed_wake_revision`) gets a wake-outbox row. |
 | Accepted authority | Compatibility records on every carrier listed under "Accepted authority across the cutover" (live work plus each session's execution-context, latest accepted and child-parent turns, or `session_initial`). v1 columns and existing v2 values are not modified. |
@@ -4643,6 +4658,8 @@ connect writer gains `credentialFormat` and `personal`.
 | EP-N13 (organization-scope video envelope rejected) and EP-N14 (direct refresh outside the lock) are still present. | `video-generation-credential.ts`, `video-generation-reconciliation.ts` | X2a |
 | The M3 Codex cutover kept each verified `user` row's legacy generation and gave Personal-workspace rows generation 1 (`codex-subscription-core-cutover.ts`, 0689), the ambiguity "Personal authority generations" avoids. An owner left with more than one current Codex generation gets an empty personal v2 entry on every new acceptance (0669, 0688), silently losing personal Codex access; the 0688 connect writer assumes one generation. | `codex-subscription-core-cutover.ts`, 0669, 0688, 0689 | PR 0 adds the count (owners whose active, serviceable personal Codex connections carry more than one current generation) to the readiness report and runbook. The repair, one fresh generation per affected owner as in M4, is an owner decision (open question), because older frozen v2 entries then lose personal reach. |
 | The `model.connected` lifecycle fact is emitted only by triggers on the legacy credential tables, so Codex connects stopped producing it after the 0689 cutover. | 0565, 0598, 0602 triggers | PR 0 (provider-keyed fact on core connection insert) |
+| A deleted explicit target was silently re-chosen: the placement world read the binding through the connection join, so an explicit pin whose account was deleted (reference cleared by `ON DELETE SET NULL`) looked like no binding, placement picked an account automatically and its commit wrote that account as the session's explicit choice, against D-24 and the 0642 comment that such a pin must stay an explicit, unavailable pin. | `subscription-core/turns.ts` (M3 placement) | Per-provider bindings PR (0729): it waits as `pinned_account_ineligible`, and the commit refuses to write over it. |
+| One binding row per session: after a second provider joins the core, a session pinned to one provider's account fails work on another provider's model (`pinned_account_ineligible`), and a placement of the other provider replaces the pin. Before the shared core each provider kept its own pin. | 0642 `subscription_session_bindings` key | Per-provider bindings PR (0729, D-32). |
 | Resolved since the inventory baseline: its open question on 0263 lacking `claude_subscription` (correct at `0d7075e`) no longer applies, because 0642 added `claude_subscription` and `subscription_connection` to the retention function. The inventory is a baseline record and is not edited. | inventory §4.2.4 | nothing to fix |
 
 Open questions for the product owner: whether owners may later choose their

@@ -164,6 +164,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       readSubscriptionSessionBinding(tx, {
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
+        provider: providerId,
         forUpdate: request.lockBinding === true,
       }),
       {

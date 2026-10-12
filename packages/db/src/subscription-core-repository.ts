@@ -404,11 +404,16 @@ export type SubscriptionSessionBinding = {
   version: number;
 };
 
+/**
+ * The session's binding for one provider (0729, D-32): a session keeps one
+ * binding per provider, and a provider reads and writes only its own.
+ */
 export async function readSubscriptionSessionBinding(
   db: Database,
   input: {
     workspaceId: string;
     sessionId: string;
+    provider: ProviderId;
     /**
      * Lock the row until the transaction ends, so a placement compares and
      * writes the binding it decided from while parallel placements of the
@@ -436,6 +441,7 @@ export async function readSubscriptionSessionBinding(
       model_id, choice, only_this_model, last_model_call_at, last_switch_reason, version
     from subscription_session_bindings
     where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+      and provider = ${input.provider}
     ${input.forUpdate ? sql`for update` : sql``}`,
   );
   if (!row) return null;
@@ -454,7 +460,10 @@ export async function readSubscriptionSessionBinding(
   };
 }
 
-/** Inserts once or compare-and-swaps an existing binding version. */
+/**
+ * Inserts the provider's binding once or compare-and-swaps its version. A
+ * binding never changes provider (the 0729 trigger refuses it).
+ */
 export async function writeSubscriptionSessionBinding(
   db: Database,
   input: Omit<SubscriptionSessionBinding, "version"> & { expectedVersion?: number | null },
@@ -476,9 +485,8 @@ export async function writeSubscriptionSessionBinding(
       ${input.lastModelCallAt?.toISOString() ?? null}::timestamptz,
       ${input.lastSwitchReason ?? null}, 1
     )
-    on conflict (workspace_id, session_id) do update
-      set provider = excluded.provider,
-          connection_id = excluded.connection_id,
+    on conflict (workspace_id, session_id, provider) do update
+      set connection_id = excluded.connection_id,
           model_id = excluded.model_id,
           choice = excluded.choice,
           only_this_model = excluded.only_this_model,
