@@ -7,6 +7,7 @@ import { instrumentedModelFetch } from "../../../packages/runtime/src/model-prov
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
 import {
   parseModelProvidersJson,
+  withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
   type ResolvedModelProvider,
 } from "@opengeni/config";
@@ -799,14 +800,27 @@ describe("Claude custody edge paths on the core", () => {
     expect(serialized).not.toContain("live-secret");
     expect(serialized).not.toContain("refresh-secret");
     const settings = withClaudeConnectionCredential(
-      testSettings({ claudeSubscriptionEnabled: true }),
+      withClaudeConnectionCatalog(
+        testSettings({ claudeSubscriptionEnabled: true }),
+        { claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] } },
+        "organization",
+      ),
       "claude_subscription",
       serialized,
       "organization",
       { connectionId: "20000000-0000-4000-8000-000000000002", credentialVersion: 7 },
     );
-    // The settings accept it as a strict Claude subscription credential.
-    const providers = JSON.stringify(parseModelProvidersJson(settings.modelProvidersJson));
+    // The settings accept it as a strict Claude subscription credential and
+    // map only the placeholder bearer and the account identity.
+    const parsed = parseModelProvidersJson(settings.modelProvidersJson);
+    const mapped = parsed.find((provider) => provider.id === "organization-claude-subscription");
+    expect(mapped?.apiKey).toBe(CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN);
+    expect(mapped?.anthropic?.identity).toEqual(accountIdentity);
+    expect(mapped?.anthropic?.credentialBinding).toEqual({
+      connectionId: "20000000-0000-4000-8000-000000000002",
+      credentialVersion: 7,
+    });
+    const providers = JSON.stringify(parsed);
     expect(providers).not.toContain("live-secret");
     expect(providers).not.toContain("refresh-secret");
   });
