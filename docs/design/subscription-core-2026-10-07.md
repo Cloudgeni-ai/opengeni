@@ -45,10 +45,11 @@ independent design review (summarised in [section 9](#9-review-changes)).
 8. **Cross-provider failover requires portable compaction.** New sessions use
    portable compaction whenever a cross-provider fallback is in effect for
    their model; existing Codex remote-compaction sessions convert at their
-   next compaction while Codex still has capacity, and until then fail over
-   only within Codex (D-19, see §6.4). D-40 (§5.7.5) proposes converting a
-   remote-compaction session at the failover point instead; it replaces the
-   last clause once the owner confirms it (Q-05).
+   next compaction while Codex still has capacity, or at failover by
+   reconstructing and summarizing all retained cleartext work units on an
+   authorized target. Original durable history and compaction records stay
+   intact. Unsupported or incomplete reconstruction fails closed with an
+   actionable reason (D-40, §5.7.5; Q-05 resolved within implementation scope).
 
 ## 2. Architecture
 
@@ -5224,8 +5225,9 @@ Fail-closed choices (contract ambiguous; strictest option taken):
 ### 5.7 M5: cross-provider failover
 
 Scope: SUB-FAIL-01 to SUB-FAIL-09, SUB-FAIL-11 and SUB-WAIT-01 for chat
-turns, with contract decisions D-33 to D-46 and open questions Q-02, Q-04,
-Q-05 and Q-06. Voice, transcription and media never cross providers
+turns, with contract decisions D-33 to D-46, open questions Q-02, Q-04
+and Q-06, and Q-05 resolved within implementation scope. Voice,
+transcription and media never cross providers
 (SUB-FAIL-10, §6.5). This section is the design only: every SUB-FAIL
 requirement stays pending until the PRs in §5.7.9 verify it. Names refer to
 main on 2026-10-12, after the settings track (§5.5) merged. Section 5.6 is
@@ -5938,7 +5940,7 @@ waits for the UI change. PR F (§5.7.9) shows the serving model in the
 session indicator and a notice of the switch, previewed with real
 components and approved by the owner before merge (D-08, D-45).
 
-#### 5.7.5 Codex remote-compaction sessions (D-40, implementation choice; Q-05 open)
+#### 5.7.5 Codex remote-compaction sessions (D-40, Q-05 resolved in scope)
 
 **What remote compaction keeps.** `compactContextRemoteV2`
 (`apps/worker/src/activities/context-compaction.ts`) asks Codex for a
@@ -5949,8 +5951,9 @@ the newest user, system and developer messages within
 catalog, the opaque `{ type: "compaction", encrypted_content }` item (with
 a `summary` only when Codex returns one) and the reasoning configuration.
 Its event's `implementation` is `responses_compaction_v2`. Assistant
-messages, tool calls and tool outputs survive only inside the opaque item,
-which only Codex can read. That is what D-19 and §6.4 describe.
+messages, tool calls and tool outputs survive in that replacement only
+inside the opaque item, which only Codex can read. This does not describe
+Opengeni's inactive durable rows; D-40 corrects D-19's earlier premise.
 
 **What Opengeni keeps.** `applyContextCompaction`
 (`packages/db/src/index.ts`) runs under the attempt fence
@@ -6006,10 +6009,28 @@ compaction item and encrypted reasoning).
    timestamp and turn attribution, with no competing compaction event or
    unrelated rows. Timestamp equality alone is not proof. Refuse any block
    that cannot satisfy those checks; never guess from active flags.
-4. The rebuilt history is compacted portably on the target's placed account,
-   through the input preparation of `compactContextPortable`. That
-   preparation drops the oldest whole work units when the input exceeds the
-   summarizer's budget, and the event records how many it dropped.
+4. Summarize every retained cleartext work unit in bounded chunks on an
+   eligible, authorized target account. Do not use `compactContextPortable`'s
+   budget-fitting path unchanged: its preparation can remove oldest work
+   units (`packages/runtime/src/context-compaction.ts`,
+   `oldestLogicalUnitCuts`), which is forbidden for this conversion.
+   Build a deterministic coverage manifest of original row ids, positions
+   and content digests since the clear boundary. Pack complete, ordered
+   work units into requests within the target's input/output budgets;
+   summarize each, then reduce all chunk summaries through a bounded tree
+   until one portable checkpoint fits. Each reduction's manifest covers
+   the union of its children. Never discard an unsummarized original unit
+   or an unconsumed chunk summary to make a request fit. An indivisible
+   unit that cannot fit, an unsupported content type, non-reducing output
+   or an exhausted conversion-only call/token budget refuses conversion
+   with its exact reason. These are conversion bounds, not healthy-turn
+   length limits. Summarization is lossy context compression, not a claim
+   of semantic losslessness; full source records remain available.
+   Every physical summarization request rechecks funding and target
+   eligibility through the core, including explicit pins, effective
+   settings and frozen background/personal authority. It never borrows a
+   different pool or relaxes a pin when capacity runs out. Tools are
+   disabled: summarization describes completed effects, never replays them.
 5. One fenced transaction installs the result through a conversion variant
    of `applyContextCompaction`, changes `codex_compaction_mode` from
    `remote_v2` to `portable` only if it is still `remote_v2`, and writes the
@@ -6017,8 +6038,13 @@ compaction item and encrypted reasoning).
    Before installation, under the same history-write fence, require that
    the latest clear/compaction boundary and maximum history position still
    match the rebuild's snapshot; any appended row or changed boundary
-   invalidates that result. The mode never returns to `remote_v2`; later
-   compactions, on Codex too, are portable.
+   invalidates that result. Require complete manifest coverage and all
+   chunk requests settled before installation. Original history rows,
+   opaque compaction items and original compaction events are never deleted
+   or rewritten; only the active model-visible view changes, using the
+   existing inactive-row convention. A transaction failure rolls back both
+   mode and active-view changes. The mode never returns to `remote_v2`;
+   later compactions, on Codex too, are portable.
 6. When any block cannot be attributed with certainty, the conversion is
    refused: an event is missing or ambiguous, or a compaction item has no
    event, as in a fork. The fork routine of 0429 and its successors copy the
@@ -6029,19 +6055,57 @@ compaction item and encrypted reasoning).
    convertible, and the session waits with `compaction_provider_locked`, as
    today.
 
-The summary is made on the target because the source provider is the one
-without capacity; it costs one portable compaction call there. For a very
-long session it can lose more than the opaque item did, because the
-summarizer sees only what fits its budget; the event records the dropped
-count. Conversion at failover is the implementation choice within the
-delegated remote-compaction unlock objective, not evidence of a new owner
-confirmation. E1's dormant conversion pieces may proceed without Q-05.
-Q-05 remains open for owner confirmation before E2 and activation. At that
-point E2 explicitly rewrites SUB-FAIL-09's within-Codex clause and the
-conflicting text of D-19, §1 item 8 and §6.4; until then the shipped
-restriction stands and no requirement is marked verified. New sessions
-keep the portable default of SUB-FAIL-09, and conversion at the next
-compaction on Codex stays.
+**Supported history and omissions.** Support uncompacted history and the
+current integer-position compaction layout when every installed block is
+attributable as above, including multiple such compactions and a validated
+context-clear boundary. Refuse older fractional layouts, missing or
+ambiguous events, forked blocks without provenance, missing source rows,
+malformed/unpaired work units and content the target cannot faithfully
+process. A coverage manifest cannot recover missing cleartext from an
+opaque item. Record the exact supported-layout version and every exclusion
+from the request copy: pre-clear history, attributed replacement blocks
+and provider-opaque artifacts, with row ranges/counts and reasons. They
+remain durably retained; no original cleartext unit after the clear
+boundary may be omitted from summarization. Report summarized unit counts,
+coverage and exclusions in the conversion receipt/event, without putting
+full transcript content in the event. The preview-gated UI in F exposes
+the outcome and actionable refusal; this design grants no new UI approval.
+
+**Failure, retries and rollback safety.** Persist staged chunk summaries
+and their coverage in a new tenant/session-scoped
+`session_compaction_conversion_chunks` relation, not in the event stream
+as model input. Key checkpoints by conversion snapshot, algorithm version
+and chunk input digest; bind the snapshot to the clear/compaction boundary,
+history high-water position, serving provider/model and accepted authority.
+Each write is attempt-fenced and links its exact core request receipt.
+Reuse a settled successful chunk only for that unchanged snapshot; a
+reserved/unknown request is not replayed (D-38). Checkpoints do not activate
+history. Crash or Temporal replay after atomic installation reads its
+conversion receipt and returns the existing result, without resummarizing,
+reinstalling, repeating tool effects or adding accounting entries.
+
+Capacity exhaustion, request failure, cancellation, unknown outcome,
+coverage failure or a stale snapshot leaves the old active history and
+`remote_v2` mode intact. Report structured reasons such as
+`conversion_capacity_unavailable`, `conversion_outcome_unknown`,
+`conversion_unit_exceeds_budget`, `conversion_budget_exhausted`,
+`conversion_summary_failed` or `conversion_snapshot_changed`, together with
+covered/remaining unit counts. Transient capacity waits can resume settled
+checkpoints after authorized capacity returns; an unknown outcome requires
+settlement first. Stale snapshots must be rebuilt, not installed. Structural
+refusals record the unsupported layout or attribution problem and direct
+the operator to supported reconstruction or waiting for Codex capacity;
+never suggest clearing history or widening access as an automatic fix.
+
+The summary is made on the target because the source provider lacks
+capacity. Long history can require multiple billed summarization calls,
+but must not be silently shortened to avoid them. Q-05 is resolved as the
+implementation approach within the existing objective, not a new owner
+decision. Neither E1 nor E2 has a Q-05 approval hold. D-40 supersedes D-19's
+premise and the earlier within-Codex-only requirement; verification remains
+pending and the runtime is not implemented here. Cross-provider defaults
+remain off, D-43's rollout gates remain, and this grants no deployment,
+cutover or UI approval. New sessions retain SUB-FAIL-09's portable default.
 
 Scheduled sessions are not affected. The generated-session checks that
 compare `codex_compaction_mode` with the accepted binding
@@ -6365,28 +6429,38 @@ merged.
   and identical policies in later generations consume no transition budget.
 - Waits for nothing open.
 
-**PR E1: the conversion pieces.** One migration. This dormant implementation
-choice is within the delegated unlock objective and is not blocked on Q-05;
-it does not claim new owner confirmation or activate conversion.
+**PR E1: the conversion pieces.** One migration. Q-05 is resolved within
+the delegated unlock objective; this does not activate conversion.
 
 - `packages/subscriptions/src/placement.ts` and the reference model: the
   convertible compaction lock and `convertsCompaction` (§5.7.5, step 1). The
   lock converts only when cross-provider failover is allowed and the input
   says the session has no refusal, so M4's placement, which forces the
   setting off, never converts.
-- `packages/runtime/src/compaction-conversion.ts` (new): the rebuild of
-  §5.7.5 step 3, pure, refusing any block it cannot attribute.
+- `packages/runtime/src/compaction-conversion.ts` (new): the rebuild,
+  supported-layout validator, coverage manifest and deterministic bounded
+  chunk/reduction planner of §5.7.5. Refuse any unattributable block or
+  unsummarized-unit omission; do not reuse oldest-unit trimming.
 - `packages/db/src/context-compaction-conversion.ts` (new): one read of the
   rows and compaction events since the latest clear marker, the fenced
   install (the conversion variant of `applyContextCompaction`, the one-way
-  mode change and the event) and the refusal record.
-- Migration: `sessions.compaction_conversion_refused_at`.
+  mode change and the event), refusal record and idempotent staged chunk
+  checkpoints tied to exact request receipts and the immutable snapshot.
+- Migration: `sessions.compaction_conversion_refused_at` and the scoped
+  `session_compaction_conversion_chunks` relation with FORCE RLS, exact
+  tenant/session keys, unique snapshot/chunk identity and fenced writers.
 - Tests under SUB-FAIL-09: the rebuild over several remote compactions, a
   context clear, a fork, a missing event, a fractional historical layout
   and ambiguous timestamp/turn attribution (all refused), no network; real
   PostgreSQL for the atomic install and mode change, the one-way mode, the
   refusal record, an archived session and an append or context change
-  between rebuild and install (the stale install is refused).
+  between rebuild and install (the stale install is refused). Test
+  all-unit coverage through multiple reduction levels, over-budget units,
+  unsupported content, no reduction, budget exhaustion and recorded
+  exclusions, with scripted no-network summaries. PostgreSQL tests as the
+  non-owner app role cover checkpoint isolation, duplicate writes, failed
+  final commit rollback and byte-for-byte preservation of original history
+  items and compaction records apart from the intended active flags.
 - Waits for A, which changes `placement.ts` first, and for nothing open.
 
 **Phase 2: hooks, each after the open PRs it names.**
@@ -6474,25 +6548,32 @@ reset and a lost mutation wake (SUB-WAIT-01/02, D-41). Waits for #4118, #4132 an
   identical policies; the replay test of §5.7.8.
 - Waits for C2, and so for the same open PRs.
 
-**PR E2: the conversion hooks.** Merges only after Q-05.
+**PR E2: the conversion hooks.** No additional Q-05 source-implementation hold.
 
 - `compaction-prep.ts` and `apps/worker/src/activities/context-compaction.ts`:
   an attempt whose serving revision carries the conversion runs it before
-  its first model call, through the input preparation of
-  `compactContextPortable`, and `maybeCompactContext` accepts it.
+  its first ordinary model call, through E1's all-unit chunk planner and
+  resumable reduction executor, and `maybeCompactContext` accepts it.
+  Each summarization call reserves and settles through the authorized
+  target's core request/funding path with tools disabled.
 - `packages/core/src/domain/sessions.ts` (`assertSessionAllowsProductModel`)
   and `packages/core/src/goal-admission.ts`: accept a pending conversion.
 - `packages/db/src/index.ts`: `applyContextCompaction` records
   `supersededFrom` and the block length in new events, and E1's functions
   are exported.
 - The step passes the convertible lock when the session has no refusal.
-- Once Q-05 is confirmed, rewrite SUB-FAIL-09's within-Codex clause and the
-  conflicting D-19 / §1 / §6.4 text in the same PR, rather than leaving a
-  decision that contradicts a requirement. Verification still needs tests.
+- Implement the revised SUB-FAIL-09 / D-40 contract; requirement
+  verification stays pending until the implementing tests pass.
 - Tests under SUB-FAIL-09: `packages/runtime/test/context-compaction.test.ts`,
   `apps/worker/test/context-compaction-activity.test.ts`, and a refusal
-  followed by the `compaction_provider_locked` wait.
-- Waits for Q-05, E1, C2 and D, and for #4129, #4130, #4157, #4158 and
+  followed by the `compaction_provider_locked` wait. Cover long-history
+  target exhaustion mid-tree, failed/empty summaries, unknown requests,
+  lost authority, source/target pins, frozen background pools and funding
+  refusal: no truncated install and no alternate unauthorized account.
+  Crash/retry and Temporal replay tests cover settled chunk reuse, unknown
+  outcome fencing, failure before final commit and replay after it, with
+  no duplicate tools, requests or accounting and unchanged original records.
+- Waits for E1, C2 and D, and for #4129, #4130, #4157, #4158 and
   #4159 (`sessions.ts`).
 
 **PR H: cleanup.** `turns.ts` uses B1's copies of `readAttemptFence`,
@@ -6553,8 +6634,9 @@ deployment setting waits for this PR.
 - Waking every candidate provider's waiters widens the wake fan-out.
 - Analytics that read the accepted policy (0533) attribute a fallback turn
   to the accepted model.
-- The converted summary of a very long remote-compaction session can lose
-  detail; the event records what was dropped.
+- Summaries can lose detail despite complete structural coverage; original
+  durable records remain intact. Long-history conversion may exhaust its
+  budget or target capacity and fail closed instead of omitting units.
 - A quarantined personal account's health retry falls back to the waiter's
   backoff, a limit inherited from #4105.
 - Until the next drained cutover drops 0729's rolling index, the step never
@@ -6628,21 +6710,18 @@ and delegated managers of that connection (not "whoever connected it").
 
 ### 6.4 Compaction (SUB-FAIL-09)
 
-Remote compaction keeps only an opaque encrypted item plus retained user,
-system and developer messages, so there is no cleartext to convert at
-failover time. Therefore: new sessions whose model has an effective
-cross-provider fallback start with portable compaction; existing
-remote-compaction sessions convert at their next compaction while Codex has
-capacity; until converted they fail over only within Codex and otherwise
-wait with an explained reason.
-
-Implementation choice (D-40, §5.7.5; Q-05 still awaits owner confirmation): Opengeni keeps
-every row a remote compaction summarized in cleartext, so a
-remote-compaction session that must cross providers can convert at the
-failover point, by rebuilding its history from those rows and compacting it
-portably on the target. Dormant conversion pieces may proceed now. Once
-the owner confirms Q-05, E2 rewrites this paragraph and SUB-FAIL-09's
-"until converted they fail over only within Codex" clause before activation.
+Remote compaction's active replacement contains an opaque encrypted item
+and retained user/system/developer messages, but Opengeni also retains the
+original inactive cleartext rows (`applyContextCompaction`, §5.7.5).
+New sessions with an effective cross-provider fallback use portable
+compaction. Existing sessions convert at their next compaction while Codex
+has capacity, or at failover on an eligible authorized target using D-40's
+complete-coverage chunked summarization. Original history and compaction
+records stay intact; only the active model-visible view changes atomically
+with the mode. Unsupported attribution, omitted cleartext units, exhausted
+budgets or incomplete summaries leave the original mode/view unchanged
+with an actionable reason. Q-05 is resolved within implementation scope;
+verification remains pending and deployment/default/UI gates are unchanged.
 
 ### 6.5 Consumers outside chat (SUB-FAIL-10, SUB-CONS-01)
 
