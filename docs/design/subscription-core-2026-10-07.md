@@ -4365,7 +4365,12 @@ SuperGrok on the core:
   cache clock before the core lease is released (a title request does not).
   The per-turn SuperGrok quota call runs
   only on the legacy route; on the core, quota is observed on refusal (and
-  by the out-of-turn probe, X2a).
+  by X2a's billing re-read before placement and its out-of-turn probe). A
+  connection that re-read finds recovered wakes the SuperGrok core waiters
+  through the same provider-neutral database wake as X1b's health recovery
+  (`wakeSubscriptionCoreCapacityWaiters`); the generic session workflow wake
+  committed with it reaches the waiter, so that wake does not depend on the
+  typed signal being drained.
 - Compaction: X1b adds no compaction change. A compaction turn whose
   placement waits is still cancelled with its request preserved (as for
   Codex) and never parks; a test asserts it arms no waiter.
