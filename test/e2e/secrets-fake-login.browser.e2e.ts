@@ -61,6 +61,7 @@ const TOTP_SEED = "JBSWY3DPEHPK3PXP";
 const SIGNUP_PASSWORD = "Gx7-kP2.qR9:mZ4=wT6?";
 const CHANGED_PASSWORD = "Nw8_vB3+hJ5@cL1#yQ0!";
 const ECHO_CANARY = "OGCANARY-echo-7Qx2Lm9Pz";
+const PASSKEY_USER_PASSWORD = "Pk4!mV9#rT2@wQ7%xL";
 
 const ACCOUNT = "0e8c3b52-0000-4000-8000-000000000001";
 const WORKSPACE = "0e8c3b52-0000-4000-8000-000000000002";
@@ -106,6 +107,7 @@ const plaintexts = new Map<string, string>([
   ["signup password", SIGNUP_PASSWORD],
   ["changed password", CHANGED_PASSWORD],
   ["echo canary", ECHO_CANARY],
+  ["passkey user password", PASSKEY_USER_PASSWORD],
 ]);
 
 /** In-memory passkey items with lease and monotonic sign-count semantics. */
@@ -199,9 +201,14 @@ async function browserdRequest(
   });
 }
 
-async function data<T>(response: Response, label: string): Promise<T> {
+/** Controller-private passkey sync replies (API ↔ browserd only). They carry
+ * key material by design and never reach the agent, so they are kept apart
+ * from the agent-facing replies the leak scan covers. */
+const passkeySyncReplies: string[] = [];
+
+async function data<T>(response: Response, label: string, sink = responses): Promise<T> {
   const text = await response.text();
-  responses.push(text);
+  sink.push(text);
   if (!response.ok) throw new Error(`${label} failed (${response.status}): ${text.slice(0, 600)}`);
   return (JSON.parse(text) as { data: T }).data;
 }
@@ -251,11 +258,10 @@ class ProductBrowser {
   }
 
   async targets(): Promise<Array<{ id: string; url?: string; [key: string]: unknown }>> {
-    const listed = await data<{ targets: Array<{ id: string; url?: string }> }>(
+    return await data<Array<{ id: string; url?: string; [key: string]: unknown }>>(
       await browserdRequest("GET", `${this.base}/targets`, this.viewToken),
       "targets",
     );
-    return listed.targets;
   }
 
   async syncPasskeys(): Promise<void> {
@@ -277,7 +283,11 @@ class ProductBrowser {
               status: response.status,
             });
           }
-          return await data<BrowserPasskeySyncResponse>(response, "passkey sync");
+          return await data<BrowserPasskeySyncResponse>(
+            response,
+            "passkey sync",
+            passkeySyncReplies,
+          );
         },
       },
       log: () => {},
@@ -369,6 +379,19 @@ function css(selector: string) {
   return { kind: "css" as const, selector };
 }
 
+/** An accessibility ref, as an agent reads it from the snapshot. This is the
+ * only way into a cross-origin iframe (CSS stays in the top document). */
+function refLocator(observation: BrowserObservation, role: string, name: string) {
+  const roots = observation.semantic?.kind === "snapshot" ? observation.semantic.roots : [];
+  const matches = flatten(roots).filter(
+    (node) => node.role.toLowerCase() === role && node.name === name,
+  );
+  if (matches.length !== 1) {
+    throw new Error(`expected one ${role} "${name}", found ${matches.length}`);
+  }
+  return { kind: "ref" as const, ref: matches[0]!.ref };
+}
+
 async function expectLoggedIn(browser: ProductBrowser, username: string, flow: string) {
   await browser.waitForText((text) => text === `Logged in as ${username}`);
   expect(
@@ -383,6 +406,14 @@ function receivedValues(flow: string, field: string): string[] {
     .received()
     .filter((entry) => entry.flow === flow && entry.field === field)
     .map((entry) => entry.value);
+}
+
+async function serverSignCount(username: string): Promise<number> {
+  const account = (await (await fetch(`${site.url}/__fake/accounts/${username}`)).json()) as {
+    passkeys: Array<{ signCount: number }>;
+  };
+  expect(account.passkeys).toHaveLength(1);
+  return account.passkeys[0]!.signCount;
 }
 
 async function passwordLogin(
@@ -620,6 +651,133 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     await browser.end();
   }, 60_000);
 
+  test("agent-owned passkey: register saves a vault item; a new session signs in with it and writes the sign count back", async () => {
+    const username = `pk-${randomUUID().slice(0, 8)}`;
+    vault["Passkey User/password"] = PASSKEY_USER_PASSWORD;
+    const first = await ProductBrowser.open(`${site.url}/signup`);
+    await first.act({ type: "fill", locator: css("#username"), value: username });
+    for (const field of ["#password", "#confirm"]) {
+      await first.act({
+        type: "fill",
+        locator: css(field),
+        value: "{{secret:Passkey User/password}}",
+      });
+    }
+    await first.act({ type: "click", locator: css("#create-account") });
+    await expectLoggedIn(first, username, "signup");
+    await first.goto("/passkey/register");
+    await first.act({ type: "click", locator: css("#create-passkey") });
+    await first.waitForText((text) => text === `Passkey saved for ${username}`);
+    await first.shot("passkey-registered");
+    await first.syncPasskeys();
+    const items = [...passkeys.items.values()].filter(
+      (item) => item.credential.userName === username,
+    );
+    expect(items).toHaveLength(1);
+    const item = items[0]!;
+    expect(item.credential.rpId).toBe("localhost");
+    expect(item.origin).toBe(site.url);
+    expect(item.credential.privateKey.length).toBeGreaterThan(100);
+    plaintexts.set("passkey private key", item.credential.privateKey);
+    await first.goto("/logout");
+    await first.end();
+
+    // A fresh browser session: the credential arrives only through the lease.
+    const second = await ProductBrowser.open(`${site.url}/passkey/login`);
+    await second.waitForText((text) => text === "Not signed in");
+    for (let round = 1; round <= 2; round += 1) {
+      const writesBefore = passkeys.signCountWrites.length;
+      if (round > 1) await second.goto("/passkey/login");
+      await second.act({ type: "click", locator: css("#passkey-login") });
+      await expectLoggedIn(second, username, "passkey");
+      const deadline = Date.now() + 5_000;
+      while (passkeys.signCountWrites.length === writesBefore && Date.now() < deadline) {
+        await second.syncPasskeys();
+        await Bun.sleep(100);
+      }
+      const written = passkeys.signCountWrites.slice(writesBefore);
+      expect(written.map((write) => write.itemId)).toEqual([item.credential.itemId]);
+      expect(written.at(-1)!.signCount).toBe(await serverSignCount(username));
+      if (round === 1) await second.shot("passkey-login");
+    }
+    const counts = passkeys.signCountWrites
+      .filter((write) => write.itemId === item.credential.itemId)
+      .map((write) => write.signCount);
+    expect(counts.length).toBe(2);
+    expect(counts[1]!).toBeGreaterThan(counts[0]!);
+    expect(item.credential.signCount).toBe(counts[1]!);
+    expect(
+      site.state().attempts.filter((attempt) => attempt.flow === "passkey" && !attempt.ok),
+    ).toEqual([]);
+    await second.end();
+  }, 180_000);
+
+  test("CAPTCHA in a cross-origin iframe is visible in the snapshot and solvable by ref", async () => {
+    const browser = await ProductBrowser.open(`${site.url}/captcha-iframe`);
+    await browser.waitForText((text) => text === "I'm not a robot");
+    await browser.act({
+      type: "click",
+      locator: refLocator(await browser.observe(), "checkbox", "I'm not a robot"),
+    });
+    await browser.waitForText((text) => text === "Characters in the image");
+    await browser.shot("captcha-challenge");
+    const answer = site.latestCaptchaAnswer();
+    expect(answer).toMatch(/^[A-Z0-9]{5}$/u);
+    await browser.act({
+      type: "fill",
+      locator: refLocator(await browser.observe(), "textbox", "Characters in the image"),
+      value: answer!,
+    });
+    await browser.act({
+      type: "click",
+      locator: refLocator(await browser.observe(), "button", "Verify"),
+    });
+    await browser.waitForText((text) => text === "Challenge solved.");
+    await browser.act({
+      type: "fill",
+      locator: refLocator(await browser.observe(), "textbox", "Username"),
+      value: "alice",
+    });
+    await browser.act({
+      type: "fill",
+      locator: refLocator(await browser.observe(), "textbox", "Password"),
+      value: "{{secret:Fake Alice/password}}",
+    });
+    await browser.act({
+      type: "click",
+      locator: refLocator(await browser.observe(), "button", "Sign in"),
+    });
+    await expectLoggedIn(browser, "alice", "captcha");
+    await browser.shot("captcha-success");
+    expect(receivedValues("captcha", "password")).toEqual([ALICE_PASSWORD]);
+  }, 120_000);
+
+  test("login popup: the popup is a target and takes a password reference", async () => {
+    const browser = await ProductBrowser.open(`${site.url}/popup-login`);
+    await browser.act({ type: "click", locator: css("#open-popup") });
+    let popupId: string | null = null;
+    const deadline = Date.now() + 15_000;
+    while (!popupId && Date.now() < deadline) {
+      popupId =
+        (await browser.targets()).find(
+          (target) => target.kind === "popup" && String(target.url).includes("/idp/authorize"),
+        )?.id ?? null;
+      if (!popupId) await Bun.sleep(150);
+    }
+    expect(popupId).not.toBeNull();
+    await browser.waitForText((text) => text === "Sign in", popupId!);
+    await browser.shot("popup-idp", popupId!);
+    await browser.act({ type: "fill", locator: css("#username"), value: "alice" }, popupId!);
+    await browser.act(
+      { type: "fill", locator: css("#password"), value: "{{secret:Fake Alice/password}}" },
+      popupId!,
+    );
+    // The popup posts the token to its opener and closes itself.
+    await browser.act({ type: "click", locator: css("#idp-sign-in") }, popupId!).catch(() => null);
+    await expectLoggedIn(browser, "alice", "popup");
+    await browser.shot("popup-opener-success");
+  }, 120_000);
+
   test("no plaintext in browserd responses or the browserd state root (journal)", async () => {
     // Dispatch-time TOTP codes went through the side map too. They are too
     // short for the W7 scanner's needles, so they get a plain substring check.
@@ -665,6 +823,8 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     const report = {
       mode,
       responsesScanned: responses.length,
+      // Controller-private passkey sync replies (key material by design; never agent-facing).
+      passkeySyncRepliesExcluded: passkeySyncReplies.length,
       journalFilesScanned: journalFiles.length,
       // Replies where browserd replaced a side-map value with "[secret]"
       // (e.g. the TOTP code shown as the value of a text box).
