@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import {
+  deliverSubscriptionCoreProviderWake,
   readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
@@ -119,6 +120,16 @@ export async function readXaiCoreStatus<Model>(
       fetchDeps,
     );
     const valid = probe.kind === "read";
+    if (probe.kind === "read" && probe.recovered) {
+      // The reading is stored and may have ended an exhaustion: wake the
+      // organization's SuperGrok core waiters. The reading already
+      // committed, so a failed wake hint never fails the status (every core
+      // waiter has its own recheck).
+      await deliverSubscriptionCoreProviderWake(deps.db, SUBSCRIPTION_CORE_XAI_PROVIDER, {
+        accountId: input.accountId,
+        reason: "usage_recovered",
+      }).catch(() => undefined);
+    }
     return {
       connected: true,
       valid,

@@ -4622,9 +4622,12 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   workspace, and only when the shared pool has no effective primary, is a
   personal connection the effective account (the first `active` one, scope
   `user` as on the legacy path), validated by one live billing read as its
-  owner through the administered `personal_owner` probe. In a shared
-  workspace a personal connection is never the workspace's effective
-  account, so nothing is read live there.
+  owner through the administered `personal_owner` probe. That reading is
+  stored like any usage observation; when it ends an exhaustion the status
+  wakes the organization's SuperGrok core waiters (`usage_recovered`, a
+  failed wake never fails the status), as the Codex and Claude usage
+  routes do. In a shared workspace a personal connection is never the
+  workspace's effective account, so nothing is read live there.
 - **Quota** (EP-N22). Core SuperGrok placement (`beforePlacement`) and the
   legacy callers on the core route (`refreshExhaustedXaiCoreQuota`) probe
   each shared connection whose stored quota is exhausted and was not read in

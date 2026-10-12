@@ -20,6 +20,7 @@ const SHARED = "55555555-5555-4555-8555-555555555555";
 
 let route: "legacy" | "core" | "maintenance";
 let calls: string[];
+let wakeFails = false;
 let candidates: string[];
 let probe: { kind: string };
 let pool: {
@@ -64,6 +65,14 @@ mock.module("@opengeni/db", () => ({
     return route;
   },
   readSubscriptionCoreSessionOwner: async () => ({ ownerSubjectId: "user:owner" }),
+  deliverSubscriptionCoreProviderWake: async (
+    _db: unknown,
+    provider: string,
+    wake: { reason: string },
+  ) => {
+    calls.push(`wake:${provider}:${wake.reason}`);
+    if (wakeFails) throw new Error("wake unavailable");
+  },
   subscriptionCorePersonalConnections: () => ({
     readSubscriptionCorePersonalConnections: async (_db: unknown, scope: { subjectId: string }) => {
       calls.push(`personal-rows:${scope.subjectId}`);
@@ -351,6 +360,16 @@ describe("SuperGrok status by route", () => {
       "personal-rows:user:caller",
       `usage:personal_owner:user:caller:${PERSONAL}`,
     ]);
+    // A live reading that ends a stored exhaustion wakes the organization's
+    // SuperGrok core waiters; a failed wake never fails the status.
+    probe = { kind: "read", recovered: true } as typeof probe;
+    calls = [];
+    expect(await read()).toMatchObject({ connected: true, valid: true });
+    expect(calls.at(-1)).toBe("wake:xai:usage_recovered");
+    wakeFails = true;
+    expect(await read()).toMatchObject({ connected: true, valid: true });
+    wakeFails = false;
+    probe = { kind: "read" };
     // A paused personal account, or another workspace: connected, not effective.
     personal = { connections: [{ ...own, status: "needs_relogin" }], ownPersonalWorkspace: true };
     expect(await read()).toEqual({ connected: true, valid: false, accountCount: 1 });

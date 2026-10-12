@@ -344,4 +344,31 @@ describe("a personal-only SuperGrok user on the core", () => {
       (await status(org, org.personalWorkspaceId, org.ownerSubjectId, upstream.fetchImpl))?.valid,
     ).not.toBe(true);
   });
+
+  test("a paused personal connection's stored exhaustion is not re-read", async () => {
+    const org = await organization();
+    const connectionId = await personalConnection(org, "paused");
+    const upstream = billing(new Date(Date.now() + 7 * 86_400_000).toISOString());
+    upstream.state.usedPercent = 100;
+    await status(org, org.personalWorkspaceId, org.ownerSubjectId, upstream.fetchImpl);
+    expect((await storedQuota(connectionId))?.exhausted_kind).toBe("quota");
+    for (const paused of ["needs_relogin", "disabled"]) {
+      await shared.admin`update subscription_connections set status = ${paused}
+        where id = ${connectionId}::uuid`;
+      upstream.state.usedPercent = 40;
+      upstream.state.calls.length = 0;
+      expect(
+        await subscriptionCorePersonalConnections(
+          XAI,
+        ).refreshExhaustedSubscriptionCorePersonalQuota(
+          client.db,
+          settings,
+          { accountId: org.accountId, subjectId: org.ownerSubjectId },
+          { fetchImpl: upstream.fetchImpl, minIntervalMs: 0 },
+        ),
+      ).toEqual([]);
+      expect(upstream.state.calls).toEqual([]);
+      expect((await storedQuota(connectionId))?.exhausted_kind).toBe("quota");
+    }
+  });
 });
