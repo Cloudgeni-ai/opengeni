@@ -723,8 +723,8 @@ const WORKSPACES: WorkspaceSeed[] = [
       },
       {
         name: "Terraform runner",
-        description: "Reads secrets during plan.",
-        permissions: ["workspace:read", "secrets:list", "secrets:read"],
+        description: "Lists secrets and uses them by reference during plan.",
+        permissions: ["workspace:read", "secrets:list", "secrets:use"],
         expires: "future",
       },
       {
@@ -1521,9 +1521,9 @@ async function seedVaults(
   for (const seed of vaults) {
     const ownerKind = seed.scope ?? "workspace";
     let found = existing.find((v) => v.name === seed.name && v.ownerKind === ownerKind);
+    const names =
+      seed.availableIn === undefined || seed.availableIn === "all" ? null : seed.availableIn;
     if (!found) {
-      const names =
-        seed.availableIn === undefined || seed.availableIn === "all" ? null : seed.availableIn;
       const resolved = names?.map((name) => sharedWorkspaces.find((w) => w.name === name)?.id);
       const complete = resolved?.every((id): id is string => Boolean(id)) ?? true;
       found = await owner.post(`${base}/vaults`, {
@@ -1540,14 +1540,17 @@ async function seedVaults(
             }
           : {}),
       });
-      if (names !== null && !complete) {
-        pendingVaultAvailability.push({
-          base,
-          vaultId: found.id,
-          names,
-          allowPersonal: seed.allowPersonalWorkspaces ?? true,
-        });
-      }
+    }
+    // Settle every narrowed organization vault after all workspaces exist, so a
+    // rerun repairs a vault that an earlier, interrupted run created narrowed to
+    // the only workspace that existed then.
+    if (ownerKind === "organization" && names !== null) {
+      pendingVaultAvailability.push({
+        base,
+        vaultId: found.id,
+        names,
+        allowPersonal: seed.allowPersonalWorkspaces ?? true,
+      });
     }
     ids[seed.name] = found.id;
     const items = [
@@ -1610,6 +1613,12 @@ async function settleVaultAvailability() {
       .map((name) => shared.find((w) => w.name === name)?.id)
       .filter((id): id is string => Boolean(id));
     const vault = await owner.get<any>(`${pending.base}/vaults/${pending.vaultId}`);
+    const current = vault.availability ?? {};
+    const same =
+      current.allowPersonalWorkspaces === pending.allowPersonal &&
+      Array.isArray(current.allowedWorkspaceIds) &&
+      [...current.allowedWorkspaceIds].sort().join() === [...ids].sort().join();
+    if (same) continue;
     await owner.patch(`${pending.base}/vaults/${pending.vaultId}`, {
       expectedGeneration: vault.generation,
       availability: { allowedWorkspaceIds: ids, allowPersonalWorkspaces: pending.allowPersonal },
