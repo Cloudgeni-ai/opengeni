@@ -28759,6 +28759,7 @@
       "ModelAccountSettingsOverview": "type",
       "ModelAccountSettingsView": "type",
       "ModelAccountSettingValues": "type",
+      "ModelAccountUsageSnapshot": "type",
       "ModelAvailabilityV1": "type",
       "ModelBillingAttributionV1": "type",
       "ModelCapabilitiesV1": "type",

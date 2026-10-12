@@ -10,6 +10,8 @@ import {
   UpdateModelAccountPreferencesRequest as ContractUpdatePreferences,
 } from "@opengeni/contracts";
 import type { z } from "zod";
+// Import the consumer-facing barrel, not the internal types file: this compile-time
+// regression must fail if a public response type is missing from the package entry.
 import type {
   ModelAccountPreferences,
   ModelAccountUsageSnapshot,
@@ -17,7 +19,7 @@ import type {
   SetSessionModelAccountChoiceRequest,
   SetSessionModelAccountChoiceResponse,
   UpdateModelAccountPreferencesRequest,
-} from "../src/types";
+} from "@opengeni/sdk";
 
 test("model-account choice and preference shapes are parity-pinned", () => {
   // Server -> client: what the API returns is what the SDK declares.
