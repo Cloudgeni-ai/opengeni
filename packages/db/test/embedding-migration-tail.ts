@@ -204,4 +204,6 @@ export const embeddingMigrationTail = [
   // The drained SuperGrok cutover requires 0712 through 0718; it runs last.
   "0719_subscription_core_xai_cutover.sql",
   "0720_subscription_core_claude_cutover.sql",
+  // The drained retirement requires both cutovers; it runs after them.
+  "0721_subscription_core_legacy_retirement.sql",
 ];

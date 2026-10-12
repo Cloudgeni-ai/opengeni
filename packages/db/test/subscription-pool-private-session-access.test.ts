@@ -33,14 +33,21 @@ import {
   withPoolWakeServiceScopeInTransaction,
   withTemporaryPoolSessionAccessInTransaction,
 } from "../src/subscription-session-access";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 
 // Characterizes the legacy SuperGrok runtime, which runs only before its
-// drained subscription-core cutover: the database withholds that migration.
-// Removed with the legacy runtime. (The legacy Claude runtime is deleted,
-// design 5.3, C4; the shared scoped waiter cases run on the SuperGrok pool.)
+// drained subscription-core cutover: the database withholds that migration
+// and the retirement migration that requires it. Removed with the legacy
+// runtime. (The legacy Claude runtime is deleted, design 5.3, C4; the shared
+// scoped waiter cases run on the SuperGrok pool.)
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_RETIREMENT_MIGRATION,
+  ],
 };
 
 let shared: SharedTestDatabase;

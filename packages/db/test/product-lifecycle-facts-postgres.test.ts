@@ -40,15 +40,19 @@ import {
 } from "../src";
 import { upsertOrganizationClaudeSubscription } from "./fixtures/legacy-claude/accounts";
 import postgres from "postgres";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 
 // The model-setup facts are written through the legacy SuperGrok and Claude
 // connect paths, which run only before their drained subscription-core
-// cutovers: the ledger records those migrations without running them.
-// Removed with the legacy runtimes.
+// cutovers: the ledger records those migrations, and the retirement migration
+// that requires them, without running them. Removed with the legacy runtimes.
 const LEGACY_SUBSCRIPTION_CUTOVERS = [
   SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
   SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
 ];
 import { upsertCodexSubscriptionCredential } from "./fixtures/legacy-codex";
 import {

@@ -121,14 +121,15 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  // Migration 0598's Claude pool activation receipt. Readiness no longer
+  // requires it (the retirement migration 0721 dropped the pool routines);
+  // it stays as a receipt the runtime need not execute.
   "claude_subscription_pool_protocol_v1_active()",
   // M3 PR 2b: run only by the Codex Apps routines as their owner.
   "subscription_codex_apps_designation_target(uuid, uuid)",
-  // M3 PR 2c: run only by the Codex connection-seam routines as their owner.
-  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  // M3 PR 3b: run only by the Codex writers as their owner (the trigger
-  // function fires without the inserting role holding EXECUTE).
-  "subscription_codex_writer_context(uuid, uuid, text)",
+  // M3 PR 3b: the owner capability internals the reset-credit fence calls
+  // and the revision-authority trigger function (triggers fire without the
+  // inserting role holding EXECUTE).
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
@@ -176,7 +177,6 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "seed_subscription_codex_cutover()",
   "record_subscription_codex_plan_change()",
   "keep_subscription_codex_cutover_identity()",
-  "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
   "auto_assign_subscription_codex_workspace()",
   "auto_assign_subscription_codex_personal_workspace()",
   "read_sender_connection(uuid, uuid, uuid, text)",
@@ -693,47 +693,18 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
 ]);
-const XAI_CREATE_CREDENTIAL_ROUTINE =
-  "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
-const XAI_DISCONNECT_CREDENTIAL_ROUTINE =
-  "disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb)";
 const XAI_SNAPSHOT_VALIDATOR_ROUTINE = "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
-const XAI_AUTHORITY_LIVE_ROUTINE =
-  "xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)";
-const XAI_POOL_VISIBLE_ROUTINE = "xai_subscription_pool_visible(uuid, uuid, text, text, uuid)";
-const XAI_RESOLVE_POOL_ROUTINE = "resolve_xai_authority_pool(uuid, uuid, text, jsonb)";
-const XAI_REVALIDATE_CREDENTIAL_ROUTINE =
-  "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)";
-const XAI_AUTHORITY_TABLES = [
-  "organization_memberships",
-  "organization_user_resource_authorities",
-  "workspace_memberships",
-  "xai_subscription_credentials",
-] as const;
-const CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE = XAI_SNAPSHOT_VALIDATOR_ROUTINE.replace("xai_", "claude_");
-const CLAUDE_AUTHORITY_ROUTINES = [
-  XAI_CREATE_CREDENTIAL_ROUTINE,
-  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
-  XAI_AUTHORITY_LIVE_ROUTINE,
-  XAI_POOL_VISIBLE_ROUTINE,
-  XAI_RESOLVE_POOL_ROUTINE,
-  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
-].map((name) => name.replace("xai_", "claude_"));
-export const CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES = [
-  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
-  ...CLAUDE_AUTHORITY_ROUTINES,
-];
-export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
+const CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE =
+  "claude_provider_account_authority_snapshot_v1_valid(jsonb)";
+/**
+ * The immutable v1 snapshot CHECK validators. They outlive the retired pool
+ * routines (migration 0721): the v1 columns and their constraints stay until
+ * M6, so the runtime role keeps EXECUTE and PUBLIC does not.
+ */
+export const SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES = [
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
-  XAI_CREATE_CREDENTIAL_ROUTINE,
-  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
-  XAI_AUTHORITY_LIVE_ROUTINE,
-  XAI_POOL_VISIBLE_ROUTINE,
-  XAI_RESOLVE_POOL_ROUTINE,
-  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
-  ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
-];
-const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
+  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
 /**
  * Migration 0707: the provider-neutral subscription-core routines (the
  * provider is their first argument). The runtime requires them; each is a
@@ -782,13 +753,10 @@ export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
 
 /**
  * The Codex-named twins of the migration 0707 neutral routines. Migration
- * 0707 kept them for binaries that still called them; no runtime code calls
- * them now, and no retained policy, trigger or routine depends on them, so
- * the M4 retirement migration drops them. Until then they stay exactly as
- * hardened as before: when one exists it must be the private-schema owner's
- * SECURITY DEFINER routine with a fixed search path, executable by the
- * runtime role and not by PUBLIC; its absence is not a violation, so the
- * drop can apply while this release runs.
+ * 0707 kept them for binaries that still called them; the retirement
+ * migration 0721 drops them (with the owner-only writer context and
+ * connection target only they called), and the runtime posture requires them
+ * absent through SUBSCRIPTION_RETIRED_ROUTINES.
  */
 export const SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES = [
   "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
@@ -811,6 +779,144 @@ export const SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES = [
   "subscription_codex_reach(uuid, uuid)",
   "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
 ] as const;
+
+/** Where a retired routine lived: the data (target) schema or an owner schema. */
+export type RetiredSubscriptionRoutineSchema =
+  | "target"
+  | "opengeni_private"
+  | "opengeni_subscription_internal";
+
+/**
+ * M4 retirement (migration 0721, design 5.3 "R. Retirement"): every routine
+ * the drained retirement migration drops, by exact signature in
+ * `oidvectortypes` form. The SuperGrok and Claude pool writers, resolvers,
+ * revalidators, policy predicates and trigger functions, the Codex twins and
+ * their owner-only internals, and 0689's Codex auto-assignment apply path.
+ * The runtime posture requires every one absent, the real-PostgreSQL
+ * migration test checks the drop against it, and the no-legacy guard forbids
+ * runtime code from naming one.
+ */
+export const SUBSCRIPTION_RETIRED_ROUTINES: readonly {
+  schema: RetiredSubscriptionRoutineSchema;
+  signature: string;
+}[] = [
+  ...(["xai", "claude"] as const).flatMap((provider) => [
+    ...[
+      `create_${provider}_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)`,
+      `disconnect_${provider}_subscription_credential(uuid, uuid, text, uuid, jsonb)`,
+      `resolve_${provider}_authority_pool(uuid, uuid, text, jsonb)`,
+      `revalidate_${provider}_subscription_authority(uuid, text, uuid, jsonb)`,
+      `${provider}_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)`,
+      `${provider}_subscription_pool_visible(uuid, uuid, text, text, uuid)`,
+      `prevent_${provider}_authority_mutation()`,
+    ].map((signature) => ({ schema: "target" as const, signature })),
+    ...[
+      `enforce_${provider}_credential_pool_reference()`,
+      `enforce_${provider}_organization_runtime_update()`,
+      `prevent_organization_${provider}_live_disconnect()`,
+    ].map((signature) => ({ schema: "opengeni_private" as const, signature })),
+  ]),
+  ...[
+    ...SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
+    "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+    "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
+  ].map((signature) => ({ schema: "opengeni_private" as const, signature })),
+  {
+    schema: "opengeni_subscription_internal",
+    signature: "subscription_codex_writer_context(uuid, uuid, text)",
+  },
+];
+
+/**
+ * Migration 0721: the policies the retirement drops, all in the data schema.
+ * The pool and credential scopes on the legacy factory tables, the Claude
+ * usage scope, and the legacy routines' runtime-capability policies on the
+ * shared membership and authority tables.
+ */
+export const SUBSCRIPTION_RETIRED_POLICIES: readonly { table: string; policy: string }[] = [
+  ...(["xai", "claude"] as const).flatMap((provider) => [
+    { table: `${provider}_subscription_credentials`, policy: `${provider}_subscription_scope` },
+    ...["rotation_settings", "credential_leases", "session_account_pins", "capacity_waiters"].map(
+      (table) => ({
+        table: `${provider}_${table}`,
+        policy: `${provider}_subscription_pool_scope`,
+      }),
+    ),
+    ...["capability_read", "membership_lock"].map((suffix) => ({
+      table: "organization_memberships",
+      policy: `${provider}_subscription_${suffix}`,
+    })),
+    ...["capability_insert", "capability_read", "capability_revoke"].map((suffix) => ({
+      table: "organization_user_resource_authorities",
+      policy: `${provider}_subscription_${suffix}`,
+    })),
+    // Only Claude kept per-credential usage (0598).
+    ...(provider === "claude"
+      ? [
+          {
+            table: `${provider}_subscription_account_usage`,
+            policy: `${provider}_usage_account_scope`,
+          },
+        ]
+      : []),
+  ]),
+];
+
+/** Migration 0721: the legacy factory triggers the retirement drops (data schema). */
+export const SUBSCRIPTION_RETIRED_TRIGGERS: readonly { table: string; trigger: string }[] = (
+  ["xai", "claude"] as const
+).flatMap((provider) => [
+  {
+    table: `${provider}_subscription_credentials`,
+    trigger: `${provider}_subscription_credentials_authority_immutable_trg`,
+  },
+  {
+    table: `${provider}_subscription_credentials`,
+    trigger: `${provider}_organization_runtime_update_guard`,
+  },
+  {
+    table: `${provider}_subscription_credentials`,
+    trigger: `${provider}_organization_live_disconnect_guard`,
+  },
+  {
+    table: `${provider}_rotation_settings`,
+    trigger: `${provider}_organization_rotation_update_guard`,
+  },
+  { table: `${provider}_rotation_settings`, trigger: `${provider}_rotation_credential_pool_guard` },
+  { table: `${provider}_credential_leases`, trigger: `${provider}_lease_credential_pool_guard` },
+  { table: `${provider}_session_account_pins`, trigger: `${provider}_pin_credential_pool_guard` },
+]);
+
+/** The bare names of every retired routine (the no-legacy guard's identifiers). */
+export const SUBSCRIPTION_RETIRED_ROUTINE_NAMES: readonly string[] = [
+  ...new Set(
+    SUBSCRIPTION_RETIRED_ROUTINES.map(({ signature }) =>
+      signature.slice(0, signature.indexOf("(")),
+    ),
+  ),
+];
+
+/**
+ * Every retired subscription object as the posture inspection describes it
+ * (`routine schema.name(args)`, `policy table.name`, `trigger table.name`),
+ * in the byte order inspection reports them: what a database that has not
+ * applied SUBSCRIPTION_RETIREMENT_MIGRATION still holds.
+ */
+export function retiredSubscriptionObjectDescriptions(targetSchema = "public"): string[] {
+  return [
+    ...SUBSCRIPTION_RETIRED_ROUTINES.map(
+      ({ schema, signature }) =>
+        `routine ${schema === "target" ? targetSchema : schema}.${signature}`,
+    ),
+    ...SUBSCRIPTION_RETIRED_POLICIES.map(({ table, policy }) => `policy ${table}.${policy}`),
+    ...SUBSCRIPTION_RETIRED_TRIGGERS.map(({ table, trigger }) => `trigger ${table}.${trigger}`),
+  ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
+/** The posture violation for a retired subscription object that is still present. */
+export function retiredSubscriptionObjectViolation(object: string): string {
+  return `retired subscription ${object} is present; apply the drained retirement migration ${SUBSCRIPTION_RETIREMENT_MIGRATION}`;
+}
 
 /**
  * Migration 0712 (M4 generic precursor): the per-provider cutover receipt
@@ -837,6 +943,15 @@ export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, s
   xai: "0719_subscription_core_xai_cutover.sql",
   claude: "0720_subscription_core_claude_cutover.sql",
 };
+
+/**
+ * The drained M4 retirement migration (design 5.3 "R. Retirement"): it drops
+ * SUBSCRIPTION_RETIRED_ROUTINES, _POLICIES and _TRIGGERS and refuses unless
+ * every provider's cutover receipt is committed. A test database that
+ * withholds a provider cutover to characterize a legacy runtime withholds
+ * this migration too.
+ */
+export const SUBSCRIPTION_RETIREMENT_MIGRATION = "0721_subscription_core_legacy_retirement.sql";
 
 /**
  * Migration 0715 (M4 PR 0b): accepted authority across a provider's cutover.
@@ -919,11 +1034,9 @@ export const SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES = [
 export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   // M3 PR 2b: returns a full connection row to the Apps routines that run as its owner.
   "subscription_codex_apps_designation_target(uuid, uuid)",
-  // M3 PR 2c: returns a full connection row to the connection-seam routines.
-  "subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-  // M3 PR 3b: the writers' caller check, capability internals and the
-  // revision-authority trigger function.
-  "subscription_codex_writer_context(uuid, uuid, text)",
+  // M3 PR 3b: the capability internals and the revision-authority trigger
+  // function (the writers' caller check and the connection-seam target went
+  // with the Codex twins in migration 0721).
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
@@ -934,7 +1047,6 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "seed_subscription_codex_cutover()",
   "record_subscription_codex_plan_change()",
   "keep_subscription_codex_cutover_identity()",
-  "apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
   "auto_assign_subscription_codex_workspace()",
   "auto_assign_subscription_codex_personal_workspace()",
   ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
@@ -985,7 +1097,7 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
-  ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
+  ...SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES,
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
   "usage_allowance_capability_active(uuid, uuid)",
@@ -1003,9 +1115,6 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
   SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
-  XAI_AUTHORITY_LIVE_ROUTINE,
-  XAI_CREATE_CREDENTIAL_ROUTINE,
-  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
   GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE,
   GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
@@ -1032,10 +1141,6 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
-  XAI_POOL_VISIBLE_ROUTINE,
-  XAI_RESOLVE_POOL_ROUTINE,
-  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
-  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
 
 /**
@@ -2172,7 +2277,11 @@ export type RuntimeDatabasePosture = {
   /** Separate owner-only schema: not part of the previous binary's runtime API inventory. */
   subscriptionOwnerRoutines?: RuntimeRoutinePosture[];
   sessionVariableSetAttachmentsCutoverPresent: boolean;
-  claudeSubscriptionPoolActivationPresent: boolean;
+  /**
+   * Retired subscription objects (SUBSCRIPTION_RETIRED_ROUTINES, _POLICIES and
+   * _TRIGGERS) the database still holds; empty once migration 0721 applied.
+   */
+  retiredSubscriptionObjects: string[];
   /** Migration 0689: Codex runs on the shared subscription core. */
   subscriptionCodexCutoverActivationPresent: boolean;
   /**
@@ -2312,12 +2421,49 @@ export async function inspectRuntimeDatabasePosture(
       );
       const sessionVariableSetAttachmentsCutoverPresent =
         variableSetCutoverRows[0]?.present === true;
-      const claudePoolActivationRows = resultRows<{ present: boolean }>(
-        await tx.execute(sql`select to_regprocedure(
-          'opengeni_private.claude_subscription_pool_protocol_v1_active()'
-        ) is not null as present`),
-      );
-      const claudeSubscriptionPoolActivationPresent = claudePoolActivationRows[0]?.present === true;
+      // Migration 0721: any retired subscription object still present means
+      // the drained retirement migration has not run. Read from the catalogs
+      // by name (no schema privilege needed); a routine counts by name, so an
+      // unexpected overload is reported too. Byte order, as
+      // retiredSubscriptionObjectDescriptions lists them.
+      const retiredSubscriptionObjects = resultRows<{ object: string }>(
+        await tx.execute(sql`
+          select object from (
+          select 'routine ' || n.nspname || '.' || p.proname || '('
+            || pg_catalog.oidvectortypes(p.proargtypes) || ')' as object
+          from pg_catalog.pg_proc p
+          join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+          join jsonb_to_recordset(${JSON.stringify(
+            SUBSCRIPTION_RETIRED_ROUTINES.map(({ schema, signature }) => ({
+              schema_name: schema === "target" ? targetSchema : schema,
+              routine_name: signature.slice(0, signature.indexOf("(")),
+            })),
+          )}::jsonb) as retired(schema_name text, routine_name text)
+            on retired.schema_name = n.nspname and retired.routine_name = p.proname
+          union all
+          select 'policy ' || c.relname || '.' || pol.polname
+          from pg_catalog.pg_policy pol
+          join pg_catalog.pg_class c on c.oid = pol.polrelid
+          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+          join jsonb_to_recordset(${JSON.stringify(
+            SUBSCRIPTION_RETIRED_POLICIES,
+          )}::jsonb) as retired("table" text, policy text)
+            on retired."table" = c.relname and retired.policy = pol.polname
+          where n.nspname = ${targetSchema}
+          union all
+          select 'trigger ' || c.relname || '.' || t.tgname
+          from pg_catalog.pg_trigger t
+          join pg_catalog.pg_class c on c.oid = t.tgrelid
+          join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+          join jsonb_to_recordset(${JSON.stringify(
+            SUBSCRIPTION_RETIRED_TRIGGERS,
+          )}::jsonb) as retired("table" text, "trigger" text)
+            on retired."table" = c.relname and retired."trigger" = t.tgname
+          where n.nspname = ${targetSchema} and not t.tgisinternal
+          ) retired_objects
+          order by object collate "C"
+        `),
+      ).map((row) => row.object);
       const codexCutoverActivationRows = resultRows<{ present: boolean }>(
         await tx.execute(sql`select to_regprocedure(
           'opengeni_private.subscription_codex_cutover_v1_active()'
@@ -2358,7 +2504,7 @@ export async function inspectRuntimeDatabasePosture(
           targetRoutines: [],
           privateRoutines: [],
           sessionVariableSetAttachmentsCutoverPresent,
-          claudeSubscriptionPoolActivationPresent,
+          retiredSubscriptionObjects,
           subscriptionCodexCutoverActivationPresent,
           subscriptionProviderCutoverReceipts,
         };
@@ -2690,7 +2836,7 @@ export async function inspectRuntimeDatabasePosture(
         privateRoutines,
         subscriptionOwnerRoutines,
         sessionVariableSetAttachmentsCutoverPresent,
-        claudeSubscriptionPoolActivationPresent,
+        retiredSubscriptionObjects,
         subscriptionCodexCutoverActivationPresent,
         subscriptionProviderCutoverReceipts,
       };
@@ -2720,8 +2866,12 @@ export function evaluateRuntimeDatabasePosture(
   const violations: string[] = [];
   const identity = posture.identity;
 
-  if (!posture.claudeSubscriptionPoolActivationPresent)
-    violations.push("database is missing the Claude subscription account activation receipt");
+  // Exact posture of the M4 retirement: this release names none of the
+  // retired subscription objects, and the drained retirement migration
+  // (SUBSCRIPTION_RETIREMENT_MIGRATION) drops them.
+  for (const object of posture.retiredSubscriptionObjects) {
+    violations.push(retiredSubscriptionObjectViolation(object));
+  }
 
   if (!posture.subscriptionCodexCutoverActivationPresent)
     violations.push(
@@ -2845,12 +2995,6 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
   }
-  for (const twin of SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES) {
-    const matches = posture.privateRoutines.filter((routine) => routine.name === twin);
-    if (matches.length > 0 && !hardenedPrivateRoutine(matches)) {
-      violations.push(`retiring Codex twin private routine ${twin} is unsafe`);
-    }
-  }
   for (const ownerOnly of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
     const routine = [...posture.privateRoutines, ...(posture.subscriptionOwnerRoutines ?? [])].find(
       (candidate) => candidate.name === ownerOnly,
@@ -2861,25 +3005,18 @@ export function evaluateRuntimeDatabasePosture(
   }
   const privateRoutinePresent = (prefix: string) =>
     posture.privateRoutines.some((routine) => routine.name.startsWith(prefix));
-  // Keyed on either personal-writer family, not on the Codex twins alone, so
-  // dropping the twins cannot switch off the owner checks below.
+  // Keyed on the neutral personal writer (the Codex twins are retired), so
+  // the owner checks below run on every database this release accepts.
   if (
     posture.subscriptionOwnerRoutines !== undefined &&
-    (privateRoutinePresent("connect_subscription_codex_personal(") ||
-      privateRoutinePresent("connect_subscription_core_personal("))
+    privateRoutinePresent("connect_subscription_core_personal(")
   ) {
     const required = [
-      // Only the Codex twin writers call the Codex writer context.
-      ...(privateRoutinePresent("connect_subscription_codex_personal(")
-        ? ["subscription_codex_writer_context(uuid, uuid, text)"]
-        : []),
       // The reset-credit fence, which stays, calls these two.
       "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
       "drop_subscription_codex_owner_capabilities(uuid)",
       "derive_scheduled_revision_subscription_authority()",
-      ...(privateRoutinePresent("connect_subscription_core_personal(")
-        ? SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES
-        : []),
+      ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
       ...(posture.privateRoutines.some((routine) =>
         routine.name.startsWith("subscription_provider_cutover_committed("),
       )
@@ -3596,41 +3733,6 @@ export function evaluateRuntimeDatabasePosture(
       // The immutable SQL validator is invoker-rights and reads no table. Its
       // exact ACL is posture-checked above; it does not participate in the
       // SECURITY DEFINER same-owner authority graph.
-    } else if (
-      CLAUDE_AUTHORITY_ROUTINE_SET.has(routine.name) ||
-      routine.name === XAI_CREATE_CREDENTIAL_ROUTINE ||
-      routine.name === XAI_DISCONNECT_CREDENTIAL_ROUTINE ||
-      routine.name === XAI_AUTHORITY_LIVE_ROUTINE ||
-      routine.name === XAI_POOL_VISIBLE_ROUTINE ||
-      routine.name === XAI_RESOLVE_POOL_ROUTINE ||
-      routine.name === XAI_REVALIDATE_CREDENTIAL_ROUTINE
-    ) {
-      const authorityTableNames = CLAUDE_AUTHORITY_ROUTINE_SET.has(routine.name)
-        ? XAI_AUTHORITY_TABLES.map((name) => name.replace("xai_", "claude_"))
-        : XAI_AUTHORITY_TABLES;
-      if (!tableByName.has(authorityTableNames[3]!)) {
-        continue;
-      }
-      const missingAuthorityTables = authorityTableNames.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
-      if (missingAuthorityTables.length > 0) {
-        violations.push(
-          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
-        );
-      } else {
-        const authorityTables = authorityTableNames.map((tableName) => tableByName.get(tableName)!);
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
-        if (authorityOwners.size !== 1) {
-          violations.push(
-            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
-          );
-        } else if (routine.owner !== authorityTables[0]!.owner) {
-          violations.push(
-            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
-          );
-        }
-      }
     } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
       violations.push(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,

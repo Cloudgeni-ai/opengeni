@@ -43,10 +43,12 @@ import { provisionRoles } from "../src/provision-roles";
 const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 // 0714 redefines 0713's reach setters, so it is held back with it.
 const LATER_MIGRATION = "0714_subscription_workspace_managed_organization_accounts.sql";
-// The drained SuperGrok cutover is a maintenance step this rolling test never
-// runs: it stays recorded as applied throughout.
+// The drained SuperGrok and Claude cutovers and the retirement after them are
+// maintenance steps this rolling test never runs: they stay recorded as
+// applied throughout.
 const MAINTENANCE_MIGRATION = "0719_subscription_core_xai_cutover.sql";
 const CLAUDE_MAINTENANCE_MIGRATION = "0720_subscription_core_claude_cutover.sql";
+const RETIREMENT_MIGRATION = "0721_subscription_core_legacy_retirement.sql";
 // 0715 rewrites routines 0713 and 0714 create, so a deployment before 0713
 // is also before it: held back with 0713 and left pending.
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
@@ -386,7 +388,7 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name)
-      values (${REACH_MIGRATION}), (${LATER_MIGRATION}), (${API_KEY_CONNECTIONS}), (${MAINTENANCE_MIGRATION}), (${CLAUDE_MAINTENANCE_MIGRATION})`;
+      values (${REACH_MIGRATION}), (${LATER_MIGRATION}), (${API_KEY_CONNECTIONS}), (${MAINTENANCE_MIGRATION}), (${CLAUDE_MAINTENANCE_MIGRATION}), (${RETIREMENT_MIGRATION})`;
     await migrate(database.ownerUrl);
     await owner`delete from schema_migrations where name in (${REACH_MIGRATION}, ${LATER_MIGRATION}, ${API_KEY_CONNECTIONS})`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });

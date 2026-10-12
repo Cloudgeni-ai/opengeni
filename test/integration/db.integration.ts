@@ -1988,17 +1988,11 @@ async function createRlsAppRole(
       `GRANT EXECUTE ON FUNCTION public.claude_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
     ),
   );
-  // Shared subscription-pool resolution reads the Claude/SuperGrok credential
-  // and rotation tables, whose RLS policies call these runtime-granted helpers.
-  for (const helper of [
-    "public.get_workspace_kind(uuid, uuid)",
-    "public.xai_subscription_pool_visible(uuid, uuid, text, text, uuid)",
-    "public.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)",
-    "public.claude_subscription_pool_visible(uuid, uuid, text, text, uuid)",
-    "public.claude_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)",
-  ]) {
-    await db.execute(dbSql.raw(`GRANT EXECUTE ON FUNCTION ${helper} TO "${role}"`));
-  }
+  // RLS policies call this runtime-granted helper (migration 0721 dropped the
+  // legacy pool policies and their SuperGrok and Claude predicates).
+  await db.execute(
+    dbSql.raw(`GRANT EXECUTE ON FUNCTION public.get_workspace_kind(uuid, uuid) TO "${role}"`),
+  );
   const url = new URL(ownerUrl);
   url.username = role;
   url.password = password;

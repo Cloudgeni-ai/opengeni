@@ -47,6 +47,9 @@ import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtur
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0720_subscription_core_claude_cutover.sql";
+// The drained retirement requires every receipt; this seam fixture records it
+// and never runs it.
+const RETIREMENT = "0721_subscription_core_legacy_retirement.sql";
 const PROVIDER = "workspace-claude-subscription";
 const MODEL = `${PROVIDER}/claude-opus-5-5`;
 const key = Buffer.alloc(32, 83);
@@ -146,7 +149,7 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${RETIREMENT})`;
         await migrate(owned.ownerUrl, undefined, {
           applicationDatabaseRoles: ["opengeni_app"],
           environmentsEncryptionKey: key,

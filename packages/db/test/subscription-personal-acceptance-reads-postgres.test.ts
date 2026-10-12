@@ -7,6 +7,9 @@
 // serviceable personal Codex account; after it the owner's personal entry is
 // frozen, through the same writers and the same rules. The runbook's inventory
 // queries (docs/deployment.md) run against the fixtures staged before 0718.
+// A deployment before 0718 is also before the drained retirement migration,
+// which drops the Codex-named writers compared here: it stays withheld, and
+// the posture reports exactly its pending retirement.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
@@ -24,6 +27,9 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -36,6 +42,9 @@ setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0718_subscription_personal_acceptance_reads.sql";
+const PENDING_RETIREMENT = retiredSubscriptionObjectDescriptions().map(
+  retiredSubscriptionObjectViolation,
+);
 const EMPTY = { version: 2, personal: [] };
 const key = Buffer.alloc(32, 61);
 const ROUTINES = [
@@ -317,7 +326,8 @@ beforeAll(async () => {
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await staging`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await staging`insert into schema_migrations(name) values (${MIGRATION})`;
+    await staging`insert into schema_migrations(name)
+      values (${MIGRATION}), (${SUBSCRIPTION_RETIREMENT_MIGRATION})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -389,7 +399,7 @@ describe.skipIf(!realDb)("0718 personal acceptance reads", () => {
       sql`select current_user::text as role`,
     );
     expect(identity!.role).toBe("opengeni_app");
-    expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
+    expect(posture).toEqual({ unprovisioned: PENDING_RETIREMENT, provisioned: PENDING_RETIREMENT });
   });
 
   test("before 0718 every writer froze the empty value for a serviceable personal account", () => {

@@ -25,6 +25,9 @@ import {
   evaluateRuntimeDatabasePosture,
   getSubscriptionCoreCodexModelConnectionAccess,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   wakeSubscriptionCoreCodexCapacityWaiters,
   withSessionRlsActorContext,
   type DbClient,
@@ -47,15 +50,19 @@ const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 const UNREGISTERED_PROVIDER = "unregistered" as never;
 // 0714 redefines 0713's reach setters, so it is withheld and applied with it.
 const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
-// The drained SuperGrok and Claude cutovers are maintenance steps this
-// rolling test never runs: they stay recorded as applied throughout.
+// The drained SuperGrok and Claude cutovers and the retirement after them are
+// maintenance steps this rolling test never runs: they stay recorded as
+// applied throughout.
 const MAINTENANCE_MIGRATIONS = [
   "0719_subscription_core_xai_cutover.sql",
   "0720_subscription_core_claude_cutover.sql",
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
 ];
-// A binary that knows 0719 and 0720 reports only the missing SuperGrok and
-// Claude receipts until the maintenance steps run.
+// A binary that knows 0719, 0720 and the retirement reports only the objects
+// the retirement drops and the missing SuperGrok and Claude receipts until
+// the maintenance steps run.
 const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
   "database is missing the xai subscription-core cutover receipt (0719_subscription_core_xai_cutover.sql); apply the pending migrations first",
   "database is missing the claude subscription-core cutover receipt (0720_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];

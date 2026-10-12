@@ -153,12 +153,13 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
       await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
       // 0712 requires the committed 0689 cutover, 0713 alters objects it
       // creates and 0714 redefines 0713's setters, so all are held back with
-      // it; 0716 builds on 0712, 0717 on 0716 and the SuperGrok cutover 0719
-      // on all of them.
+      // it; 0716 builds on 0712, 0717 on 0716, the SuperGrok cutover 0719 on all
+      // of them and the retirement 0721 on both cutovers.
       await owner`insert into schema_migrations(name) values ('0689_subscription_core_codex_cutover.sql'),
         ('0712_subscription_core_generic_precursor.sql'), ('0713_subscription_core_provider_keyed_reach.sql'),
         ('0714_subscription_workspace_managed_organization_accounts.sql'), ('0715_subscription_core_api_key_connections.sql'),
-        ('0716_subscription_authority_compat.sql'), ('0717_subscription_authority_fences.sql'), ('0719_subscription_core_xai_cutover.sql'), ('0720_subscription_core_claude_cutover.sql')`;
+        ('0716_subscription_authority_compat.sql'), ('0717_subscription_authority_fences.sql'), ('0719_subscription_core_xai_cutover.sql'), ('0720_subscription_core_claude_cutover.sql'),
+        ('0721_subscription_core_legacy_retirement.sql')`;
       await migrate(owned.databaseUrl);
       await provisionRoles(owned.databaseUrl, { appPassword: owned.appPassword });
     } finally {

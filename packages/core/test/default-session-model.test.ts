@@ -45,14 +45,21 @@ import {
 } from "../src/default-session-model";
 import { createSessionForRequest } from "../src/domain/sessions";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "@opengeni/db";
 
 // Characterizes the legacy SuperGrok runtime, which runs only before its
-// drained subscription-core cutover: the database withholds that migration.
-// Removed with the legacy runtime. The legacy Claude runtime is deleted
-// (design 5.3, C4): Claude readiness comes only from the shared core.
+// drained subscription-core cutover: the database withholds that migration
+// and the retirement migration that requires it. Removed with the legacy
+// runtime. The legacy Claude runtime is deleted (design 5.3, C4): Claude
+// readiness comes only from the shared core.
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_RETIREMENT_MIGRATION,
+  ],
 };
 
 test("scoped grants choose a funded credit model without overriding saved choices", () => {

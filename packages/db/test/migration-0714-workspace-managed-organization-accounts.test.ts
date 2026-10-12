@@ -14,7 +14,12 @@ import {
 } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
-import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
+import {
+  createDb,
+  ensureManagedAccessForUser,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+  type DbClient,
+} from "../src";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
@@ -25,6 +30,10 @@ const MIGRATION = "0714_subscription_workspace_managed_organization_accounts.sql
 // 0715 rewrites routines 0714 creates, so a deployment before 0714 is also
 // before it: held back and replayed after 0714.
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
+// ...and before the drained retirement migration, which drops the Codex
+// reach twin 0714 rewrites: held back for good, so replaying 0714 cannot
+// recreate a retired routine.
+const RETIREMENT = SUBSCRIPTION_RETIREMENT_MIGRATION;
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 83);
 const MODEL = "codex/gpt-5.5";
@@ -90,7 +99,8 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${MIGRATION}), (${API_KEY_CONNECTIONS})`;
+    await owner`insert into schema_migrations(name)
+      values (${MIGRATION}), (${API_KEY_CONNECTIONS}), (${RETIREMENT})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {

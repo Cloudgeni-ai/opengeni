@@ -30,7 +30,12 @@ import {
 } from "../src";
 import { decodeSubscriptionCoreXaiCredential } from "../src/subscription-core-xai-adapter";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
-import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
+import {
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
 
 const MIGRATION = "0719_subscription_core_xai_cutover.sql";
@@ -841,7 +846,10 @@ describe.skipIf(!realDb)(
       owned = fixture;
       owner = postgres(owned.ownerUrl, { max: 1 });
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+      // This file characterizes the window between the cutover and the drained
+      // retirement, which requires the receipt: the retirement stays recorded
+      // and never runs here.
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${SUBSCRIPTION_RETIREMENT_MIGRATION})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
       await seed();
@@ -1648,7 +1656,10 @@ describe.skipIf(!realDb)(
         };
         const posture = await inspectRuntimeDatabasePosture(client.db, options);
         expect(posture.subscriptionProviderCutoverReceipts).toEqual(["claude", "codex", "xai"]);
-        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+        // Clean but for the objects the withheld retirement drops.
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+          retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+        );
       }, 180_000);
 
       test("the legacy connect routine cannot write a SuperGrok account after the receipt", async () => {

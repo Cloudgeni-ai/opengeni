@@ -24,15 +24,21 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "@opengeni/db";
 
 // Characterizes the legacy SuperGrok runtime, which runs only before its
-// drained subscription-core cutover: the database withholds that migration.
-// Removed with the legacy runtime. Claude is on the shared core (its legacy
-// runtime is deleted, design 5.3, C4): every accepted Claude snapshot is the
-// workspace default.
+// drained subscription-core cutover: the database withholds that migration
+// and the retirement migration that requires it. Removed with the legacy
+// runtime. Claude is on the shared core (its legacy runtime is deleted,
+// design 5.3, C4): every accepted Claude snapshot is the workspace default.
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_RETIREMENT_MIGRATION,
+  ],
 };
 const CLAUDE_V1_DEFAULT = { version: 1, scope: "workspace" } as const;
 

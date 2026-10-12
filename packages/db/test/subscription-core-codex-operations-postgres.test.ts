@@ -779,7 +779,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     const forged = await withSessionRlsActorContext({ subjectId: other.ownerSubjectId }, () =>
       rawRows(
         client!.db,
-        sql`select 1 from opengeni_private.read_subscription_codex_connection_credential(
+        sql`select 1 from opengeni_private.read_subscription_core_connection_credential('codex',
           ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${assignedHere}::uuid,
           ${lease.operationId}::uuid, ${lease.attemptId}::uuid, ${lease.holderId}, 1)`,
       ),
@@ -1229,7 +1229,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     const direct = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
       rawRows(
         client!.db,
-        sql`select id from opengeni_private.subscription_codex_connection_target(
+        sql`select id from opengeni_subscription_internal.subscription_core_connection_target('codex',
           ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connectionId}::uuid,
           null, null, null, null)`,
       ),
@@ -1257,11 +1257,11 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       ownerClient = createDb(appUrl.toString(), { max: 4 });
       shared = { ...previous.shared!, admin: owned.admin } as SharedTestDatabase;
       client = ownerClient;
-      // Role provisioning grants every opengeni_private routine; the target
-      // helper is revoked again after that blanket grant.
+      // The target helper is owner-only: it lives in the internal schema,
+      // outside role provisioning's blanket opengeni_private grant.
       const [executable] = await owned.admin<{ executable: boolean }[]>`
         select has_function_privilege('opengeni_app',
-          'opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint)',
+          'opengeni_subscription_internal.subscription_core_connection_target(text,uuid,uuid,uuid,uuid,uuid,text,bigint)',
           'EXECUTE') as executable`;
       expect(executable).toEqual({ executable: false });
       await personalRevocationCase();

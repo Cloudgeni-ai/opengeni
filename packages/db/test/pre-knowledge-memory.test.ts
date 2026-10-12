@@ -57,6 +57,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         // The drained SuperGrok cutover reads the withheld 0560 import column.
         "0719_subscription_core_xai_cutover.sql",
         "0720_subscription_core_claude_cutover.sql",
+        // The retirement requires both cutovers.
+        "0721_subscription_core_legacy_retirement.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);

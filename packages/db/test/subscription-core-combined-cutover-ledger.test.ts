@@ -9,6 +9,10 @@
  *   rerun after the fix completes Claude;
  * - that rerun is safe only because nothing but rolling migrations lies
  *   between the two cutover ordinals (the ledger check below).
+ *
+ * The drained retirement (design 5.3 "R. Retirement") follows both and
+ * requires both receipts: in a combined window it runs last, after the
+ * cutovers commit, and a Claude abort stops the window before it.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -21,12 +25,19 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
-import { createDb, evaluateRuntimeDatabasePosture, inspectRuntimeDatabasePosture } from "../src";
+import {
+  createDb,
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+  SUBSCRIPTION_RETIRED_ROUTINES,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src";
 import { XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION } from "../src/xai-subscription-core-cutover";
 import { CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MIGRATION } from "../src/claude-subscription-core-cutover";
 
 const XAI = XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION;
 const CLAUDE = CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MIGRATION;
+const RETIREMENT = SUBSCRIPTION_RETIREMENT_MIGRATION;
 const key = Buffer.alloc(32, 83);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const drizzle = new URL("../drizzle/", import.meta.url);
@@ -45,6 +56,19 @@ test("only rolling migrations lie between the SuperGrok and the Claude cutover",
   for (const name of files.slice(xai + 1, claude)) {
     const first = (await readFile(new URL(name, drizzle), "utf8")).split("\n", 1)[0];
     expect(`${name}: ${first}`).toBe(`${name}: -- deployment-mode: rolling`);
+  }
+});
+
+test("the drained retirement follows the Claude cutover with only rolling migrations between", async () => {
+  const files = (await readdir(drizzle)).filter((name) => /^\d{4}_.*\.sql$/.test(name)).sort();
+  const claude = files.indexOf(CLAUDE);
+  const retirement = files.indexOf(RETIREMENT);
+  expect(retirement).toBeGreaterThan(claude);
+  const first = (await readFile(new URL(RETIREMENT, drizzle), "utf8")).split("\n", 1)[0];
+  expect(first).toBe("-- deployment-mode: maintenance");
+  for (const name of files.slice(claude + 1, retirement)) {
+    const line = (await readFile(new URL(name, drizzle), "utf8")).split("\n", 1)[0];
+    expect(`${name}: ${line}`).toBe(`${name}: -- deployment-mode: rolling`);
   }
 });
 
@@ -109,9 +133,9 @@ async function prepare(name: string) {
   if (!owned) throw new Error("Real PostgreSQL required");
   const owner = postgres(owned.ownerUrl, { max: 1 });
   await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-  await owner`INSERT INTO schema_migrations(name) VALUES (${XAI}), (${CLAUDE})`;
+  await owner`INSERT INTO schema_migrations(name) VALUES (${XAI}), (${CLAUDE}), (${RETIREMENT})`;
   await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-  await owner`DELETE FROM schema_migrations WHERE name IN (${XAI}, ${CLAUDE})`;
+  await owner`DELETE FROM schema_migrations WHERE name IN (${XAI}, ${CLAUDE}, ${RETIREMENT})`;
   await owner.end();
   return { owned, fixture: await seed(owned) };
 }
@@ -126,7 +150,9 @@ async function state(owned: OwnerMigratedTestDatabase) {
   const [row] = await owned.admin`SELECT
     opengeni_private.subscription_provider_cutover_committed('xai') AS xai_receipt,
     opengeni_private.subscription_provider_cutover_committed('claude') AS claude_receipt,
-    (SELECT array_agg(name ORDER BY name) FROM schema_migrations WHERE name IN (${XAI}, ${CLAUDE})) AS ledger,
+    (SELECT array_agg(name ORDER BY name) FROM schema_migrations
+      WHERE name IN (${XAI}, ${CLAUDE}, ${RETIREMENT})) AS ledger,
+    to_regprocedure('resolve_claude_authority_pool(uuid, uuid, text, jsonb)') IS NOT NULL AS legacy_routines,
     (SELECT count(*)::int FROM subscription_connections WHERE provider = 'xai') AS xai_connections,
     (SELECT count(*)::int FROM subscription_connections WHERE provider = 'claude') AS claude_connections,
     (SELECT count(*)::int FROM opengeni_private.subscription_cutover_report
@@ -167,12 +193,13 @@ describe.skipIf(!realDb)("SuperGrok and Claude cutovers in one maintenance windo
     await owned?.release();
   }, 60_000);
 
-  test("one migrate applies SuperGrok then Claude, each with its own receipt and parity report", async () => {
+  test("one migrate applies SuperGrok then Claude, each with its own receipt and parity report, then the retirement", async () => {
     await runWindow(owned);
     expect(await state(owned)).toMatchObject({
       xai_receipt: true,
       claude_receipt: true,
-      ledger: [XAI, CLAUDE],
+      ledger: [XAI, CLAUDE, RETIREMENT],
+      legacy_routines: false,
       xai_connections: 1,
       claude_connections: 1,
       xai_mismatches: 0,
@@ -184,6 +211,21 @@ describe.skipIf(!realDb)("SuperGrok and Claude cutovers in one maintenance windo
         <= (SELECT committed_at FROM opengeni_private.subscription_provider_cutover_receipts WHERE provider = 'claude')
         AS ordered`;
     expect(order!.ordered).toBe(true);
+    // The retirement dropped every retired routine; the migrated rows stay.
+    const retiredNames = (target: boolean) =>
+      SUBSCRIPTION_RETIRED_ROUTINES.filter(({ schema }) => (schema === "target") === target).map(
+        ({ signature }) => signature.slice(0, signature.indexOf("(")),
+      );
+    const [left] = await owned.admin`SELECT count(*)::int AS total FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE (n.nspname = 'public' AND p.proname = ANY(${retiredNames(true)}::text[]))
+        OR (n.nspname IN ('opengeni_private', 'opengeni_subscription_internal')
+          AND p.proname = ANY(${retiredNames(false)}::text[]))`;
+    expect(left!.total).toBe(0);
+    const [rows] = await owned.admin`SELECT
+      (SELECT count(*)::int FROM xai_subscription_credentials) AS xai,
+      (SELECT count(*)::int FROM claude_subscription_credentials) AS claude`;
+    expect(rows).toEqual({ xai: 1, claude: 1 });
     await postureClean(owned);
   }, 300_000);
 });
@@ -198,7 +240,7 @@ describe.skipIf(!realDb)("a Claude abort in a combined window", () => {
     await owned?.release();
   }, 60_000);
 
-  test("leaves SuperGrok cut over; the rerun after the fix completes Claude", async () => {
+  test("leaves SuperGrok cut over and the retirement unapplied; the rerun after the fix completes Claude and the retirement", async () => {
     // A legacy Claude model connection that is not revoked aborts 0720 only.
     await owned.admin`ALTER TABLE connections DISABLE TRIGGER USER`;
     await owned.admin`UPDATE connections SET status = 'active' WHERE id = ${fixture.legacy}`;
@@ -209,6 +251,7 @@ describe.skipIf(!realDb)("a Claude abort in a combined window", () => {
       xai_receipt: true,
       claude_receipt: false,
       ledger: [XAI],
+      legacy_routines: true,
       xai_connections: 1,
       claude_connections: 0,
       xai_mismatches: 0,
@@ -223,7 +266,8 @@ describe.skipIf(!realDb)("a Claude abort in a combined window", () => {
     expect(await state(owned)).toMatchObject({
       xai_receipt: true,
       claude_receipt: true,
-      ledger: [XAI, CLAUDE],
+      ledger: [XAI, CLAUDE, RETIREMENT],
+      legacy_routines: false,
       xai_connections: 1,
       claude_connections: 1,
       xai_mismatches: 0,

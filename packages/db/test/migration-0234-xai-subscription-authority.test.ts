@@ -34,13 +34,19 @@ import {
   type DbClient,
 } from "../src";
 import { FORCE_RLS_TABLES, SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 
 // Characterizes the legacy SuperGrok runtime, which runs only before the
-// drained SuperGrok cutover: the database withholds that migration. Removed
-// with the legacy runtime.
+// drained SuperGrok cutover: the database withholds that migration and the
+// retirement migration that requires it. Removed with the legacy runtime.
 const LEGACY_XAI_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_RETIREMENT_MIGRATION,
+  ],
 };
 
 const migrationPath = join(

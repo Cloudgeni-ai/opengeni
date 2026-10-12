@@ -26,15 +26,22 @@ import {
   workspaceXaiSubscriptionActiveForAuthority,
   type DbClient,
 } from "../src";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 
 // Characterizes the legacy SuperGrok runtime, which runs only before its
-// drained subscription-core cutover: the database withholds that migration.
-// Removed with the legacy runtime. Claude is on the shared core (its legacy
-// runtime is deleted, design 5.3, C4): every accepted Claude snapshot is the
-// workspace default, which turnAuthority and updateAuthority assert.
+// drained subscription-core cutover: the database withholds that migration
+// and the retirement migration that requires it. Removed with the legacy
+// runtime. Claude is on the shared core (its legacy runtime is deleted,
+// design 5.3, C4): every accepted Claude snapshot is the workspace default,
+// which turnAuthority and updateAuthority assert.
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_RETIREMENT_MIGRATION,
+  ],
 };
 
 // Contract: the subscription pool belongs to the receiving session's accepted

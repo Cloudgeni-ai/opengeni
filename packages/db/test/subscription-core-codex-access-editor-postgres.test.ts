@@ -1674,7 +1674,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       manager.subjectId,
       async (tx) => {
         const attempts = [
-          sql`select opengeni_private.set_subscription_codex_reach(
+          sql`select opengeni_private.set_subscription_core_reach('codex',
             ${org.accountId}::uuid, ${id}::uuid, true, true)`,
           sql`update subscription_connections set scope_kind = 'organization' where id = ${id}::uuid`,
           sql`insert into subscription_connection_people

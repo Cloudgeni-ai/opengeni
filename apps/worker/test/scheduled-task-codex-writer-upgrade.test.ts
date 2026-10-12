@@ -51,6 +51,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   // The drained SuperGrok cutover requires 0718; held back (never applied).
   const xaiCutover = "0719_subscription_core_xai_cutover.sql";
   const claudeCutover = "0720_subscription_core_claude_cutover.sql";
+  // The drained retirement requires both cutovers; held back with them.
+  const retirement = "0721_subscription_core_legacy_retirement.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
@@ -60,7 +62,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     // the genuine pre-writer fixture, then replay them in ledger order below.
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
-      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${compat}), (${fences}), (${acceptanceReads}), (${xaiCutover}), (${claudeCutover})`;
+      (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${compat}), (${fences}), (${acceptanceReads}), (${xaiCutover}), (${claudeCutover}), (${retirement})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);

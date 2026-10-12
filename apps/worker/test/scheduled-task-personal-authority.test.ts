@@ -68,14 +68,21 @@ import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../src/activities/environment";
 import type { ActivityServices } from "../src/activities/types";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "@opengeni/db";
 
 // Characterizes the legacy SuperGrok runtime, which runs only before its
-// drained subscription-core cutover: the database withholds that migration.
-// Removed with the legacy runtime. Claude is on the shared core (its legacy
-// runtime is deleted, design 5.3, C4): its v1 columns carry the default.
+// drained subscription-core cutover: the database withholds that migration
+// and the retirement migration that requires it. Removed with the legacy
+// runtime. Claude is on the shared core (its legacy runtime is deleted,
+// design 5.3, C4): its v1 columns carry the default.
 const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!],
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_RETIREMENT_MIGRATION,
+  ],
 };
 const CLAUDE_V1_DEFAULT = { version: 1, scope: "workspace" } as const;
 
@@ -1634,7 +1641,7 @@ describe("scheduled task personal MCP authority", () => {
       // 0561 and 0582 also extend the producer fence beyond this replay boundary.
       // So does 0717 (the generated session's Claude snapshot comparison).
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0719_subscription_core_xai_cutover.sql'), ('0720_subscription_core_claude_cutover.sql')`;
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0719_subscription_core_xai_cutover.sql'), ('0720_subscription_core_claude_cutover.sql'), ('0721_subscription_core_legacy_retirement.sql')`;
       // Allowance policy/attribution compiles against the same withheld
       // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
       for (const name of allowanceMigrationTail)

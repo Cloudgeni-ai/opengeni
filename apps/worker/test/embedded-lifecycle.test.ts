@@ -485,11 +485,13 @@ describe("embedded worker lifecycle contract", () => {
         },
       ],
       [{ present: true }],
+      // Migration 0721: no retired subscription object remains.
+      [],
       [{ present: true }],
+      // Migration 0712: the cutover receipt reader exists and every provider holds
+      // its receipt.
       [{ present: true }],
-      // Migration 0712: the cutover receipt reader exists and Codex holds its receipt.
-      [{ present: true }],
-      [{ provider: "codex" }],
+      [{ provider: "claude" }, { provider: "codex" }, { provider: "xai" }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -749,32 +751,13 @@ describe("embedded worker lifecycle contract", () => {
           "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
           "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
           "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
-          "begin_subscription_codex_refresh(uuid, uuid, uuid, uuid, text, text, uuid, text, bigint)",
-          "persist_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
-          "fail_subscription_codex_refresh(uuid, uuid, uuid, uuid, uuid, bigint, text)",
-          "quarantine_subscription_codex_connection(uuid, uuid, uuid, uuid, uuid, text, bigint, bigint, text, text, timestamp with time zone)",
-          "recover_subscription_codex_connection_health(uuid, uuid, uuid, uuid)",
-          "persist_subscription_codex_refresh_with_plan(uuid, uuid, uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone, text)",
-          "subscription_codex_acceptance_authority_v2(uuid, uuid, uuid, text)",
           "resolve_subscription_codex_apps_designation(uuid, uuid)",
           "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
           "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
           "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
           "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
-          "read_subscription_codex_connection_credential(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-          "begin_subscription_codex_connection_refresh(uuid, uuid, uuid, uuid, uuid, text, bigint)",
-          "persist_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
-          "fail_subscription_codex_connection_refresh(uuid, uuid, uuid, bigint, text)",
           "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
-          "connect_subscription_codex_personal(uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text)",
-          "disconnect_subscription_codex_connection(uuid, uuid, text, uuid)",
-          "subscription_codex_personal_connections(uuid, uuid, text)",
           "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
-          "subscription_codex_task_authority_v2(uuid, uuid, uuid, text)",
-          "subscription_codex_revision_authority_v2(uuid, uuid, uuid, bigint)",
-          "manage_subscription_codex_personal(uuid, uuid, text, uuid, text, text, boolean, integer)",
-          "subscription_codex_reach(uuid, uuid)",
-          "set_subscription_codex_reach(uuid, uuid, boolean, boolean)",
           "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
           "subscription_codex_owner_membership_held(uuid, uuid)",
           ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
@@ -795,7 +778,6 @@ describe("embedded worker lifecycle contract", () => {
         })),
       ],
       [
-        "subscription_codex_writer_context(uuid, uuid, text)",
         "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
         "drop_subscription_codex_owner_capabilities(uuid)",
         "derive_scheduled_revision_subscription_authority()",
@@ -883,7 +865,7 @@ describe("embedded worker lifecycle contract", () => {
     // probe no longer queries session-tenancy activation at all.
     const embeddedDb = (
       variableSetCutoverPresent = true,
-      claudePoolActivationPresent = true,
+      retiredSubscriptionObjects: string[] = [],
       codexCutoverActivationPresent = true,
     ) => {
       const results: unknown[] = [
@@ -905,10 +887,10 @@ describe("embedded worker lifecycle contract", () => {
           },
         ],
         [{ present: variableSetCutoverPresent }],
-        [{ present: claudePoolActivationPresent }],
+        retiredSubscriptionObjects.map((object) => ({ object })),
         [{ present: codexCutoverActivationPresent }],
         [{ present: true }],
-        [{ provider: "codex" }],
+        [{ provider: "claude" }, { provider: "codex" }, { provider: "xai" }],
       ];
       let index = 0;
       return {
@@ -931,10 +913,18 @@ describe("embedded worker lifecycle contract", () => {
     await expect(dbReadyCheck(embeddedDb(false), options)()).rejects.toThrow(
       /missing the 0352 session Variable Set attachment runtime receipt/,
     );
-    await expect(dbReadyCheck(embeddedDb(true, false), options)()).rejects.toThrow(
-      /missing the Claude subscription account activation receipt/,
+    // The embedded (scoped) topology also requires the drained retirement.
+    await expect(
+      dbReadyCheck(
+        embeddedDb(true, [
+          "routine embedded.resolve_claude_authority_pool(uuid, uuid, text, jsonb)",
+        ]),
+        options,
+      )(),
+    ).rejects.toThrow(
+      /retired subscription routine embedded\.resolve_claude_authority_pool\(uuid, uuid, text, jsonb\) is present; apply the drained retirement migration 0721_subscription_core_legacy_retirement\.sql/,
     );
-    await expect(dbReadyCheck(embeddedDb(true, true, false), options)()).rejects.toThrow(
+    await expect(dbReadyCheck(embeddedDb(true, [], false), options)()).rejects.toThrow(
       /missing the 0689 Codex subscription-core cutover receipt/,
     );
   });
