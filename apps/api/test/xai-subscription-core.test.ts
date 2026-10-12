@@ -32,6 +32,16 @@ let pool: {
   }>;
   primaryConnectionId: string | null;
 };
+let personal: {
+  connections: Array<{
+    connectionId: string;
+    label: string | null;
+    providerAccountId: string | null;
+    status: string;
+  }>;
+  ownPersonalWorkspace: boolean;
+};
+const PERSONAL = "66666666-6666-4666-8666-666666666666";
 
 const token = (version: number) => ({
   credential: { accessToken: `core-access-${version}` },
@@ -54,6 +64,23 @@ mock.module("@opengeni/db", () => ({
     return route;
   },
   readSubscriptionCoreSessionOwner: async () => ({ ownerSubjectId: "user:owner" }),
+  subscriptionCorePersonalConnections: () => ({
+    readSubscriptionCorePersonalConnections: async (_db: unknown, scope: { subjectId: string }) => {
+      calls.push(`personal-rows:${scope.subjectId}`);
+      return personal;
+    },
+  }),
+  subscriptionCoreAdministeredConnections: () => ({
+    probeSubscriptionCoreAdministeredConnectionUsage: async (
+      _db: unknown,
+      _settings: unknown,
+      scope: { kind: string; subjectId: string },
+      connectionId: string,
+    ) => {
+      calls.push(`usage:${scope.kind}:${scope.subjectId}:${connectionId}`);
+      return probe;
+    },
+  }),
   workspaceXaiSubscriptionActive: async () => {
     calls.push("legacy:active");
     return true;
@@ -146,6 +173,7 @@ beforeEach(() => {
     ],
     primaryConnectionId: SHARED,
   };
+  personal = { connections: [], ownPersonalWorkspace: false };
   upstream = async () => Response.json({ text: "hello", language: "en" });
 });
 
@@ -281,7 +309,7 @@ describe("SuperGrok status by route", () => {
       models: ["model"],
       activeAccount: { id: SHARED, label: "Team", subject: "xai-user", scope: "organization" },
     });
-    expect(calls).toEqual(["route:xai", `live-models:${SHARED}`]);
+    expect(calls).toEqual(["route:xai", "personal-rows:user:caller", `live-models:${SHARED}`]);
     probe = { kind: "relogin" };
     expect(await read()).toMatchObject({ connected: true, valid: false, models: [] });
   });
@@ -291,5 +319,44 @@ describe("SuperGrok status by route", () => {
     expect(await read()).toEqual({ connected: true, valid: false, accountCount: 1 });
     route = "maintenance";
     expect(await read()).toEqual({ connected: false, valid: false, accountCount: 0 });
+  });
+
+  test("the viewer's own personal account counts; it is effective only in their Personal workspace without a shared primary", async () => {
+    const own = {
+      connectionId: PERSONAL,
+      label: "Mine",
+      providerAccountId: "xai-me",
+      status: "active",
+    };
+    // A shared primary stays the effective account.
+    personal = { connections: [own], ownPersonalWorkspace: true };
+    expect(await read()).toMatchObject({
+      connected: true,
+      valid: true,
+      accountCount: 2,
+      activeAccount: { id: SHARED, scope: "organization" },
+    });
+    // Without one, the owner's personal account, validated as its owner.
+    pool = { connections: [], primaryConnectionId: null };
+    calls = [];
+    expect(await read()).toEqual({
+      connected: true,
+      valid: true,
+      accountCount: 1,
+      models: ["model"],
+      activeAccount: { id: PERSONAL, label: "Mine", subject: "xai-me", scope: "user" },
+    });
+    expect(calls).toEqual([
+      "route:xai",
+      "personal-rows:user:caller",
+      `usage:personal_owner:user:caller:${PERSONAL}`,
+    ]);
+    // A paused personal account, or another workspace: connected, not effective.
+    personal = { connections: [{ ...own, status: "needs_relogin" }], ownPersonalWorkspace: true };
+    expect(await read()).toEqual({ connected: true, valid: false, accountCount: 1 });
+    personal = { connections: [own], ownPersonalWorkspace: false };
+    calls = [];
+    expect(await read()).toEqual({ connected: true, valid: false, accountCount: 1 });
+    expect(calls.some((call) => call.startsWith("usage:"))).toBe(false);
   });
 });

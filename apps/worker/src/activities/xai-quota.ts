@@ -1,59 +1,12 @@
 import {
-  deliverSubscriptionCoreProviderWake,
   listXaiSubscriptionAccountsMetadata,
   readSubscriptionCoreProviderRouteForWorkspace,
-  SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
-  subscriptionCoreOperationConnections,
   updateXaiQuotaMetadata,
 } from "@opengeni/db";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
-import type { Settings } from "@opengeni/config";
-import type { Database } from "@opengeni/db";
 import { buildXaiTurnRequestAuthorization } from "./xai-auth";
-
-const CORE_SUBSCRIPTION_SERVICE_SUBJECT = "service:subscription-core";
-
-/**
- * After the SuperGrok receipt: one billing probe per exhausted shared
- * connection in this workspace's explicit context (design 5.3, EP-N22),
- * never legacy rows and never a personal connection (the probe runs as the
- * core's service subject). A recovery wakes the organization's SuperGrok
- * core waiters: a shared connection can serve every workspace it reaches.
- */
-export async function refreshExhaustedXaiCoreQuota(input: {
-  db: Database;
-  settings: Settings;
-  accountId: string;
-  workspaceId: string;
-  fetch?: typeof fetch;
-}): Promise<void> {
-  let recovered: string[];
-  try {
-    recovered = await subscriptionCoreOperationConnections(
-      SUBSCRIPTION_CORE_XAI,
-    ).refreshExhaustedSubscriptionCoreQuota(
-      input.db,
-      input.settings,
-      {
-        kind: "workspace",
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: CORE_SUBSCRIPTION_SERVICE_SUBJECT,
-      },
-      input.fetch ? { fetchImpl: input.fetch } : {},
-    );
-  } catch {
-    // A failed probe never blocks placement; the stored state stands.
-    return;
-  }
-  if (recovered.length > 0) {
-    await deliverSubscriptionCoreProviderWake(input.db, SUBSCRIPTION_CORE_XAI_PROVIDER, {
-      accountId: input.accountId,
-      reason: "usage_recovered",
-    });
-  }
-}
+import { refreshExhaustedXaiCoreQuota } from "./subscription-core-xai-quota";
 
 /** Refresh billing, never inference, before treating cached exhaustion as current. */
 export async function refreshExhaustedXaiQuota(

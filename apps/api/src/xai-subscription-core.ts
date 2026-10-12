@@ -3,7 +3,9 @@ import {
   readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
+  subscriptionCoreAdministeredConnections,
   subscriptionCoreOperationConnections,
+  subscriptionCorePersonalConnections,
   workspaceXaiSubscriptionActive,
   type Database,
 } from "@opengeni/db";
@@ -47,7 +49,7 @@ export type XaiStatusPayload<Model> = {
     id: string;
     label: string | null;
     subject: string | null;
-    scope: "workspace" | "organization";
+    scope: "workspace" | "organization" | "user";
   };
 };
 
@@ -56,7 +58,13 @@ export type XaiStatusPayload<Model> = {
  * probe): the workspace's shared pool and its effective primary, validated
  * by one live model read through the adapter on that connection. Null
  * before the receipt (the caller keeps the legacy status); a maintenance
- * hold reports nothing usable. Personal connections are never listed.
+ * hold reports nothing usable.
+ *
+ * The viewer's own personal connections count as connected wherever the
+ * owner-only reader shows them. Only in the viewer's own Personal workspace,
+ * and only without a shared primary, is a personal connection the effective
+ * account (legacy scope `user`), validated by one live usage read as its
+ * owner there. Another person's personal connections are never listed.
  */
 export async function readXaiCoreStatus<Model>(
   deps: { db: Database; settings: Settings },
@@ -81,29 +89,64 @@ export async function readXaiCoreStatus<Model>(
   if (route === "legacy") return null;
   if (route === "maintenance") return { connected: false, valid: false, accountCount: 0 };
   const connections = subscriptionCoreOperationConnections(SUBSCRIPTION_CORE_XAI);
-  const pool = await connections.readSubscriptionCoreWorkspaceConnections(deps.db, scope);
+  const [pool, personal] = await Promise.all([
+    connections.readSubscriptionCoreWorkspaceConnections(deps.db, scope),
+    subscriptionCorePersonalConnections(
+      SUBSCRIPTION_CORE_XAI,
+    ).readSubscriptionCorePersonalConnections(deps.db, scope),
+  ]);
+  const accountCount = pool.connections.length + personal.connections.length;
+  const fetchDeps = input.fetch ? { fetchImpl: input.fetch as typeof fetch } : {};
   const active = pool.connections.find(
     (connection) => connection.connectionId === pool.primaryConnectionId,
   );
-  if (!active) {
+  const ownActive = personal.ownPersonalWorkspace
+    ? personal.connections.find((connection) => connection.status === "active")
+    : undefined;
+  if (!active && ownActive) {
+    const probe = await subscriptionCoreAdministeredConnections(
+      SUBSCRIPTION_CORE_XAI,
+    ).probeSubscriptionCoreAdministeredConnectionUsage(
+      deps.db,
+      deps.settings,
+      {
+        kind: "personal_owner",
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+      },
+      ownActive.connectionId,
+      fetchDeps,
+    );
+    const valid = probe.kind === "read";
     return {
-      connected: pool.connections.length > 0,
-      valid: false,
-      accountCount: pool.connections.length,
+      connected: true,
+      valid,
+      accountCount,
+      models: valid ? await input.models() : [],
+      activeAccount: {
+        id: ownActive.connectionId,
+        label: ownActive.label,
+        subject: ownActive.providerAccountId,
+        scope: "user",
+      },
     };
+  }
+  if (!active) {
+    return { connected: accountCount > 0, valid: false, accountCount };
   }
   const probe = await connections.probeSubscriptionCoreConnectionLiveModels(
     deps.db,
     deps.settings,
     scope,
     active.connectionId,
-    input.fetch ? { fetchImpl: input.fetch as typeof fetch } : {},
+    fetchDeps,
   );
   const valid = probe.kind === "read";
   return {
     connected: true,
     valid,
-    accountCount: pool.connections.length,
+    accountCount,
     models: valid ? await input.models() : [],
     activeAccount: {
       id: active.connectionId,

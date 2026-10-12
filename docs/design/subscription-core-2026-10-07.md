@@ -4616,6 +4616,15 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
 - **Status** (EP-N23) reads the workspace's shared pool and validates the
   effective primary with one `liveModels` read; without an effective primary
   it reports `valid: false`. The payload shape is unchanged.
+  The viewer's own personal connections, through the owner-only reader,
+  count towards `connected` and `accountCount` wherever that reader shows
+  them (another person's never). Only in the viewer's own Personal
+  workspace, and only when the shared pool has no effective primary, is a
+  personal connection the effective account (the first `active` one, scope
+  `user` as on the legacy path), validated by one live billing read as its
+  owner through the administered `personal_owner` probe. In a shared
+  workspace a personal connection is never the workspace's effective
+  account, so nothing is read live there.
 - **Quota** (EP-N22). Core SuperGrok placement (`beforePlacement`) and the
   legacy callers on the core route (`refreshExhaustedXaiCoreQuota`) probe
   each shared connection whose stored quota is exhausted and was not read in
@@ -4628,19 +4637,30 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   below the limit end a quota exhaustion, the legacy SuperGrok rule. Codex
   does not set it. An at-limit reading (no known reset) is not below the
   limit and leaves the exhaustion and its deadline in place.
-- **Gap: personal connections (fails closed).** The legacy probe re-read
-  every exhausted account the person could use, personal ones included.
-  On the core nothing re-reads a personal SuperGrok connection's billing:
-  the service-subject probe sees shared connections only, and the
-  credential seam refuses a personal connection outside an exact accepted
-  turn. A personal connection's stored exhaustion therefore stands until
-  its stored deadline. The status likewise reports only the workspace's
-  shared pool, so a person whose only SuperGrok connection is personal
-  sees `connected: false` there. SuperGrok has no organization-level
-  status or usage route, so nothing else is affected. This is the same gap
-  Claude has; closing it needs provider-neutral owner-only reads (the
-  Claude C2c step). X3 either lands after them or ships with this
-  behaviour documented.
+  A turn whose accepted authority carries the session owner's SuperGrok
+  personal authority (for exactly the owner's membership) also re-reads that
+  owner's own exhausted personal connections, with the same 30-second
+  interval: the stored rows come from the owner-only reader in the owner's
+  Personal workspace, and each live read runs as the owner through the
+  administered `personal_owner` probe there (whatever workspace the turn
+  runs in), never as the service subject. A shared-capacity-only turn,
+  another provider's or another membership's authority, and an ownerless
+  session re-read no personal connection. A recovery wakes the
+  organization's SuperGrok core waiters; any failure keeps the stored state
+  and never blocks placement. The provider-neutral pieces live in
+  `subscription-core/personal-connections.ts`
+  (`subscriptionCorePersonalConnections`), keyed by provider only; the
+  SuperGrok wiring lives in the worker's `subscription-core-xai-quota.ts`.
+- **Personal connections (closed before X3).** X2a's core re-read only
+  shared billing and its status listed only the shared pool, so a person
+  whose only SuperGrok connection is personal saw `connected: false` and
+  kept a stored exhaustion until its deadline. The status and quota rules
+  above close that on the provider-neutral owner-only reads (#4159).
+  Still open: the core waiter reconcile (X1b) must call
+  `refreshExhaustedXaiCoreQuota` before it reconciles, or a parked turn
+  waits until the stored deadline even after billing recovers. SuperGrok
+  has no organization-level status or usage route, so nothing else is
+  affected.
 - **Image** (EP-N09/N10). A core-placed SuperGrok turn generates images on
   its own placed connection (`executeCoreXaiImageGeneration`): an `image`
   operation lease keyed by the ledger operation id at the turn's execution
