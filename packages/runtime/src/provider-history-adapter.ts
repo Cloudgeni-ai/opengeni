@@ -1,9 +1,4 @@
-import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
-import {
-  chatReasoning,
-  chatReasoningDetails,
-  chatReasoningDetailsText,
-} from "./chat-reasoning";
+import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
@@ -31,11 +26,7 @@ function callId(item: Record<string, unknown>): string | null {
     item.providerData && typeof item.providerData === "object"
       ? (item.providerData as Record<string, unknown>)
       : null;
-  const value =
-    item.callId ??
-    item.call_id ??
-    providerData?.callId ??
-    providerData?.call_id;
+  const value = item.callId ?? item.call_id ?? providerData?.callId ?? providerData?.call_id;
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
@@ -50,9 +41,7 @@ function boundedJson(value: unknown): string {
   return `${rendered.slice(0, HISTORICAL_FACT_MAX_CHARS)}…`;
 }
 
-function historicalFact(
-  item: Record<string, unknown>,
-): Record<string, unknown> {
+function historicalFact(item: Record<string, unknown>): Record<string, unknown> {
   return {
     type: "message",
     // This is transcript evidence, never a privileged instruction. Keeping it
@@ -75,8 +64,7 @@ function isChatReasoning(item: Record<string, unknown>): boolean {
     item.type === "reasoning" &&
     Array.isArray(item.rawContent) &&
     item.rawContent.some(
-      (part) =>
-        part?.type === "reasoning_text" && typeof part.text === "string",
+      (part) => part?.type === "reasoning_text" && typeof part.text === "string",
     ) &&
     (!Array.isArray(item.content) || item.content.length === 0) &&
     !item.encrypted_content &&
@@ -90,19 +78,13 @@ function isChatReasoning(item: Record<string, unknown>): boolean {
 function chatReasoningText(item: Record<string, unknown>): string {
   const parts = item.rawContent as Array<{ type?: string; text?: string }>;
   return parts
-    .filter(
-      (part) =>
-        part?.type === "reasoning_text" && typeof part.text === "string",
-    )
+    .filter((part) => part?.type === "reasoning_text" && typeof part.text === "string")
     .map((part) => part.text)
     .join("");
 }
 
 function historicalReasoningContent(text: string) {
-  return {
-    type: "output_text",
-    text: `[Historical reasoning from another model]\n${text}`,
-  };
+  return { type: "output_text", text: `[Historical reasoning from another model]\n${text}` };
 }
 
 /** Opaque reasoning belongs to its native API. Foreign APIs receive only its
@@ -156,26 +138,18 @@ function portableChatMetadata(
   previous: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const metadata = item.providerData as Record<string, unknown> | undefined;
-  if (
-    item.type === "function_call" &&
-    metadata?.type === "function" &&
-    metadata.function
-  ) {
+  if (item.type === "function_call" && metadata?.type === "function" && metadata.function) {
     // Non-streamed Chat calls also retain their nested wire function envelope.
     // The canonical call already owns name/arguments/callId; Responses has no
     // nested `function` field. Preserve unrelated provider extensions.
     const { type: _type, function: _function, ...providerData } = metadata;
     const { providerData: _metadata, ...projected } = item;
-    return Object.keys(providerData).length
-      ? { ...projected, providerData }
-      : projected;
+    return Object.keys(providerData).length ? { ...projected, providerData } : projected;
   }
   if (item.role !== "assistant" || !Array.isArray(item.content)) return item;
   let changed = false;
   const precedingReason =
-    previous && isChatReasoning(previous)
-      ? chatReasoningText(previous)
-      : undefined;
+    previous && isChatReasoning(previous) ? chatReasoningText(previous) : undefined;
   const legacyReasons = new Set<string>();
   const content = item.content.map((part) => {
     if (
@@ -197,10 +171,7 @@ function portableChatMetadata(
   return changed
     ? {
         ...item,
-        content: [
-          ...Array.from(legacyReasons, historicalReasoningContent),
-          ...content,
-        ],
+        content: [...Array.from(legacyReasons, historicalReasoningContent), ...content],
       }
     : item;
 }
@@ -224,9 +195,7 @@ const CHAT_INCOMPATIBLE_ITEM_TYPES = new Set([
   "apply_patch_call_output",
 ]);
 
-function isChatIncompatibleHostedToolCall(
-  item: Record<string, unknown>,
-): boolean {
+function isChatIncompatibleHostedToolCall(item: Record<string, unknown>): boolean {
   return item.type === "hosted_tool_call" && item.name !== "file_search_call";
 }
 
@@ -240,9 +209,7 @@ function chatSystemContent(content: unknown): unknown {
       (part) =>
         part !== null &&
         typeof part === "object" &&
-        (part.type === "input_text" ||
-          part.type === "output_text" ||
-          part.type === "text") &&
+        (part.type === "input_text" || part.type === "output_text" || part.type === "text") &&
         typeof part.text === "string",
     )
   )
@@ -261,21 +228,12 @@ export function projectHistoryForProvider(
   providerApi: HistoryProviderApi,
 ): Array<Record<string, unknown>> {
   const nativeClaude = providerApi === "anthropic-messages";
-  // Each distinct session goal context reaches the model once per request.
-  const goalOnce = collapseRepeatedSessionGoalContexts(items);
-  const projected = goalOnce.map((item) => {
-    const evidence = projectHostedSearchEvidence(item, {
-      preserveAnthropicNative: nativeClaude,
-    });
+  const projected = items.map((item) => {
+    const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
     return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
   });
-  const input = projected.every((item, index) => item === items[index])
-    ? items
-    : projected;
-  return projectWireHistory(
-    withWireValidFunctionCallArguments(input),
-    providerApi,
-  );
+  const input = projected.every((item, index) => item === items[index]) ? items : projected;
+  return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi);
 }
 
 /**
@@ -284,25 +242,15 @@ export function projectHistoryForProvider(
  * wire, so other providers get the plain text. Canonical history keeps it for
  * a later switch back to Claude, which must replay it exactly.
  */
-function withoutClaudeCitationMetadata(
-  item: Record<string, unknown>,
-): Record<string, unknown> {
-  if (
-    item.type !== "message" ||
-    item.role !== "assistant" ||
-    !Array.isArray(item.content)
-  )
+function withoutClaudeCitationMetadata(item: Record<string, unknown>): Record<string, unknown> {
+  if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content))
     return item;
   let changed = false;
   const content = item.content.map((part) => {
     const metadata = part?.providerData;
-    if (!metadata || typeof metadata !== "object" || !("anthropic" in metadata))
-      return part;
+    if (!metadata || typeof metadata !== "object" || !("anthropic" in metadata)) return part;
     changed = true;
-    const { anthropic: _anthropic, ...rest } = metadata as Record<
-      string,
-      unknown
-    >;
+    const { anthropic: _anthropic, ...rest } = metadata as Record<string, unknown>;
     const { providerData: _providerData, ...plain } = part;
     return Object.keys(rest).length ? { ...plain, providerData: rest } : plain;
   });
@@ -315,9 +263,7 @@ export const INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS = 4_000;
 function isJsonObjectText(text: string): boolean {
   try {
     const parsed: unknown = JSON.parse(text);
-    return (
-      parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-    );
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
   } catch {
     return false;
   }
@@ -338,8 +284,7 @@ export function withWireValidFunctionCallArguments(
 ): Array<Record<string, unknown>> {
   let changed = false;
   const projected = items.map((item) => {
-    if (item.type !== "function_call" || typeof item.arguments !== "string")
-      return item;
+    if (item.type !== "function_call" || typeof item.arguments !== "string") return item;
     const raw = item.arguments;
     if (isJsonObjectText(raw)) return item;
     changed = true;
@@ -348,10 +293,7 @@ export function withWireValidFunctionCallArguments(
       raw.length <= INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS
         ? raw
         : `${raw.slice(0, INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS)}…[truncated ${raw.length - INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS} chars]`;
-    return {
-      ...item,
-      arguments: JSON.stringify({ _invalid_arguments: bounded }),
-    };
+    return { ...item, arguments: JSON.stringify({ _invalid_arguments: bounded }) };
   });
   return changed ? projected : items;
 }
@@ -409,10 +351,7 @@ function projectWireHistory(
       changed = true;
       return reasoning;
     }
-    if (
-      item.type === "message" &&
-      (item.role === "developer" || item.role === "system")
-    ) {
+    if (item.type === "message" && (item.role === "developer" || item.role === "system")) {
       const content = chatSystemContent(item.content);
       if (item.role === "developer" || content !== item.content) {
         changed = true;
