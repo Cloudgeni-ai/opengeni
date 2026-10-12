@@ -63664,6 +63664,20 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 // enrollment, atomically increments its credential generation, and REUSES its
 // selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
 // before this helper so replaying one already-approved request does not rotate.
+//
+// A personal machine belongs to the workspace it was first connected from, and
+// finalize_scoped_enrollment reuses the owner's enrollment for the same public
+// key wherever that is. Credentials and connection lookups are per workspace,
+// so a personal finalize from any other workspace is refused with
+// PersonalMachineConnectedElsewhereError. The caller's transaction rolls back,
+// so nothing is written and a single-use token is not claimed.
+export class PersonalMachineConnectedElsewhereError extends Error {
+  constructor() {
+    super("this machine was first connected as a personal machine from another workspace");
+    this.name = "PersonalMachineConnectedElsewhereError";
+  }
+}
+
 async function finalizeEnrollmentInScope(
   scopedDb: Database,
   input: {
@@ -63705,6 +63719,14 @@ async function finalizeEnrollmentInScope(
       .from(schema.sandboxes)
       .where(eq(schema.sandboxes.id, created.sandboxId))
       .limit(1);
+    if (
+      input.scope === "user" &&
+      (!enrollmentRow || enrollmentRow.workspaceId !== input.workspaceId)
+    ) {
+      // The owner's existing enrollment for this key lives in another workspace:
+      // this workspace cannot read it, and its credentials would not match.
+      throw new PersonalMachineConnectedElsewhereError();
+    }
     if (!enrollmentRow || !sandboxRow) throw new Error("Scoped enrollment finalize lost rows");
     return {
       enrollment: mapEnrollment(enrollmentRow),
@@ -63794,6 +63816,9 @@ async function finalizeEnrollmentInScope(
 // still active; any other machine, or a machine removed since, gets
 // EnrollTokenAlreadyRedeemedError and nothing is written. Legacy tokens without
 // an id keep their old multi-use behavior until they expire.
+// A personal token for a machine that is already its owner's personal machine
+// from another workspace gets PersonalMachineConnectedElsewhereError, also
+// without writing anything or claiming the token.
 export class EnrollTokenAlreadyRedeemedError extends Error {
   constructor() {
     super("enroll token was already used to connect another machine");
@@ -63801,11 +63826,41 @@ export class EnrollTokenAlreadyRedeemedError extends Error {
   }
 }
 
+// A personal token's owner can no longer own a machine here: they left the
+// organization, lost access to the minting workspace, or were suspended after
+// the command was created. Nothing is written.
+export class EnrollTokenOwnerUnavailableError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "the person who created this connect command can no longer connect machines here",
+      options,
+    );
+    this.name = "EnrollTokenOwnerUnavailableError";
+  }
+}
+
+function databaseErrorCode(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return "";
+}
+
 export async function finalizeEnrollmentByToken(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
+    /**
+     * The signed owner of a personal (`enroll_user`) token. When present the
+     * machine is created user-owned through the same scoped finalizer and
+     * organization-membership fence as a personal device-flow approval, which
+     * rechecks the owner's live membership and workspace access now.
+     */
+    ownerSubjectId?: string | null;
     pubkey: string;
     hasDisplay: boolean;
     allowScreenControl: boolean;
@@ -63824,67 +63879,109 @@ export async function finalizeEnrollmentByToken(
   if (tokenId !== null && !input.tokenExpiresAt) {
     throw new Error("a single-use enroll token requires its expiry");
   }
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      if (tokenId !== null) {
-        // Expired redemptions can never match a live token; drop them so the
-        // ledger stays bounded per workspace.
-        await scopedDb.execute(sql`
+  const ownerSubjectId = input.ownerSubjectId ?? null;
+  if (ownerSubjectId !== null && !ownerSubjectId.trim()) {
+    throw new Error("a personal enroll token requires its owner");
+  }
+  const finalizeInScope = (database: Database) =>
+    withRlsContext(
+      database,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        if (ownerSubjectId !== null) {
+          // The scoped finalizer reads the owner from this transaction-local
+          // subject, exactly as a personal device-flow approval does.
+          await setSubjectRlsContext(scopedDb, ownerSubjectId);
+        }
+        if (tokenId !== null) {
+          // Expired redemptions can never match a live token; drop them so the
+          // ledger stays bounded per workspace.
+          await scopedDb.execute(sql`
           delete from enrollment_token_redemptions
           where workspace_id = ${input.workspaceId}::uuid
             and expires_at < ${new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()}::timestamptz`);
-        // Claim the token first. A concurrent claim by another machine blocks on
-        // the primary key, then sees this row and is refused.
-        const claimed = await rawRows<{ tokenId: string }>(
-          scopedDb,
-          sql`insert into enrollment_token_redemptions
+          // Claim the token first. A concurrent claim by another machine blocks on
+          // the primary key, then sees this row and is refused.
+          const claimed = await rawRows<{ tokenId: string }>(
+            scopedDb,
+            sql`insert into enrollment_token_redemptions
                 (token_id, account_id, workspace_id, pubkey, expires_at, redeemed_at)
               values (${tokenId}, ${input.accountId}::uuid, ${input.workspaceId}::uuid,
                 ${input.pubkey}, ${input.tokenExpiresAt!.toISOString()}::timestamptz,
                 ${now.toISOString()}::timestamptz)
               on conflict (token_id) do nothing
               returning token_id as "tokenId"`,
-        );
-        if (claimed.length === 0) {
-          // A repeat by the same machine is a retry only while the machine it
-          // connected is still enrolled; a removed machine needs a new token.
-          const [existing] = await rawRows<{ pubkey: string; enrollmentActive: boolean }>(
-            scopedDb,
-            sql`select r.pubkey,
+          );
+          if (claimed.length === 0) {
+            // A repeat by the same machine is a retry only while the machine it
+            // connected is still enrolled; a removed machine needs a new token.
+            const [existing] = await rawRows<{ pubkey: string; enrollmentActive: boolean }>(
+              scopedDb,
+              sql`select r.pubkey,
                        coalesce(e.status = 'active', false) as "enrollmentActive"
                 from enrollment_token_redemptions r
                 left join enrollments e on e.id = r.enrollment_id
                 where r.token_id = ${tokenId}
                   and r.workspace_id = ${input.workspaceId}::uuid`,
-          );
-          if (!existing || existing.pubkey !== input.pubkey || !existing.enrollmentActive) {
-            throw new EnrollTokenAlreadyRedeemedError();
+            );
+            if (!existing || existing.pubkey !== input.pubkey || !existing.enrollmentActive) {
+              throw new EnrollTokenAlreadyRedeemedError();
+            }
           }
         }
-      }
-      const finalized = await finalizeEnrollmentInScope(scopedDb, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        pubkey: input.pubkey,
-        hasDisplay: input.hasDisplay,
-        allowScreenControl: input.allowScreenControl,
-        os: input.os,
-        arch: input.arch,
-        sandboxName: input.sandboxName,
-        now,
-      });
-      if (tokenId !== null) {
-        await scopedDb.execute(sql`
+        const finalized = await finalizeEnrollmentInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(ownerSubjectId !== null ? { scope: "user" as const } : {}),
+          pubkey: input.pubkey,
+          hasDisplay: input.hasDisplay,
+          allowScreenControl: input.allowScreenControl,
+          os: input.os,
+          arch: input.arch,
+          sandboxName: input.sandboxName,
+          now,
+        });
+        if (tokenId !== null) {
+          await scopedDb.execute(sql`
           update enrollment_token_redemptions
           set enrollment_id = ${finalized.enrollment.id}::uuid
           where token_id = ${tokenId}
             and workspace_id = ${input.workspaceId}::uuid`);
+        }
+        return finalized;
+      },
+    );
+  if (ownerSubjectId === null) return await finalizeInScope(db);
+  // Organization membership precedes the tenancy fence, then the redemption and
+  // enrollment rows (the same order as approveDeviceEnrollmentRequest). Fail
+  // closed on contention rather than wait on an unknown reverse-order holder.
+  try {
+    return await db.transaction(async (tx) => {
+      const database = tx as unknown as Database;
+      const [fence] = await rawRows<{ acquired: boolean }>(
+        database,
+        sql`
+        select pg_try_advisory_xact_lock(hashtextextended(
+          ${`organization-membership:${input.accountId}`}, 0
+        )) as acquired
+      `,
+      );
+      if (!fence?.acquired) {
+        throw Object.assign(new Error("Enrollment membership is changing; retry the transaction"), {
+          code: "55P03",
+        });
       }
-      return finalized;
-    },
-  );
+      return await finalizeInScope(database);
+    });
+  } catch (error) {
+    // P0002: no active organization membership for the owner (STRICT lookup);
+    // 42501: the owner no longer has access to the minting workspace.
+    const code = databaseErrorCode(error);
+    if (code === "P0002" || code === "42501") {
+      throw new EnrollTokenOwnerUnavailableError({ cause: error });
+    }
+    throw error;
+  }
 }
 
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:
