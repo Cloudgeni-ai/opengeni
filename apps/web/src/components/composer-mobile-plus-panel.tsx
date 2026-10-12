@@ -305,6 +305,16 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
+          {props.secrets ? (
+            <SettingRowItem
+              panel="secrets"
+              icon={<LockKeyholeIcon className="size-4" />}
+              label="Secrets"
+              setting={props.secrets}
+              disabled={props.disabled}
+              onOpen={() => setPanel("secrets")}
+            />
+          ) : null}
           {props.variableSets ? (
             <DropdownMenuItem
               data-composer-panel="variables"
@@ -320,16 +330,6 @@ export function ComposerMobilePlusPanel(
               <DropdownMenuMeta>{props.variableSets.selectedCount || ""}</DropdownMenuMeta>
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
-          ) : null}
-          {props.secrets ? (
-            <SettingRowItem
-              panel="secrets"
-              icon={<LockKeyholeIcon className="size-4" />}
-              label="Secrets"
-              setting={props.secrets}
-              disabled={props.disabled}
-              onOpen={() => setPanel("secrets")}
-            />
           ) : null}
           {props.runsOn || props.visibility ? <DropdownMenuSeparator /> : null}
           {props.runsOn ? (

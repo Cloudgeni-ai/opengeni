@@ -160,8 +160,15 @@ import {
 } from "@/lib/use-workspace-model-catalog";
 import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
 import { ComposerCapabilitiesChip } from "@/components/composer-capabilities-chip";
+import { useVaults } from "@opengeni/react";
+import {
+  SessionSecretsMenuBody,
+  draftSecretsRows,
+  sessionSecretsSummary,
+} from "@/components/secrets/session-secrets-panel";
 import {
   capabilityAvailability,
+  capabilityOn,
   capabilitySummary,
   draftFromRequest,
   requestFromDraft,
@@ -355,6 +362,19 @@ function SessionsIndexRouteContent({
         agentCapabilities: requestFromDraft(next, agentAvailability),
       })),
   };
+  // "+" > Secrets: which vaults this chat may use. Shown only while its agent
+  // can use secrets (the workspace default or this chat's own capabilities).
+  const draftSecretsOn =
+    agentAvailability.isAvailable("secrets") &&
+    capabilityOn(composerAgentCapabilities.draft.values, "secrets");
+  const canListSecrets =
+    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
+    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const draftVaults = useVaults({ workspaceId, enabled: canListSecrets && draftSecretsOn });
+  const draftVaultPolicy = draft.vaultPolicy ?? { mode: "all" as const };
+  const draftVaultRows = draftVaults.vaults
+    ? draftSecretsRows(draftVaults.vaults, draftVaultPolicy)
+    : null;
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -1804,6 +1824,40 @@ function SessionsIndexRouteContent({
                               disabled={busy || newSessionDraft.loading}
                               catalogRefresh={repositoryCatalogRefresh}
                               onConnectWorkspaceApp={githubAppConnect.open}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draftSecretsOn && canListSecrets
+                    ? {
+                        secrets: {
+                          summary: sessionSecretsSummary(draftVaultPolicy, draftVaultRows),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <SessionSecretsMenuBody
+                              vaults={draftVaultRows}
+                              policy={draftVaultPolicy}
+                              narrowedByParent={false}
+                              canEdit
+                              disabled={busy || newSessionDraft.loading}
+                              loading={draftVaults.loading}
+                              error={draftVaults.error}
+                              onRetry={() => void draftVaults.refresh()}
+                              onPolicyChange={(policy) =>
+                                setDraft((current) => {
+                                  const { vaultPolicy: _previous, ...rest } = current;
+                                  return policy.mode === "all"
+                                    ? rest
+                                    : { ...rest, vaultPolicy: policy };
+                                })
+                              }
+                              onManage={() =>
+                                void navigate({
+                                  to: "/workspaces/$workspaceId/secrets",
+                                  params: { workspaceId },
+                                })
+                              }
                             />
                           ),
                         },

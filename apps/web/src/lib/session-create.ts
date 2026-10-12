@@ -132,6 +132,11 @@ export type SessionDraft = {
    * signup setup chat). Not edited in the composer; sent as `agent.instructions`.
    */
   agentInstructions?: string;
+  /**
+   * The chat's "+" > Secrets choice. Undefined means every vault the person
+   * can reach (no narrowing); sent as `agent.vaultPolicy`.
+   */
+  vaultPolicy?: import("@opengeni/sdk").VaultPolicy;
 };
 
 /**
@@ -579,11 +584,19 @@ export function newSessionDraftOptionsFromSessionDraft(
 }
 
 function agentExtras(draft: SessionDraft): { agent?: AgentConfigRequest } {
-  if (draft.agentCapabilities === undefined && draft.agentInstructions === undefined) return {};
+  const vaultPolicy = draft.vaultPolicy?.mode === "selected" ? draft.vaultPolicy : undefined;
+  if (
+    draft.agentCapabilities === undefined &&
+    draft.agentInstructions === undefined &&
+    vaultPolicy === undefined
+  ) {
+    return {};
+  }
   return {
     agent: {
       ...(draft.agentCapabilities !== undefined ? { capabilities: draft.agentCapabilities } : {}),
       ...(draft.agentInstructions !== undefined ? { instructions: draft.agentInstructions } : {}),
+      ...(vaultPolicy !== undefined ? { vaultPolicy } : {}),
     },
   };
 }
@@ -643,6 +656,9 @@ export function sessionDraftFromNewSessionDraftOptions(
       : {}),
     ...(options.agent?.instructions !== undefined
       ? { agentInstructions: options.agent.instructions }
+      : {}),
+    ...(options.agent?.vaultPolicy?.mode === "selected"
+      ? { vaultPolicy: options.agent.vaultPolicy }
       : {}),
   };
 }
