@@ -140,19 +140,27 @@ export function renderSecretRefText(
   if (!ui || !mayContainSecretReference(text)) return text;
   const tokens = ui.tokenize(text);
   if (!tokens.some((token) => token.type === "reference")) return text;
-  return tokens.map((token, index) =>
-    token.type === "reference" ? (
-      <SecretRefChipView
-        key={index}
-        ui={ui}
-        reference={token.reference}
-        linkable={options.linkable ?? true}
-        className={options.chipClassName}
-      />
-    ) : (
-      <Fragment key={index}>{token.type === "text" ? token.value : token.raw}</Fragment>
-    ),
-  );
+  // Keys are source offsets: text runs start where the previous token ended.
+  let offset = 0;
+  return tokens.map((token) => {
+    if (token.type === "reference") {
+      offset = token.reference.end;
+      return (
+        <SecretRefChipView
+          key={`ref-${token.reference.start}`}
+          ui={ui}
+          reference={token.reference}
+          linkable={options.linkable ?? true}
+          className={options.chipClassName}
+        />
+      );
+    }
+    if (token.type === "invalid") {
+      offset = token.end;
+      return <Fragment key={`invalid-${token.start}`}>{token.raw}</Fragment>;
+    }
+    return <Fragment key={`text-${offset}`}>{token.value}</Fragment>;
+  });
 }
 
 export type SecretAnswerChipProps = {
