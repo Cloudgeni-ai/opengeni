@@ -25,6 +25,8 @@ let rotations = 0;
 describeSubscriptionCoreConformance<CodexTokens>({
   name: "Codex subscription",
   databaseLabel: "subscription-core-codex-conformance",
+  // The adapter's declared usage-reading completeness (asserted by the suite).
+  usageReadingsComplete: true,
   provider: subscriptionCoreCodexProvider({
     refresh: async (refreshToken) => {
       rotations += 1;

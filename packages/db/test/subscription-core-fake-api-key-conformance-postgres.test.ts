@@ -56,6 +56,8 @@ const upstream = new ScriptedApiKeyUpstream();
 describeSubscriptionCoreConformance({
   name: "fake API-key connector",
   databaseLabel: "subscription-core-fake-api-key-conformance",
+  // The adapter's declared usage-reading completeness (asserted by the suite).
+  usageReadingsComplete: true,
   provider: fakeApiKeyProvider,
   models: FAKE_API_KEY_MODELS,
   credential: (label) => ({ apiKey: `sk-conformance-${label}` }),

@@ -216,6 +216,14 @@ export type SubscriptionCoreConformanceSubject<Credential> = {
    * checks the adapter agrees (a subject without it takes the adapter's word).
    */
   renews?: boolean;
+  /**
+   * Whether the adapter must declare its usage readings complete (design
+   * 5.3, Claude track): a complete reading ends an omitted exhausted window,
+   * a partial one keeps it until its reset. Every subject states it, and the
+   * suite checks the adapter's declaration against it, so a removed or
+   * flipped declaration fails the suite instead of switching branches.
+   */
+  usageReadingsComplete: boolean;
   /** Test-database setup run once as the owner (for example a test registration). */
   prepareDatabase?(shared: SharedTestDatabase): Promise<void>;
   /** The scripted upstream all traffic goes to (started by the suite). */
@@ -251,6 +259,11 @@ export function describeSubscriptionCoreConformance<Credential>(
   if (subject.renews !== undefined && subject.renews !== renews)
     throw new Error(
       `The conformance subject expects credentials that ${subject.renews ? "renew" : "never renew"}`,
+    );
+  const usageReadingsComplete = provider.adapter.usageReadingsComplete === true;
+  if (usageReadingsComplete !== subject.usageReadingsComplete)
+    throw new Error(
+      `The conformance subject expects ${subject.usageReadingsComplete ? "complete" : "partial"} usage readings`,
     );
   const m0 = subject.models[0]!;
   const m1 = subject.models[1]!;
@@ -3927,6 +3940,20 @@ export function describeSubscriptionCoreConformance<Credential>(
         connectionId,
         observation,
       );
+      // The subject's stated completeness, asserted before it chooses a branch.
+      expect(usageReadingsComplete).toBe(subject.usageReadingsComplete);
+      if (!subject.usageReadingsComplete) {
+        // A partial usage reading (the adapter declares no complete
+        // readings) cannot tell that the refused limit ended: it never
+        // reports the fallback window, which stays until its own reset.
+        expect(recorded).toEqual({ applied: true, recovered: false });
+        expect(await placeChecked(turn, new Date(now + 2_000))).toMatchObject({ kind: "wait" });
+        expect(await evaluateChecked(turn, new Date(fallback + 1_000))).toMatchObject({
+          kind: "run",
+          connectionId,
+        });
+        return;
+      }
       expect(recorded).toEqual({ applied: true, recovered: true });
       expect(await placeChecked(turn, new Date(now + 2_000))).toMatchObject({
         kind: "run",

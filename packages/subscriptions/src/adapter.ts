@@ -245,11 +245,18 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    * Decode a `fetchUsage` response into the shared quota model, fenced on
    * the refresh generation of the bearer that read it. Null when the
    * response carries no quota (an error payload or no windows).
+   *
+   * `modelIds`, when the caller passes it, lists the product models the
+   * connection can serve when the response is decoded (the caller's
+   * catalog), for providers whose usage reports limits of model groups
+   * that become per-model cooldowns. Absent: no catalog is known, and only
+   * models the response itself names can be cooled down.
    */
   decodeQuota?(input: {
     response: unknown;
     observedAt: number;
     refreshGeneration: number;
+    modelIds?: readonly ModelId[];
   }): SubscriptionQuota | null;
   /**
    * The provider's usage endpoint is authoritative for its quota: a
@@ -259,6 +266,15 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    * it passes (design 2.2).
    */
   usageReadEndsQuotaExhaustion?: boolean;
+  /**
+   * The provider's usage-endpoint readings are complete: each reports every
+   * window that limits the connection, so a stored exhausted window that a
+   * newer reading omits has ended and is dropped. Absent or false: a
+   * reading may omit a window that still runs, and the shared quota merge
+   * keeps an omitted exhausted window until its own reset (fail closed,
+   * design 2.2). Response headers and refusals are always partial.
+   */
+  usageReadingsComplete?: boolean;
   /**
    * Optional live model catalog of one connection (provider model ids),
    * read with its bearer through `input.fetch`. Throws when the provider

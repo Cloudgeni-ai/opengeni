@@ -50,6 +50,9 @@ const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 // The format-aware personal connect writer is built from the live connect
 // writer 0715 rewrites: held back with 0715 and applied with it.
 const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
+// The personal version reader is built from the owner reader withheld 0715
+// rewrites: held back with 0715 and replayed after it.
+const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);
 const MODEL = "codex/gpt-5.5";
@@ -418,7 +421,8 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${REACH_MIGRATION}), (${API_KEY_CONNECTIONS}),
-      (${PERSONAL_CONNECT_FORMAT})`;
+      (${PERSONAL_CONNECT_FORMAT}),
+      (${PERSONAL_CONNECTION_VERSIONS})`;
     for (const later of LATER_MIGRATIONS)
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
@@ -475,7 +479,7 @@ beforeAll(async () => {
   const later = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await later`delete from schema_migrations
-      where name in (${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT})`;
+      where name in (${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${PERSONAL_CONNECTION_VERSIONS})`;
     await migrate(database.ownerUrl);
   } finally {
     await later.end();
@@ -517,10 +521,11 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         sql`select current_user as role`,
       );
       expect(current?.role).toBe("opengeni_app");
-      // 0715 and 0728 (built on it) are still held back here, so this binary
-      // also reports the two routines 0728 adds as missing.
+      // 0715, and 0728 and 0730 (built on it), are still held back here, so
+      // this binary also reports the routines 0728 and 0730 add as missing.
       expect(staged!.unprovisionedPosture).toEqual([
         "subscription M3 precursor private routine connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text) is missing or unsafe",
+        "subscription M3 precursor private routine subscription_core_personal_connection_versions(text, uuid, uuid, text) is missing or unsafe",
         "subscription M3 precursor private routine subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint) is missing or unsafe",
       ]);
       // Every runtime routine 0713 adds is executable before provisioning,

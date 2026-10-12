@@ -354,6 +354,10 @@ export type { SubscriptionCoreProvider } from "./subscription-core/provider";
 export { buildSubscriptionCoreTurnTokenResolver } from "./subscription-core/turn-token-resolver";
 export * from "./subscription-core-xai-adapter";
 export * from "./subscription-core-xai";
+// Claude usage, readiness and admission on the core (design 5.3, Claude
+// track C2a); every caller reads the Claude provider route first.
+export * from "./subscription-core-claude-usage";
+export * from "./subscription-core-claude-reads";
 // Provider-neutral operations outside chat (media, transcription, realtime,
 // usage and catalog probes), bound per provider by the caller.
 export {
@@ -504,8 +508,10 @@ import { withOrganizationClaudeCapacityMutation } from "./claude-subscription-ac
 export {
   assertModelConnectionAllowsTurn,
   modelAllowedByConnections,
+  type ClaudeCoreModelRestrictions,
   type ConnectionModelRestrictions,
 } from "./workspace-model-connection-access";
+import type { ClaudeCoreModelRestrictions } from "./workspace-model-connection-access";
 import {
   assertModelConnectionAllowsTurn,
   getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
@@ -27595,6 +27601,7 @@ export async function getWorkspaceConnectionModelRestrictions(
   subjectId: string,
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
+  claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
 ) {
   return await resolveWorkspaceConnectionModelRestrictions(
     db,
@@ -27603,6 +27610,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
     authoritySnapshot,
     claudeAuthoritySnapshot,
+    claudeCoreRestrictions,
   );
 }
 

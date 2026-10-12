@@ -35,6 +35,10 @@ import {
 } from "./claude-subscription-tokens";
 import { subscriptionCoreDefaultErrors } from "./subscription-core/errors";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
+import {
+  decodeSubscriptionCoreClaudeUsage,
+  fetchSubscriptionCoreClaudeUsage,
+} from "./subscription-core-claude-usage";
 
 /** Claude's provider id on the shared core and in the legacy tables. */
 export const SUBSCRIPTION_CORE_CLAUDE_PROVIDER = "claude";
@@ -174,6 +178,11 @@ export function subscriptionCoreClaudeAdapter(
       },
     },
     reloginText: (message) => (message.trim().length > 0 ? message : RELOGIN_TEXT),
+    // Usage reads and their decoding live in `subscription-core-claude-usage.ts` (C2a).
+    fetchUsage: (read) => fetchSubscriptionCoreClaudeUsage(read),
+    decodeQuota: (input) => decodeSubscriptionCoreClaudeUsage(input),
+    // A usage reading may omit a window that still runs: keep it (design 5.3).
+    usageReadingsComplete: false,
   };
 }
 

@@ -115,6 +115,8 @@ export const fakeApiKeyAdapter: SubscriptionCoreAdapter<FakeApiKeyCredential> = 
   refresh: null,
   reloginText: (message: string) =>
     message || "The API key was refused by the provider. Add a new key to continue.",
+  // The spend-budget read reports the whole budget window.
+  usageReadingsComplete: true,
 });
 
 /** The database binding, as a real connector's module would export it. */
