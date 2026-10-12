@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
@@ -512,4 +513,23 @@ describe("SuperGrok turn finalization by route", () => {
     expect(finalize).toHaveBeenCalledTimes(1);
     expect(placed.release).toHaveBeenCalledTimes(1);
   });
+});
+
+test("a cancelled session title checkpoints the title lane of whichever core turn placed it", () => {
+  // Source-level wiring check (comments stripped, whitespace collapsed): the
+  // parallel-title finish hook runs inside the stream attempt, which is not
+  // unit-constructible. The lane itself is tested in the Codex suite.
+  const source = readFileSync(
+    new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    "utf8",
+  )
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/\s+/g, " ");
+  const hook = source.slice(source.indexOf("const persistParallelSessionTitle = async ("));
+  expect(
+    hook.startsWith(
+      "const persistParallelSessionTitle = async ( generated: GeneratedSessionTitle | null, ): Promise<void> => { if (!generated) { await subscriptionCoreTurnOf(providerTurn)?.titleRequests?.checkpoint(); return; }",
+    ),
+  ).toBe(true);
+  expect(source.includes("codexSubscriptionCore?.titleRequests?.checkpoint()")).toBe(false);
 });
