@@ -3256,3 +3256,154 @@ BEGIN
 END
 $vault_routines$;
 
+-- ===========================================================================
+-- §B RETIRE VARIABLE SET VALUES
+-- ===========================================================================
+-- Env injection is gone: nothing reads variable values any more, and every
+-- active value already lives in a vault (checked again below). This section
+--   1. removes variable names from persisted sandbox env (session envelopes
+--      and lease resume state), so no plaintext copy outlives the set, and
+--   2. deletes every variable value, including those of revoked sets.
+-- Set header rows, attachments and the set routines stay: scheduled-run
+-- admission still fences set ids and generations. A later contract migration
+-- drops the tables, columns and routines.
+
+-- Removes `names` from every env map a persisted sandbox entry can carry:
+-- sessionState.{manifest,providerState.manifest,providerState,}.environment,
+-- at the top level and under each legacy sessionsByAgent.<agent> entry.
+CREATE FUNCTION opengeni_private.vault_scrub_entry_environment(p_entry jsonb, p_names text[])
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  result jsonb := p_entry;
+  env_path text[];
+  target text[];
+  agent_key text;
+  prefix text[];
+  prefixes text[][] := ARRAY[ARRAY['sessionState', '', '']];
+BEGIN
+  IF p_entry IS NULL OR pg_catalog.jsonb_typeof(p_entry) <> 'object'
+    OR p_names IS NULL OR pg_catalog.cardinality(p_names) = 0 THEN
+    RETURN p_entry;
+  END IF;
+  IF pg_catalog.jsonb_typeof(p_entry -> 'sessionsByAgent') = 'object' THEN
+    FOR agent_key IN SELECT pg_catalog.jsonb_object_keys(p_entry -> 'sessionsByAgent') LOOP
+      prefixes := prefixes || ARRAY[ARRAY['sessionsByAgent', agent_key, 'sessionState']];
+    END LOOP;
+  END IF;
+  FOR i IN 1 .. pg_catalog.array_length(prefixes, 1) LOOP
+    prefix := ARRAY(SELECT part FROM pg_catalog.unnest(prefixes[i:i]) part WHERE part <> '');
+    FOREACH env_path SLICE 1 IN ARRAY ARRAY[
+      ARRAY['manifest', 'environment', ''],
+      ARRAY['providerState', 'manifest', 'environment'],
+      ARRAY['providerState', 'environment', ''],
+      ARRAY['environment', '', '']
+    ] LOOP
+      target := prefix || ARRAY(SELECT part FROM pg_catalog.unnest(env_path) part WHERE part <> '');
+      IF pg_catalog.jsonb_typeof(result #> target) = 'object' THEN
+        result := pg_catalog.jsonb_set(result, target, (result #> target) - p_names);
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN result;
+END
+$$;
+
+ALTER TABLE workspace_variable_sets NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_variable_set_variables NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE vault_field_versions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE vault_item_fields NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE sandbox_session_envelopes NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE sandbox_leases NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE audit_events NO FORCE ROW LEVEL SECURITY;
+-- The scrub only removes env keys. Lease guards police archive, billing,
+-- checkpoint and provider-create state, none of which change here, so they
+-- are switched off for this one statement rather than taught about it.
+ALTER TABLE sandbox_leases DISABLE TRIGGER USER;
+
+DO $retire_variable_values$
+DECLARE
+  missing_copies integer;
+  scrubbed_envelopes integer := 0;
+  scrubbed_leases integer := 0;
+  removed_values integer := 0;
+BEGIN
+  -- Every value of an active set must have its byte-identical vault copy.
+  SELECT pg_catalog.count(*)::integer INTO missing_copies
+  FROM workspace_variable_set_variables variable
+  JOIN workspace_variable_sets variable_set ON variable_set.id = variable.variable_set_id
+  WHERE variable_set.status = 'active'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM vault_item_fields field
+      JOIN vault_field_versions version ON version.field_id = field.id
+      WHERE field.item_id = variable.id
+        AND version.version = variable.version
+        AND version.value_encrypted = variable.value_encrypted
+    );
+  IF missing_copies > 0 THEN
+    RAISE EXCEPTION 'variable value retirement aborted: % active values have no vault copy',
+      missing_copies;
+  END IF;
+
+  -- Values stored under the lossless codec stay valid when keys are removed.
+  PERFORM pg_catalog.set_config('opengeni.lossless_content_writer', '1', true);
+
+  WITH names AS (
+    SELECT account_id, pg_catalog.array_agg(DISTINCT name) AS names
+    FROM workspace_variable_set_variables
+    GROUP BY account_id
+  ), changed AS (
+    UPDATE sandbox_session_envelopes envelope
+    SET envelope = opengeni_private.vault_scrub_entry_environment(envelope.envelope, names.names)
+    FROM names
+    WHERE names.account_id = envelope.account_id
+      AND opengeni_private.vault_scrub_entry_environment(envelope.envelope, names.names)
+        IS DISTINCT FROM envelope.envelope
+    RETURNING 1
+  )
+  SELECT pg_catalog.count(*)::integer INTO scrubbed_envelopes FROM changed;
+
+  WITH names AS (
+    SELECT account_id, pg_catalog.array_agg(DISTINCT name) AS names
+    FROM workspace_variable_set_variables
+    GROUP BY account_id
+  ), changed AS (
+    UPDATE sandbox_leases lease
+    SET resume_state = opengeni_private.vault_scrub_entry_environment(lease.resume_state, names.names)
+    FROM names
+    WHERE names.account_id = lease.account_id
+      AND opengeni_private.vault_scrub_entry_environment(lease.resume_state, names.names)
+        IS DISTINCT FROM lease.resume_state
+    RETURNING 1
+  )
+  SELECT pg_catalog.count(*)::integer INTO scrubbed_leases FROM changed;
+
+  PERFORM pg_catalog.set_config('opengeni.lossless_content_writer', '', true);
+
+  DELETE FROM workspace_variable_set_variables;
+  GET DIAGNOSTICS removed_values = ROW_COUNT;
+
+  INSERT INTO audit_events (account_id, workspace_id, subject_id, action, target_type, metadata)
+  VALUES (NULL, NULL, 'system:migration:0738', 'variable_set.values_retired', 'migration',
+    pg_catalog.jsonb_build_object(
+      'migration', '0738_vaults.sql',
+      'removedValues', removed_values,
+      'scrubbedEnvelopes', scrubbed_envelopes,
+      'scrubbedLeases', scrubbed_leases
+    ));
+END
+$retire_variable_values$;
+
+ALTER TABLE sandbox_leases ENABLE TRIGGER USER;
+ALTER TABLE workspace_variable_sets FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_variable_set_variables FORCE ROW LEVEL SECURITY;
+ALTER TABLE vault_field_versions FORCE ROW LEVEL SECURITY;
+ALTER TABLE vault_item_fields FORCE ROW LEVEL SECURITY;
+ALTER TABLE sandbox_session_envelopes FORCE ROW LEVEL SECURITY;
+ALTER TABLE sandbox_leases FORCE ROW LEVEL SECURITY;
+ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
+
+DROP FUNCTION opengeni_private.vault_scrub_entry_environment(jsonb, text[]);

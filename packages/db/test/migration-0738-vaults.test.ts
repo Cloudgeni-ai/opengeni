@@ -71,6 +71,31 @@ type Seeded = {
   membershipId: string;
   sets: Record<string, { id: string; scope: string; name: string; status: string }>;
   plaintext: Map<string, string>;
+  sessionId: string;
+  leaseId: string;
+};
+
+// §B: persisted sandbox env carries set variable names next to constants.
+const persistedEnvelope = {
+  backendId: "docker",
+  sessionState: {
+    manifest: { root: "/workspace", environment: { API_KEY: "upper", HOME: "/home/agent" } },
+    environment: { STRIPE_KEY: "sk_test_org", PATH: "/usr/bin" },
+    providerState: {
+      environment: { MULTILINE: "line one", GIT_TERMINAL_PROMPT: "0" },
+      manifest: { environment: { DATABASE_URL: "postgres://fixture", LANG: "C.UTF-8" } },
+    },
+  },
+  sessionsByAgent: {
+    legacy: { sessionState: { environment: { GONE: "revoked value", TZ: "UTC" } } },
+  },
+};
+const persistedResumeState = {
+  backendId: "docker",
+  sessionState: {
+    providerState: { environment: { OPENAI_API_KEY: "sk-fixture-user", HOME: "/root" } },
+    workspaceArchiveRef: { key: "kept" },
+  },
 };
 
 async function seed(admin: postgres.Sql): Promise<Seeded> {
@@ -200,6 +225,32 @@ async function seed(admin: postgres.Sql): Promise<Seeded> {
     variables: [{ name: "GONE", value: "should not copy" }],
   });
 
+  const sessionId = crypto.randomUUID();
+  const sandboxGroupId = crypto.randomUUID();
+  // Fixture rows only: replica mode skips the session admission triggers.
+  const lease = await admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      insert into sessions (id, account_id, workspace_id, initial_message, model, sandbox_backend,
+        sandbox_group_id, tool_policy, root_session_id, nested_agent_depth,
+        effective_max_nested_agent_depth, nested_agent_depth_policy_source, reasoning_effort,
+        latency_mode)
+      values (${sessionId}::uuid, ${accountId}::uuid, ${workspaceId}::uuid, 'scrub fixture',
+        'scripted-model', 'docker', ${sandboxGroupId}::uuid,
+        '{"mode":"workspace_default","inheritedFromSessionId":null}'::jsonb, ${sessionId}::uuid, 0, 1,
+        'deployment', 'low', 'standard')`;
+    await tx`
+      insert into sandbox_session_envelopes (account_id, workspace_id, session_id, envelope, envelope_codec_version)
+      values (${accountId}::uuid, ${workspaceId}::uuid, ${sessionId}::uuid,
+        ${admin.json(persistedEnvelope)}, 1)`;
+    const [row] = await tx<{ id: string }[]>`
+      insert into sandbox_leases (account_id, workspace_id, sandbox_group_id, backend, expires_at, resume_state)
+      values (${accountId}::uuid, ${workspaceId}::uuid, ${sandboxGroupId}::uuid, 'docker',
+        now() + interval '1 hour', ${admin.json(persistedResumeState)})
+      returning id::text as id`;
+    return row!;
+  });
+
   return {
     accountId,
     workspaceId,
@@ -208,6 +259,8 @@ async function seed(admin: postgres.Sql): Promise<Seeded> {
     membershipId: membership!.id,
     sets,
     plaintext,
+    sessionId,
+    leaseId: lease.id,
   };
 }
 
@@ -348,7 +401,58 @@ test.skipIf(!realDb)(
       renamedItems: 1,
     });
 
-    // Variable sets keep working alongside vaults.
+    // §B: every value is gone (revoked sets too); set headers stay for the
+    // scheduled-run admission fences.
+    const [remaining] = await admin<{ count: number }[]>`
+    select count(*)::int as count from workspace_variable_set_variables`;
+    expect(remaining!.count).toBe(0);
+    const [headers] = await admin<{ count: number }[]>`
+    select count(*)::int as count from workspace_variable_sets where account_id = ${seeded.accountId}::uuid`;
+    expect(headers!.count).toBe(Object.keys(seeded.sets).length);
+    const [retired] = await admin<{ metadata: Record<string, unknown> }[]>`
+    select metadata from audit_events where action = 'variable_set.values_retired'`;
+    expect(retired!.metadata).toMatchObject({
+      migration: MIGRATION,
+      removedValues: 10,
+      scrubbedEnvelopes: 1,
+      scrubbedLeases: 1,
+    });
+    // §B: variable names leave persisted env; constants and other state stay,
+    // and the lossless codec marker is kept.
+    const [envelope] = await admin<{ envelope: unknown; codec: number | null }[]>`
+    select envelope, envelope_codec_version as codec from sandbox_session_envelopes
+    where session_id = ${seeded.sessionId}::uuid`;
+    expect(envelope!.codec).toBe(1);
+    expect(envelope!.envelope).toEqual({
+      backendId: "docker",
+      sessionState: {
+        manifest: { root: "/workspace", environment: { HOME: "/home/agent" } },
+        environment: { PATH: "/usr/bin" },
+        providerState: {
+          environment: { GIT_TERMINAL_PROMPT: "0" },
+          manifest: { environment: { LANG: "C.UTF-8" } },
+        },
+      },
+      sessionsByAgent: { legacy: { sessionState: { environment: { TZ: "UTC" } } } },
+    });
+    const [lease] = await admin<{ resume_state: unknown }[]>`
+    select resume_state from sandbox_leases where id = ${seeded.leaseId}::uuid`;
+    expect(lease!.resume_state).toEqual({
+      backendId: "docker",
+      sessionState: {
+        providerState: { environment: { HOME: "/root" } },
+        workspaceArchiveRef: { key: "kept" },
+      },
+    });
+    const [triggers] = await admin<{ disabled: number }[]>`
+    select count(*)::int as disabled from pg_trigger
+    where tgrelid = 'sandbox_leases'::regclass and not tgisinternal and tgenabled = 'D'`;
+    expect(triggers!.disabled).toBe(0);
+    const [helper] = await admin<{ count: number }[]>`
+    select count(*)::int as count from pg_proc where proname = 'vault_scrub_entry_environment'`;
+    expect(helper!.count).toBe(0);
+
+    // Variable set headers keep listing alongside vaults.
     const afterSets = await listLegacyVariableSets(client!.db, {
       accountId: seeded.accountId,
       workspaceId: seeded.workspaceId,
