@@ -42,8 +42,9 @@ const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
 /**
- * Experiment (OPE-550, `OPENGENI_EXPERIMENT_CUT_POLLING=1`): honor the model's
- * requested foreground wait up to this ceiling instead of the 30-second cap.
+ * Cut polling (OPE-550; settings.experimentCutPolling, on by default, kill
+ * switch `OPENGENI_EXPERIMENT_CUT_POLLING=false`): honor the model's requested
+ * foreground wait up to this ceiling instead of the 30-second cap.
  * Models request 60-300 s for builds and test suites; the silent 30-second cap
  * turned each such command into repeated empty `write_stdin` polls, each a
  * full-context model request. The wait still returns on exit and stays
@@ -53,7 +54,7 @@ const TURN_MAX_MODEL_WAIT_MS = 30_000;
  */
 const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
 /**
- * Under the experiment a long wait must not hold a dev server, watcher, tail or
+ * With cut polling a long wait must not hold a dev server, watcher, tail or
  * REPL for minutes after it printed what the model needs. Once the ordinary
  * (30-second) window has passed, a command that produced output during this
  * call and then stayed quiet this long returns control. The 30-second floor
@@ -329,16 +330,7 @@ function cappedYield(value: unknown, cap: number): number {
     : cap;
 }
 
-export function cutPollingExperimentEnabled(
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  return env.OPENGENI_EXPERIMENT_CUT_POLLING === "1";
-}
-
-export function modelWaitMs(
-  value: unknown,
-  cutPolling: boolean = cutPollingExperimentEnabled(),
-): number {
+export function modelWaitMs(value: unknown, cutPolling: boolean): number {
   const max = cutPolling ? CUT_POLLING_MAX_MODEL_WAIT_MS : TURN_MAX_MODEL_WAIT_MS;
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? Math.min(value, max)
@@ -384,8 +376,11 @@ export function looksLikeInputPrompt(output: string): boolean {
 }
 
 /** Model-facing foreground wait for one exec/read call. */
-function foregroundWait(value: unknown): { waitMs: number; quietReturnAfterMs?: number } {
-  if (!cutPollingExperimentEnabled()) return { waitMs: modelWaitMs(value, false) };
+function foregroundWait(
+  value: unknown,
+  cutPolling: boolean,
+): { waitMs: number; quietReturnAfterMs?: number } {
+  if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
   return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
 }
 
@@ -945,9 +940,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private drainPromise: Promise<void> | null = null;
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
+  private readonly cutPolling: boolean;
 
-  constructor(signal?: AbortSignal) {
+  constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
+    this.cutPolling = options.cutPolling === true;
     if (signal?.aborted) {
       this.cancel(signal.reason);
     } else {
@@ -1683,7 +1680,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 state,
                 initialOutput: output,
                 startedAt,
-                ...foregroundWait(parsed.yield_time_ms),
+                ...foregroundWait(parsed.yield_time_ms, this.cutPolling),
                 maxOutputTokens:
                   typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
               });
@@ -1808,7 +1805,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   initialOutput: output,
                   ...(initialObservationFailure ? { initialObservationFailure } : {}),
                   startedAt,
-                  ...foregroundWait(parsed?.yield_time_ms),
+                  ...foregroundWait(parsed?.yield_time_ms, this.cutPolling),
                   maxOutputTokens:
                     typeof parsed?.max_output_tokens === "number"
                       ? parsed.max_output_tokens
@@ -1833,7 +1830,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     startedAt: number;
     waitMs: number;
     /**
-     * Experiment only: after this much of the wait, return once output produced
+     * Cut polling only: after this much of the wait, return once output produced
      * during this call has gone quiet (see CUT_POLLING_OUTPUT_QUIET_MS).
      */
     quietReturnAfterMs?: number;
@@ -2744,10 +2741,20 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 }
 
+export type TurnToolCancellationControllerOptions = {
+  /**
+   * Honor long model-requested foreground waits (settings.experimentCutPolling,
+   * OPENGENI_EXPERIMENT_CUT_POLLING; on by default in production settings).
+   * Omitted means the ordinary 30-second cap.
+   */
+  cutPolling?: boolean;
+};
+
 export function createTurnToolCancellationController(
   signal?: AbortSignal,
+  options: TurnToolCancellationControllerOptions = {},
 ): TurnToolCancellationController {
-  return new TurnToolCancellationControllerImpl(signal);
+  return new TurnToolCancellationControllerImpl(signal, options);
 }
 
 /** Wrap a capability instance without depending on SDK-private subclasses. */

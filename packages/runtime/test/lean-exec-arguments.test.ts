@@ -4,31 +4,17 @@ import { testSettings } from "@opengeni/testing";
 import {
   LEAN_EXEC_COMMAND_DEFAULTS,
   LEAN_EXEC_COMMAND_PARAMETERS,
-  OUTPUT_COST_EXPERIMENT_ENV,
   canonicalizeLeanExecCommandInput,
-  outputCostExperimentEnabled,
   withLeanExecCommandArguments,
 } from "../src/sandbox/lean-exec-arguments";
 import { buildAgentCapabilities, createSandboxClientForBackend } from "../src/index";
 
 type FunctionTool = Extract<Tool<unknown>, { type: "function" }>;
 
-const originalFlag = process.env[OUTPUT_COST_EXPERIMENT_ENV];
 const sessions: Array<{ close(): Promise<void> }> = [];
 
 afterEach(async () => {
-  if (originalFlag === undefined) delete process.env[OUTPUT_COST_EXPERIMENT_ENV];
-  else process.env[OUTPUT_COST_EXPERIMENT_ENV] = originalFlag;
   await Promise.all(sessions.splice(0).map((session) => session.close().catch(() => undefined)));
-});
-
-describe("outputCostExperimentEnabled", () => {
-  test("is on only for the exact value 1", () => {
-    expect(outputCostExperimentEnabled({})).toBe(false);
-    expect(outputCostExperimentEnabled({ [OUTPUT_COST_EXPERIMENT_ENV]: "0" })).toBe(false);
-    expect(outputCostExperimentEnabled({ [OUTPUT_COST_EXPERIMENT_ENV]: "true" })).toBe(false);
-    expect(outputCostExperimentEnabled({ [OUTPUT_COST_EXPERIMENT_ENV]: "1" })).toBe(true);
-  });
 });
 
 describe("canonicalizeLeanExecCommandInput", () => {
@@ -113,12 +99,14 @@ describe("withLeanExecCommandArguments", () => {
 
 describe("composed shell capability", () => {
   async function execTool(
-    flag: string | undefined,
+    lean: boolean,
     options: Parameters<typeof buildAgentCapabilities>[2] = {},
   ): Promise<FunctionTool> {
-    if (flag === undefined) delete process.env[OUTPUT_COST_EXPERIMENT_ENV];
-    else process.env[OUTPUT_COST_EXPERIMENT_ENV] = flag;
-    const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+    const settings = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      experimentOutputCost: lean,
+    });
     const client = createSandboxClientForBackend("local", settings) as {
       create(manifest?: unknown): Promise<{ close(): Promise<void> }>;
     };
@@ -136,8 +124,8 @@ describe("composed shell capability", () => {
     )!;
   }
 
-  test("flag off keeps the strict SDK schema that requires every argument", async () => {
-    const exec = await execTool(undefined);
+  test("disabled keeps the strict SDK schema that requires every argument", async () => {
+    const exec = await execTool(false);
     const parameters = exec.parameters as unknown as { required: string[] };
     expect(exec.strict).toBe(true);
     expect([...parameters.required].sort()).toEqual(
@@ -145,8 +133,8 @@ describe("composed shell capability", () => {
     );
   });
 
-  test("flag on exposes the lean schema and runs a call with only cmd and max_output_tokens", async () => {
-    const exec = await execTool("1");
+  test("enabled exposes the lean schema and runs a call with only cmd and max_output_tokens", async () => {
+    const exec = await execTool(true);
     expect(exec.strict).toBe(false);
     expect((exec.parameters as unknown as { required: string[] }).required).toEqual([
       "cmd",
@@ -163,7 +151,7 @@ describe("composed shell capability", () => {
 
   test("an omitted login runs a non-login shell, as models choose today", async () => {
     const probe = "shopt -q login_shell && echo LOGIN-SHELL || echo NON-LOGIN-SHELL";
-    const exec = await execTool("1");
+    const exec = await execTool(true);
     const omitted = String(
       await exec.invoke(
         {} as never,
@@ -183,7 +171,7 @@ describe("composed shell capability", () => {
 
   test("with the turn cancellation fence an omitted tty still runs without a TTY", async () => {
     const abort = new AbortController();
-    const exec = await execTool("1", { turnCancellationSignal: abort.signal });
+    const exec = await execTool(true, { turnCancellationSignal: abort.signal });
     const probe = "[ -t 1 ] && echo HAS-TTY || echo NO-TTY";
     const omitted = String(
       await exec.invoke({} as never, JSON.stringify({ cmd: probe, max_output_tokens: 200 })),

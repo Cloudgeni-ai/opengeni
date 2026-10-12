@@ -481,10 +481,7 @@ import {
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
-import {
-  outputCostExperimentEnabled,
-  withLeanExecCommandArguments,
-} from "./sandbox/lean-exec-arguments";
+import { withLeanExecCommandArguments } from "./sandbox/lean-exec-arguments";
 export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
 export {
   classifyModelStreamIdleTimeoutError,
@@ -4190,7 +4187,9 @@ function buildAgentCapabilitiesFromComposition(
 ): ReturnType<typeof Capabilities.default> {
   const toolCancellation =
     options.turnCancellationSignal || options.onToolCancellationFence
-      ? createTurnToolCancellationController(options.turnCancellationSignal)
+      ? createTurnToolCancellationController(options.turnCancellationSignal, {
+          cutPolling: settings.experimentCutPolling,
+        })
       : null;
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
@@ -4302,10 +4301,11 @@ function buildAgentCapabilitiesFromComposition(
       });
     };
   }
-  // Experiment (OPENGENI_EXPERIMENT_OUTPUT_COST=1, default off): a
-  // lean non-strict `exec_command` schema. Outermost, so every inner layer
-  // (SDK parser, turn cancellation, routing fence) sees canonical arguments.
-  if (outputCostExperimentEnabled()) {
+  // Lean non-strict `exec_command` schema (settings.experimentOutputCost, on by
+  // default; OPENGENI_EXPERIMENT_OUTPUT_COST=false disables). Outermost, so every
+  // inner layer (SDK parser, turn cancellation, routing fence) sees canonical
+  // arguments.
+  if (settings.experimentOutputCost) {
     for (const capability of caps) {
       const target = capability as unknown as { tools(): Tool<unknown>[] };
       const original = target.tools;

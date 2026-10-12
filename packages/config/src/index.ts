@@ -854,6 +854,13 @@ const SettingsSchema = z.object({
   // Cache the session-independent system-prompt prefix (on by default after an A/B
   // comparison; set false to disable) separately on Anthropic Messages requests.
   experimentSystemPromptCacheSplit: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT
+  // Honor a model-requested foreground shell wait up to 4 minutes instead of 30
+  // seconds, returning early for quiet servers and input prompts (on by default
+  // after an A/B halved command polls; set false to disable).
+  experimentCutPolling: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_CUT_POLLING
+  // Lean non-strict `exec_command` schema: only `cmd` and `max_output_tokens`
+  // are required (on by default after an A/B; set false to disable).
+  experimentOutputCost: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_OUTPUT_COST
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -4629,6 +4636,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
+    experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
+    experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(

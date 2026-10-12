@@ -1,8 +1,8 @@
 /**
- * Experiment: lean model-facing `exec_command` arguments.
+ * Lean model-facing `exec_command` arguments.
  *
- * Gated by `OPENGENI_EXPERIMENT_OUTPUT_COST=1` (worker environment, default
- * off).
+ * Gated by settings.experimentOutputCost (on by default; kill switch
+ * `OPENGENI_EXPERIMENT_OUTPUT_COST=false` in the worker environment). OPE-550.
  *
  * The SDK shell capability declares `exec_command` through `tool()`, which
  * defaults to strict mode. Strict mode turns every optional field into a
@@ -31,12 +31,6 @@
  * meaning (default shell, turn cwd).
  */
 import type { Tool } from "@openai/agents";
-
-export const OUTPUT_COST_EXPERIMENT_ENV = "OPENGENI_EXPERIMENT_OUTPUT_COST";
-
-export function outputCostExperimentEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env[OUTPUT_COST_EXPERIMENT_ENV] === "1";
-}
 
 /** Values filled in for omitted arguments; the dominant explicit choices today. */
 export const LEAN_EXEC_COMMAND_DEFAULTS = {

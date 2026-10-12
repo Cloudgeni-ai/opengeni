@@ -3,14 +3,13 @@ import type { Tool } from "@openai/agents";
 
 import {
   createTurnToolCancellationController,
-  cutPollingExperimentEnabled,
   looksLikeInputPrompt,
   modelWaitMs,
 } from "../src/sandbox/turn-tool-cancellation";
 
 const runContext = {} as never;
-const FLAG = "OPENGENI_EXPERIMENT_CUT_POLLING";
-const originalFlag = process.env[FLAG];
+/** Per-test cut-polling setting passed to each controller. */
+let cutPolling = false;
 
 function running(sessionId: number, output = ""): string {
   return [
@@ -116,7 +115,7 @@ async function runExec(
   yieldTimeMs: number,
   initialOutput = "",
 ): Promise<string> {
-  const controller = createTurnToolCancellationController();
+  const controller = createTurnToolCancellationController(undefined, { cutPolling });
   const [exec] = controller.wrapTools(
     [functionTool("exec_command", async () => running(7, initialOutput))],
     session,
@@ -127,16 +126,25 @@ async function runExec(
 }
 
 afterEach(() => {
-  if (originalFlag === undefined) delete process.env[FLAG];
-  else process.env[FLAG] = originalFlag;
+  cutPolling = false;
 });
 
-describe("cut-polling experiment flag", () => {
-  test("is off unless exactly 1", () => {
-    expect(cutPollingExperimentEnabled({})).toBe(false);
-    expect(cutPollingExperimentEnabled({ [FLAG]: "0" })).toBe(false);
-    expect(cutPollingExperimentEnabled({ [FLAG]: "true" })).toBe(false);
-    expect(cutPollingExperimentEnabled({ [FLAG]: "1" })).toBe(true);
+describe("cut-polling setting", () => {
+  test("is off unless the controller opts in", async () => {
+    const fake = virtualCommand(90_000);
+    try {
+      const controller = createTurnToolCancellationController();
+      const [exec] = controller.wrapTools(
+        [functionTool("exec_command", async () => running(7, "start\n"))],
+        fake.session,
+      ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+      const output = String(
+        await exec!.invoke(runContext, JSON.stringify({ cmd: "x", yield_time_ms: 290_000 })),
+      );
+      expect(output).toContain("Process running with session ID");
+    } finally {
+      fake.restore();
+    }
   });
 
   test("default keeps the 30-second cap; the experiment honors requests up to 4 minutes", () => {
@@ -150,11 +158,11 @@ describe("cut-polling experiment flag", () => {
     expect(modelWaitMs(-1, true)).toBe(10_000);
   });
 
-  test("flag off: a 90 s command requested with a 290 s wait returns a running handle at 30 s", async () => {
-    delete process.env[FLAG];
+  test("disabled: a 90 s command requested with a 290 s wait returns a running handle at 30 s", async () => {
+    cutPolling = false;
     const fake = virtualCommand(90_000);
     try {
-      const controller = createTurnToolCancellationController();
+      const controller = createTurnToolCancellationController(undefined, { cutPolling });
       const [exec] = controller.wrapTools(
         [functionTool("exec_command", async () => running(7, "start\n"))],
         fake.session,
@@ -171,11 +179,11 @@ describe("cut-polling experiment flag", () => {
     }
   });
 
-  test("flag on: the same command returns its terminal result from the original call", async () => {
-    process.env[FLAG] = "1";
+  test("enabled: the same command returns its terminal result from the original call", async () => {
+    cutPolling = true;
     const fake = virtualCommand(90_000);
     try {
-      const controller = createTurnToolCancellationController();
+      const controller = createTurnToolCancellationController(undefined, { cutPolling });
       const [exec] = controller.wrapTools(
         [functionTool("exec_command", async () => running(7, "start\n"))],
         fake.session,
@@ -194,11 +202,11 @@ describe("cut-polling experiment flag", () => {
     }
   });
 
-  test("flag on: an explicit short yield still returns early", async () => {
-    process.env[FLAG] = "1";
+  test("enabled: an explicit short yield still returns early", async () => {
+    cutPolling = true;
     const fake = virtualCommand(90_000, 5_000);
     try {
-      const controller = createTurnToolCancellationController();
+      const controller = createTurnToolCancellationController(undefined, { cutPolling });
       const [exec] = controller.wrapTools(
         [functionTool("exec_command", async () => running(7))],
         fake.session,
@@ -214,11 +222,11 @@ describe("cut-polling experiment flag", () => {
     }
   });
 
-  test("flag on: a write_stdin poll honors its long requested wait", async () => {
-    process.env[FLAG] = "1";
+  test("enabled: a write_stdin poll honors its long requested wait", async () => {
+    cutPolling = true;
     const fake = virtualCommand(120_000);
     try {
-      const controller = createTurnToolCancellationController();
+      const controller = createTurnToolCancellationController(undefined, { cutPolling });
       const [, write] = controller.wrapTools(
         [
           functionTool("exec_command", async () => running(7)),
@@ -237,11 +245,11 @@ describe("cut-polling experiment flag", () => {
     }
   });
 
-  test("flag on: a command that never exits returns control at the 4-minute ceiling", async () => {
-    process.env[FLAG] = "1";
+  test("enabled: a command that never exits returns control at the 4-minute ceiling", async () => {
+    cutPolling = true;
     const fake = virtualCommand(null, 60_000);
     try {
-      const controller = createTurnToolCancellationController();
+      const controller = createTurnToolCancellationController(undefined, { cutPolling });
       const [exec] = controller.wrapTools(
         [functionTool("exec_command", async () => running(7))],
         fake.session,
@@ -288,7 +296,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
   });
 
   test("a dev server that printed ready returns at the default window, not the requested 4 minutes", async () => {
-    process.env[FLAG] = "1";
+    cutPolling = true;
     const fake = scriptedCommand(
       (now) =>
         now === 1_000 ? { output: "  VITE ready in 312 ms\n  Local: http://0.0.0.0:5173/\n" } : {},
@@ -306,7 +314,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
   });
 
   test("output that keeps streaming past the default window keeps the wait open until exit", async () => {
-    process.env[FLAG] = "1";
+    cutPolling = true;
     const fake = scriptedCommand(
       (now) =>
         now >= 80_000 ? { output: "PASS all\n", exitCode: 0 } : { output: `test ${now / 4_000}\n` },
@@ -323,7 +331,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
   });
 
   test("a command that printed early and then runs silently returns at the default window, then a re-check waits for exit", async () => {
-    process.env[FLAG] = "1";
+    cutPolling = true;
     const fake = scriptedCommand(
       (now) =>
         now === 5_000
@@ -338,7 +346,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
       expect(first).toContain("Process running with session ID 7");
       expect(fake.now()).toBe(30_000);
       // The re-check produces no new output until exit, so it waits for it.
-      const controller = createTurnToolCancellationController();
+      const controller = createTurnToolCancellationController(undefined, { cutPolling });
       const [, write] = controller.wrapTools(
         [
           functionTool("exec_command", async () => running(7)),
@@ -358,7 +366,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
   });
 
   test("an output gap inside the default window does not return early", async () => {
-    process.env[FLAG] = "1";
+    cutPolling = true;
     const fake = scriptedCommand(
       (now) =>
         now === 2_000
@@ -378,7 +386,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
   });
 
   test("a command waiting at an input prompt returns after a short silence", async () => {
-    process.env[FLAG] = "1";
+    cutPolling = true;
     const fake = scriptedCommand(
       (now) => (now === 1_000 ? { output: "Python 3.12.3\n>>> " } : {}),
       1_000,
@@ -394,7 +402,7 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
   });
 
   test("a silent long build waits for exit", async () => {
-    process.env[FLAG] = "1";
+    cutPolling = true;
     const fake = scriptedCommand(
       (now) => (now >= 150_000 ? { output: "built\n", exitCode: 0 } : {}),
       10_000,
@@ -408,8 +416,8 @@ describe("cut-polling quiet return for servers, watchers and prompts", () => {
     }
   });
 
-  test("flag off: a prompt still holds the ordinary window", async () => {
-    delete process.env[FLAG];
+  test("disabled: a prompt still holds the ordinary window", async () => {
+    cutPolling = false;
     const fake = scriptedCommand((now) => (now === 1_000 ? { output: ">>> " } : {}), 1_000);
     try {
       const result = await runExec(fake.session, "python3", 300_000);
