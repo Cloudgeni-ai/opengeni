@@ -7,8 +7,15 @@ import { dirname, join, resolve } from "node:path";
  * Harnesses never inherit an ambient `.env` (Bun test/scripts in this repo run
  * with `--no-env-file`), so the eval reads ONE explicit env file and copies only
  * the model-provider keys into the settings it builds. Values are never logged.
+ * The Vercel AI Gateway rail is accepted too (OPENGENI_VERCEL_AI_GATEWAY_API_KEY,
+ * OPENGENI_GATEWAY_MODELS, OPENGENI_MANAGED_MODELS_JSON); a bare
+ * VERCEL_AI_GATEWAY_API_KEY (the shell-export form) maps onto the OPENGENI_ name.
  */
-const MODEL_ENV_KEY = /^OPENGENI_(OPENAI|AZURE_OPENAI)_[A-Z0-9_]+$/u;
+const MODEL_ENV_KEY =
+  /^OPENGENI_((OPENAI|AZURE_OPENAI)_[A-Z0-9_]+|VERCEL_AI_GATEWAY_API_KEY|GATEWAY_MODELS|MANAGED_MODELS_JSON)$/u;
+const MODEL_ENV_ALIASES: Readonly<Record<string, string>> = {
+  VERCEL_AI_GATEWAY_API_KEY: "OPENGENI_VERCEL_AI_GATEWAY_API_KEY",
+};
 
 export type ModelEnv = Record<string, string>;
 
@@ -60,22 +67,39 @@ function gitCommonDir(cwd: string): string | null {
   return path.length > 0 ? path : null;
 }
 
+/** Keep only model-provider keys (plus the Gateway alias) from a parsed env file. */
+export function selectModelEnv(parsed: Record<string, string>): ModelEnv {
+  const env: ModelEnv = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (value.length === 0) continue;
+    const alias = MODEL_ENV_ALIASES[key];
+    if (alias && parsed[alias] === undefined) env[alias] = value;
+    else if (MODEL_ENV_KEY.test(key)) env[key] = value;
+  }
+  return env;
+}
+
+export function hasModelCredential(env: ModelEnv): boolean {
+  return (
+    env.OPENGENI_OPENAI_API_KEY !== undefined ||
+    env.OPENGENI_AZURE_OPENAI_API_KEY !== undefined ||
+    env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY !== undefined
+  );
+}
+
 export function loadModelEnv(explicit: string | undefined): { path: string; env: ModelEnv } {
   for (const path of candidateEnvFiles(explicit)) {
     if (!existsSync(path)) continue;
-    const parsed = parseDotenv(readFileSync(path, "utf8"));
-    const env: ModelEnv = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (MODEL_ENV_KEY.test(key) && value.length > 0) env[key] = value;
-    }
-    const hasCredential =
-      env.OPENGENI_OPENAI_API_KEY !== undefined || env.OPENGENI_AZURE_OPENAI_API_KEY !== undefined;
+    const env = selectModelEnv(parseDotenv(readFileSync(path, "utf8")));
+    const hasCredential = hasModelCredential(env);
     if (hasCredential) return { path, env };
     if (explicit && resolve(explicit) === path) {
-      throw new Error(`${path} has no OPENGENI_OPENAI_API_KEY or OPENGENI_AZURE_OPENAI_API_KEY`);
+      throw new Error(
+        `${path} has no OPENGENI_OPENAI_API_KEY, OPENGENI_AZURE_OPENAI_API_KEY or Vercel AI Gateway key`,
+      );
     }
   }
   throw new Error(
-    "No model credentials found. Pass --env-file <path> (or OPENGENI_EVAL_ENV_FILE) pointing at a .env with OpenAI/Azure OpenAI keys.",
+    "No model credentials found. Pass --env-file <path> (or OPENGENI_EVAL_ENV_FILE) pointing at a .env with OpenAI/Azure OpenAI or Vercel AI Gateway keys.",
   );
 }
