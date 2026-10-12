@@ -5,6 +5,7 @@ import {
   CreateVaultItemRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   HumanInputQuestion,
+  normalizeSecretQuestion,
   HumanInputSecretAnswer,
   intersectVaultPolicies,
   isValidSecretName,
@@ -197,10 +198,14 @@ describe("ask card secret field", () => {
     expect(HumanInputQuestion.safeParse({ ...secretQuestion, secret: undefined }).success).toBe(
       false,
     );
-    expect(
-      HumanInputQuestion.safeParse({ ...secretQuestion, options: [{ id: "a", label: "A" }] })
-        .success,
-    ).toBe(false);
+    // Options and Other are tolerated (strict tool schemas make models send
+    // them) and dropped before the request is persisted.
+    const sloppy = HumanInputQuestion.parse({
+      ...secretQuestion,
+      options: [{ id: "a", label: "A" }],
+      allowOther: true,
+    });
+    expect(normalizeSecretQuestion(sloppy)).toMatchObject({ options: [], allowOther: false });
     expect(
       HumanInputQuestion.safeParse({
         id: "q",

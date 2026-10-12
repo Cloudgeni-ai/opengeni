@@ -17474,20 +17474,10 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
             message: "secret questions require a secret spec",
           });
         }
-        if (question.options.length > 0) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["options"],
-            message: "secret questions cannot have options",
-          });
-        }
-        if (question.allowOther) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["allowOther"],
-            message: "secret questions do not use Other",
-          });
-        }
+        // Options and Other mean nothing for a secret. Strict tool schemas make
+        // models send them anyway, so they are tolerated here and dropped when
+        // the request is persisted (`normalizeSecretQuestion`), never failing
+        // the turn.
       } else if (question.secret != null) {
         ctx.addIssue({
           code: "custom",
@@ -17593,6 +17583,13 @@ export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSch
   }),
 );
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
+
+/** Secret questions never carry options or Other; drop what a model sent. */
+export function normalizeSecretQuestion<
+  T extends { kind: string; options: unknown[]; allowOther: boolean },
+>(question: T): T {
+  return question.kind === "secret" ? { ...question, options: [], allowOther: false } : question;
+}
 
 export const HumanInputAnswer = z.object({
   questionId: z.string().min(1).max(64),
