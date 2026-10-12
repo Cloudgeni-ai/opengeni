@@ -1011,7 +1011,7 @@ const SettingsSchema = z.object({
   // default pinned by runtime tests.
   agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
   // Knowledge retrieval, correction and standing-preference guidance (on by default after the
-  // OPE-550 A/B; set false to disable).
+  // instruction-following A/B; set false to disable).
   experimentKnowledgeRetrievalGuidance: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),

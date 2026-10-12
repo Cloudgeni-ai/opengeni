@@ -575,3 +575,89 @@ test("saved output is claimed before a full batch of older uncaptured results", 
     reconcile_after=now()+interval '1 day',reconcile_claim_id=null,reconcile_claimed_at=null
     where session_id in (${olderSessionId},${fixture.identity.sessionId})`;
 });
+
+/** No runner answers on the command's exact address, as NATS reports it. */
+const noRunnerRpc = (): ControlRpc & { requests: () => number } => {
+  let requests = 0;
+  return {
+    requests: () => requests,
+    request: async () => {
+      requests++;
+      throw new SelfhostedControlError({
+        message: "no responders",
+        code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+        agentOffline: true,
+        neverSent: true,
+        reason: "agent_offline",
+        retryable: false,
+      });
+    },
+  };
+};
+const parkSession = async (sessionId: string) =>
+  shared.admin`update session_background_commands set
+    reconcile_after=now()+interval '1 day',reconcile_claim_id=null,reconcile_claimed_at=null
+    where session_id=${sessionId}`;
+
+test("output whose runner was retired settles once instead of retrying forever", async () => {
+  // Uncaptured output: the runner took it with it, so it is recorded as missing.
+  // The retirement rules are the running-command claim's: replaced, revoked or
+  // cleanly stopped. A runner that is merely offline may come back.
+  for (const change of ["replaced", "revoked", "stopped", "offline", "crashed"] as const) {
+    const fixture = await terminalOutputFixture();
+    const enrollmentId = fixture.identity.enrollmentId;
+    if (change === "replaced") {
+      // A different runner process holds the connection, live or not.
+      await shared.admin`update enrollments set connection_instance_id='successor',connection_lease_expires_at=now()-interval '1 minute' where id=${enrollmentId}`;
+    } else if (change === "revoked") {
+      await shared.admin`update enrollments set status='revoked',revoked_at=now(),connection_instance_id=null,connection_lease_expires_at=null where id=${enrollmentId}`;
+    } else if (change === "stopped") {
+      await shared.admin`update enrollments set connection_instance_id=null,connection_lease_expires_at=null,went_offline_at=now(),went_offline_reason='GOING_OFFLINE_REASON_USER_STOP' where id=${enrollmentId}`;
+    } else if (change === "offline") {
+      await shared.admin`update enrollments set connection_lease_expires_at=now()-interval '1 minute' where id=${enrollmentId}`;
+    } else {
+      // Gone without saying why: it may be the same process coming back.
+      await shared.admin`update enrollments set connection_instance_id=null,connection_lease_expires_at=null,went_offline_at=now(),went_offline_reason=null where id=${enrollmentId}`;
+    }
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, noRunnerRpc());
+    const row = await fixture.stored();
+    expect(row.output_consumed_at).toBeNull();
+    expect(row.output_release_observed_at).toBeNull();
+    if (change === "offline" || change === "crashed") {
+      expect(row.output_unavailable_at).toBeNull();
+      expect(row.last_reconcile_outcome).toBe("output_retry");
+    } else {
+      expect(row.output_unavailable_at).toBeInstanceOf(Date);
+      expect(row.last_reconcile_outcome).toBe("output_unavailable");
+    }
+    await parkSession(fixture.identity.sessionId);
+  }
+
+  // Captured output whose final acknowledgement never reached the old runner:
+  // nothing is retained any more, so the release is complete.
+  const fixture = await terminalOutputFixture();
+  const publish = fixture.connection.publish;
+  fixture.connection.publish = (subject, payload) => {
+    if (OpAck.decode(payload).final) throw new Error("synthetic publisher failure");
+    publish(subject, payload);
+  };
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  const captured = await fixture.stored();
+  expect(captured.output_consumed_at).toBeInstanceOf(Date);
+  expect(captured.last_reconcile_outcome).toBe("output_retry");
+  await fixture.due();
+  const rpc = noRunnerRpc();
+  // Still the machine's live runner: silence alone keeps the retry.
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+  expect((await fixture.stored()).last_reconcile_outcome).toBe("output_retry");
+  expect(rpc.requests()).toBe(1);
+  await fixture.due();
+  await shared.admin`update enrollments set connection_instance_id='successor' where id=${fixture.identity.enrollmentId}`;
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+  const released = await fixture.stored();
+  expect(released.output_release_observed_at).toBeInstanceOf(Date);
+  expect(released.output_unavailable_at).toBeNull();
+  expect(released.last_reconcile_outcome).toBe("output_released");
+  expect(released.output_consumed_at.getTime()).toBe(captured.output_consumed_at.getTime());
+  await parkSession(fixture.identity.sessionId);
+});
