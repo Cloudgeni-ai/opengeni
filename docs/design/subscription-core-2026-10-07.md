@@ -5282,7 +5282,13 @@ like C1a.
   joined chain; the queued writes are awaited in full, while the wake
   delivery is bounded like a finalizer step and detached by the turn's
   cancellation signal (the capacity outbox is its backstop), so a stuck
-  signal never holds settlement. This relies on the
+  signal never holds settlement. The production finalizer must not wrap
+  the queued-write join in detachable housekeeping: it retains the lease
+  and its heartbeat until those writes settle, even after cancellation or
+  the housekeeping deadline. A genuinely stuck join remains under the
+  existing `provider_leases` finalization-stage watchdog, which requests
+  graceful host drain and uses the host's exit backstop; it never fabricates
+  completion or releases the lease early. This relies on the
   partial-reading fix of
   `applyQuotaObservation` (#4120), so C1b merges on a base that contains it.
 - Waits. The core waiter accepts `claude` with the legacy Claude wait's

@@ -523,15 +523,17 @@ async function finalizeTurnAttemptSteps(
     // The same for a core-placed Claude turn (its legacy usage receipts and
     // legacy release never run: they need the legacy authority and subject).
     if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
-      await waitForTurnFinalizerStep(
-        finalizeCoreClaudeTurn({
-          db,
-          signalCodexCapacityWorkflow,
-          core: providerTurn.claudeSubscriptionCore,
-          lease: leases.claude,
-        }).catch(() => undefined),
-        finalizerSignal,
-      );
+      // Queued quota writes still need this lease's fence. Cancellation and
+      // housekeeping timeouts may detach only the wake, never that write join.
+      // The provider_leases stage monitor contains a genuinely stuck join by
+      // requesting host drain; it must not manufacture completion/release.
+      await finalizeCoreClaudeTurn({
+        db,
+        signalCodexCapacityWorkflow,
+        core: providerTurn.claudeSubscriptionCore,
+        lease: leases.claude,
+        signal: finalizerSignal,
+      }).catch(() => undefined);
       leases.claude.stopHeartbeat();
       await waitForTurnFinalizerStep(
         leases.claude.releaseCurrent().catch(() => false),

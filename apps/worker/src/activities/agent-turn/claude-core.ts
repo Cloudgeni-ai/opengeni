@@ -580,13 +580,17 @@ export async function finalizeCoreClaudeTurn(
   input: CoreCodexWakeServices & {
     core: SubscriptionCoreTurn;
     lease: ClaudeTurnLease;
+    signal?: AbortSignal | undefined;
   },
 ): Promise<void> {
-  await joinCoreClaudeObservations(input, input.core);
-  await finalizeCoreSubscriptionTurn({
-    db: input.db,
-    provider: CLAUDE,
-    core: input.core,
-    lease: input.lease,
-  });
+  await joinCoreClaudeObservations(input, input.core, { signal: input.signal });
+  await waitForTurnFinalizerStep(
+    finalizeCoreSubscriptionTurn({
+      db: input.db,
+      provider: CLAUDE,
+      core: input.core,
+      lease: input.lease,
+    }),
+    input.signal,
+  );
 }
