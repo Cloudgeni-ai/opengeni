@@ -4668,6 +4668,26 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect((await choose(privateTurn, org.ownerSubjectId, personal)).outcome).toBe("not_found");
       });
 
+      test("SUB-SEL-04: an API key or service may choose a shared account for a person's shared session, never a personal one", async () => {
+        const org = await organization();
+        const pooled = await sharedConnection(org, `key-shared-${crypto.randomUUID()}`);
+        await personalConnection(org, `key-personal-${crypto.randomUUID()}`);
+        const shared = await runningTurn(org, { visibility: "workspace_shared" });
+        for (const caller of [`api_key:${crypto.randomUUID()}`, `service:${crypto.randomUUID()}`]) {
+          // The caller sees only the pool: never someone's personal account.
+          expect(await offered(shared, caller)).toEqual({ [pooled]: "choosable" });
+          expect(await choose(shared, caller, pooled)).toMatchObject({
+            outcome: "changed",
+            connectionId: pooled,
+          });
+          expect(await bindingOf(shared)).toMatchObject({
+            connectionId: pooled,
+            choice: "explicit",
+          });
+          expect((await choose(shared, caller, null)).outcome).toBe("changed");
+        }
+      });
+
       test("SUB-WAIT-02, SUB-SEL-04: a choice for a waiting turn wakes it, and turning the fallback opt-in on wakes waiting turns", async () => {
         const armWaiter = async (org: Org, turn: Turn): Promise<string> => {
           const tenant = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };

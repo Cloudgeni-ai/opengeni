@@ -5256,7 +5256,11 @@ or provider on a shared account). This change does not alter either order.
    concurrent placement; the whole transaction is replayed a bounded number
    of times when it loses a deadlock to a session's first placement, and
    then reports `conflict`), and leaves the decision to the binding guard: a
-   refusal surfaces as `refused`, never as a silent fallback. A turn waiting
+   refusal surfaces as `refused`, never as a silent fallback. The guard
+   records the choosing subject as the binding's initiating
+   subject, as the Codex pin does, so an API key or service may choose a
+   shared account for a session it may see and never matches a personal
+   account's owner. A turn waiting
    for capacity is woken and re-placed at once; otherwise the choice applies
    from the next turn. It records `model_account.selection.changed`.
    Saving a person's personal-fallback opt-in wakes the organization's

@@ -248,6 +248,7 @@ async function listChoosableConnections(
 async function readOwnOptIn(
   tx: Database,
   input: { accountId: string; subjectId: string },
+  options: { lock?: boolean } = {},
 ): Promise<{ membershipId: string; optIn: boolean; version: number } | null> {
   if (!input.subjectId.startsWith("user:")) return null;
   const [membership] = await rawRows<{ id: string | null }>(
@@ -264,7 +265,8 @@ async function readOwnOptIn(
     tx,
     sql`select personal_fallback_opt_in, version from subscription_person_preferences
       where account_id = ${input.accountId}::uuid
-        and organization_membership_id = ${membership.id}::uuid`,
+        and organization_membership_id = ${membership.id}::uuid
+      ${options.lock ? sql`for update` : sql``}`,
   );
   return {
     membershipId: membership.id,
@@ -518,15 +520,15 @@ async function chooseOnce(
         }
         if (!target) return none("not_found");
       }
-      // The binding guard authorizes the choosing human. Only a person is
-      // recorded as the initiating human; any other subject leaves it unset
-      // (a personal binding still needs its owner).
+      // The binding guard requires an initiating subject for every binding
+      // write and uses it only to match a personal account's owner, so the
+      // choosing subject is recorded whoever it is (as the Codex pin does):
+      // an API key or service may choose a shared account, and never matches
+      // a personal owner.
       await setSubjectRlsContext(tx, input.subjectId);
-      if (input.subjectId.startsWith("user:")) {
-        await tx.execute(
-          sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
-        );
-      }
+      await tx.execute(
+        sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
+      );
       // A preference change admits no inference, so the canonical
       // session-events lock is taken without the workspace control prefix
       // (the same lock contract as every pin).
@@ -757,7 +759,10 @@ export async function writeSubscriptionPersonPreferences(
   if (!input.subjectId.startsWith("user:")) return { outcome: "not_member" };
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) => {
     await setSubjectRlsContext(tx, input.subjectId);
-    const own = await readOwnOptIn(tx, input);
+    // Lock the row so the value the wake decision compares against is the
+    // one this write replaces, even against a concurrent write of the same
+    // row (another tab).
+    const own = await readOwnOptIn(tx, input, { lock: true });
     if (!own) return { outcome: "not_member" as const };
     const value = input.personalFallbackOptIn;
     const rows = await rawRows<{ personal_fallback_opt_in: boolean; version: number | string }>(
