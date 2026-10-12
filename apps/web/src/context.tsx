@@ -8,11 +8,7 @@ import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redire
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
-import {
-  invalidateSubscriptionAccountQueries,
-  MODEL_CONNECTIONS_CHANGED,
-  retainSharedQueries,
-} from "@/lib/shared-query";
+import { useConsoleSharedQueries } from "@/lib/shared-query";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -828,17 +824,9 @@ export function RootRouteComponent() {
     return createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
   }, [accessKeyVersion, sessionChannelProjectionAuthority]);
   // Account lists and usage limits read through this client stay across
-  // navigation (see useSharedQuery). They live under this exact client, which
-  // is replaced on every identity change; releasing a retired client clears
-  // everything it read.
-  useEffect(() => retainSharedQueries(client), [client]);
-  // An "Available in" or default change can change which accounts a workspace
-  // sees: every retained account list re-reads (mounted) or is dropped.
-  useEffect(() => {
-    const changed = () => void invalidateSubscriptionAccountQueries(client);
-    window.addEventListener(MODEL_CONNECTIONS_CHANGED, changed);
-    return () => window.removeEventListener(MODEL_CONNECTIONS_CHANGED, changed);
-  }, [client]);
+  // navigation and are cleared with it when an identity change replaces it;
+  // "Available in" changes re-read them.
+  useConsoleSharedQueries(client);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =

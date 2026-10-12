@@ -215,7 +215,9 @@ same time share one request and one result, and account changes made through
 these hooks re-read every mounted list (also when the component that made the
 change has already unmounted). By default nothing is kept after the last reader
 unmounts, so a host that reuses one `client` for different people never shows
-one person's accounts to the next. Set `retainReadsAcrossMounts` on
+one person's accounts to the next, also when it re-keys its tree for the next
+person in a single render (a read still in flight for the previous person is
+discarded). Set `retainReadsAcrossMounts` on
 `OpenGeniProvider` to keep them across navigation instead: returning to a page
 renders the last accounts at once and re-reads them in the background once
 they are older than 10 seconds. Failed reads are never kept, and a

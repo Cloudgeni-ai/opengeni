@@ -103,12 +103,14 @@ export function useOrganizationCodexSubscriptions({
           signal: controller.signal,
         })
           .then(async (result) => {
-            if (!result || controller.signal.aborted) return;
-            // Organization accounts feed every workspace that inherits them:
-            // retained Codex lists go stale even if this page has been left.
+            if (!result) return;
+            // Organization accounts feed every workspace that inherits them, so
+            // a confirmed sign-in invalidates every retained Codex list, also
+            // when the page was left as it was confirmed. (Leaving earlier
+            // stops polling: unmount aborts it and `result` is null.)
             if (result.status === "connected")
               void invalidateSharedQueries(client, ["codex-accounts"]);
-            if (cancelled.current) return;
+            if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
             if (result.status === "expired") {
               recordOutcome("expired");

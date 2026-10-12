@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useLayoutEffect, useReducer, useRef, useSyncExternalStore } from "react";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 
@@ -15,10 +15,14 @@ import { usePageLiveActivity } from "./internal";
  *   (`["codex-accounts", workspaceId, "session", sessionId]`).
  * - By default nothing outlives its readers: mounted readers of one key share
  *   one request and one snapshot, and the entry is dropped as soon as the last
- *   reader unmounts. Only a scope a host retains (`retainSharedQueries`, used
- *   by the provider opt-in) keeps unmounted entries for `retainMs`, so a host
- *   that reuses one client for different people never serves one person's rows
- *   to the next mount. Ending the last retention clears the scope.
+ *   reader unmounts. Only the reader instance that let go may take it back
+ *   (StrictMode, effect re-runs); a different reader mounting in the same
+ *   commit (a host re-keying its tree for another person) starts from nothing
+ *   and the earlier read is discarded. Only a scope a host retains
+ *   (`retainSharedQueries`, used by the provider opt-in) keeps unmounted
+ *   entries for `retainMs`, so a host that reuses one client for different
+ *   people never serves one person's rows to the next mount. Ending the last
+ *   retention clears the scope.
  * - `clearSharedQueries(scope)` drops every row at once. Mounted readers stay
  *   subscribed and read again; writes from operations that started before the
  *   clear are discarded.
@@ -26,7 +30,10 @@ import { usePageLiveActivity } from "./internal";
  * Semantics:
  *
  * - A mount with retained data renders it immediately and revalidates in the
- *   background once it is older than `staleTimeMs`.
+ *   background once it is older than `staleTimeMs`. An enabled reader reports
+ *   `loading` until its key's first read completes.
+ * - Page visibility pauses only polling and background revalidation of rows
+ *   already on screen; invalidation and `refresh()` read on a hidden page too.
  * - A loader is bound to its key when the render that supplied it commits, so a
  *   render that never commits (a transition) or a key change cannot run one
  *   key's loader for another key's entry.
@@ -76,6 +83,8 @@ type Loader<T> = (signal: AbortSignal) => Promise<T>;
 type LoaderBinding = { key: string; load: Loader<unknown> };
 
 type Subscriber = {
+  /** The hook instance; only it may take back an entry it just let go of. */
+  owner: object;
   /** The committed loader and the key it reads; null for subscribe-only readers. */
   binding: { current: LoaderBinding } | null;
   enabled: boolean;
@@ -101,6 +110,8 @@ type Entry = {
   /** The interval `timer` was armed with. */
   timerInterval: number | null;
   retainTimer: ReturnType<typeof setTimeout> | null;
+  /** The reader instance that last let go of this entry while it awaits release. */
+  releasedBy: object | null;
 };
 
 type Scope = {
@@ -145,10 +156,10 @@ function setSnapshot(entry: Entry, next: SharedQuerySnapshot<unknown>): void {
   for (const listener of entry.listeners) listener();
 }
 
-/** Readers allowed to read now: enabled, on a live page, and bound to this key. */
-function activeSubscribers(entry: Entry): Subscriber[] {
+/** Readers that may read: enabled and bound to this key (visible or not). */
+function readers(entry: Entry): Subscriber[] {
   return [...entry.subscribers].filter(
-    (each) => each.enabled && each.pageLive && each.binding?.current.key === entry.key,
+    (each) => each.enabled && each.binding?.current.key === entry.key,
   );
 }
 
@@ -187,10 +198,11 @@ function evict(state: Scope, entry: Entry): void {
   if (state.entries.get(entry.key) === entry) state.entries.delete(entry.key);
 }
 
-/** Poll at the shortest interval among active readers; keep a timer already armed for it. */
+/** Poll at the shortest interval among readers on a visible page; keep a timer already armed for it. */
 function arm(entry: Entry): void {
   let interval: number | undefined;
-  for (const each of activeSubscribers(entry)) {
+  for (const each of readers(entry)) {
+    if (!each.pageLive) continue;
     if (each.pollIntervalMs === undefined || each.pollIntervalMs <= 0) continue;
     interval =
       interval === undefined ? each.pollIntervalMs : Math.min(interval, each.pollIntervalMs);
@@ -207,7 +219,7 @@ function arm(entry: Entry): void {
 }
 
 async function runFresh(entry: Entry): Promise<void> {
-  const subscriber = activeSubscribers(entry).at(-1);
+  const subscriber = readers(entry).at(-1);
   if (!subscriber?.binding) return;
   const { load } = subscriber.binding.current;
   const ticket = ++entry.generation;
@@ -253,7 +265,7 @@ function run(entry: Entry, force = false): Promise<void> {
       // Superseded meanwhile: the read that replaced it is the newer one.
       if (entry.trailing !== trailing) return entry.inFlight ?? undefined;
       entry.trailing = null;
-      if (activeSubscribers(entry).length > 0) return run(entry);
+      if (readers(entry).length > 0) return run(entry);
       // Nobody can read now: what the predecessor stored is not known to be
       // current, so the next mount or resume re-reads.
       entry.invalidated = true;
@@ -276,14 +288,18 @@ function isStale(entry: Entry, staleTimeMs: number): boolean {
 }
 
 function reconcile(entry: Entry): void {
-  const active = activeSubscribers(entry);
+  const active = readers(entry);
   if (active.length === 0) {
     stopTimer(entry);
     if (entry.snapshot.loading) setSnapshot(entry, { ...entry.snapshot, loading: false });
     return;
   }
   const staleTimeMs = Math.min(...active.map((each) => each.staleTimeMs));
-  if (isStale(entry, staleTimeMs)) {
+  // A hidden page still reads what it has nothing (or nothing right) to show;
+  // it only defers revalidating rows already on screen.
+  const due =
+    active.some((each) => each.pageLive) || entry.invalidated || entry.snapshot.data === null;
+  if (due && isStale(entry, staleTimeMs)) {
     // A mount or resume never inherits an earlier failure: it reads again and
     // shows a loading state (or retained rows) until that read settles.
     if (entry.snapshot.error || (entry.snapshot.data === null && !entry.snapshot.loading)) {
@@ -331,9 +347,35 @@ function getOrCreate(scope: object, key: string, loading: boolean): Entry {
     timer: null,
     timerInterval: null,
     retainTimer: null,
+    releasedBy: null,
   };
   state.entries.set(key, created);
   return created;
+}
+
+/**
+ * Register a reader instance. In an unretained scope an entry that another
+ * instance let go of in this same commit is not adopted: its rows and any read
+ * in flight belonged to that reader (possibly another person), so it starts
+ * over and writes begun before now are refused. True when it was reset.
+ */
+function registerSubscriber(scope: object, entry: Entry, subscriber: Subscriber): boolean {
+  const state = scopeState(scope);
+  const foreign =
+    entry.subscribers.size === 0 &&
+    entry.releasedBy !== null &&
+    entry.releasedBy !== subscriber.owner &&
+    state.retainers === 0;
+  if (foreign) {
+    supersedeReads(entry);
+    stopTimer(entry);
+    entry.invalidated = false;
+    state.epoch += 1;
+    setSnapshot(entry, IDLE);
+  }
+  entry.releasedBy = null;
+  entry.subscribers.add(subscriber);
+  return foreign;
 }
 
 function unsubscribe(scope: object, entry: Entry, subscriber: Subscriber, retainMs: number): void {
@@ -342,6 +384,7 @@ function unsubscribe(scope: object, entry: Entry, subscriber: Subscriber, retain
     reconcile(entry);
     return;
   }
+  entry.releasedBy = subscriber.owner;
   // Only the poll stops: in a retained scope a read in flight still lands
   // for the next mount. Otherwise the entry goes with its last reader.
   stopTimer(entry);
@@ -411,11 +454,14 @@ export function invalidateSharedQueries(scope: object, prefix: SharedQueryKey): 
     }
     supersedeReads(entry);
     entry.invalidated = true;
-    if (activeSubscribers(entry).length > 0) {
+    // Readers keep their rows on screen while the re-read runs, also on a
+    // hidden page (a sign-in finished in another tab must not blank Settings).
+    if (readers(entry).length > 0) {
       reads.push(run(entry).finally(() => arm(entry)));
       continue;
     }
-    // Mounted but paused (hidden page or disabled): re-read when it resumes.
+    // Only disabled or subscribe-only readers: drop the rows; an enabled
+    // reader reads again when it appears.
     stopTimer(entry);
     setSnapshot(entry, IDLE);
   }
@@ -440,7 +486,7 @@ export function clearSharedQueries(scope: object): void {
     stopTimer(entry);
     stopRetainTimer(entry);
     entry.invalidated = true;
-    const active = activeSubscribers(entry).length > 0;
+    const active = readers(entry).length > 0;
     setSnapshot(entry, active ? IDLE_LOADING : IDLE);
     if (active) void run(entry).finally(() => arm(entry));
   }
@@ -517,10 +563,15 @@ export function useSharedQuery<T>(
     [scope, key, enabled],
   );
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const owner = useRef<object>({});
+  const [, rerender] = useReducer((count: number) => count + 1, 0);
 
-  useEffect(() => {
+  // Registered in the layout phase, after any reader this commit unmounts has
+  // let go, so a foreign entry is reset before the browser paints.
+  useLayoutEffect(() => {
     const entry = getOrCreate(scope, key, enabled);
     const subscriber: Subscriber = {
+      owner: owner.current,
       binding,
       enabled,
       pageLive,
@@ -528,19 +579,24 @@ export function useSharedQuery<T>(
       staleTimeMs,
       retainMs,
     };
-    entry.subscribers.add(subscriber);
+    const reset = registerSubscriber(scope, entry, subscriber);
     reconcile(entry);
+    // This render showed the previous reader's rows: replace them before paint.
+    if (reset) rerender();
     return () => unsubscribe(scope, entry, subscriber, retainMs);
   }, [scope, key, enabled, pageLive, pollIntervalMs, staleTimeMs, retainMs]);
 
   const refresh = useCallback((): Promise<void> => {
     const entry = scopes.get(scope)?.entries.get(key);
-    if (!entry || activeSubscribers(entry).length === 0) return Promise.resolve();
+    if (!entry || readers(entry).length === 0) return Promise.resolve();
     return run(entry, true).finally(() => arm(entry));
   }, [scope, key]);
 
   // A disabled reader shows nothing, not even rows retained by other readers.
-  return enabled ? { ...snapshot, refresh } : { ...IDLE, refresh };
+  if (!enabled) return { ...IDLE, refresh };
+  // Enabled with nothing read yet (also the first render after enabling).
+  const unread = snapshot.data === null && snapshot.error === null && snapshot.updatedAt === null;
+  return { ...snapshot, loading: snapshot.loading || unread, refresh };
 }
 
 /**
@@ -568,9 +624,12 @@ export function useSharedQueryValue<T>(
     [scope, key],
   );
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  useEffect(() => {
+  const owner = useRef<object>({});
+  const [, rerender] = useReducer((count: number) => count + 1, 0);
+  useLayoutEffect(() => {
     const entry = getOrCreate(scope, key, false);
     const subscriber: Subscriber = {
+      owner: owner.current,
       binding: null,
       enabled: false,
       pageLive: true,
@@ -578,7 +637,7 @@ export function useSharedQueryValue<T>(
       staleTimeMs: DEFAULT_STALE_TIME_MS,
       retainMs: DEFAULT_RETAIN_MS,
     };
-    entry.subscribers.add(subscriber);
+    if (registerSubscriber(scope, entry, subscriber)) rerender();
     return () => unsubscribe(scope, entry, subscriber, DEFAULT_RETAIN_MS);
   }, [scope, key]);
   return snapshot;

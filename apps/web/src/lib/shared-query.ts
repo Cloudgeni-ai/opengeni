@@ -9,7 +9,12 @@
  * `retainReadsAcrossMounts`. The console therefore imports the source modules
  * directly, as its fixtures already do, and keeps them out of the package surface.
  */
-import { invalidateSharedQueries } from "../../../../packages/react/src/hooks/shared-query";
+import { useEffect } from "react";
+
+import {
+  invalidateSharedQueries,
+  retainSharedQueries,
+} from "../../../../packages/react/src/hooks/shared-query";
 
 export {
   clearSharedQueries,
@@ -46,3 +51,23 @@ export function invalidateSubscriptionAccountQueries(client: object): Promise<vo
 
 /** The window event pages dispatch after a model connection or its availability changes. */
 export const MODEL_CONNECTIONS_CHANGED = "model-connections-changed";
+
+/**
+ * The console's cache wiring for its API client (called once, at the root that
+ * owns `client`):
+ *
+ * - Reads made through `client` are kept across navigation. The console
+ *   creates a new client on every identity change, so they never outlive the
+ *   person they were read for: switching clients releases (and clears) the
+ *   previous one.
+ * - A `model-connections-changed` event (an "Available in" or default change)
+ *   re-reads every mounted subscription account list and drops the rest.
+ */
+export function useConsoleSharedQueries(client: object): void {
+  useEffect(() => retainSharedQueries(client), [client]);
+  useEffect(() => {
+    const changed = () => void invalidateSubscriptionAccountQueries(client);
+    window.addEventListener(MODEL_CONNECTIONS_CHANGED, changed);
+    return () => window.removeEventListener(MODEL_CONNECTIONS_CHANGED, changed);
+  }, [client]);
+}

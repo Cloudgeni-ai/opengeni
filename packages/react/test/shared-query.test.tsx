@@ -70,7 +70,10 @@ async function renderTree(node: ReactNode) {
   const root = createRoot(container);
   await act(async () => root.render(node));
   return {
+    container,
     rerender: (next: ReactNode) => act(async () => root.render(next)),
+    /** Schedule a render inside the caller's own act (for startTransition). */
+    render: (next: ReactNode) => root.render(next),
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -151,6 +154,101 @@ describe("useSharedQuery — default scope (no host opt-in)", () => {
     expect(state.reads).toBe(1);
     expect(peekSharedQuery<string>(scope, ["accounts"])?.data).toBe("rows");
     await tree.unmount();
+  });
+});
+
+describe("useSharedQuery — reader instances (no host opt-in)", () => {
+  function Reader({
+    scope,
+    who,
+    load,
+  }: {
+    scope: object;
+    who: string;
+    load: () => Promise<string>;
+  }) {
+    const { data, loading } = useSharedQuery(scope, ["accounts"], load);
+    return <span>{`${who}:${data ?? (loading ? "loading" : "none")}`}</span>;
+  }
+
+  test("a host re-keying its tree for the next person never shows the previous rows", async () => {
+    const scope = {};
+    let person = "alice";
+    const { state, load } = counter(() => `${person}-rows`);
+    const tree = await renderTree(<Reader key="alice" scope={scope} who="alice" load={load} />);
+    await flush();
+    expect(tree.container.textContent).toBe("alice:alice-rows");
+    // <OpenGeniProvider key={userId}> with the same client: Alice's reader
+    // unmounts and Bob's mounts in one commit.
+    person = "bob";
+    await tree.rerender(<Reader key="bob" scope={scope} who="bob" load={load} />);
+    await flush();
+    expect(tree.container.textContent).toBe("bob:bob-rows");
+    expect(state.reads).toBe(2);
+    await tree.unmount();
+  });
+
+  test("a read the previous reader started never lands for a re-keyed reader", async () => {
+    const scope = {};
+    const reads: ReturnType<typeof deferred<string>>[] = [];
+    const load = () => {
+      const read = deferred<string>();
+      reads.push(read);
+      return read.promise;
+    };
+    const tree = await renderTree(<Reader key="alice" scope={scope} who="alice" load={load} />);
+    expect(reads.length).toBe(1);
+    await tree.rerender(<Reader key="bob" scope={scope} who="bob" load={load} />);
+    expect(reads.length).toBe(2);
+    await actRun(async () => reads[0]!.resolve("alice-rows"));
+    await flush();
+    expect(tree.container.textContent).toBe("bob:loading");
+    await actRun(async () => reads[1]!.resolve("bob-rows"));
+    await flush();
+    expect(tree.container.textContent).toBe("bob:bob-rows");
+    await tree.unmount();
+  });
+
+  test("the same reader's effect re-run keeps its rows and its read", async () => {
+    const scope = {};
+    const { state, load } = counter(() => "rows");
+    const hook = await renderHook(
+      ({ poll }: { poll: number | undefined }) =>
+        useSharedQuery(scope, ["accounts"], load, { pollIntervalMs: poll }),
+      { poll: undefined as number | undefined },
+    );
+    await flush();
+    expect(hook.result.current.data).toBe("rows");
+    // A changed option re-registers the same instance.
+    await hook.rerender({ poll: 60_000 });
+    expect(hook.result.current.data).toBe("rows");
+    expect(state.reads).toBe(1);
+    await hook.unmount();
+  });
+
+  test("a reader reports loading from the first render after it is enabled", async () => {
+    const scope = {};
+    const gate = deferred<string>();
+    const { load } = counter(() => gate.promise);
+    const renders: { enabled: boolean; loading: boolean; data: string | null }[] = [];
+    const hook = await renderHook(
+      ({ enabled }: { enabled: boolean }) => {
+        const result = useSharedQuery(scope, ["accounts"], load, { enabled });
+        renders.push({ enabled, loading: result.loading, data: result.data });
+        return result;
+      },
+      { enabled: false },
+    );
+    expect(hook.result.current.loading).toBe(false);
+    await hook.rerender({ enabled: true });
+    const enabledRenders = renders.filter((each) => each.enabled);
+    expect(enabledRenders.length).toBeGreaterThan(0);
+    // Never "loaded, nothing there" before the first read completes.
+    expect(enabledRenders.every((each) => each.loading && each.data === null)).toBe(true);
+    await actRun(async () => gate.resolve("rows"));
+    await flush();
+    expect(hook.result.current).toMatchObject({ loading: false, data: "rows" });
+    await hook.unmount();
   });
 });
 
@@ -510,7 +608,7 @@ describe("useSharedQuery — loader binding", () => {
     // React keeps the committed (A) tree and discards this render.
     await act(async () =>
       startTransition(() =>
-        tree.rerender(
+        tree.render(
           <Suspense fallback={null}>
             <Probe k="B" suspend />
           </Suspense>,
@@ -561,6 +659,52 @@ describe("useSharedQuery — polling", () => {
     } finally {
       await actRun(async () => setVisibility("visible"));
       await hook.unmount();
+    }
+  });
+});
+
+describe("useSharedQuery — hidden page", () => {
+  test("invalidation and refresh still read on a hidden page, keeping rows on screen", async () => {
+    const { scope, release } = retainedScope();
+    const gates: ReturnType<typeof deferred<string>>[] = [];
+    const { state, load } = counter(() => {
+      const gate = deferred<string>();
+      gates.push(gate);
+      return gate.promise;
+    });
+    const hook = await mount(scope, ["accounts"], load);
+    try {
+      await actRun(async () => gates[0]!.resolve("rows-1"));
+      await flush();
+      expect(hook.result.current.data).toBe("rows-1");
+      // A device sign-in finishes in another tab: this one is hidden.
+      await actRun(async () => setVisibility("hidden"));
+      await flush(2_200);
+      await actRun(async () => {
+        void invalidateSharedQueries(scope, ["accounts"]);
+      });
+      expect(state.reads).toBe(2);
+      // The rows stay while the re-read runs; never "not connected here".
+      expect(hook.result.current).toMatchObject({ data: "rows-1", loading: false });
+      await actRun(async () => gates[1]!.resolve("rows-2"));
+      await flush();
+      expect(hook.result.current.data).toBe("rows-2");
+      // An explicit refresh (e.g. reloadAccounts after connecting) reads too.
+      let refreshed = false;
+      await actRun(async () => {
+        void hook.result.current.refresh().then(() => {
+          refreshed = true;
+        });
+      });
+      expect(state.reads).toBe(3);
+      await actRun(async () => gates[2]!.resolve("rows-3"));
+      await flush();
+      expect(refreshed).toBe(true);
+      expect(hook.result.current.data).toBe("rows-3");
+    } finally {
+      await actRun(async () => setVisibility("visible"));
+      await hook.unmount();
+      release();
     }
   });
 });
