@@ -1473,7 +1473,9 @@ inventory; execution pickers retain its active-only default. Shared accounts are
 current-workspace scoped, while personal accounts use their existing same-owner,
 same-organization authority across origin workspaces.
 
-Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
+Connector permission management, including host-attached session MCP servers
+(`/v1/workspaces/:workspaceId/session-mcp-tool-permissions`):
+`packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
 
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.

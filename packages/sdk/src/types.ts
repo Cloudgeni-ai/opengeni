@@ -9859,6 +9859,26 @@ export type UpdateConnectorToolPermissionsRequest = {
   | { target: "action"; toolName: string; actionName: string }
 );
 
+/** Saved Allow/Ask/Block rules for a session MCP server the host attaches.
+ * Tools without a rule follow `defaultPermission`, then the attaching session's
+ * `requireApproval` recommendation (Ask), then Allow. */
+export type SessionMcpToolPermissionsResponse = {
+  connectionId: string;
+  serverId: string;
+  defaultPermission: ConnectorToolPermission | null;
+  tools: Array<{ toolName: string; permission: ConnectorToolPermission }>;
+  revision: string;
+  canManage: boolean;
+  appliesTo: "next_attempt";
+};
+/** `url` is the exact URL attached to sessions; `permission: null` resets. */
+export type UpdateSessionMcpToolPermissionsRequest = {
+  serverId: string;
+  url: string;
+  permission: ConnectorToolPermission | null;
+  expectedRevision?: string;
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });
+
 /** Agent capability ids (see `@opengeni/contracts` agent-config). */
 export type AgentCapabilityId =
   | "webSearch"

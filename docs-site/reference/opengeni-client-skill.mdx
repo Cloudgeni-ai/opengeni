@@ -675,6 +675,28 @@ Your own tokens instead of `toolServer`: add the server in `createSession`
 `{ mcpCredentialUpdates: [{ id, headers }] }` from `beforeForwardMessage` to
 rotate it.
 
+Let admins choose Allow, Ask first, or Block per tool. `approvals.ask` (or
+`requireApproval`) is only the recommendation. Saved choices win, and
+Opengeni enforces them; an Ask call waits for a person to approve it. Build
+the settings screen on your server with the same server id and exact URL you
+attach:
+
+```ts
+const server = { serverId: "app", url: process.env.OPENGENI_TOOL_SERVER_URL! };
+const saved = await og.asUser(admin.id).getSessionMcpToolPermissions(workspaceId, server);
+// saved.defaultPermission: "Allow all" and the like; saved.tools: per-tool choices.
+await og.asUser(admin.id).updateSessionMcpToolPermissions(workspaceId, {
+  ...server,
+  target: "tools", // or "default" for every tool without its own choice
+  toolNames: ["delete_post"],
+  permission: "block", // "allow" | "ask" | "block", or null to reset
+  expectedRevision: saved.revision,
+});
+```
+
+Writes need `capabilities:manage`. Agents cannot change their own
+permissions. A change applies from each chat's next run.
+
 ### Local development
 
 Opengeni must reach the tool endpoint over public HTTPS. Never tunnel the whole
