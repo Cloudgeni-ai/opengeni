@@ -18,6 +18,7 @@ export * from "./journal";
 export * from "./lightpanda-binary";
 export * from "./lightpanda-runner";
 export * from "./media";
+export * from "./passkeys";
 export * from "./protocol";
 export * from "./protected-auth-journal";
 export * from "./runner";

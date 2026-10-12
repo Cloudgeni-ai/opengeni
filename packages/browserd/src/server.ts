@@ -11,6 +11,7 @@ import {
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserExternalAuthCommand,
+  BrowserPasskeySyncRequest,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
@@ -606,6 +607,23 @@ export class BrowserControlServer {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       return success(this.supervisor.readClipboard(reference));
+    }
+    if (segments.length === 5 && segments[3] === "passkeys" && segments[4] === "sync") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const sync = BrowserPasskeySyncRequest.safeParse(await readJson(request));
+      if (!sync.success) {
+        throw new ProtocolError("invalid_action", "passkey sync request is invalid", 400);
+      }
+      if (sync.data.browserSessionId !== browserSessionId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "passkey sync targets another browser session",
+          409,
+        );
+      }
+      return success(await this.supervisor.passkeySync(sync.data));
     }
     if (segments.length === 5 && segments[3] === "downloads") {
       if (request.method !== "GET") {
@@ -2065,6 +2083,8 @@ function interactionStatus(code: string): number {
 }
 
 function routeNeedsControl(segments: readonly string[], request: Request): boolean {
+  // Passkey sync carries private keys both ways.
+  if (segments[3] === "passkeys") return true;
   if (
     segments[3] === "actions" ||
     segments[3] === "external-auth" ||
