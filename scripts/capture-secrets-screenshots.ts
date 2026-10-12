@@ -468,12 +468,12 @@ export const CAPTURE_STATES: CaptureState[] = [
       ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Seeded ask card"]}`
       : null,
   ),
-  // Until the ask card is seeded: the same component in the UI kit (light and dark side by side).
+  // Until the ask card is seeded: the same component and its states in the UI kit.
   s(
     "S9",
     "kit",
     "Ask card secret field states in the UI kit",
-    () => "/dev/ui-kit?section=secret-ask-card&theme=split&chrome=0",
+    () => "/dev/ui-kit?section=secret-ask-card&theme=light&chrome=0",
     { requires: "none" },
   ),
   // S10 / S11 session Secrets panel (the composer's "+" menu > Secrets), composer
