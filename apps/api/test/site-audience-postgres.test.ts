@@ -2,9 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
-  resolveNewSiteAudience,
   resolveSiteAudienceChange,
-  siteViewerForGrant,
   type ObjectStorageDependency,
   type SessionWorkflowClient,
 } from "@opengeni/core";
@@ -334,7 +332,7 @@ test("an Only me Site is hidden from other members and admins until its owner sh
   expect((await f.call(f.other, "GET", `/${siteId}`)).status).toBe(404);
 });
 
-test("a Site made in an Only me chat starts Only me without exposing the chat", async () => {
+test("a Site from an Only me chat never exposes the chat to other members", async () => {
   const f = await fixture();
   const chat = await withSessionRlsActorContext({ subjectId: f.owner.subjectId }, () =>
     createSession(db.db, {
@@ -352,59 +350,6 @@ test("a Site made in an Only me chat starts Only me without exposing the chat", 
       sandboxBackend: "none",
     }),
   );
-  const workspaceChat = await withSessionRlsActorContext({ subjectId: f.owner.subjectId }, () =>
-    createSession(db.db, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      initialMessage: "Team work",
-      resources: [],
-      metadata: {},
-      createdBy: { kind: "subject", subjectId: f.owner.subjectId },
-      subjectId: f.owner.subjectId,
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    }),
-  );
-  const audienceFor = (
-    who: { subjectId: string; grant: AccessGrant },
-    sourceSessionId: string | null,
-    requested?: "private" | "workspace",
-  ) =>
-    withSessionRlsActorContext({ subjectId: who.subjectId }, async () =>
-      resolveNewSiteAudience({
-        db: db.db,
-        settings: f.settings,
-        grant: who.grant,
-        viewer: await siteViewerForGrant(db.db, who.grant),
-        requested,
-        sourceSessionId,
-      }),
-    );
-  expect(await audienceFor(f.owner, chat.id)).toEqual({
-    visibility: "user_private",
-    ownerSubjectId: f.owner.subjectId,
-  });
-  // An explicit choice still wins over the chat's audience.
-  expect(await audienceFor(f.owner, chat.id, "workspace")).toEqual({
-    visibility: "workspace_shared",
-    ownerSubjectId: f.owner.subjectId,
-  });
-  expect(await audienceFor(f.owner, workspaceChat.id)).toEqual({
-    visibility: "workspace_shared",
-    ownerSubjectId: f.owner.subjectId,
-  });
-  expect(await audienceFor(f.owner, null)).toEqual({
-    visibility: "workspace_shared",
-    ownerSubjectId: f.owner.subjectId,
-  });
-  // Someone who cannot see the chat learns nothing from it.
-  expect(await audienceFor(f.other, chat.id)).toEqual({
-    visibility: "workspace_shared",
-    ownerSubjectId: f.other.subjectId,
-  });
-
   // Its versions name the chat; nobody else sees the Site, and once shared
   // they still never see the chat.
   const site = await f.publish("From my chat", "private");

@@ -1,6 +1,5 @@
 import type { AccessGrant, WorkspaceArtifactVisibility } from "@opengeni/contracts";
 import {
-  getVisibleSessionTenancyVisibility,
   scheduledTaskViewerSubject,
   type Database,
   type WorkspaceArtifactViewer,
@@ -64,9 +63,7 @@ async function requireOnlyMeAllowed(input: {
 /**
  * The audience and owner to store for a new Site. An explicit choice wins;
  * Only me needs a person who may start Only me work here. Without one, a Site
- * published from a chat starts with that chat's audience, so a Site made in an
- * Only me chat stays Only me until its owner shares it. Anything else starts
- * shared with the workspace, as every Site did before audiences existed.
+ * starts shared with the workspace, as every Site did before audiences existed.
  */
 export async function resolveNewSiteAudience(input: {
   db: Database;
@@ -74,7 +71,6 @@ export async function resolveNewSiteAudience(input: {
   grant: AccessGrant;
   viewer: WorkspaceArtifactViewer;
   requested: WorkspaceArtifactVisibility | undefined;
-  sourceSessionId: string | null;
 }): Promise<{
   visibility: "user_private" | "workspace_shared";
   ownerSubjectId: string | null;
@@ -89,19 +85,7 @@ export async function resolveNewSiteAudience(input: {
     });
     return { visibility: "user_private", ownerSubjectId };
   }
-  if (input.requested === "workspace" || input.sourceSessionId === null || !ownerSubjectId)
-    return { visibility: "workspace_shared", ownerSubjectId };
-  // The chat already is Only me, so this narrows nothing and needs no fresh
-  // permission, like an existing Only me item when Only me is later turned off.
-  const chat = await getVisibleSessionTenancyVisibility(
-    input.db,
-    input.grant.workspaceId,
-    input.sourceSessionId,
-  );
-  return {
-    visibility: chat === "user_private" ? "user_private" : "workspace_shared",
-    ownerSubjectId,
-  };
+  return { visibility: "workspace_shared", ownerSubjectId };
 }
 
 /**

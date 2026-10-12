@@ -270,7 +270,6 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         grant,
         viewer: await siteViewerForGrant(deps.db, grant),
         requested: request.visibility,
-        sourceSessionId: null,
       });
       const content = await prepareContent(deps, grant, {
         ...(request.html !== undefined ? { html: request.html } : {}),
