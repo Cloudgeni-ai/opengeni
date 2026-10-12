@@ -197,7 +197,7 @@ export const embeddingMigrationTail = [
   // carrier tables and patches the personal helpers 0712 patched; replay
   // after it.
   "0716_subscription_authority_compat.sql",
-  // Requires 0716's routines and patches fences earlier migrations define.
+  // Requires 0727's routines and patches fences earlier migrations define.
   "0717_subscription_authority_fences.sql",
   // Redefines enqueue_native_push_v2 from withheld 0664 and extends the inbox
   // settings 0663 and 0665 grow; replay after them.
@@ -210,5 +210,5 @@ export const embeddingMigrationTail = [
   "0726_subscription_personal_acceptance_reads.sql",
   // Patches the operation-lease guard withheld 0671 and 0711 define; replay
   // after them.
-  "0716_subscription_core_ownerless_video_operations.sql",
+  "0727_subscription_core_ownerless_video_operations.sql",
 ];

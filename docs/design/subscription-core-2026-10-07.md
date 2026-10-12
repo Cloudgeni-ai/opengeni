@@ -4338,7 +4338,7 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   after funding still meets a 429, which, as on the legacy path, is not
   treated as proof that nothing started.
   Core video funding and core realtime also require the deployment's
-  SuperGrok subscription switch. Migration 0716 admits a `video` lease in an
+  SuperGrok subscription switch. Migration 0727 admits a `video` lease in an
   ownerless session (shared connections only, no person), as 0698 did for
   ownerless turns; otherwise a scheduled task's video could never submit.
 - **Status** (EP-N23) reads the workspace's shared pool and validates the

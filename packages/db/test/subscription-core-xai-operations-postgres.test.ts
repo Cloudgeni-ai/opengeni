@@ -400,7 +400,7 @@ describe.skipIf(!realDb)("SuperGrok operations on the shared core (X2a)", () => 
     expect(await bindingCount(sessionId)).toBe(0);
   });
 
-  test("video leases an organization-scope connection in owned and ownerless sessions (EP-N13, 0716)", async () => {
+  test("video leases an organization-scope connection in owned and ownerless sessions (EP-N13, 0727)", async () => {
     const org = await organization();
     const connection = await sharedConnection(org, "org-video");
     const personal = await personalConnection(org, "personal-video");

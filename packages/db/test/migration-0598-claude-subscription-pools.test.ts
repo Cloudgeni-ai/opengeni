@@ -58,7 +58,7 @@ const subscriptionCoreMigrations = [
   "0715_subscription_core_api_key_connections.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
   "0716_subscription_authority_compat.sql",
-  // Requires 0716's routines; it follows 0716.
+  // Requires 0727's routines; it follows 0727.
   "0717_subscription_authority_fences.sql",
   // Adds a trigger on the session bindings table from withheld 0642.
   "0723_subscription_binding_cache_clock.sql",
@@ -67,7 +67,7 @@ const subscriptionCoreMigrations = [
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
   "0726_subscription_personal_acceptance_reads.sql",
   // Patches the operation-lease guard withheld 0671 and 0711 define.
-  "0716_subscription_core_ownerless_video_operations.sql",
+  "0727_subscription_core_ownerless_video_operations.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
