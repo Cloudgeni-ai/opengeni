@@ -22,6 +22,8 @@ export const ArtifactCatalogItem = z
     status: z.enum(["active", "archived"]),
     /** Shared workspace metadata, not content-access authority. */
     pinned: z.boolean().optional(),
+    /** Sites only: "private" when only its owner (the viewer) can see it. */
+    visibility: z.enum(["private", "workspace"]).optional(),
     sourceSessionId: z.string().uuid().optional(),
     versionId: z.string().min(1).max(128).optional(),
     file: RetainedArtifactReferenceSchema.optional(),

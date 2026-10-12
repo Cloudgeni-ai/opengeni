@@ -51,4 +51,6 @@ export type {
   ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
 } from "./types";

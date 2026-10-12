@@ -1925,7 +1925,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                               {`No connections match "${query.trim()}". `}
                               <button
                                 type="button"
-                                className="font-medium text-brand hover:underline"
+                                className="font-medium og-link"
                                 onClick={() => setQuery("")}
                               >
                                 Clear search

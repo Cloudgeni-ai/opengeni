@@ -4194,9 +4194,25 @@ export type ModelAccountChoiceRefusal =
   | "session_has_no_owner";
 
 /**
- * One account the model picker may list for a session: a shared account of
- * the workspace's pool or the caller's own personal account.
+ * Cached usage, not a live check or a promise of available capacity. Source/time
+ * describe the snapshot, not each retained window. A past reset does not prove replenishment.
  */
+export type ModelAccountUsageSnapshot = {
+  /** Snapshot-level time, not the observation time of every retained window. */
+  observedAt: string | null;
+  source: "usage_endpoint" | "response_headers" | "refusal" | null;
+  windows: Array<{
+    id: string;
+    /** Null means unknown; values over 100 can represent overage. */
+    usedPercent: number | null;
+    resetsAt: string | null;
+    status: "ok" | "warning" | "exhausted" | "unknown";
+  }>;
+  exhaustedUntil: string | null;
+  exhaustedKind: "quota" | "rate_limit" | null;
+};
+
+/** An already-visible account, with optional cached usage (never an eligibility decision). */
 export type ModelAccountChoiceOption = {
   provider: string;
   connectionId: string;
@@ -4209,15 +4225,24 @@ export type ModelAccountChoiceOption = {
   allowedModelIds: string[] | null;
   choosable: boolean;
   refusal: ModelAccountChoiceRefusal | null;
+  /** Omitted on older servers; null means no decodable stored snapshot. Readings may be partial or stale. */
+  usage?: ModelAccountUsageSnapshot | null | undefined;
 };
 
 /** A session's current account, what it may switch to, and the effective personal settings. */
 export type SessionModelAccountChoiceResponse = {
+  /** The session's account when it has bindings for one provider only; else null (see `bindings`). */
   binding: {
     provider: string;
     connectionId: string | null;
     choice: "explicit" | "automatic";
   } | null;
+  /** One binding per provider. */
+  bindings: {
+    provider: string;
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+  }[];
   accounts: ModelAccountChoiceOption[];
   personal: {
     connectionsAllowed: boolean;
@@ -4226,8 +4251,15 @@ export type SessionModelAccountChoiceResponse = {
   };
 };
 
-/** `connectionId: null` returns the session to automatic account selection. */
-export type SetSessionModelAccountChoiceRequest = { connectionId: string | null };
+/**
+ * A connection becomes the choice for its provider; other providers' choices
+ * stay. `connectionId: null` returns `provider`'s choice to automatic, or
+ * every provider's when `provider` is omitted.
+ */
+export type SetSessionModelAccountChoiceRequest = {
+  connectionId: string | null;
+  provider?: string;
+};
 
 export type SetSessionModelAccountChoiceResponse = {
   changed: boolean;
@@ -9859,6 +9891,26 @@ export type UpdateConnectorToolPermissionsRequest = {
   | { target: "action"; toolName: string; actionName: string }
 );
 
+/** Saved Allow/Ask/Block rules for a session MCP server the host attaches.
+ * Tools without a rule follow `defaultPermission`, then the attaching session's
+ * `requireApproval` recommendation (Ask), then Allow. */
+export type SessionMcpToolPermissionsResponse = {
+  connectionId: string;
+  serverId: string;
+  defaultPermission: ConnectorToolPermission | null;
+  tools: Array<{ toolName: string; permission: ConnectorToolPermission }>;
+  revision: string;
+  canManage: boolean;
+  appliesTo: "next_attempt";
+};
+/** `url` is the exact URL attached to sessions; `permission: null` resets. */
+export type UpdateSessionMcpToolPermissionsRequest = {
+  serverId: string;
+  url: string;
+  permission: ConnectorToolPermission | null;
+  expectedRevision?: string;
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });
+
 /** Agent capability ids (see `@opengeni/contracts` agent-config). */
 export type AgentCapabilityId =
   | "webSearch"
@@ -9942,6 +9994,8 @@ export type ResolvedAgentConfig = {
   capabilities: ResolvedAgentCapabilities;
   /** Capabilities wanted on but not offered by this deployment. */
   unavailable: AgentCapabilityId[];
+  /** Why each unavailable capability is off; present whenever `unavailable` is non-empty. */
+  unavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
   identity: string | null;
   renderer: AgentRenderer;
   source:

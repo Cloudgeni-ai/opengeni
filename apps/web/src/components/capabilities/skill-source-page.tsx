@@ -132,7 +132,7 @@ export function SkillSourcePage({
                 href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-sm font-medium text-brand hover:underline"
+                className="text-sm font-medium og-link"
               >
                 View source
               </a>
@@ -189,7 +189,7 @@ export function SkillSourcePage({
                     href={preview.sourceUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="font-medium text-brand hover:underline"
+                    className="font-medium og-link"
                   >
                     {preview.sourceUrl.replace(/^https?:\/\//, "")}
                   </a>

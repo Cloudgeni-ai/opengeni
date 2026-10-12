@@ -26,6 +26,7 @@ const real = {
     core.settingsWithEnabledCapabilityMcpServersForTargets,
   visibleMcpAccountConnectionsByIds: core.visibleMcpAccountConnectionsByIds,
   availableMcpAccountBindings: core.availableMcpAccountBindings,
+  siteViewerForGrant: core.siteViewerForGrant,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
   listConnectorToolPermissionPolicies: dbModule.listConnectorToolPermissionPolicies,
   getWorkspaceSiteSessionOrigin: dbModule.getWorkspaceSiteSessionOrigin,
@@ -46,6 +47,8 @@ type Fixture = {
 const fixtures = new Map<Database, Fixture>();
 mock.module("@opengeni/core", () => ({
   ...core,
+  siteViewerForGrant: async (...args: Parameters<typeof real.siteViewerForGrant>) =>
+    fixtures.has(args[0]) ? { subjectId: args[1].subjectId } : real.siteViewerForGrant(...args),
   resolveWorkspaceCatalogSettings: async (
     ...args: Parameters<typeof real.resolveWorkspaceCatalogSettings>
   ) =>

@@ -299,30 +299,6 @@ type CodexSseTerminalClassification =
     }
   | null;
 
-/** Explicit account refusal in a terminal stream, before any completed output. */
-function isDefiniteCodexRefusal(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const value = error as Record<string, unknown>;
-  const status = Number(value.status ?? value.statusCode);
-  const code = value.code ?? value.type;
-  return (
-    status === 401 ||
-    status === 403 ||
-    status === 429 ||
-    (typeof code === "string" &&
-      [
-        "unauthorized",
-        "invalid_api_key",
-        "usage_limit_reached",
-        "insufficient_quota",
-        "quota_exceeded",
-        "billing_hard_limit_reached",
-        "rate_limit_exceeded",
-        "too_many_requests",
-      ].includes(code))
-  );
-}
-
 function classifyCodexSseTerminal(ev: CodexSseEvent): CodexSseTerminalClassification {
   if (ev.type === "response.failed") {
     return {
@@ -1178,7 +1154,6 @@ async function sseToJsonResponse(
   const text = await res.text();
   let final: Record<string, unknown> | null = null;
   let terminalError: Response | null = null;
-  let terminalRefusal = false;
   const items: unknown[] = []; // assembled from output_item.done (the codex backend
   // leaves response.completed.response.output empty and emits the items separately).
   for (const data of sseDataPayloads(text)) {
@@ -1192,7 +1167,6 @@ async function sseToJsonResponse(
       } else {
         const terminal = classifyCodexSseTerminal(ev);
         if (terminal?.phase === "failed") {
-          terminalRefusal = isDefiniteCodexRefusal(terminal.rawError);
           terminalError = codexSseFailureResponse(
             res,
             terminal.rawError,
@@ -1214,7 +1188,12 @@ async function sseToJsonResponse(
   }
   if (terminalError) {
     markSemanticTerminal(semanticTerminal, "failed");
-    if (terminalRefusal && !hasMeaningfulCodexOutput(items)) {
+    // The provider itself terminated this response with a failure event
+    // (response.failed, error, response.incomplete). Before any completed
+    // output that is a definite answer, exactly like an HTTP 5xx status: no
+    // model response was produced, so the request is safe to run again. A
+    // failure after completed output stays unknown.
+    if (!hasMeaningfulCodexOutput(items)) {
       await settleProviderRequest(audit, "refused");
     }
     await emitRequestEvent(audit, {
@@ -1569,11 +1548,15 @@ function validateCodexStream(
   const observeOutput = (output: unknown) => {
     meaningfulOutput ||= hasMeaningfulCodexOutput(output);
   };
-  const observeTerminal = (phase: "completed" | "failed", error?: unknown) =>
+  // `providerTerminal` is true only for a failure the provider declared in the
+  // stream (response.failed, error, response.incomplete). Before completed
+  // output that is a definite answer, like an HTTP 5xx status; a stream that
+  // ends without any terminal event stays unknown.
+  const observeTerminal = (phase: "completed" | "failed", providerTerminal = false) =>
     onSemanticTerminal?.(
       phase,
       phase === "completed" && meaningfulOutput,
-      phase === "failed" && !meaningfulOutput && isDefiniteCodexRefusal(error),
+      phase === "failed" && !meaningfulOutput && providerTerminal,
     );
   const emitCompleteBlocks = (
     controller: TransformStreamDefaultController<Uint8Array>,
@@ -1681,7 +1664,7 @@ const CODEX_TERMINAL_TYPE_HINTS = [
 function inspectCodexSseBlock(
   block: string,
   source: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed", error?: unknown) => void,
+  onSemanticTerminal?: (phase: "completed" | "failed", providerTerminal?: boolean) => void,
   onOutput?: (output: unknown) => void,
 ): boolean {
   const lines = block.split(/\r\n|\r|\n/);
@@ -1707,7 +1690,7 @@ function inspectCodexSseBlock(
   const terminal = classifyCodexSseTerminal(ev);
   if (ev.type === "response.output_item.done") onOutput?.([ev.item]);
   if (terminal?.phase === "failed") {
-    onSemanticTerminal?.("failed", terminal.rawError);
+    onSemanticTerminal?.("failed", true);
     throw codexSseFailureError(
       source,
       terminal.rawError,

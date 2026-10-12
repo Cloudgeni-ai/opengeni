@@ -12,6 +12,8 @@ import {
   startMaintenanceWorkflowOnce,
 } from "../src/internal-maintenance";
 import { startMaintenanceCadences, type MaintenanceCadence } from "../src/maintenance-cadence";
+import { modalOrphanSweepMayHaveWork } from "../src/activities/sandbox-lease";
+import { browserDeadlineCheckpointTaskQueue } from "../src/browser-deadline-checkpoint-contract";
 import { sessionWorkflowWakeDispatchRequestedSignal } from "../src/workflows/workflow-wake";
 import { deferred, flushTelemetry, telemetryClock } from "./fixtures/telemetry-clock";
 
@@ -216,9 +218,158 @@ describe("internal maintenance jobs", () => {
       "session-workflow-wake-dispatcher": 10_000,
       "knowledge-indexing": KNOWLEDGE_INDEXING_PERIOD_MS,
       "site-auth-maintenance": SITE_AUTH_MAINTENANCE_PERIOD_MS,
+      // The old reaper Schedule's period, which the boot invariants validate.
+      "sandbox-lease-reaper": settings.sandboxLeaseReaperPeriodMs,
+      "sandbox-idle-checkpoint": settings.sandboxLeaseReaperPeriodMs,
+      "browser-deadline-checkpoint": settings.sandboxLeaseReaperPeriodMs,
     });
     expect(KNOWLEDGE_INDEXING_PERIOD_MS).toBe(15_000);
     expect(SITE_AUTH_MAINTENANCE_PERIOD_MS).toBe(60_000);
+    expect(settings.sandboxLeaseReaperPeriodMs).toBeLessThan(settings.sandboxViewerHolderTtlMs);
+  });
+
+  test("each sandbox job starts its unchanged fixed-id workflow on its own queue", async () => {
+    const started: Array<{ type: string; workflowId: string; taskQueue: string }> = [];
+    const cadences = await internalMaintenanceCadences({
+      settings,
+      observability: observability(),
+      db: fakeDb,
+      jobs: ["sandbox-lease-reaper", "sandbox-idle-checkpoint", "browser-deadline-checkpoint"],
+      workflow: {
+        start: async (type: string, options: { workflowId: string; taskQueue: string }) => {
+          started.push({ type, workflowId: options.workflowId, taskQueue: options.taskQueue });
+        },
+      } as never,
+    });
+    for (const job of cadences) expect(await job.start()).toBe("started");
+    const queue = settings.temporalTaskQueue;
+    expect(started).toEqual([
+      {
+        type: "sandboxReaperWorkflowV2",
+        workflowId: "opengeni-sandbox-lease-reaper-v2",
+        taskQueue: `${queue}-sandbox-lifecycle-v1`,
+      },
+      {
+        type: "sandboxIdleCheckpointSweepWorkflow",
+        workflowId: "opengeni-sandbox-idle-checkpoints-v1",
+        taskQueue: `${queue}-sandbox-lifecycle-v1`,
+      },
+      {
+        type: "browserDeadlineCheckpointSweepWorkflow",
+        workflowId: "opengeni-browser-deadline-checkpoints-v1",
+        taskQueue: browserDeadlineCheckpointTaskQueue(queue),
+      },
+    ]);
+  });
+
+  test("the idle checkpoint sweep has no work while ownership or snapshots are off", async () => {
+    for (const off of [{ sandboxOwnershipEnabled: false }, { sandboxSnapshotIntervalMs: 0 }]) {
+      const [idle] = await internalMaintenanceCadences({
+        settings: { ...settings, sandboxOwnershipEnabled: true, ...off },
+        observability: observability(),
+        // Never read: the inventory it previews is empty by configuration.
+        db: fakeDb,
+        jobs: ["sandbox-idle-checkpoint"],
+        workflow: {} as never,
+      });
+      expect(await idle!.hasWork()).toBe(false);
+    }
+  });
+
+  test("knowledge indexing has no work and reads nothing without an embedding credential", async () => {
+    const embedder = (available: boolean | undefined) => ({
+      model: "index-test-model",
+      dimensions: 3,
+      ...(available === undefined ? {} : { available }),
+      embedMany: async () => [],
+      embedQuery: async () => [],
+    });
+    const warnings: Array<{ message: string; fields: unknown }> = [];
+    const obs = Object.assign(observability(), {
+      warn: (message: string, fields?: unknown) => {
+        warnings.push({ message, fields });
+      },
+    });
+    const [blocked] = await internalMaintenanceCadences({
+      settings,
+      observability: obs,
+      // Never read: queued jobs cannot be embedded by this process.
+      db: fakeDb,
+      jobs: ["knowledge-indexing"],
+      documentServices: { embedder: embedder(false) } as never,
+      workflow: {} as never,
+    });
+    for (let tick = 0; tick < 3; tick += 1) expect(await blocked!.hasWork()).toBe(false);
+    expect(warnings).toEqual([
+      {
+        message: "Knowledge indexing is idle: no document embedding credential is configured",
+        fields: { job: "knowledge-indexing", model: "index-test-model" },
+      },
+    ]);
+
+    // An available embedder (explicitly, or by omission) keeps the queue check.
+    for (const available of [true, undefined]) {
+      const reads: unknown[] = [];
+      const [ready] = await internalMaintenanceCadences({
+        settings,
+        observability: observability(),
+        db: {
+          execute: async (query: unknown) => {
+            reads.push(query);
+            return [{ due: true }];
+          },
+        } as never,
+        jobs: ["knowledge-indexing"],
+        documentServices: { embedder: embedder(available) } as never,
+        workflow: {} as never,
+      });
+      expect(await ready!.hasWork()).toBe(true);
+      expect(reads).toHaveLength(1);
+    }
+  });
+
+  test("the Modal orphan sweep has work only while the provider app runs a box", async () => {
+    const unused = async () => {
+      throw new Error("Modal must not be called");
+    };
+    expect(
+      await modalOrphanSweepMayHaveWork({
+        settings: { ...settings, sandboxBackend: "docker", modalTokenId: "", modalTokenSecret: "" },
+        observability: observability(),
+        hasRunningSandboxes: unused,
+      }),
+    ).toBe(false);
+    const modal = { ...settings, sandboxBackend: "modal" as const };
+    expect(
+      await modalOrphanSweepMayHaveWork({
+        settings: modal,
+        observability: observability(),
+        hasRunningSandboxes: async () => true,
+      }),
+    ).toBe(true);
+    // An empty app is the sweep's complete, empty inventory, projected as such.
+    const projected = observability();
+    expect(
+      await modalOrphanSweepMayHaveWork({
+        settings: modal,
+        observability: projected,
+        hasRunningSandboxes: async () => false,
+      }),
+    ).toBe(false);
+    const metrics = await projected.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_modal_sandbox_inventory\{state="running",[^}]*\} 0\n/);
+    expect(metrics).toMatch(
+      /opengeni_sandbox_inventory_refresh_timestamp_seconds\{domain="modal_provider",/,
+    );
+    await expect(
+      modalOrphanSweepMayHaveWork({
+        settings: modal,
+        observability: observability(),
+        hasRunningSandboxes: async () => {
+          throw new Error("Modal unavailable");
+        },
+      }),
+    ).rejects.toThrow("Modal unavailable");
   });
 
   test("the wake dispatcher is signal-with-started on one fixed execution", async () => {
@@ -332,6 +483,7 @@ describe("internal maintenance jobs", () => {
     expect(deleted).toEqual([
       "opengeni-session-workflow-wake-dispatcher",
       "opengeni-site-auth-maintenance",
+      "opengeni-sandbox-lease-reaper",
     ]);
     await expect(
       deleteLegacyMaintenanceSchedules(

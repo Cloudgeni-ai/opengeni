@@ -4916,20 +4916,47 @@ function parseKey(input: string, mac: boolean): ParsedKey {
   };
 }
 
-const KEY_DEFINITIONS: Record<
-  string,
-  { key: string; code: string; keyCode: number; text?: string }
-> = {
+type KeyDefinition = { key: string; code: string; keyCode: number; text?: string };
+
+const NAMED_KEY_DEFINITIONS: Record<string, KeyDefinition> = {
   enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
   tab: { key: "Tab", code: "Tab", keyCode: 9 },
   escape: { key: "Escape", code: "Escape", keyCode: 27 },
   backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
   delete: { key: "Delete", code: "Delete", keyCode: 46 },
+  insert: { key: "Insert", code: "Insert", keyCode: 45 },
+  home: { key: "Home", code: "Home", keyCode: 36 },
+  end: { key: "End", code: "End", keyCode: 35 },
+  pageup: { key: "PageUp", code: "PageUp", keyCode: 33 },
+  pagedown: { key: "PageDown", code: "PageDown", keyCode: 34 },
   arrowup: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
   arrowdown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
   arrowleft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
   arrowright: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+  contextmenu: { key: "ContextMenu", code: "ContextMenu", keyCode: 93 },
   space: { key: " ", code: "Space", keyCode: 32, text: " " },
+};
+
+// Standard key names (KeyboardEvent.key, case-insensitive), the function keys
+// F1-F24, and the common short spellings of the same keys.
+const KEY_DEFINITIONS: Record<string, KeyDefinition> = {
+  ...NAMED_KEY_DEFINITIONS,
+  ...Object.fromEntries(
+    Array.from({ length: 24 }, (_, index) => {
+      const name = `F${index + 1}`;
+      return [name.toLowerCase(), { key: name, code: name, keyCode: 112 + index }];
+    }),
+  ),
+  esc: NAMED_KEY_DEFINITIONS.escape!,
+  return: NAMED_KEY_DEFINITIONS.enter!,
+  del: NAMED_KEY_DEFINITIONS.delete!,
+  ins: NAMED_KEY_DEFINITIONS.insert!,
+  pgup: NAMED_KEY_DEFINITIONS.pageup!,
+  pgdn: NAMED_KEY_DEFINITIONS.pagedown!,
+  up: NAMED_KEY_DEFINITIONS.arrowup!,
+  down: NAMED_KEY_DEFINITIONS.arrowdown!,
+  left: NAMED_KEY_DEFINITIONS.arrowleft!,
+  right: NAMED_KEY_DEFINITIONS.arrowright!,
 };
 
 // Typical exit animations take 100-300 ms. Longer finite animations are

@@ -39,6 +39,11 @@ import {
   fetchClaudeSubscriptionProfile,
   parseClaudeSubscriptionProfile,
 } from "./claude-subscription-profile";
+import {
+  claudeCoreAccount,
+  connectClaudeCore,
+  deliverClaudeCoreWake,
+} from "./claude-subscription-core";
 
 export type ClaudeOAuthScope = {
   accountId: string;
@@ -57,6 +62,12 @@ const AttemptScope = z
     credentialId: z.string().uuid().nullable(),
     credentialVersion: z.number().int().nonnegative(),
     authoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.nullable(),
+    /**
+     * Started on the shared core (C2b). An attempt completes only on the
+     * runtime it started on; an older pod's strict schema rejects the key
+     * (410, start again), which fails closed too.
+     */
+    runtime: z.literal("core").optional(),
   })
   .strict();
 const Attempt = z.discriminatedUnion("stage", [
@@ -78,6 +89,25 @@ function same(left: string, right: string) {
 }
 const changed = () =>
   new HTTPException(409, { message: "Claude account changed during sign-in. Start again." });
+/**
+ * Claude on the shared core for this attempt (the route read the `claude`
+ * provider route). A core attempt records `runtime: "core"`, names the
+ * canonical connection and its row version, and carries no v1 authority
+ * snapshot; an attempt completes only on the runtime it started on, so one
+ * started on the legacy path (adding or reconnecting) never writes a core
+ * connection, nor a core one a legacy row (409, start again).
+ */
+export type ClaudeOAuthCore = { connectedBySubjectId: string | null };
+
+async function coreTarget(deps: ApiRouteDeps, scope: ClaudeOAuthScope, credentialId: string) {
+  const account = await claudeCoreAccount(
+    deps,
+    { accountId: scope.accountId, workspaceId: scope.workspaceId, subjectId: scope.actorSubjectId },
+    credentialId,
+  );
+  return account ? { account, authoritySnapshot: null } : null;
+}
+
 async function target(deps: ApiRouteDeps, scope: ClaudeOAuthScope, credentialId: string) {
   if (!scope.workspaceId) {
     const pool = await listOrganizationClaudeSubscriptions(deps.db, {
@@ -99,11 +129,12 @@ export async function startClaudeSubscriptionOAuth(
   deps: ApiRouteDeps,
   scope: ClaudeOAuthScope,
   input: { scope?: "workspace" | "user" | undefined; reconnectAccountId?: string | undefined } = {},
+  core: ClaudeOAuthCore | null = null,
 ) {
   const key = requireEnvironmentEncryption(deps.settings);
   const poolScope = scope.workspaceId ? (input.scope ?? "workspace") : "organization";
   const current = input.reconnectAccountId
-    ? await target(deps, scope, input.reconnectAccountId)
+    ? await (core ? coreTarget : target)(deps, scope, input.reconnectAccountId)
     : null;
   if (input.reconnectAccountId && (!current || current.account.scope !== poolScope))
     throw changed();
@@ -121,6 +152,7 @@ export async function startClaudeSubscriptionOAuth(
     credentialId: current?.account.id ?? null,
     credentialVersion: current?.account.version ?? 0,
     authoritySnapshot: current?.authoritySnapshot ?? null,
+    ...(core ? { runtime: "core" } : {}),
   });
   await storeIntegrationOAuthPendingState(deps.db, {
     ...scope,
@@ -145,6 +177,7 @@ export async function completeClaudeSubscriptionOAuth(
   input: { attemptId: string; code: string },
   reauthorize: (poolScope?: "workspace" | "user" | "organization") => Promise<void>,
   fetchImpl: typeof fetch = globalThis.fetch,
+  core: ClaudeOAuthCore | null = null,
 ) {
   const key = requireEnvironmentEncryption(deps.settings);
   const encrypted = await loadIntegrationOAuthPendingState(deps.db, {
@@ -172,8 +205,11 @@ export async function completeClaudeSubscriptionOAuth(
     throw new HTTPException(403, {
       message: "Complete Claude sign-in in the browser where you started it.",
     });
+  if ((attempt.runtime === "core") !== (core !== null)) throw changed();
   await reauthorize(attempt.poolScope);
-  const current = attempt.credentialId ? await target(deps, scope, attempt.credentialId) : null;
+  const current = attempt.credentialId
+    ? await (core ? coreTarget : target)(deps, scope, attempt.credentialId)
+    : null;
   if (
     attempt.credentialId &&
     (!current ||
@@ -275,6 +311,70 @@ export async function completeClaudeSubscriptionOAuth(
   });
   const providerAccountId =
     accountUuid || "oauth:" + createHmac("sha256", key).update(tokens.access_token).digest("hex");
+  if (core) {
+    const personal = attempt.poolScope === "user";
+    const saved = await withRlsContext(deps.db, scope, async (tx) => {
+      const connected = await connectClaudeCore(
+        tx,
+        {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          subjectId: scope.actorSubjectId,
+          ...(personal ? { personal: true } : {}),
+          encryptionKey: key,
+          credential: bundle,
+          providerAccountId,
+          accountEmail: profile?.email ?? direct?.email ?? null,
+          planType: profile?.plan ?? direct?.plan ?? null,
+          label: current?.account.label ?? null,
+          connectedBySubjectId: core.connectedBySubjectId,
+          ...(current
+            ? {
+                reconnectTarget: {
+                  connectionId: current.account.id,
+                  expectedVersion: current.account.version,
+                  providerAccountId: current.account.providerAccountId,
+                },
+              }
+            : {}),
+        },
+        "Claude account changed during sign-in. Start again.",
+      );
+      await storeIntegrationOAuthPendingState(tx, {
+        ...scope,
+        id: input.attemptId,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+        stateEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({
+            purpose: "claude-subscription-oauth",
+            ...scope,
+            stage: "complete",
+            poolScope: attempt.poolScope,
+            credentialId: connected.id,
+            credentialVersion: connected.version,
+            authoritySnapshot: null,
+            runtime: "core",
+          }),
+        ),
+      });
+      return connected;
+    });
+    await deliverClaudeCoreWake(deps, saved.wake);
+    await offerClaudeDefaultModels(deps, {
+      ...(scope.workspaceId
+        ? { accountId: scope.accountId, workspaceId: scope.workspaceId }
+        : { organizationId: scope.accountId }),
+      actorSubjectId: scope.actorSubjectId,
+      providerKind: "claude_subscription",
+    });
+    return ClaudeSubscriptionOAuthCompleteResponse.parse({
+      connected: true,
+      accountId: saved.id,
+      scope: attempt.poolScope,
+      credentialVersion: saved.version,
+    });
+  }
   const details = {
     encryptionKey: key,
     secret: bundle,

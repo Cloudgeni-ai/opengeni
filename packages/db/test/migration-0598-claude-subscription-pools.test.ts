@@ -74,6 +74,12 @@ const subscriptionCoreMigrations = [
   "0729_subscription_person_preferences_owner.sql",
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   "0730_subscription_core_personal_connection_versions.sql",
+  // Rekeys the session bindings table from withheld 0642.
+  "0733_subscription_session_bindings_per_provider.sql",
+  // Previews the system-update claim rewritten by withheld core migrations.
+  "0732_sandbox_maintenance_work_probes.sql",
+  // Owner-only routines over the shared connection table from withheld 0642.
+  "0735_subscription_core_owned_connection_usage.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

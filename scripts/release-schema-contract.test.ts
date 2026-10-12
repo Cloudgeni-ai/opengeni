@@ -2264,7 +2264,12 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0737_site_audience.sql",
+      "0733_subscription_session_bindings_per_provider.sql",
+      "0732_sandbox_maintenance_work_probes.sql",
+      "0731_published_site_versions_workspace_visible.sql",
       "0730_maintenance_work_probes.sql",
+      "0735_subscription_core_owned_connection_usage.sql",
       "0730_subscription_core_personal_connection_versions.sql",
       "0729_subscription_person_preferences_owner.sql",
       "0728_subscription_core_personal_connect_format.sql",
@@ -2694,6 +2699,7 @@ describe("release schema contract", () => {
       "0684_claude_haiku_5_5_default_model.sql",
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
+      "0736_notification_webhook_content.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

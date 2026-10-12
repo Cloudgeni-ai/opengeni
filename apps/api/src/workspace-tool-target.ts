@@ -15,6 +15,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
   withSiteSessionOrigin,
+  siteViewerForGrant,
 } from "@opengeni/core";
 import {
   beginTargetToolGatewayCall,
@@ -85,6 +86,7 @@ async function siteTarget(
       const { status, version } = await getWorkspaceArtifactContentRef(
         deps.db,
         authorization.grant.workspaceId,
+        await siteViewerForGrant(deps.db, authorization.grant),
         request.siteArtifactId,
         request.siteVersionId,
       );
@@ -317,7 +319,7 @@ export async function invokeWorkspaceToolTarget(
       request.siteArtifactId && request.siteVersionId
         ? await resolveSiteSessionOrigin(
             deps.db,
-            authorization.grant.workspaceId,
+            authorization.grant,
             request.siteArtifactId,
             request.siteVersionId,
           )
@@ -426,14 +428,17 @@ export async function resolveWorkspaceToolManifest(
   // evaluation reads the version once and checks every identity against it.
   const authorizeSite = async (db: Database) => {
     if (!siteArtifactId || !siteVersionId) return;
+    // Who the caller reads Sites as, then the version they can see.
     let read: ReturnType<typeof getWorkspaceArtifactContentRef> | undefined;
     const pinned = () =>
-      (read ??= getWorkspaceArtifactContentRef(
-        db,
-        authorization.grant.workspaceId,
-        siteArtifactId,
-        siteVersionId,
-      ));
+      (read ??= (async () =>
+        await getWorkspaceArtifactContentRef(
+          db,
+          authorization.grant.workspaceId,
+          await siteViewerForGrant(db, authorization.grant),
+          siteArtifactId,
+          siteVersionId,
+        ))());
     if (identities.length === 0) {
       let status: string;
       let versionId: string;

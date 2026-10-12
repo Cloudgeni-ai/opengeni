@@ -424,6 +424,9 @@ export type {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  UpdateWorkspaceArtifactVisibilityRequest,
+  UpdateWorkspaceArtifactVisibilityResponse,
+  WorkspaceArtifactVisibility,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -811,6 +814,7 @@ export type {
   UpdateWorkspaceModelAccountSettingsRequest,
   ModelAccountChoiceRefusal,
   ModelAccountChoiceOption,
+  ModelAccountUsageSnapshot,
   SessionModelAccountChoiceResponse,
   SetSessionModelAccountChoiceRequest,
   SetSessionModelAccountChoiceResponse,
@@ -1531,6 +1535,8 @@ export type {
   ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
 } from "./types";
 
 export { sessionListEntry } from "./session-list-entries";

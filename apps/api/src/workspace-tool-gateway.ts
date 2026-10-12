@@ -7,6 +7,7 @@ import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { recordToolApproval } from "@opengeni/observability";
+import { sessionMcpApprovalConnectionId } from "@opengeni/runtime";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -48,6 +49,7 @@ import {
   visibleMcpAccountConnectionsByIds,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  siteViewerForGrant,
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
@@ -896,7 +898,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           connectionId:
             binding?.connectionId ??
             config.connectionRef?.connectionId ??
-            `session-mcp:${config.id}:${createHash("sha256").update(config.url, "utf8").digest("hex")}`,
+            sessionMcpApprovalConnectionId(config.id, config.url),
           serverId: binding?.canonicalServerId ?? config.id,
         },
       ] as const;
@@ -1262,12 +1264,7 @@ export async function callWorkspaceToolGateway(
     transportMeta.approvalConfirmed = approvalConfirmed;
     const origin =
       siteContext && db
-        ? await resolveOrigin(
-            db,
-            grant.workspaceId,
-            siteContext.siteArtifactId,
-            siteContext.siteVersionId,
-          )
+        ? await resolveOrigin(db, grant, siteContext.siteArtifactId, siteContext.siteVersionId)
         : null;
     await prepared.reauthorize?.();
     const result = await (origin
@@ -1418,16 +1415,40 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   throw error;
 }
 
+/** A saved Site version, only when the caller can see the Site. */
+export type WorkspaceSiteVersionResolver = (
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  artifactId: string,
+  versionId: string,
+) => Promise<
+  Pick<Awaited<ReturnType<typeof getWorkspaceArtifactContentRef>>, "status" | "version">
+>;
+
+const resolveVisibleSiteVersion: WorkspaceSiteVersionResolver = async (
+  db,
+  grant,
+  artifactId,
+  versionId,
+) =>
+  await getWorkspaceArtifactContentRef(
+    db,
+    grant.workspaceId,
+    await siteViewerForGrant(db, grant),
+    artifactId,
+    versionId,
+  );
+
 export async function requireWorkspaceSiteToolAuthorization(
   db: ApiRouteDeps["db"],
   grant: AccessGrant,
   context: WorkspaceSiteToolContext,
-  resolveVersion = getWorkspaceArtifactContentRef,
+  resolveVersion: WorkspaceSiteVersionResolver = resolveVisibleSiteVersion,
 ): Promise<void> {
   try {
     const { status, version } = await resolveVersion(
       db,
-      grant.workspaceId,
+      grant,
       context.siteArtifactId,
       context.siteVersionId,
     );

@@ -8,7 +8,11 @@ import {
 } from "@opengeni/core";
 import {
   automaticSessionTitleFanoutDue,
+  browserDeadlineCheckpointDue,
   knowledgeIndexDue,
+  sandboxIdleCheckpointDue,
+  sandboxLeaseReaperDue,
+  sandboxMaintenanceDue,
   sessionWorkflowWakesDue,
   siteAuthMaintenanceDue,
   workspacePauseTimerDue,
@@ -28,6 +32,16 @@ import {
   type MaintenanceCadences,
   type MaintenanceStartResult,
 } from "./maintenance-cadence";
+import {
+  BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+  browserDeadlineCheckpointTaskQueue,
+} from "./browser-deadline-checkpoint-contract";
+import {
+  SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID,
+  SANDBOX_REAPER_V2_WORKFLOW_ID,
+  sandboxLifecycleTaskQueue,
+} from "./sandbox-reaper-contract";
+import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
 import type { TelemetryScheduler } from "./telemetry-scheduler";
 
 export const KNOWLEDGE_INDEXING_SCHEDULE_ID = "opengeni-knowledge-indexing";
@@ -37,20 +51,28 @@ export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance
 export const SITE_AUTH_MAINTENANCE_WORKFLOW_ID = "opengeni-site-auth-maintenance";
 /** Matches the minimum public site-auth health policy interval. */
 export const SITE_AUTH_MAINTENANCE_PERIOD_MS = 60 * 1_000;
+/** The Schedule earlier releases used to drive the sandbox lease reaper. */
+export const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
 
 export const INTERNAL_MAINTENANCE_JOBS = [
   "session-workflow-wake-dispatcher",
   "knowledge-indexing",
   "site-auth-maintenance",
+  "sandbox-lease-reaper",
+  "sandbox-idle-checkpoint",
+  "browser-deadline-checkpoint",
 ] as const;
 export type InternalMaintenanceJob = (typeof INTERNAL_MAINTENANCE_JOBS)[number];
 
 /** Schedules that earlier releases created for these jobs. A paused Schedule
  * still runs its scheduler workflow on every tick, so they are deleted. */
-const LEGACY_SCHEDULE_IDS: Record<InternalMaintenanceJob, string> = {
+const LEGACY_SCHEDULE_IDS: Partial<Record<InternalMaintenanceJob, string>> = {
   "session-workflow-wake-dispatcher": SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   "knowledge-indexing": KNOWLEDGE_INDEXING_SCHEDULE_ID,
   "site-auth-maintenance": SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+  // The old reaper Schedule fired a router workflow that started the drain
+  // inventory, both checkpoint sweeps and the maintenance child on every tick.
+  "sandbox-lease-reaper": SANDBOX_REAPER_SCHEDULE_ID,
 };
 
 type WorkflowStarter = Pick<TemporalClient["workflow"], "start" | "signalWithStart">;
@@ -84,6 +106,7 @@ export async function deleteLegacyMaintenanceSchedules(
 ): Promise<void> {
   for (const job of jobs) {
     const scheduleId = LEGACY_SCHEDULE_IDS[job];
+    if (!scheduleId) continue;
     try {
       await schedule.getHandle(scheduleId).delete();
       observability.info(
@@ -144,12 +167,17 @@ export async function internalMaintenanceCadences(input: {
     });
   }
   if (jobs.has("knowledge-indexing")) {
-    let embedding: Promise<{ model: string; dimensions: number }> | undefined;
+    let embedding: Promise<{ model: string; dimensions: number; available: boolean }> | undefined;
+    let unavailableReported = false;
     const resolveEmbedding = async () => {
       const services =
         input.documentServices ??
         (await import("@opengeni/documents")).createDocumentServices(settings);
-      return { model: services.embedder.model, dimensions: services.embedder.dimensions };
+      return {
+        model: services.embedder.model,
+        dimensions: services.embedder.dimensions,
+        available: services.embedder.available !== false,
+      };
     };
     cadences.push({
       job: "knowledge-indexing",
@@ -159,7 +187,21 @@ export async function internalMaintenanceCadences(input: {
           embedding = undefined;
           throw error;
         });
-        return await knowledgeIndexDue(db, await embedding);
+        const current = await embedding;
+        // Without an embedding credential every batch fails before reaching the
+        // provider, so queued jobs are not work this process can do. They stay
+        // queued and index once the deployment configures a credential.
+        if (!current.available) {
+          if (!unavailableReported) {
+            unavailableReported = true;
+            observability.warn(
+              "Knowledge indexing is idle: no document embedding credential is configured",
+              { job: "knowledge-indexing", model: current.model },
+            );
+          }
+          return false;
+        }
+        return await knowledgeIndexDue(db, current);
       },
       start: async () =>
         await startMaintenanceWorkflowOnce(workflow, {
@@ -186,6 +228,78 @@ export async function internalMaintenanceCadences(input: {
           taskQueue,
         }),
     });
+  }
+  const sandboxJobs = (
+    ["sandbox-lease-reaper", "sandbox-idle-checkpoint", "browser-deadline-checkpoint"] as const
+  ).filter((job) => jobs.has(job));
+  if (sandboxJobs.length > 0) {
+    // The same period the old reaper Schedule used, so the boot invariants
+    // (reaper period below the viewer holder TTL, and with the idle grace
+    // below the provider lifetime) hold for every sandbox cadence.
+    assertSandboxReaperActivityTimeout(settings);
+    const periodMs = settings.sandboxLeaseReaperPeriodMs;
+    const lifecycleQueue = sandboxLifecycleTaskQueue(taskQueue);
+    const sandbox = await import("./activities/sandbox-lease");
+    if (jobs.has("sandbox-lease-reaper")) {
+      const { SANDBOX_CHECKPOINT_GC_CLAIM_TTL_MS } = sandbox;
+      cadences.push({
+        job: "sandbox-lease-reaper",
+        periodMs,
+        // The drain inventory and its maintenance pass act only on warm or held
+        // leases, due reconciliation rows, or (with Modal) boxes still running in
+        // the provider app. With none of those, the tick only refreshes the
+        // pass's read-only gauges in this process.
+        hasWork: async () => {
+          if (
+            (await sandboxLeaseReaperDue(db)) ||
+            (await sandboxMaintenanceDue(db, {
+              checkpointArtifactClaimTtlMs: SANDBOX_CHECKPOINT_GC_CLAIM_TTL_MS,
+            })) ||
+            (await sandbox.modalOrphanSweepMayHaveWork({ settings, observability }))
+          ) {
+            return true;
+          }
+          await sandbox.refreshIdleSandboxReaperProjections({ db, settings, observability });
+          return false;
+        },
+        start: async () =>
+          await startMaintenanceWorkflowOnce(workflow, {
+            workflowType: "sandboxReaperWorkflowV2",
+            workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID,
+            taskQueue: lifecycleQueue,
+          }),
+      });
+    }
+    if (jobs.has("sandbox-idle-checkpoint")) {
+      cadences.push({
+        job: "sandbox-idle-checkpoint",
+        periodMs,
+        // The sweep's inventory is empty when ownership or snapshots are off.
+        hasWork: async () =>
+          settings.sandboxOwnershipEnabled &&
+          settings.sandboxSnapshotIntervalMs > 0 &&
+          (await sandboxIdleCheckpointDue(db, { intervalMs: settings.sandboxSnapshotIntervalMs })),
+        start: async () =>
+          await startMaintenanceWorkflowOnce(workflow, {
+            workflowType: "sandboxIdleCheckpointSweepWorkflow",
+            workflowId: SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID,
+            taskQueue: lifecycleQueue,
+          }),
+      });
+    }
+    if (jobs.has("browser-deadline-checkpoint")) {
+      cadences.push({
+        job: "browser-deadline-checkpoint",
+        periodMs,
+        hasWork: async () => await browserDeadlineCheckpointDue(db),
+        start: async () =>
+          await startMaintenanceWorkflowOnce(workflow, {
+            workflowType: "browserDeadlineCheckpointSweepWorkflow",
+            workflowId: BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+            taskQueue: browserDeadlineCheckpointTaskQueue(taskQueue),
+          }),
+      });
+    }
   }
   return cadences;
 }

@@ -273,6 +273,8 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
               },
             }
           : {}),
+        // Recorded on the event so integrations can deliver it themselves.
+        ...(target === null ? { undeliveredReason: "no_human_recipient" as const } : {}),
       });
       if (!parsed.success) {
         const issue = parsed.error.issues[0];

@@ -274,10 +274,37 @@ test("an exhausted provider quota is terminal copy that points at the model pick
     detail: compactionError,
     dailyLimit: true,
   });
-  // An unknown marker value is ignored rather than trusted.
+  // An unknown marker value is ignored rather than trusted: the compaction
+  // failure keeps its own short copy instead of a quota headline.
   expect(
     failedSessionCopy({ ...compaction, quotaScope: "constructor" }, false, false, true).reason,
-  ).toBe(`${compactionError.slice(0, 157)}…`);
+  ).toBe(
+    "Couldn’t compact conversation history. If the next message fails too, start a new session.",
+  );
+});
+
+test("a provider-rejected compaction names the outcome and keeps the raw text behind Details", () => {
+  const recorded =
+    "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+  expect(
+    failedSessionCopy(
+      {
+        ...summary,
+        reason: recorded,
+        recordedDetail: recorded,
+        failureCode: "context_compaction_failed",
+      },
+      false,
+      false,
+      true,
+    ),
+  ).toEqual({
+    reason:
+      "Couldn’t compact conversation history. If the next message fails too, start a new session.",
+    unavailableModel: false,
+    compaction: true,
+    detail: recorded,
+  });
 });
 
 test("authored worker copy and Opengeni credit failures keep their own wording", () => {

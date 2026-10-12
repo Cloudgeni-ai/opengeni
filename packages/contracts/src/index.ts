@@ -1,4 +1,5 @@
 export * from "./session-target";
+export * from "./turn-serving-policy";
 import { modelLogoUrl } from "./model-display";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
@@ -140,6 +141,8 @@ export {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  UpdateWorkspaceArtifactVisibilityRequest,
+  UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -156,6 +159,7 @@ export {
   WorkspaceArtifactSourcePath,
   WorkspaceArtifactStatus,
   WorkspaceArtifactVersion,
+  WorkspaceArtifactVisibility,
   WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS,
   WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
@@ -14865,6 +14869,10 @@ export const NotificationLink = z
   .strict();
 export type NotificationLink = z.infer<typeof NotificationLink>;
 
+/** Why a posted notification reached no one in Opengeni. */
+export const NotificationUndeliveredReason = z.enum(["no_human_recipient"]);
+export type NotificationUndeliveredReason = z.infer<typeof NotificationUndeliveredReason>;
+
 export const SessionNotificationPostedPayload = z
   .object({
     key: NotificationKey,
@@ -14886,6 +14894,11 @@ export const SessionNotificationPostedPayload = z
       .object({ subjectId: z.string().min(1).max(300), label: z.string().min(1).max(200) })
       .strict()
       .optional(),
+    /**
+     * Set when Opengeni notified nobody: the session works for no person (an
+     * API key or service started it). Absent when a person was notified.
+     */
+    undeliveredReason: NotificationUndeliveredReason.optional(),
   })
   .strict();
 export type SessionNotificationPostedPayload = z.infer<typeof SessionNotificationPostedPayload>;
@@ -19561,6 +19574,7 @@ export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discover
 export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
+export * from "./session-mcp-tool-permissions";
 export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";

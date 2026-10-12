@@ -42,9 +42,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
-/** Read-only maintenance work checks (migration 0730) and the claim each one
- * previews, which fixes its owner and runtime grant. */
-const MAINTENANCE_WORK_PROBE_ROUTINES = [
+/** Read-only maintenance work checks (migrations 0730 and 0732) and the claim
+ * each one previews, which fixes its owner and runtime grant. */
+export const MAINTENANCE_WORK_PROBE_ROUTINES = [
   ["session_workflow_wakes_due_v1()", "claim_session_workflow_wakes(integer)", "private"],
   [
     "automatic_session_title_fanout_due_v1()",
@@ -59,6 +59,52 @@ const MAINTENANCE_WORK_PROBE_ROUTINES = [
   [
     "site_auth_maintenance_due_v1(bigint)",
     "claim_site_auth_maintenance(bigint, integer)",
+    "private",
+  ],
+  [
+    "sandbox_lease_reaper_due_v1()",
+    "reap_sandbox_leases(bigint, bigint, bigint, bigint)",
+    "private",
+  ],
+  [
+    "sandbox_idle_checkpoint_due_v1(bigint)",
+    "list_idle_checkpoint_candidates(integer, bigint)",
+    "private",
+  ],
+  ["browser_deadline_checkpoint_due_v1()", "list_browser_deadline_checkpoints(integer)", "private"],
+  [
+    "session_system_update_outbox_due_v1()",
+    "claim_session_system_update_outbox_v2(integer)",
+    "private",
+  ],
+  [
+    "session_list_snapshots_expired_v1()",
+    "reap_expired_session_list_snapshots(integer)",
+    "private",
+  ],
+  [
+    "connected_command_reconciliation_due_v1()",
+    "claim_connected_machine_background_commands(uuid, integer, bigint, timestamp with time zone)",
+    "private",
+  ],
+  [
+    "connected_command_output_release_due_v1()",
+    "claim_connected_command_output_releases(uuid, integer, bigint, timestamp with time zone)",
+    "private",
+  ],
+  [
+    "terminal_retained_processes_due_v1()",
+    "claim_terminal_retained_processes(uuid, integer, bigint)",
+    "private",
+  ],
+  [
+    "sandbox_ended_epoch_blockers_due_v1()",
+    "list_sandbox_ended_epoch_blockers(integer)",
+    "private",
+  ],
+  [
+    "sandbox_checkpoint_artifact_gc_due_v1(bigint)",
+    "claim_sandbox_checkpoint_artifacts(uuid, integer, bigint)",
     "private",
   ],
 ] as const;
@@ -799,6 +845,11 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
   // Migration 0730: the owner's personal connections with their row version.
   "subscription_core_personal_connection_versions(text, uuid, uuid, text)",
+  // Migration 0735: the owner's live usage read of their own personal
+  // connection (credential, refresh begin, quota write).
+  "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
+  "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
+  "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */

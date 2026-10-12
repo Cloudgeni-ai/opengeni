@@ -2385,3 +2385,42 @@ export function classifyClaudeCredentialFailure(
   }
   return null;
 }
+
+/**
+ * Claude's classification of a failed model request as a shared provider
+ * outcome (the adapter's `classifyError`, Claude track C1b), for a request
+ * of the Claude subscription transport only: a reconnect-required refresh or
+ * HTTP 401 is `unauthorized` (the transport already ran the turn's one
+ * forced refresh); 429 is `rate_limited` for the turn's model `modelId`, with
+ * the provider's retry time (null: the adapter's fallback applies); 529 or
+ * `overloaded_error` is `overloaded`, which never moves the turn to another
+ * account; 403 is `fatal`, which never rotates or quarantines the account.
+ * Anything else, a provider safety refusal included, is null: not a refusal
+ * of the account.
+ */
+export function classifyClaudeProviderError(
+  error: unknown,
+  modelId?: string,
+): ProviderErrorOutcome | null {
+  if (isProviderSafetyRefusal(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof ClaudeSubscriptionReconnectRequired) return { kind: "unauthorized" };
+    if (current instanceof AnthropicRequestError) {
+      if (!current.subscription) return null;
+      if (current.status === 401) return { kind: "unauthorized" };
+      if (current.status === 429)
+        return {
+          kind: "rate_limited",
+          retryAfterMs: providerRetryAfterMs(current),
+          ...(modelId === undefined ? {} : { modelId }),
+        };
+      if (current.status === 529 || current.errorType === "overloaded_error")
+        return { kind: "overloaded" };
+      if (current.status === 403) return { kind: "fatal" };
+      return null;
+    }
+    current = current.cause;
+  }
+  return null;
+}

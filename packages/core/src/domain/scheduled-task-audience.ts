@@ -174,6 +174,29 @@ export const SCHEDULED_TASK_PRIVATE_DISABLED_MESSAGE =
   "Only me schedules are turned off for this organization.";
 
 /**
+ * Whether this person may start something new as Only me in this workspace: a
+ * chat, a schedule or a Site. In their Personal workspace, whenever the
+ * platform offers private sessions; elsewhere, when the organization allows
+ * Only me and the deployment does not turn it off.
+ */
+export async function mayStartOnlyMe(
+  db: Database,
+  settings: PrivacySettings,
+  workspaceId: string,
+  subjectId: string,
+): Promise<boolean> {
+  const policy = await getPrivateSessionCreatePolicy(db, {
+    workspaceId,
+    actorSubjectId: subjectId,
+  }).catch(() => null);
+  return policy
+    ? policy.personalWorkspace
+      ? policy.platformAvailable
+      : policy.organizationEnabled && privacyDeploymentLimits(settings).onlyMeAllowed
+    : false;
+}
+
+/**
  * The audience to store for a created or edited schedule. A schedule that
  * posts into an Only me chat, or writes to its owner's personal knowledge, is
  * always Only me. Choosing Only me needs a human owner who may create Only me
@@ -210,16 +233,14 @@ export async function resolveScheduledTaskVisibility(input: {
   // Narrowing an existing Only me schedule never needs a fresh permission; a
   // newly private one needs the organization to allow Only me.
   if (input.current?.visibility !== "private" && !forced) {
-    const policy = await getPrivateSessionCreatePolicy(input.db, {
-      workspaceId: input.grant.workspaceId,
-      actorSubjectId: input.ownerSubjectId,
-    }).catch(() => null);
-    const allowed = policy
-      ? policy.personalWorkspace
-        ? policy.platformAvailable
-        : policy.organizationEnabled && privacyDeploymentLimits(input.settings).onlyMeAllowed
-      : false;
-    if (!allowed)
+    if (
+      !(await mayStartOnlyMe(
+        input.db,
+        input.settings,
+        input.grant.workspaceId,
+        input.ownerSubjectId,
+      ))
+    )
       throw new HTTPException(403, { message: SCHEDULED_TASK_PRIVATE_DISABLED_MESSAGE });
   }
   return "user_private";

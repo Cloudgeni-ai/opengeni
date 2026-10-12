@@ -396,6 +396,18 @@ export {
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
 export * from "./subscription-core-xai-compat";
+export * from "./subscription-core-claude-adapter";
+export * from "./subscription-core-claude";
+export * from "./subscription-core-claude-compat";
+// Live usage reads outside a workspace pool: an organization administrator's
+// and a personal connection owner's (design 5.3).
+export {
+  subscriptionCoreAdministeredConnections,
+  SUBSCRIPTION_CORE_ADMINISTERED_READ_TIMEOUT_MS,
+  type SubscriptionCoreAdministeredJoinedFetch,
+  type SubscriptionCoreAdministeredProbeDeps,
+  type SubscriptionCoreAdministeredScope,
+} from "./subscription-core/administered-connections";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,
@@ -439,6 +451,7 @@ import {
 import {
   readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
   readSubscriptionSessionBinding as readCoreSessionBinding,
+  isSubscriptionSessionBindingRollingConflict,
   resolveSubscriptionConnectionId as resolveCoreConnectionId,
   writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
@@ -25146,8 +25159,9 @@ export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT
 
 /**
  * The session-event vocabulary of one provider's core waiter. Codex keeps
- * the names its core waiter shipped with (M3); SuperGrok keeps the names of
- * its legacy waiter, so a wait reads the same before and after its cutover.
+ * the names its core waiter shipped with (M3); SuperGrok and Claude keep the
+ * names of their legacy waiters, so a wait reads the same before and after
+ * the provider's cutover.
  */
 type SubscriptionCoreWaitVocabulary<
   P extends SubscriptionCoreWaiterProvider = SubscriptionCoreWaiterProvider,
@@ -25244,6 +25258,43 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     }),
     cancelledBy: "xai_capacity_reconcile",
     recheckBeforeReset: true,
+  },
+  // Claude keeps the names of its legacy waiter (Claude track C1b).
+  claude: {
+    label: "Claude",
+    waitingEventType: "turn.capacity_waiting",
+    waitingPayload: {
+      provider: "claude-subscription",
+      recovery: "provider_capacity",
+      retryable: true,
+    },
+    statusReason: "claude_capacity",
+    closeToolsReason: "claude_capacity_wait",
+    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.claude,
+    resumedEvent: (waiter) => ({
+      type: "turn.recovery.requested",
+      payload: {
+        reason: "claude_capacity_available",
+        provider: "claude-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        wakeRevision: waiter.wakeRevision,
+      },
+    }),
+    supersededEvent: (waiter, reason) => ({
+      type: "turn.superseded",
+      payload: {
+        provider: "claude-subscription",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        reason,
+      },
+    }),
+    cancelledBy: "claude_capacity_reconcile",
+    // Claude's adapter reads no usage that can end an exhaustion before its
+    // stored reset (its quota comes from response headers), so its waiter
+    // sleeps until the reset like Codex's.
+    recheckBeforeReset: false,
   },
 };
 
@@ -29173,11 +29224,11 @@ export async function getSubscriptionCoreSessionCodexAccounts(
         .limit(1);
       if (!session) return null;
       const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
-      const binding = await readCoreSessionBinding(tx, {
+      const codexBinding = await readCoreSessionBinding(tx, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        provider: "codex",
       });
-      const codexBinding = binding?.provider === "codex" ? binding : null;
       const [turn] = session.activeTurnId
         ? await rawRows<{ id: string; status: string; connection_id: string | null }>(
             tx,
@@ -29381,7 +29432,9 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         wake: null,
       };
       if (!session || session.accountId !== input.accountId) return unchanged;
-      // Lock the binding: a running turn's placement
+      // Lock the session's Codex binding (a session keeps one binding per
+      // provider, D-32; another provider's is never read or written here):
+      // a running turn's placement
       // (`writeSubscriptionSessionBinding`) advances its version, and an
       // unlocked read would lose the version compare-and-swap below to it and
       // report the choice as not found. Cache-clock advances do not bump it.
@@ -29389,6 +29442,7 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         tx,
         sql`select choice, version from subscription_session_bindings
           where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+            and provider = 'codex'
           for update`,
       );
       const binding = lockedBinding
@@ -29418,7 +29472,8 @@ export async function pinSubscriptionCoreSessionCodexAccount(
               sql`update subscription_session_bindings
                 set choice = 'automatic', version = version + 1
                 where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
+                  and version = ${binding.version}
                 returning version`,
             );
             return rows.length > 0;
@@ -29427,11 +29482,12 @@ export async function pinSubscriptionCoreSessionCodexAccount(
             const rows = await rawRows<{ version: number | string }>(
               scoped,
               sql`update subscription_session_bindings
-                set provider = 'codex', connection_id = ${connectionId}::uuid,
+                set connection_id = ${connectionId}::uuid,
                     choice = 'explicit', last_switch_reason = 'explicit_choice',
                     version = version + 1
                 where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
+                  and version = ${binding.version}
                 returning version`,
             );
             return rows.length > 0;
@@ -29457,6 +29513,9 @@ export async function pinSubscriptionCoreSessionCodexAccount(
           (error as { cause?: { code?: unknown } } | null)?.cause?.code;
         // The guard refuses a connection this session may not use.
         if (code === "42501") return unchanged;
+        // A racing first binding of the session met 0733's rolling index (a
+        // lost compare-and-swap); the savepoint rolled it back.
+        if (isSubscriptionSessionBindingRollingConflict(error)) return unchanged;
         throw error;
       }
       const appliedTo: "waiting_turn" | "next_turn" =
@@ -75945,10 +76004,11 @@ export async function peekSessionWork(
 
     // A core waiter (any provider) is the only waiter written after its
     // provider's cutover; it keeps that provider's legacy reference shape
-    // (`provider: "xai"` for SuperGrok, none for Codex), so the workflow
-    // waits on it exactly as on a legacy waiter. A row that no longer belongs
-    // to the session's active waiting turn becomes an immediate check, whose
-    // reconcile deletes it, rather than a sleep until its next check.
+    // (`provider: "xai"` for SuperGrok, `"claude"` for Claude, none for
+    // Codex), so the workflow waits on it exactly as on a legacy waiter. A
+    // row that no longer belongs to the session's active waiting turn
+    // becomes an immediate check, whose reconcile deletes it, rather than a
+    // sleep until its next check.
     const coreCapacityWait = await readSubscriptionCoreWaiterInTransaction(scopedDb, {
       workspaceId,
       sessionId,

@@ -24,6 +24,8 @@ tools: [{ kind: "mcp", id: "acme" }],
 
 Use the names from the server's `tools/list` (`update_ticket`, not `acme__update_ticket`). Use `getConnectorToolPermissions` and `updateConnectorToolPermissions` for account-specific Allow, Ask first, Block and reset choices. Pass the returned revision as `expectedRevision` to detect concurrent changes. API Integration `autoApprovedTools` remains a compatibility input: omission preserves existing choices, while an explicit value updates them. See [Your data](/integrate/your-data).
 
+For an MCP server your product attaches to sessions, let workspace admins save the same choices with `getSessionMcpToolPermissions` and `updateSessionMcpToolPermissions`. Pass the server's `id` and its exact `url`. `target: "default"` covers every tool without its own choice, so it can be "Allow all", while `target: "tools"` sets named tools. Saved choices replace the `requireApproval` recommendation from the next run on. Writes need `capabilities:manage`, so an agent cannot change its own permissions.
+
 When the agent proposes a gated call, the session enters `requires_action` and the conversation shows Approve and Reject. A rejection goes back to the agent as the tool's result so it can adapt. Only people can approve tool calls.
 
 ## Let the agent ask questions

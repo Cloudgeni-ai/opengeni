@@ -492,35 +492,186 @@ describe("capacity limit rows", () => {
       occurredAt: new Date(T0 + seconds * 1000).toISOString(),
     } satisfies SessionEvent;
   };
-  function blocked(): SessionEvent[] {
+  function blocked(
+    options: {
+      work?: boolean;
+      startupRunning?: boolean;
+      wait?: { type: string; payload: Record<string, unknown> };
+    } = {},
+  ): SessionEvent[] {
     sequence = 0;
+    const wait = options.wait ?? {
+      type: "codex.capacity.waiting",
+      payload: {
+        code: "subscription_capacity_unavailable",
+        waitReason: "no_eligible_capacity",
+        error: OLD_COPY,
+      },
+    };
     return [
       at(0, "user.message", { text: "Cool thanks" }, null),
       at(0, "turn.queued", { turnId: "turn-1" }),
       at(1, "session.status.changed", { status: "running" }),
       at(1, "turn.started", {}),
-      at(2, "codex.capacity.waiting", {
-        code: "subscription_capacity_unavailable",
-        waitReason: "no_eligible_capacity",
-        error: OLD_COPY,
-      }),
+      ...(options.startupRunning
+        ? [at(1, "turn.startup.phase.started", { phase: "model_preparation" })]
+        : []),
+      ...(options.work
+        ? [
+            at(1, "agent.toolCall.created", {
+              id: "ls",
+              name: "exec_command",
+              arguments: { cmd: "ls" },
+            }),
+            at(1, "agent.toolCall.output", { id: "ls", output: "ok" }),
+          ]
+        : []),
+      at(2, wait.type, wait.payload),
       at(2, "session.status.changed", { status: "waiting_capacity" }),
     ];
   }
 
-  test("a blocked turn says Limit reached once, with one quiet secondary line", async () => {
+  const GUIDANCE = "Try again after your quota resets, or switch to another model or provider.";
+  const statusRow = (container: HTMLElement) => {
+    const status = container.querySelector("[data-og-exchange-status]");
+    const header = status?.closest<HTMLElement>("[data-og-work-header]");
+    if (!status || !header) throw new Error("expected an exchange status row");
+    return { status, header };
+  };
+
+  test("a blocked turn says Usage limit reached once, with no clock and no empty disclosure", async () => {
     const r = await renderComponent(
       <MessageTimeline events={blocked()} turnSummary={{ rolling: true }} />,
     );
     try {
       await flush();
-      expect(statusTrigger(r.container).textContent).toStartWith("Limit reached · ");
+      const { status, header } = statusRow(r.container);
+      // Five hours parked on a limit: no elapsed time is counted.
+      expect(status.textContent).toBe("Usage limit reached");
+      expect(header.textContent).toBe("Usage limit reached");
       expect(r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent).toBe(
-        "Continues automatically when capacity is available.",
+        GUIDANCE,
       );
+      expect(r.container.textContent).not.toMatch(/automatic|continues/i);
       expect(r.container.textContent).not.toContain("No Codex subscription");
-      expect(r.container.textContent?.split("Limit reached").length).toBe(2);
+      expect(r.container.textContent?.split(/limit reached/i).length).toBe(2);
       expect(r.container.querySelector("[role=status]")).toBeNull();
+      // Nothing to reveal: no chevron, no toggle, no fold content.
+      expect(header.tagName).not.toBe("BUTTON");
+      expect(header.closest("button")).toBeNull();
+      expect(header.querySelector(".lucide-chevron-right")).toBeNull();
+      expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+      await act(async () => header.click());
+      expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+      const section = header.closest("[data-og-work-section]");
+      expect(section?.querySelector("button, [aria-expanded]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a limit during a still-running startup phase offers no empty disclosure", async () => {
+    // The row's rail hides running phases, so they are not details to reveal.
+    const r = await renderComponent(
+      <MessageTimeline
+        events={blocked({ startupRunning: true })}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      const { status, header } = statusRow(r.container);
+      expect(status.textContent).toBe("Usage limit reached");
+      expect(r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent).toBe(
+        GUIDANCE,
+      );
+      expect(header.closest("button")).toBeNull();
+      expect(header.querySelector(".lucide-chevron-right")).toBeNull();
+      await act(async () => header.click());
+      expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+      const section = header.closest("[data-og-work-section]");
+      expect(section?.querySelector("button, [aria-expanded]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a limit after real work keeps its guidance visible when the work is expanded", async () => {
+    // Work before the limit: the parked row has real details to reveal.
+    const events = blocked({ work: true });
+    const r = await renderComponent(
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      const trigger = statusTrigger(r.container);
+      expect(trigger.textContent).toStartWith("Usage limit reached");
+      expect(trigger.textContent).not.toMatch(/\d+[smh]\b/);
+      expect(trigger.querySelector(".lucide-chevron-right")).not.toBeNull();
+      const guidance = () =>
+        r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent;
+      expect(guidance()).toBe(GUIDANCE);
+      await act(async () => trigger.click());
+      await flush();
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      expect(r.container.querySelector("[data-og-fold-content]")?.textContent).toContain("ls");
+      expect(guidance()).toBe(GUIDANCE);
+      expect(trigger.textContent).not.toMatch(/\d+[smh]\b/);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a reconnect wait keeps its actionable reason and is not labelled a limit", async () => {
+    const events = blocked({
+      wait: {
+        type: "turn.capacity_waiting",
+        payload: {
+          provider: "claude",
+          code: "claude_relogin_required",
+          error: "The serving Claude account requires reconnection",
+          detail: "the same accepted turn is waiting for another eligible account",
+        },
+      },
+    });
+    const r = await renderComponent(
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      const { status } = statusRow(r.container);
+      expect(status.textContent).toBe("Waiting");
+      expect(r.container.querySelector("[data-og-exchange-wait-detail]")?.textContent).toBe(
+        "The serving Claude account requires reconnection",
+      );
+      expect(r.container.textContent).not.toMatch(/limit reached|quota/i);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("approval waits and working rows keep their live clocks", async () => {
+    sequence = 0;
+    const approval = [
+      event("turn.started", {}),
+      ...tool("plan", "exec_command"),
+      event("session.requiresAction", {}),
+      event("session.status.changed", { status: "requires_action" }),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={approval} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      expect(statusTrigger(r.container).textContent).toMatch(/^Waiting for you · \d+m/);
+      await r.rerender(
+        <MessageTimeline
+          events={[...approval, event("session.status.changed", { status: "running" })]}
+          turnSummary={{ rolling: true }}
+        />,
+      );
+      await flush();
+      expect(statusTrigger(r.container).textContent).toMatch(/^Working · \d+m/);
     } finally {
       await r.unmount();
     }
@@ -548,7 +699,7 @@ describe("capacity limit rows", () => {
     );
     try {
       await flush();
-      expect(r.container.textContent).not.toContain("Limit reached");
+      expect(r.container.textContent).not.toMatch(/limit reached/i);
       expect(r.container.textContent).not.toContain("No Codex subscription");
       expect(r.container.textContent).toContain("You're welcome!");
       // 4h 00m 31s wall time minus the 3h 59m 58s wait.

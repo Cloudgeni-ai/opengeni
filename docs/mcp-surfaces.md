@@ -200,7 +200,8 @@ step (including awaited native preflight); the hook awaits nothing after it.
 Site, route, policy and organization-key reads share one
 `statement_timeout`-bounded transaction; an external actor's authorizer uses a
 second, and a person's route-owned fresh grant runs beside them uncancelled. A
-pinned Site version is read once per evaluation, however many tools it pins. At
+pinned Site is read once per evaluation, as the caller may see it (its audience
+and active version), however many tools it pins. At
 the deadline an evaluation is answered as unavailable authority and starts no
 further part or read; a read already running ends at its statement timeout and
 the transaction rolls back. Before an execution-mode credential resolve, which

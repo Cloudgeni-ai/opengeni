@@ -52,6 +52,8 @@ import type {
 import type {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  UpdateWorkspaceArtifactVisibilityRequest,
+  UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -241,6 +243,8 @@ import type {
   CapabilityCatalogResponse,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
   CapabilityInstallation,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
@@ -8058,6 +8062,44 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Read the workspace's saved Allow/Ask/Block rules for a session MCP server
+   * this host attaches (same `id` and exact `url` as in `mcpServers`).
+   */
+  async getSessionMcpToolPermissions(
+    workspaceId: string,
+    server: { serverId: string; url: string },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SessionMcpToolPermissionsResponse> {
+    const query = new URLSearchParams({ serverId: server.serverId, url: server.url });
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/session-mcp-tool-permissions?${query}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /**
+   * Set or reset Allow/Ask/Block for a session MCP server's default or named
+   * tools. Requires `capabilities:manage`; agents and service principals are
+   * refused. Rules apply from each session's next attempt.
+   */
+  async updateSessionMcpToolPermissions(
+    workspaceId: string,
+    request: UpdateSessionMcpToolPermissionsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ saved: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/session-mcp-tool-permissions`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async enableCapability(
     workspaceId: string,
     capabilityId: string,
@@ -8196,6 +8238,22 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "PATCH",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/status`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change who can see a Site: the whole workspace, or only you. Only its owner can. */
+  async updateWorkspaceArtifactVisibility(
+    workspaceId: string,
+    artifactId: string,
+    request: UpdateWorkspaceArtifactVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateWorkspaceArtifactVisibilityResponse> {
+    return await this.requestJson<UpdateWorkspaceArtifactVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/visibility`,
       request,
       undefined,
       options,

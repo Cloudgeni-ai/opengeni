@@ -47,6 +47,15 @@ import type { Hono } from "hono";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
 import { claudeUsageRoute, coreClaudeUsage, type CoreClaudeUsageCaller } from "./claude-core-usage";
+import {
+  claudeCoreAccount,
+  claudeCoreRoute,
+  claudePoolCore,
+  connectClaudeCore,
+  requireClaudeCorePersonalWorkspace,
+} from "../claude-subscription-core";
+import { deliverPoolCoreWake } from "./subscription-pool-core";
+import { managedCookieHuman } from "./subscription-pool-access";
 
 function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: string | null) {
   return {
@@ -68,6 +77,9 @@ function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: strin
   };
 }
 
+const CLAUDE_CORE = claudePoolCore(accountJson);
+const SETUP_TOKEN_CHANGED = "Claude account changed. Reload it before replacing the token.";
+
 export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRouteDeps) {
   registerSubscriptionAccountPoolRoutes(app, deps, {
     provider: "claude",
@@ -75,6 +87,7 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     displayName: "Claude",
     enabled: () => deps.settings.claudeSubscriptionEnabled,
     accountJson,
+    core: CLAUDE_CORE,
     projectAccounts: async (accounts, activeId, authority) => {
       const usage = await listClaudeAccountUsage(deps.db, authority, accounts);
       return accounts.map((account) => {
@@ -241,13 +254,101 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
           }
         : null;
       const workspaceId = organization ? null : c.req.param("workspaceId")!;
+      // The runtime first (one receipt read), so a private account on the
+      // core is authorized in the owner's Personal workspace, where the core
+      // keeps it, and refused (403) anywhere else. The read grant naming the
+      // organization is taken only once a receipt exists (the callback), so
+      // legacy authorizes exactly as before.
+      const read: { grant?: Awaited<ReturnType<typeof requireAccessGrant>> } = {};
+      const runtime = await claudeCoreRoute(deps, async () => {
+        if (actor) return actor.organizationId;
+        read.grant = await requireAccessGrant(c, deps, workspaceId!, "workspace:read");
+        return read.grant.accountId;
+      });
+      if (runtime === "core" && workspaceId && parsed.data.scope === "user") {
+        if (!read.grant) throw new Error("core Claude route without its read grant");
+        await requireClaudeCorePersonalWorkspace(deps, {
+          accountId: read.grant.accountId,
+          workspaceId,
+          subjectId: read.grant.subjectId,
+        });
+      }
       const authority = workspaceId
-        ? await requireSubscriptionScopeMutation(c, deps, workspaceId, parsed.data.scope, "Claude")
+        ? await requireSubscriptionScopeMutation(
+            c,
+            deps,
+            workspaceId,
+            parsed.data.scope,
+            "Claude",
+            runtime === "core" ? "personal_workspace" : "ordinary_workspace",
+          )
         : null;
       const accountId = actor?.organizationId ?? authority!.accountId;
       const subjectId = actor?.subjectId ?? authority!.subjectId;
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
       const reconnectId = parsed.data.reconnectAccountId;
+      if (runtime === "core") {
+        const scope = workspaceId ? parsed.data.scope : "organization";
+        const personal = scope === "user";
+        const target = reconnectId
+          ? await claudeCoreAccount(deps, { accountId, workspaceId, subjectId }, reconnectId)
+          : null;
+        if (
+          reconnectId &&
+          (!target ||
+            target.version !== parsed.data.expectedCredentialVersion ||
+            target.scope !== scope)
+        )
+          throw new HTTPException(409, { message: SETUP_TOKEN_CHANGED });
+        const connected = await connectClaudeCore(
+          deps.db,
+          {
+            accountId,
+            workspaceId,
+            subjectId,
+            ...(personal ? { personal: true } : {}),
+            encryptionKey,
+            credential: ClaudeSubscriptionCredential.parse(
+              JSON.parse(
+                prepareClaudeSubscriptionCredential(
+                  deps.settings,
+                  workspaceId ? "workspace:" + workspaceId : "organization:" + accountId,
+                  parsed.data.token,
+                ),
+              ),
+            ),
+            providerAccountId:
+              "setup:" +
+              createHmac("sha256", encryptionKey).update(parsed.data.token).digest("hex"),
+            accountEmail: null,
+            planType: null,
+            label: target?.label ?? parsed.data.label ?? "Claude subscription",
+            connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null,
+            ...(target
+              ? {
+                  reconnectTarget: {
+                    connectionId: target.id,
+                    expectedVersion: target.version,
+                    providerAccountId: target.providerAccountId,
+                  },
+                }
+              : {}),
+          },
+          SETUP_TOKEN_CHANGED,
+        );
+        await deliverPoolCoreWake(deps, CLAUDE_CORE, connected.wake);
+        await offerClaudeDefaultModels(deps, {
+          ...(workspaceId ? { accountId, workspaceId } : { organizationId: accountId }),
+          actorSubjectId: subjectId,
+          providerKind: "claude_subscription",
+        });
+        return c.json({
+          connected: true,
+          accountId: connected.id,
+          credentialVersion: connected.version,
+          scope,
+        });
+      }
       const reconnectAccount = !reconnectId
         ? null
         : workspaceId

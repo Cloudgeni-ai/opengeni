@@ -142,7 +142,11 @@ export function subscriptionCoreClaudeAdapter(
       format === SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT ? capabilities : setupTokenCapabilities,
     credentialKind: "oauth",
     quotaKind: "usage_windows",
+    // Workspace model policy names Claude models by their scope-specific
+    // provider id; on the core a workspace-scoped model runs on organization
+    // connections, so it must be allowed under both identities.
     modelPolicyProviderId: SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0],
+    modelPolicyProviderIdsFor: subscriptionCoreClaudeModelPolicyProviderIds,
     cacheFacts: { kind: "exact_ttl", ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS },
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_CLAUDE_FORBIDDEN_QUARANTINE_MS,
@@ -189,6 +193,21 @@ export function subscriptionCoreClaudeAdapter(
 /** The product model ids a Claude upstream model id is served as. */
 export function subscriptionCoreClaudeProductModelIds(upstreamModelId: string): string[] {
   return SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES.map((prefix) => `${prefix}/${upstreamModelId}`);
+}
+
+/**
+ * The workspace-policy provider ids a Claude product model must all be
+ * allowed under: its own prefix plus the organization id its connections
+ * carry (`workspace-claude-subscription` models need both), the
+ * organization id alone otherwise.
+ */
+export function subscriptionCoreClaudeModelPolicyProviderIds(modelId: string): readonly string[] {
+  const prefix = modelId.slice(0, Math.max(0, modelId.indexOf("/")));
+  const organization = SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0];
+  return prefix !== organization &&
+    (SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES as readonly string[]).includes(prefix)
+    ? [prefix, organization]
+    : [organization];
 }
 
 const ACCOUNT_WINDOWS = new Set(["five_hour", "seven_day"]);

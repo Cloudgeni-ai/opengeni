@@ -29,6 +29,7 @@ import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
 import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
@@ -89,7 +90,7 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { sessionAgentsSignal } from "@opengeni/react/session-agents-model";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   BotIcon,
   BugIcon,
@@ -156,6 +157,7 @@ import {
   catalogConnectionAccountSelection,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { useSessionRouteMemory } from "@/lib/last-session-memory";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { currentModelRecovery } from "@/lib/model-recovery";
@@ -418,6 +420,26 @@ export function SessionRoute({
   } = useSession(sessionId, {
     events,
     beginRead: beginSessionDetailRead,
+  });
+  // "Back to sessions" from Settings reopens this session (see last-session-memory).
+  const restoredSessionId = useRouterState({
+    select: (state) => state.location.state.restoredSessionId,
+  });
+  const leaveRestoredSession = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions",
+      params: { workspaceId },
+      replace: true,
+    });
+  }, [navigate, workspaceId]);
+  const leavingRestoredSession = useSessionRouteMemory({
+    subjectId: context.accessContext.subjectId,
+    workspaceId,
+    sessionId,
+    openedSessionId: fetchedSession?.id ?? null,
+    loadError,
+    restoredSessionId,
+    leave: leaveRestoredSession,
   });
   useEffect(
     () => () =>
@@ -1183,6 +1205,7 @@ export function SessionRoute({
   // A freshly sent creation handoff already has visible conversation truth.
   // Never paint the genesis message or mount a second loading treatment first.
   if (!session || !opened) {
+    if (leavingRestoredSession) return <LoadingPanel />;
     if (!session && loadError) {
       return (
         <Suspense fallback={<LoadingPanel />}>
@@ -2518,11 +2541,11 @@ function SessionChatPane(props: {
     retryOperation?.failureEventId === props.failure?.failureEventId ? retryOperation : null;
   // A failure before a logical turn exists cannot preserve an original intent.
   // Prefer detail evidence; paged timeline absence is not positive eligibility.
-  const retryHasRetainedTurn = Boolean(
+  const failureTurnId =
     props.session.failureDiagnostics?.eventId === props.failure?.failureEventId
       ? props.session.failureDiagnostics?.turnId
-      : props.events.find((event) => event.id === props.failure?.failureEventId)?.turnId,
-  );
+      : props.events.find((event) => event.id === props.failure?.failureEventId)?.turnId;
+  const retryHasRetainedTurn = Boolean(failureTurnId);
   const retryFailedSession = useMemo(
     () =>
       createFailedSessionRetry(
@@ -2959,6 +2982,10 @@ function SessionChatPane(props: {
           <LazyFailedSessionBanner
             key={props.session.id}
             failure={props.failure}
+            shownInTimeline={timelineShowsFailure(timelineWithStartup, {
+              failureEventId: props.failure.failureEventId,
+              turnId: failureTurnId,
+            })}
             analyticsKey={
               props.failure.failureEventId ??
               `${props.session.id}:${props.failure.failedAt ?? "unknown"}`

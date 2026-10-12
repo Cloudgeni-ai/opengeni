@@ -249,6 +249,91 @@ describe("context compaction rendering", () => {
     );
     await r.unmount();
   });
+
+  test("a provider-rejected compaction stays short and keeps diagnostics behind Details", async () => {
+    const recorded =
+      "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+    const r = await renderComponent(
+      <MessageTimeline
+        turnSummary={{ rolling: true }}
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("turn.started", {}),
+          timelineEvent("turn.startup.phase.started", { phase: "model_preparation" }),
+          timelineEvent("session.context.compaction.started", { trigger: "auto" }),
+          timelineEvent("session.context.compaction.skipped", {
+            trigger: "auto",
+            reason: "summarization_failed",
+            providerRejection: {
+              httpStatus: 400,
+              type: "invalid_request_error",
+              code: "missing_required_parameter",
+              param: "input[116].status",
+              requestId: "req_7f3a",
+            },
+          }),
+          timelineEvent("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 4_000,
+            expectedTransition: false,
+          }),
+          timelineEvent("turn.failed", {
+            error: recorded,
+            code: "context_compaction_failed",
+            retryable: false,
+            recovery: "user_message",
+            compacted: false,
+          }),
+        ]}
+        status="failed"
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Couldn’t compact conversation history"),
+      );
+      expect(status?.textContent).toContain("Couldn’t compact conversation history · Auto");
+      expect(status?.textContent).toContain(
+        "Chat history is unchanged. If your next message fails too, start a new session.",
+      );
+      // One failure, one Details control: no separate notice repeats it.
+      expect(
+        Array.from(r.container.querySelectorAll("button, summary")).filter(
+          (control) => control.textContent?.trim() === "Details",
+        ),
+      ).toHaveLength(1);
+      // No raw provider text or identifiers in the visible summary.
+      const panel = r.container.querySelector<HTMLElement>("[data-og-compaction-details]");
+      expect(panel?.hidden).toBe(true);
+      expect(status?.textContent).not.toContain("input[116].status");
+      expect(status?.textContent).not.toContain("HTTP 400");
+      // The turn chip names the outcome; the recorded text is only a hover title.
+      const reason = Array.from(r.container.querySelectorAll<HTMLElement>("[title]")).find(
+        (element) => element.title === recorded,
+      );
+      expect(reason?.textContent).toContain("Couldn’t compact conversation history");
+      expect(r.container.textContent).not.toContain("Missing required parameter");
+
+      const toggle = Array.from(status?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent === "Details",
+      );
+      expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+      expect(toggle?.getAttribute("aria-controls")).toBe(panel?.id ?? "missing");
+      await act(async () => toggle?.click());
+      await flush();
+      expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+      expect(panel?.hidden).toBe(false);
+      expect(panel?.textContent).toContain(
+        "HTTP 400 · invalid_request_error · missing_required_parameter",
+      );
+      expect(panel?.textContent).toContain("input[116].status");
+      expect(panel?.textContent).toContain("req_7f3a");
+      expect(panel?.textContent).toContain("rejects this request the same way");
+    } finally {
+      await r.unmount();
+    }
+  });
 });
 
 describe("structured human-input history", () => {

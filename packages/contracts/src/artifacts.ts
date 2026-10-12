@@ -129,6 +129,13 @@ export const WorkspaceArtifactVersion = z.object({
 });
 export type WorkspaceArtifactVersion = z.infer<typeof WorkspaceArtifactVersion>;
 
+/**
+ * Who can see a Site, in the same words as a chat or a schedule: everyone in
+ * the workspace, or only its owner ("Only me").
+ */
+export const WorkspaceArtifactVisibility = z.enum(["private", "workspace"]);
+export type WorkspaceArtifactVisibility = z.infer<typeof WorkspaceArtifactVisibility>;
+
 export const WorkspaceArtifact = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -137,6 +144,10 @@ export const WorkspaceArtifact = z.object({
   title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
   description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable(),
   status: WorkspaceArtifactStatus,
+  /** Absent from older servers, where every Site is visible to the workspace. */
+  visibility: WorkspaceArtifactVisibility.default("workspace"),
+  /** The person the Site belongs to; only they can change its audience. */
+  ownerSubjectId: z.string().min(1).max(1024).nullable().default(null),
   currentVersion: WorkspaceArtifactVersion.nullable(),
   createdBySubjectId: z.string().min(1).max(1024),
   createdAt: z.string().datetime({ offset: true }),
@@ -222,6 +233,8 @@ export const CreateWorkspaceArtifactRequest = z
     uploadId: z.string().uuid().optional(),
     source: WorkspaceArtifactSourceBundle.optional(),
     requestedTools: WorkspaceArtifactRequestedTools.optional(),
+    /** Who can see the new Site. Omitted: the whole workspace. */
+    visibility: WorkspaceArtifactVisibility.optional(),
     idempotencyKey: z.string().trim().min(1).max(200),
   })
   .refine((value) => (value.html !== undefined) !== (value.uploadId !== undefined), {
@@ -268,6 +281,23 @@ export const SetWorkspaceArtifactStatusRequest = z.object({
   idempotencyKey: z.string().trim().min(1).max(200),
 });
 export type SetWorkspaceArtifactStatusRequest = z.infer<typeof SetWorkspaceArtifactStatusRequest>;
+
+/** Change who can see a Site. Only its owner can. */
+export const UpdateWorkspaceArtifactVisibilityRequest = z
+  .object({
+    visibility: WorkspaceArtifactVisibility,
+  })
+  .strict();
+export type UpdateWorkspaceArtifactVisibilityRequest = z.infer<
+  typeof UpdateWorkspaceArtifactVisibilityRequest
+>;
+
+export const UpdateWorkspaceArtifactVisibilityResponse = z.object({
+  artifact: WorkspaceArtifact,
+});
+export type UpdateWorkspaceArtifactVisibilityResponse = z.infer<
+  typeof UpdateWorkspaceArtifactVisibilityResponse
+>;
 
 export const WorkspaceArtifactMutationResponse = z.object({
   artifact: WorkspaceArtifact,

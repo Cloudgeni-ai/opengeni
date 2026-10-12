@@ -9,6 +9,7 @@ import {
   grantWorkspaceAccess,
   initializeSessionStartAtomically,
   listInboxItems,
+  listSessionEvents,
   setMemberNotificationsAllowed,
   type DbClient,
   type InboxItemRow,
@@ -156,11 +157,19 @@ describe("notifying another member of the workspace", () => {
 
   test("a session that works for no person cannot notify members", async () => {
     if (!shared) return;
-    const { scope, bea, notify } = await setup({ creator: "service:nightly" });
+    const { scope, bea, session, notify } = await setup({ creator: "service:nightly" });
     await setMemberNotificationsAllowed(client.db, { ...scope, subjectId: bea, allowed: true });
     await expect(notify({ title: "Hi", recipient: "Bea" })).rejects.toThrow(
       "This session works for no person",
     );
+    // Owner-less notifications are still recorded, saying why nobody was notified.
+    expect(await notify({ title: "Ready", key: "ready" })).toMatchObject({ delivered: false });
+    const posted = (await listSessionEvents(client.db, scope.workspaceId, session.id)).filter(
+      (event) => event.type === "session.notification.posted",
+    );
+    expect(posted.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ key: "ready", undeliveredReason: "no_human_recipient" }),
+    ]);
   });
 
   test("once allowed, it reaches the member, says who sent it, and keeps per-person copies", async () => {

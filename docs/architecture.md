@@ -536,6 +536,9 @@ child Codemode authority is transient/attempt-bound.
 
 Foreground output releases once its exact tool-result receipt, output event and
 journal are durable, independently of turn completion. Other owners retain output.
+Background output-release probes and claims park disconnected runners without
+changing custody. Reconnect restores eligibility; proven retirement remains due
+for final settlement.
 [Streaming exec](connected-machines.md#streaming-exec-op-stream).
 
 Machine paths are session-specific. Offline operations fail typed; reasoning continues.
@@ -1473,7 +1476,9 @@ inventory; execution pickers retain its active-only default. Shared accounts are
 current-workspace scoped, while personal accounts use their existing same-owner,
 same-organization authority across origin workspaces.
 
-Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
+Connector permission management, including host-attached session MCP servers
+(`/v1/workspaces/:workspaceId/session-mcp-tool-permissions`):
+`packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
 
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
@@ -1523,8 +1528,9 @@ approval display field, and share the permanent operation tombstone namespace
 with v1. One per-request live fence (`workspace-tool-target-fence.ts`) covers
 the caller, exact pinned Site, selected route and live action policy; each
 physical provider request evaluates it once after awaited native credential
-authorization, reading only the selected rows (a pinned Site version once) in
-bounded transactions that start no read after the evaluation's deadline.
+authorization, reading only the selected rows (a pinned Site once, as the
+caller may see it) in bounded transactions that start no read after the
+evaluation's deadline.
 Legacy HTTP calls may rebuild only the
 target identity's connector when their complete catalog digest has a
 content-free per-process attestation for the same caller scope and the live
@@ -2017,6 +2023,12 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
+The migration ledger keys receipts by full SQL filename, not ordinal. Published
+SQL names and bytes remain immutable, including historical duplicate ordinals.
+The source guard permits a duplicate group already present together on one
+protected base (`origin/main` or `origin/production`, not a custom comparison
+base); independent cross-branch allocations and new collisions still
+fail. See [migration delivery rules](../AGENTS.md#deployment-work-notes).
 Managed PostgreSQL may preinstall pgvector for restricted migrators. The
 explicit initial-migration opt-in verifies its public extension-owned type;
 see [deployment](deployment.md#database-identities-and-runtime-posture).

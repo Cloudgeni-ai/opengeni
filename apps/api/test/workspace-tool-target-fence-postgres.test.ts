@@ -353,6 +353,7 @@ async function organizationCaller(
   return {
     keyId: key.id,
     app,
+    post,
     resolve: (replica: ReturnType<typeof app>) => send(replica, "resolve"),
     invoke: (replica: ReturnType<typeof app>) => send(replica, "invoke"),
     manifest: (replica: ReturnType<typeof app>, body: unknown) => post(replica, "manifest", body),
@@ -413,6 +414,8 @@ async function siteFixture(fixture: Awaited<ReturnType<typeof serviceFixture>>, 
     slug: `target-fence-site-${artifactId.slice(0, 8)}`,
     title: "Target fence Site",
     description: null,
+    visibility: "workspace_shared",
+    ownerSubjectId: fixture.grant.subjectId,
     contentKey: `workspace-artifacts/${fixture.grant.workspaceId}/${artifactId}/index.html`,
     contentSha256: "d".repeat(64),
     sizeBytes: 64,
@@ -1018,6 +1021,42 @@ describe("targeted tool fence on PostgreSQL", () => {
       provider.server.close();
     }
   }, 120_000);
+
+  test("a Site its owner turns Only me stops a caller who can no longer see it at any boundary", async () => {
+    if (!shared) return;
+    const provider = startProvider();
+    try {
+      for (const boundary of ["initialize", "notifications/initialized", "tools/list"]) {
+        const fixture = await serviceFixture(provider);
+        const site = await siteFixture(fixture, 0);
+        const replica = fixture.app();
+        const invoke = () =>
+          fixture.post(replica, "invoke", {
+            target: { identity: fixture.identity },
+            siteArtifactId: site.siteArtifactId,
+            siteVersionId: site.siteVersionId,
+            operationId: crypto.randomUUID(),
+            arguments: { query: "vector(1)" },
+          });
+        // Shared with the workspace, the organization key may call its tool.
+        expect((await invoke()).status).toBe(200);
+        provider.reset();
+        // Only me for its owner: a key reads Sites as no person.
+        provider.at(
+          boundary,
+          async () =>
+            await shared!.admin`update workspace_artifacts set visibility = 'user_private'
+              where id = ${site.siteArtifactId}::uuid`,
+        );
+        const response = await invoke();
+        expect([boundary, response.status]).toEqual([boundary, 403]);
+        expect(provider.afterChange().filter((method) => method !== "-")).toEqual([]);
+        expect(provider.server.calls).toHaveLength(0);
+      }
+    } finally {
+      provider.server.close();
+    }
+  }, 300_000);
 
   test("a manifest missing a requested tool because authority could not be read is a 503, never a partial list", async () => {
     if (!shared) return;

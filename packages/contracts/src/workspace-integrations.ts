@@ -1,5 +1,12 @@
 import { z } from "zod";
-import type { TurnInitiator, TurnInitiatorContext } from "./index";
+import {
+  NotificationFact,
+  NotificationLink,
+  NotificationUndeliveredReason,
+  NotificationUrgency,
+  type TurnInitiator,
+  type TurnInitiatorContext,
+} from "./index";
 
 import {
   OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
@@ -198,8 +205,8 @@ export type ListOrganizationWebhookDeliveriesResponse = z.infer<
 >;
 
 /**
- * The thin body POSTed to a webhook endpoint. It identifies what changed;
- * receivers read details through the authenticated API.
+ * The body POSTed to a webhook endpoint. Lifecycle events identify what
+ * changed; notification events also include their bounded display content.
  */
 export const SessionWorkspaceWebhookEvent = z.object({
   lane: z.enum(["organization", "workspace"]).default("workspace"),
@@ -219,7 +226,25 @@ export const SessionWorkspaceWebhookEvent = z.object({
   sequence: z.number().int(),
   occurredAt: z.string(),
   initiatingHuman: InitiatingHuman.nullable().optional(),
-  data: z.object({ status: z.string().optional(), reason: z.string().optional() }).passthrough(),
+  data: z
+    .object({
+      status: z.string().optional(),
+      reason: z.string().optional(),
+      /** Notification fields are optional for pre-upgrade thin deliveries. */
+      key: z.string().optional(),
+      title: z.string().optional(),
+      subtitle: z.string().optional(),
+      body: z.string().optional(),
+      facts: z.array(z.lazy(() => NotificationFact)).optional(),
+      link: z.lazy(() => NotificationLink).optional(),
+      urgency: z.lazy(() => NotificationUrgency).optional(),
+      replaced: z.boolean().optional(),
+      recipientSubjectId: z.string().optional(),
+      sender: z.object({ subjectId: z.string(), label: z.string() }).optional(),
+      /** Present when Opengeni notified no one, so the receiver may deliver it. */
+      undeliveredReason: z.lazy(() => NotificationUndeliveredReason).optional(),
+    })
+    .passthrough(),
 });
 export type SessionWorkspaceWebhookEvent = z.infer<typeof SessionWorkspaceWebhookEvent>;
 /** Workspace allowance events have no synthetic session or turn identity.

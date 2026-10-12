@@ -173,10 +173,15 @@ test("exact API finds associations beyond 64 editable entries and five Site page
   expect(await listEditableArtifactIdsForSession(client.db, f.scope, f.session.id)).not.toContain(
     f.ids[69],
   );
-  const page = await listWorkspaceArtifacts(client.db, f.scope.workspaceId, {
-    sourceSessionId: f.session.id,
-    limit: 100,
-  });
+  const page = await listWorkspaceArtifacts(
+    client.db,
+    f.scope.workspaceId,
+    { subjectId: null },
+    {
+      sourceSessionId: f.session.id,
+      limit: 100,
+    },
+  );
   expect(page.artifacts.map((artifact) => artifact.id)).not.toContain(f.siteIds[500]);
   const editable = await f.request(f.ids[69]!, f.session.id, "editable");
   expect(editable.status, await editable.clone().text()).toBe(200);

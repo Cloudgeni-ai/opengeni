@@ -23,6 +23,7 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
+import { presentTurnFailureText } from "./compaction-copy";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -1473,14 +1474,43 @@ export function buildTimeline(
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
+        // A compaction failure names its outcome and keeps the recorded
+        // provider text behind Details. The turn's own failed compaction
+        // landmark is the one place that shows it: it receives the recorded
+        // text, and no separate notice repeats it.
+        // Retry reopens the same logical turn, so only a landmark from this
+        // attempt (after the turn's previous settlement) can own this failure.
+        const failure = allowance ? null : presentTurnFailureText(failureText);
+        let landmarkIndex = -1;
+        if (failure?.detail !== undefined && turnId !== null) {
+          // Skip the turn-end just pushed for this failure.
+          for (let index = items.length - 2; index >= 0; index -= 1) {
+            const item = items[index];
+            if (item?.kind === "turn-end" && item.turnId === turnId) break;
+            if (
+              item?.kind === "context-compaction" &&
+              item.turnId === turnId &&
+              item.phase === "skipped" &&
+              item.skipReason === "summarization_failed"
+            ) {
+              landmarkIndex = index;
+              break;
+            }
+          }
+        }
+        const landmark = landmarkIndex >= 0 ? items[landmarkIndex] : undefined;
+        if (landmark?.kind === "context-compaction" && failure?.detail !== undefined) {
+          items[landmarkIndex] = { ...landmark, failureDetail: failure.detail };
+        }
         if (allowance) {
           allowanceNotice(event, turnId);
-        } else if (!hadActivity) {
+        } else if (!hadActivity && !landmark) {
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: failureText ?? "The turn failed.",
+            text: failure?.summary ?? "The turn failed.",
+            ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
             occurredAt: event.occurredAt,
           });
         }
@@ -2232,6 +2262,8 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         label: live.capacityWait.label,
         since: live.occurredAt,
         detail: live.capacityWait.detail,
+        // Its span is not work and may last until a quota resets: no clock.
+        untimed: true,
       };
     }
     const pausedMs = (capacityPauses.get(key) ?? []).reduce((total, pause) => {
@@ -3559,8 +3591,11 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
 const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
 
 /**
- * A capacity wait reads as "Limit reached" with one plain secondary line. Only
- * a wait that time alone will not end keeps its recorded, actionable reason.
+ * A quota or capacity wait reads as "Usage limit reached" with one plain line
+ * of guidance. It never promises that the work continues by itself: the
+ * reader decides whether to wait for the quota to reset or to switch. Only a
+ * wait that a person must resolve (reconnect, re-enable, choose another
+ * account) keeps its recorded, actionable reason and is not labelled a limit.
  */
 function capacityWaitPresentation(
   type: string,
@@ -3580,12 +3615,17 @@ function capacityWaitPresentation(
     const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
     return { turnId, label: "Waiting", detail, text: detail };
   }
-  const detail =
-    payload.waitReason === "pinned_account_unavailable"
-      ? "Continues automatically when the chosen account is available."
-      : "Continues automatically when capacity is available.";
-  return { turnId, label: "Limit reached", detail, text: `Limit reached. ${detail}` };
+  return {
+    turnId,
+    label: CAPACITY_LIMIT_LABEL,
+    detail: CAPACITY_LIMIT_DETAIL,
+    text: `${CAPACITY_LIMIT_LABEL}. ${CAPACITY_LIMIT_DETAIL}`,
+  };
 }
+
+const CAPACITY_LIMIT_LABEL = "Usage limit reached";
+const CAPACITY_LIMIT_DETAIL =
+  "Try again after your quota resets, or switch to another model or provider.";
 
 /** Lifecycle evidence that a capacity wait is over. */
 function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {

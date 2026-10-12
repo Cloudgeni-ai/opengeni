@@ -5,6 +5,7 @@ import {
   createDb,
   createEnrollment,
   createSession,
+  sandboxMaintenanceDue,
   settleConnectedMachineSessionBackgroundCommand,
 } from "@opengeni/db";
 import { ErrorCode, ExecRequest, OpAck } from "@opengeni/agent-proto";
@@ -574,4 +575,140 @@ test("saved output is claimed before a full batch of older uncaptured results", 
   await shared.admin`update session_background_commands set
     reconcile_after=now()+interval '1 day',reconcile_claim_id=null,reconcile_claimed_at=null
     where session_id in (${olderSessionId},${fixture.identity.sessionId})`;
+});
+
+/** No runner answers on the command's exact address, as NATS reports it. */
+const noRunnerRpc = (): ControlRpc & { requests: () => number } => {
+  let requests = 0;
+  return {
+    requests: () => requests,
+    request: async () => {
+      requests++;
+      throw new SelfhostedControlError({
+        message: "no responders",
+        code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+        agentOffline: true,
+        neverSent: true,
+        reason: "agent_offline",
+        retryable: false,
+      });
+    },
+  };
+};
+const parkSession = async (sessionId: string) =>
+  shared.admin`update session_background_commands set
+    reconcile_after=now()+interval '1 day',reconcile_claim_id=null,reconcile_claimed_at=null
+    where session_id=${sessionId}`;
+
+test("output whose runner was retired settles once instead of retrying forever", async () => {
+  // Uncaptured output: the runner took it with it, so it is recorded as missing.
+  // The retirement rules are the running-command claim's: replaced, revoked or
+  // cleanly stopped. A runner that is merely offline may come back.
+  for (const change of ["replaced", "revoked", "stopped", "offline", "crashed"] as const) {
+    const fixture = await terminalOutputFixture();
+    const enrollmentId = fixture.identity.enrollmentId;
+    if (change === "replaced") {
+      // A different runner process holds the connection, live or not.
+      await shared.admin`update enrollments set connection_instance_id='successor',connection_lease_expires_at=now()-interval '1 minute' where id=${enrollmentId}`;
+    } else if (change === "revoked") {
+      await shared.admin`update enrollments set status='revoked',revoked_at=now(),connection_instance_id=null,connection_lease_expires_at=null where id=${enrollmentId}`;
+    } else if (change === "stopped") {
+      await shared.admin`update enrollments set connection_instance_id=null,connection_lease_expires_at=null,went_offline_at=now(),went_offline_reason='GOING_OFFLINE_REASON_USER_STOP' where id=${enrollmentId}`;
+    } else if (change === "offline") {
+      await shared.admin`update enrollments set connection_lease_expires_at=now()-interval '1 minute' where id=${enrollmentId}`;
+    } else {
+      // Gone without saying why: it may be the same process coming back.
+      await shared.admin`update enrollments set connection_instance_id=null,connection_lease_expires_at=null,went_offline_at=now(),went_offline_reason=null where id=${enrollmentId}`;
+    }
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, noRunnerRpc());
+    const row = await fixture.stored();
+    expect(row.output_consumed_at).toBeNull();
+    expect(row.output_release_observed_at).toBeNull();
+    if (change === "offline" || change === "crashed") {
+      expect(row.output_unavailable_at).toBeNull();
+      expect(row.reconcile_attempts).toBe(0);
+    } else {
+      expect(row.output_unavailable_at).toBeInstanceOf(Date);
+      expect(row.last_reconcile_outcome).toBe("output_unavailable");
+    }
+    await parkSession(fixture.identity.sessionId);
+  }
+
+  // Captured output whose final acknowledgement never reached the old runner:
+  // nothing is retained any more, so the release is complete.
+  const fixture = await terminalOutputFixture();
+  const publish = fixture.connection.publish;
+  fixture.connection.publish = (subject, payload) => {
+    if (OpAck.decode(payload).final) throw new Error("synthetic publisher failure");
+    publish(subject, payload);
+  };
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  const captured = await fixture.stored();
+  expect(captured.output_consumed_at).toBeInstanceOf(Date);
+  expect(captured.last_reconcile_outcome).toBe("output_retry");
+  await fixture.due();
+  const rpc = noRunnerRpc();
+  // Still the machine's live runner: silence alone keeps the retry.
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+  expect((await fixture.stored()).last_reconcile_outcome).toBe("output_retry");
+  expect(rpc.requests()).toBe(1);
+  await fixture.due();
+  await shared.admin`update enrollments set connection_instance_id='successor' where id=${fixture.identity.enrollmentId}`;
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+  const released = await fixture.stored();
+  expect(released.output_release_observed_at).toBeInstanceOf(Date);
+  expect(released.output_unavailable_at).toBeNull();
+  expect(released.last_reconcile_outcome).toBe("output_released");
+  expect(released.output_consumed_at.getTime()).toBe(captured.output_consumed_at.getTime());
+  await parkSession(fixture.identity.sessionId);
+});
+
+test("offline output is neither due nor claimed until reconnect, without changing custody", async () => {
+  for (const captured of [false, true]) {
+    const fixture = await terminalOutputFixture();
+    if (captured) {
+      const publish = fixture.connection.publish;
+      fixture.connection.publish = (subject, payload) => {
+        if (OpAck.decode(payload).final) throw new Error("synthetic publisher failure");
+        publish(subject, payload);
+      };
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+      fixture.connection.publish = publish;
+      await fixture.due();
+    }
+    const before = await fixture.stored();
+    const due = () => sandboxMaintenanceDue(client.db, { checkpointArtifactClaimTtlMs: 900000 });
+    // Output is independent of completion notifications. Drain their outbox
+    // so this probe measures only the remaining output obligation.
+    await shared.admin`update session_system_update_outbox set status='delivered',delivered_at=now() where status='pending'`;
+    for (const connection of ["expired", "null", "goodbye"] as const) {
+      await shared.admin`update enrollments set
+        connection_instance_id=${connection === "null" ? null : "launch"},
+        connection_lease_expires_at=${connection === "null" ? null : connection === "expired" ? new Date(0) : new Date(Date.now() + 3600000)},
+        went_offline_at=${connection === "goodbye" ? new Date() : null},
+        went_offline_reason=null where id=${fixture.identity.enrollmentId}`;
+      expect(await due()).toBe(false);
+      const rpc = noRunnerRpc();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+      expect(rpc.requests()).toBe(0);
+      const after = await fixture.stored();
+      expect(after.reconcile_attempts).toBe(before.reconcile_attempts);
+      expect(after.output_consumed_at).toEqual(before.output_consumed_at);
+      expect(after.output_exit_seq).toBe(before.output_exit_seq);
+      expect(after.output_release_observed_at).toBeNull();
+      expect(after.output_unavailable_at).toBeNull();
+    }
+    await shared.admin`update enrollments set connection_instance_id='launch',
+      connection_lease_expires_at=now()+interval '1 hour',went_offline_at=null, went_offline_reason=null
+      where id=${fixture.identity.enrollmentId}`;
+    expect(await due()).toBe(true);
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    expect((await fixture.stored()).output_consumed_at).toBeInstanceOf(Date);
+    await fixture.due();
+    fixture.runner.lostOps.add(fixture.identity.opId);
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    expect((await fixture.stored()).output_release_observed_at).toBeInstanceOf(Date);
+    expect(await due()).toBe(false);
+    await parkSession(fixture.identity.sessionId);
+  }
 });
