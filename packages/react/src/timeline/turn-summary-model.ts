@@ -99,6 +99,11 @@ export type TurnSummaryStatus = Readonly<{
   durationMs?: number | undefined;
   /** Live step preview under the row while it is collapsed. */
   preview?: ReactNode;
+  /**
+   * Guidance under the row that stays visible whether the fold is open or
+   * closed, e.g. what a wait needs from the reader.
+   */
+  guidance?: ReactNode;
 }>;
 
 /** Elapsed wall time with seconds below an hour: "14s", "2m 14s", "1h 05m". */
