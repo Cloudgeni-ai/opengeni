@@ -41,6 +41,7 @@ import {
   coreWorkspaceSettings,
   requireSubscriptionCoreRoute,
   subscriptionCoreRoute,
+  subscriptionCoreMaintenanceError,
   type SubscriptionPoolCore,
 } from "./subscription-pool-core";
 const allocatorBody = SubscriptionAccountToggleRequest;
@@ -74,9 +75,7 @@ export type SubscriptionPoolAccount = XaiSubscriptionAccountMetadata;
  */
 function deletedLegacyRepository(displayName: string): PoolRepository {
   const deleted = async (): Promise<never> => {
-    throw new HTTPException(503, {
-      message: `${displayName} subscriptions are served only by the shared subscription core`,
-    });
+    throw subscriptionCoreMaintenanceError(displayName);
   };
   return {
     listOrganizationSubscriptions: deleted,

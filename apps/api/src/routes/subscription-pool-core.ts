@@ -107,13 +107,22 @@ export async function requireSubscriptionCoreRoute(
 ): Promise<"core"> {
   const route = await subscriptionCoreRoute(deps, provider, displayName, accountId);
   if (route !== "core") {
-    throw typedHttpError(
-      503,
-      SUBSCRIPTION_CORE_CUTOVER_DISABLED,
-      `${displayName} subscriptions are paused for maintenance in this organization`,
-    );
+    // Without a receipt the reader returns before resolving the
+    // organization; resolve it here so authorization runs first, as it does
+    // under maintenance, and a stranger learns nothing about the provider.
+    await accountId();
+    throw subscriptionCoreMaintenanceError(displayName);
   }
   return route;
+}
+
+/** The typed refusal of a core-only provider that is not on `core`. */
+export function subscriptionCoreMaintenanceError(displayName: string) {
+  return typedHttpError(
+    503,
+    SUBSCRIPTION_CORE_CUTOVER_DISABLED,
+    `${displayName} subscriptions are paused for maintenance in this organization`,
+  );
 }
 
 /** Deliver a committed change's wake; never fails the request (waiters recheck). */
