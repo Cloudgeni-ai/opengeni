@@ -2898,6 +2898,7 @@ export function buildOpenGeniAgent(
     defaults: !hostSuppliedSkillCatalog,
     editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
     sites: !hostSuppliedSkillCatalog && filesystemAvailable,
+    secrets: !hostSuppliedSkillCatalog && options.agentConfig?.capabilities.secrets === true,
     videoGeneration: !hostSuppliedSkillCatalog && Boolean(options.videoGeneration),
   });
   const skillCatalog = hostSuppliedSkillCatalog
