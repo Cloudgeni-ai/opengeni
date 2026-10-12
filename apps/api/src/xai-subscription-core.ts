@@ -63,9 +63,14 @@ export type XaiStatusPayload<Model> = {
  *
  * The viewer's own personal connections count as connected wherever the
  * owner-only reader shows them. Only in the viewer's own Personal workspace,
- * and only without a shared primary, is a personal connection the effective
- * account (legacy scope `user`), validated by one live usage read as its
- * owner there. Another person's personal connections are never listed.
+ * only without a shared primary, and only for a caller who passes the
+ * owner check of a private account (`ownerVerified`: the verified owning
+ * person with `connections:write`, never a read-only key or an agent), is a
+ * personal connection the effective account (legacy scope `user`),
+ * validated by one live usage read as its owner there; that read also
+ * applies the organization's personal-connections rule (0729). Any other
+ * caller gets the stored count only, with no live read and no wake.
+ * Another person's personal connections are never listed.
  */
 export async function readXaiCoreStatus<Model>(
   deps: { db: Database; settings: Settings },
@@ -74,6 +79,8 @@ export async function readXaiCoreStatus<Model>(
     workspaceId: string;
     subjectId: string;
     models: () => Promise<Model[]>;
+    /** Asked only before a live personal read; false refuses it. */
+    ownerVerified: () => Promise<boolean>;
     fetch?: unknown;
   },
 ): Promise<XaiStatusPayload<Model> | null> {
@@ -104,7 +111,7 @@ export async function readXaiCoreStatus<Model>(
   const ownActive = personal.ownPersonalWorkspace
     ? personal.connections.find((connection) => connection.status === "active")
     : undefined;
-  if (!active && ownActive) {
+  if (!active && ownActive && (await input.ownerVerified())) {
     const probe = await subscriptionCoreAdministeredConnections(
       SUBSCRIPTION_CORE_XAI,
     ).probeSubscriptionCoreAdministeredConnectionUsage(

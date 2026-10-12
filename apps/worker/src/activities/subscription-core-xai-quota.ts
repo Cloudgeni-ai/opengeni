@@ -7,27 +7,9 @@ import {
   type Database,
   type SubscriptionCoreTurnIdentity,
 } from "@opengeni/db";
-import { subscriptionPersonalAuthorityForProviderV2 } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 
 const CORE_SUBSCRIPTION_SERVICE_SUBJECT = "service:subscription-core";
-
-/**
- * The person whose own SuperGrok connections a core turn may use: the
- * session owner, only when the turn's accepted authority carries their
- * SuperGrok personal authority for exactly that membership. Null for any
- * other turn (shared capacity only).
- */
-export function xaiCorePersonalSubject(identity: SubscriptionCoreTurnIdentity): string | null {
-  const authority = subscriptionPersonalAuthorityForProviderV2(
-    identity.acceptedAuthorityV2,
-    SUBSCRIPTION_CORE_XAI_PROVIDER,
-  );
-  if (!authority || !identity.sessionOwnerSubjectId) return null;
-  return authority.ownerMembershipId === identity.sessionOwnerMembershipId
-    ? identity.sessionOwnerSubjectId
-    : null;
-}
 
 /**
  * After the SuperGrok receipt: one billing probe per exhausted connection
@@ -35,10 +17,13 @@ export function xaiCorePersonalSubject(identity: SubscriptionCoreTurnIdentity): 
  *
  * - Shared connections in this workspace's explicit context, as the core's
  *   service subject.
- * - With `personalSubjectId` (a turn carrying that person's SuperGrok
- *   personal authority): that person's own personal connections, as the
+ * - With `personalTurn` (the exact accepted turn being placed or waiting):
+ *   only the personal connections placement itself would let that turn use
+ *   (its initiating human is the session owner, a private session or the
+ *   owner's Personal workspace, the frozen v2 entry at the current
+ *   authority generation, personal connections allowed), each read as the
  *   owner in their own Personal workspace (the administered
- *   `personal_owner` read).
+ *   `personal_owner` read). Any other turn reads no personal connection.
  *
  * A recovery wakes the organization's SuperGrok core waiters: a shared
  * connection can serve every workspace it reaches, and an owner's parked
@@ -50,7 +35,7 @@ export async function refreshExhaustedXaiCoreQuota(input: {
   settings: Settings;
   accountId: string;
   workspaceId: string;
-  personalSubjectId?: string | null;
+  personalTurn?: SubscriptionCoreTurnIdentity | null;
   fetch?: typeof fetch;
 }): Promise<void> {
   const deps = input.fetch ? { fetchImpl: input.fetch } : {};
@@ -74,15 +59,15 @@ export async function refreshExhaustedXaiCoreQuota(input: {
   } catch {
     // The stored shared state stands.
   }
-  if (input.personalSubjectId) {
+  if (input.personalTurn) {
     try {
       recovered.push(
         ...(await subscriptionCorePersonalConnections(
           SUBSCRIPTION_CORE_XAI,
-        ).refreshExhaustedSubscriptionCorePersonalQuota(
+        ).refreshExhaustedSubscriptionCoreTurnPersonalQuota(
           input.db,
           input.settings,
-          { accountId: input.accountId, subjectId: input.personalSubjectId },
+          input.personalTurn,
           deps,
         )),
       );

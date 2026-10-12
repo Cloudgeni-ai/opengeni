@@ -729,6 +729,23 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
       models: supergrokModels,
+      // A live read of a personal account, as the Claude core usage route
+      // gates it: the verified owning person, in their Personal workspace.
+      ownerVerified: async () => {
+        try {
+          const owner = await requirePrivateSubscriptionHuman(
+            c,
+            deps,
+            workspaceId,
+            "SuperGrok",
+            "personal_workspace",
+          );
+          return owner.accountId === grant.accountId && owner.subjectId === grant.subjectId;
+        } catch (error) {
+          if (error instanceof HTTPException) return false;
+          throw error;
+        }
+      },
       ...(deps.xaiFetch ? { fetch: deps.xaiFetch } : {}),
     });
     if (coreStatus) return c.json(coreStatus);

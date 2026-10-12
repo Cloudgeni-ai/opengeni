@@ -294,6 +294,7 @@ describe("SuperGrok realtime by route", () => {
 });
 
 describe("SuperGrok status by route", () => {
+  let ownerVerified = true;
   const read = () =>
     readXaiCoreStatus(
       { db: {} as never, settings },
@@ -302,6 +303,10 @@ describe("SuperGrok status by route", () => {
         workspaceId: WORKSPACE,
         subjectId: "user:caller",
         models: async () => ["model"],
+        ownerVerified: async () => {
+          calls.push("owner-check");
+          return ownerVerified;
+        },
       },
     );
 
@@ -358,6 +363,7 @@ describe("SuperGrok status by route", () => {
     expect(calls).toEqual([
       "route:xai",
       "personal-rows:user:caller",
+      "owner-check",
       `usage:personal_owner:user:caller:${PERSONAL}`,
     ]);
     // A live reading that ends a stored exhaustion wakes the organization's
@@ -370,12 +376,21 @@ describe("SuperGrok status by route", () => {
     expect(await read()).toMatchObject({ connected: true, valid: true });
     wakeFails = false;
     probe = { kind: "read" };
+    // A caller who fails the owner check (a read-only key, an agent): the
+    // stored count only, with no live read and no wake.
+    ownerVerified = false;
+    probe = { kind: "read", recovered: true } as typeof probe;
+    calls = [];
+    expect(await read()).toEqual({ connected: true, valid: false, accountCount: 1 });
+    expect(calls).toEqual(["route:xai", "personal-rows:user:caller", "owner-check"]);
+    ownerVerified = true;
+    probe = { kind: "read" };
     // A paused personal account, or another workspace: connected, not effective.
     personal = { connections: [{ ...own, status: "needs_relogin" }], ownPersonalWorkspace: true };
     expect(await read()).toEqual({ connected: true, valid: false, accountCount: 1 });
     personal = { connections: [own], ownPersonalWorkspace: false };
     calls = [];
     expect(await read()).toEqual({ connected: true, valid: false, accountCount: 1 });
-    expect(calls.some((call) => call.startsWith("usage:"))).toBe(false);
+    expect(calls.some((call) => call.startsWith("usage:") || call === "owner-check")).toBe(false);
   });
 });

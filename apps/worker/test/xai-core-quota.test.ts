@@ -2,16 +2,17 @@
  * SuperGrok core placement re-reads billing for exhausted shared
  * connections before it trusts a stored exhaustion (design 5.3, EP-N22):
  * the probe runs as the core's service subject in the turn's workspace, and
- * a recovery wakes the organization's SuperGrok core waiters. A turn that
- * carries the session owner's SuperGrok personal authority also re-reads
- * that owner's own personal connections (as the owner); no other turn does.
+ * a recovery wakes the organization's SuperGrok core waiters. The exact
+ * turn is also handed to the personal re-read, which reads only what
+ * placement itself would let that turn use (proven on real PostgreSQL in
+ * apps/api/test/xai-core-personal-status-postgres.test.ts).
  */
 import { beforeEach, expect, mock, test } from "bun:test";
 import * as realDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 
 let probes: Array<{ provider: string; scope: unknown }>;
-let personalProbes: Array<{ provider: string; input: unknown }>;
+let personalProbes: Array<{ provider: string; turn: unknown }>;
 let wakes: Array<{ provider: string; wake: unknown }>;
 let recovered: string[] | Error;
 let personalRecovered: string[] | Error;
@@ -36,12 +37,12 @@ mock.module("@opengeni/db", () => ({
   subscriptionCorePersonalConnections: (provider: { adapter: { provider: string } }) => {
     if (unregistered) throw new Error("No subscription-core provider is registered for this id");
     return {
-      refreshExhaustedSubscriptionCorePersonalQuota: async (
+      refreshExhaustedSubscriptionCoreTurnPersonalQuota: async (
         _db: unknown,
         _settings: unknown,
-        input: unknown,
+        turn: unknown,
       ) => {
-        personalProbes.push({ provider: provider.adapter.provider, input });
+        personalProbes.push({ provider: provider.adapter.provider, turn });
         if (personalRecovered instanceof Error) throw personalRecovered;
         return personalRecovered;
       },
@@ -60,7 +61,7 @@ const identity = {
   workspaceId: "22222222-2222-4222-8222-222222222222",
   sessionId: "33333333-3333-4333-8333-333333333333",
   turnId: "44444444-4444-4444-8444-444444444444",
-  initiatingHumanSubjectId: "user:someone",
+  initiatingHumanSubjectId: "user:owner",
   sessionOwnerSubjectId: "user:owner",
   sessionOwnerMembershipId: OWNER_MEMBERSHIP,
   acceptedAuthorityV2: { version: 2, personal: [] },
@@ -100,7 +101,7 @@ test("placement probes exhausted shared connections as the core's service subjec
       },
     },
   ]);
-  expect(personalProbes).toEqual([]);
+  expect(personalProbes).toEqual([{ provider: "xai", turn: identity }]);
   expect(wakes).toEqual([]);
 });
 
@@ -122,33 +123,20 @@ test("a failed probe never blocks placement", async () => {
   expect(wakes).toEqual([]);
 });
 
-test("a turn with the owner's SuperGrok personal authority re-reads the owner's own exhausted connections", async () => {
-  await before(personalAuthority("xai"));
-  expect(personalProbes).toEqual([
-    { provider: "xai", input: { accountId: identity.accountId, subjectId: "user:owner" } },
-  ]);
+test("the personal re-read gets the exact turn, and its recovery wakes the waiters", async () => {
+  const turn = personalAuthority("xai");
+  await before(turn);
+  // The turn itself, never a subject: the re-read authorizes it as placement does.
+  expect(personalProbes).toEqual([{ provider: "xai", turn }]);
+  expect(personalProbes[0]!.turn).toBe(turn);
   expect(probes).toHaveLength(1);
   expect(wakes).toEqual([]);
   // A personal recovery wakes the organization's SuperGrok core waiters, also
   // when the shared probe failed.
   recovered = new Error("billing unavailable");
   personalRecovered = ["77777777-7777-4777-8777-777777777777"];
-  await before(personalAuthority("xai"));
+  await before(turn);
   expect(wakes).toEqual([
     { provider: "xai", wake: { accountId: identity.accountId, reason: "usage_recovered" } },
   ]);
-});
-
-test("no personal re-read without the owner's SuperGrok personal authority", async () => {
-  // Another provider's personal authority, another membership's, or an
-  // ownerless session: shared capacity only.
-  await before(personalAuthority("codex"));
-  await before(personalAuthority("xai", "88888888-8888-4888-8888-888888888888"));
-  await before({
-    ...personalAuthority("xai"),
-    sessionOwnerSubjectId: null,
-    sessionOwnerMembershipId: null,
-  } as unknown as realDb.SubscriptionCoreTurnIdentity);
-  expect(personalProbes).toEqual([]);
-  expect(probes).toHaveLength(3);
 });
