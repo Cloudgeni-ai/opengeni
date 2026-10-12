@@ -3,6 +3,7 @@ import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
 import { createCodexCapacityActivities } from "../src/activities/codex-capacity";
 import {
+  CODEX_CORE_WAIT_BINDING,
   CORE_CODEX_WAKE_DELIVERY_MAX_ATTEMPTS,
   coreCodexWakeRetryDelayMs,
   deliverSubscriptionCoreCodexWakes,
@@ -10,6 +11,8 @@ import {
   reconcileCoreCodexCapacityWait,
   wakeSubscriptionCoreCodexWaitersAndDeliver,
 } from "../src/activities/subscription-core-codex-waits";
+import { XAI_CORE_WAIT_BINDING } from "../src/activities/subscription-core-xai-waits";
+import * as xaiQuota from "../src/activities/xai-quota";
 
 const restores: Array<{ mockRestore(): void }> = [];
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
@@ -495,5 +498,109 @@ describe("capacity activities accept both waiter shapes", () => {
     ).toEqual({ action: "stale" });
     expect(anyCore).toHaveBeenCalledTimes(1);
     expect(core).not.toHaveBeenCalled();
+  });
+
+  const xaiWaiter: db.SubscriptionCoreCodexCapacityWait = { ...waiter, provider: "xai" };
+  const xaiReconcile = {
+    accountId: "account-1",
+    workspaceId: "workspace-1",
+    sessionId: "session-1",
+    waiterId: "waiter-1",
+    generation: 2,
+    cause: "timer" as const,
+    provider: "xai" as const,
+  };
+
+  test("a SuperGrok core waiter re-reads billing before its reconcile evaluates, at the woken revision", async () => {
+    const read = spy(db, "getSubscriptionCoreCapacityWaitById")
+      .mockResolvedValueOnce(xaiWaiter)
+      .mockResolvedValueOnce({ ...xaiWaiter, wakeRevision: 6 });
+    outbox([]);
+    const refresh = spy(xaiQuota, "refreshExhaustedXaiCoreQuota").mockResolvedValue(undefined);
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(null);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "superseded",
+      events: [],
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await activities().reconcileCodexCapacityWait(xaiReconcile)).toEqual({
+      action: "superseded",
+    });
+    expect(refresh).toHaveBeenCalledWith({
+      db: {},
+      settings: {},
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(reconcile).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ provider: "xai", evaluatedWakeRevision: 6 }),
+    );
+  });
+
+  test("a SuperGrok waiter gone after the billing re-read is stale; a failed re-read still evaluates", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitById")
+      .mockResolvedValueOnce(xaiWaiter)
+      .mockResolvedValueOnce(null);
+    outbox([]);
+    const refresh = spy(xaiQuota, "refreshExhaustedXaiCoreQuota").mockResolvedValue(undefined);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
+    expect(await activities().reconcileCodexCapacityWait(xaiReconcile)).toEqual({
+      action: "stale",
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(reconcile).not.toHaveBeenCalled();
+
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(xaiWaiter);
+    refresh.mockRejectedValue(new Error("billing unavailable"));
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(null);
+    reconcile.mockResolvedValue({ action: "superseded", events: [] });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(await activities().reconcileCodexCapacityWait(xaiReconcile)).toEqual({
+      action: "superseded",
+    });
+  });
+
+  test("only a provider whose billing read ends an exhaustion re-reads before reconcile", () => {
+    expect(XAI_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeFunction();
+    expect(CODEX_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeUndefined();
+  });
+});
+
+describe("core waiter recheck schedule", () => {
+  const now = new Date("2030-01-01T00:00:00.000Z");
+  const at = (ms: number) => new Date(now.getTime() + ms);
+
+  test("a provider that rechecks before its reset backs off from 60 s to 15 min, capped at the reset", () => {
+    const resetAt = at(6 * 3_600_000);
+    const schedule = (refreshAttempt: number, earliestResetAt = resetAt) =>
+      db.subscriptionCoreCodexNextCheckAt({
+        earliestResetAt,
+        healthRetryAt: null,
+        refreshAttempt,
+        now,
+        rechecksBeforeReset: true,
+      });
+    expect(schedule(0)).toEqual({ nextCheckAt: at(60_000), resetKind: "bounded_refresh" });
+    expect(schedule(1)).toEqual({ nextCheckAt: at(120_000), resetKind: "bounded_refresh" });
+    expect(schedule(9)).toEqual({ nextCheckAt: at(15 * 60_000), resetKind: "bounded_refresh" });
+    expect(schedule(9, at(30_000))).toEqual({
+      nextCheckAt: at(30_000),
+      resetKind: "authoritative",
+    });
+  });
+
+  test("any other provider sleeps until its reset, unchanged", () => {
+    expect(
+      db.subscriptionCoreCodexNextCheckAt({
+        earliestResetAt: at(6 * 3_600_000),
+        healthRetryAt: null,
+        refreshAttempt: 0,
+        now,
+      }),
+    ).toEqual({ nextCheckAt: at(6 * 3_600_000), resetKind: "authoritative" });
+    expect(db.subscriptionCoreWaiterRechecksBeforeReset("codex")).toBe(false);
+    expect(db.subscriptionCoreWaiterRechecksBeforeReset("xai")).toBe(true);
   });
 });

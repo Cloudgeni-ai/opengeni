@@ -50,6 +50,7 @@ import {
   deliverSubscriptionCoreProviderWakes,
   enqueueSessionWorkflowWakeInTransaction,
   enqueueSessionTurn,
+  deliverSubscriptionCoreProviderWake,
   ensureManagedAccessForUser,
   getSubscriptionCoreCapacityWaitForSession,
   mutateSessionControlInTransaction,
@@ -57,6 +58,7 @@ import {
   reconcileSubscriptionCoreCapacityWait,
   submitHumanPromptInTransaction,
   subscriptionCoreCapacityWaitRef,
+  subscriptionCoreWaiterRechecksBeforeReset,
   transitionSessionVisibility,
   wakeSubscriptionCoreProviderCapacityWaiters,
   withRlsContext,
@@ -4892,6 +4894,20 @@ export function describeSubscriptionCoreConformance<Credential>(
           wakeRevision: 1,
         });
         expect(instantOf(armed.waiter, "earliestResetAt")).toBe(resetAt);
+        // A provider whose usage read can end an exhaustion early (the
+        // adapter's flag, which the waiter vocabulary mirrors) rechecks on the
+        // bounded backoff capped at the reset; any other sleeps until it.
+        const rechecks = subscriptionCoreWaiterRechecksBeforeReset(waits.provider);
+        expect(rechecks).toBe(provider.adapter.usageReadEndsQuotaExhaustion === true);
+        const armedCheckAt = armed.waiter.nextCheckAt.getTime();
+        if (rechecks) {
+          expect(armed.waiter).toMatchObject({ resetKind: "bounded_refresh", refreshAttempt: 0 });
+          expect(armedCheckAt).toBeGreaterThanOrEqual(now + 60_000);
+          expect(armedCheckAt).toBeLessThanOrEqual(Date.now() + 60_000);
+        } else {
+          expect(armed.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
+          expect(armedCheckAt).toBe(resetAt);
+        }
         expect(armed.events.map((event): string => event.type)).toEqual([
           waits.events.waiting,
           "session.status.changed",
@@ -4962,6 +4978,13 @@ export function describeSubscriptionCoreConformance<Credential>(
         });
         expect(scopes.map((scope) => scope.workspaceId)).toContain(turn.identity.workspaceId);
         expect(await wakeRevision()).toBe(2);
+        // The provider-neutral delivery entry point (a quota recovery's wake)
+        // reaches the same armed waiter.
+        await deliverSubscriptionCoreProviderWake(db(), providerId, {
+          accountId: org.accountId,
+          reason: "usage_recovered",
+        });
+        expect(await wakeRevision()).toBe(3);
 
         const reconcileInput = {
           accountId: org.accountId,
@@ -4969,20 +4992,34 @@ export function describeSubscriptionCoreConformance<Credential>(
           sessionId: turn.identity.sessionId,
           waiterId: armed.waiter.waiterId,
           generation: 1,
-          evaluatedWakeRevision: 2,
+          evaluatedWakeRevision: 3,
           provider: waits.provider,
         };
-        expect(
-          await reconcileSubscriptionCoreCapacityWait(db(), {
-            ...reconcileInput,
-            evaluation: {
-              kind: "wait",
-              waitReason: waiting.reason,
-              earliestResetAt: waiting.earliestResetAt,
-              healthRetryAt: null,
-            },
-          }),
-        ).toMatchObject({ action: "waiting" });
+        const beforeRecheck = Date.now();
+        const rechecked = await reconcileSubscriptionCoreCapacityWait(db(), {
+          ...reconcileInput,
+          evaluation: {
+            kind: "wait",
+            waitReason: waiting.reason,
+            earliestResetAt: waiting.earliestResetAt,
+            healthRetryAt: null,
+          },
+        });
+        if (rechecked.action !== "waiting")
+          throw new Error(`reconcile returned ${rechecked.action}`);
+        const recheckAt = rechecked.waiter.nextCheckAt.getTime();
+        if (rechecks) {
+          // The backoff grows across rechecks (60 s, then 120 s, ...).
+          expect(rechecked.waiter).toMatchObject({
+            resetKind: "bounded_refresh",
+            refreshAttempt: 1,
+          });
+          expect(recheckAt).toBeGreaterThanOrEqual(beforeRecheck + 120_000);
+          expect(recheckAt).toBeLessThanOrEqual(Date.now() + 120_000);
+        } else {
+          expect(rechecked.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
+          expect(recheckAt).toBe(resetAt);
+        }
         // After the reset the connection serves again and the same turn resumes.
         expect(await evaluateChecked(turn, new Date(resetAt + 1_000))).toMatchObject({
           kind: "run",

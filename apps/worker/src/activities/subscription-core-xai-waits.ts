@@ -15,6 +15,7 @@ import {
   type SubscriptionCoreProvider,
 } from "@opengeni/db";
 import type { CoreWaitBinding } from "./subscription-core-codex-waits";
+import { refreshExhaustedXaiCoreQuota } from "./xai-quota";
 
 const XAI = SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider;
 
@@ -33,4 +34,9 @@ export const XAI_CORE_WAIT_BINDING: CoreWaitBinding = {
   wakeWaiters: (db, input) => wakeSubscriptionCoreProviderCapacityWaiters(db, "xai", input),
   reconcileWaiter: (db, input) =>
     reconcileSubscriptionCoreCapacityWait(db, { ...input, provider: "xai" }),
+  // A SuperGrok billing read can end an exhaustion before its stored reset, so
+  // a parked turn re-reads billing (shared connections only, as the core's
+  // service subject) at each bounded recheck, as the legacy waiter did.
+  refreshBeforeReconcile: ({ db, settings }, scope) =>
+    refreshExhaustedXaiCoreQuota({ db, settings, ...scope }),
 };

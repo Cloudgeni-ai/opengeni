@@ -25142,6 +25142,13 @@ type SubscriptionCoreWaitVocabulary<
   ) => { type: "codex.capacity.superseded" | "turn.superseded"; payload: Record<string, unknown> };
   /** `session_turns.cancelled_by` of a superseded blocked turn. */
   cancelledBy: string;
+  /**
+   * The provider's usage read can end a quota exhaustion before its stored
+   * reset (its adapter's `usageReadEndsQuotaExhaustion`; a test keeps the two
+   * equal), so a waiter rechecks on the bounded backoff, capped at the reset,
+   * instead of sleeping until the reset.
+   */
+  recheckBeforeReset: boolean;
 };
 
 const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
@@ -25172,6 +25179,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       payload: { waiterId: waiter.waiterId, generation: waiter.generation, reason },
     }),
     cancelledBy: "codex_capacity_reconcile",
+    recheckBeforeReset: false,
   },
   xai: {
     label: "SuperGrok",
@@ -25204,8 +25212,16 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       },
     }),
     cancelledBy: "xai_capacity_reconcile",
+    recheckBeforeReset: true,
   },
 };
+
+/** Whether a provider's core waiter rechecks before its stored reset (see the vocabulary). */
+export function subscriptionCoreWaiterRechecksBeforeReset(
+  provider: SubscriptionCoreWaiterProvider,
+): boolean {
+  return subscriptionCoreWaitVocabulary(provider).recheckBeforeReset;
+}
 
 function subscriptionCoreWaitVocabulary(provider: string): SubscriptionCoreWaitVocabulary {
   const vocabulary = SUBSCRIPTION_CORE_WAIT_VOCABULARY[provider as SubscriptionCoreWaiterProvider];
@@ -25439,15 +25455,26 @@ export async function getSubscriptionCoreCapacityWaitById(
  * When a core waiter checks again: at the earliest known reset when there is
  * one (authoritative), else at a quarantine's end when sooner than the bounded
  * control-plane backoff (no provider call is made at a check, only placement).
+ * For a provider whose usage read can end an exhaustion early
+ * (`rechecksBeforeReset`), a future reset only caps the bounded backoff
+ * (`bounded_refresh`): its waiter's reconcile re-reads usage first, so it
+ * never sleeps until the end of a credit period after credits are back.
  */
 export function subscriptionCoreCodexNextCheckAt(input: {
   earliestResetAt: Date | null;
   healthRetryAt: Date | null;
   refreshAttempt: number;
   now: Date;
-}): { nextCheckAt: Date; resetKind: "authoritative" | "mutation_only" } {
+  rechecksBeforeReset?: boolean;
+}): { nextCheckAt: Date; resetKind: CodexCapacityResetKind } {
   const { now } = input;
   if (input.earliestResetAt && input.earliestResetAt.getTime() > now.getTime()) {
+    if (input.rechecksBeforeReset === true) {
+      const bounded = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
+      if (bounded < input.earliestResetAt.getTime()) {
+        return { nextCheckAt: new Date(bounded), resetKind: "bounded_refresh" };
+      }
+    }
     return { nextCheckAt: input.earliestResetAt, resetKind: "authoritative" };
   }
   const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
@@ -25679,6 +25706,7 @@ export async function armSubscriptionCoreCapacityWait(
           healthRetryAt: input.healthRetryAt ?? null,
           refreshAttempt: 0,
           now,
+          rechecksBeforeReset: vocabulary.recheckBeforeReset,
         });
         const nextCheckAt = new Date(
           Math.max(
@@ -26098,12 +26126,15 @@ export async function reconcileSubscriptionCoreCapacityWait(
           const authoritative =
             waitEvaluation.earliestResetAt !== null &&
             waitEvaluation.earliestResetAt.getTime() > now.getTime();
-          const refreshAttempt = authoritative ? 0 : waiter.refreshAttempt + 1;
+          // A provider that rechecks before its reset backs off across checks.
+          const refreshAttempt =
+            authoritative && !vocabulary.recheckBeforeReset ? 0 : waiter.refreshAttempt + 1;
           const scheduled = subscriptionCoreCodexNextCheckAt({
             earliestResetAt: waitEvaluation.earliestResetAt,
             healthRetryAt: waitEvaluation.healthRetryAt,
             refreshAttempt,
             now,
+            rechecksBeforeReset: vocabulary.recheckBeforeReset,
           });
           // Capacity changes can prompt a recheck but never bypass a persisted
           // false-resumption delay.

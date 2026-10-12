@@ -34,6 +34,7 @@ import {
   type SubscriptionCoreWaiterProvider,
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
+import type { Settings } from "@opengeni/config";
 import type { CodexCapacityWaitRef, SignalCodexCapacityWorkflow } from "./types";
 import { workflowIdForSession } from "./common";
 
@@ -76,6 +77,16 @@ export type CoreWaitBinding = {
     input: { accountId: string; reason: string; workspaceIds?: readonly string[] },
   ) => Promise<SubscriptionCoreCodexWakeScope[]>;
   reconcileWaiter: typeof reconcileSubscriptionCoreCodexCapacityWait;
+  /**
+   * Re-read the provider's usage before a timed or woken reconcile evaluates
+   * placement, for a provider whose usage read can end an exhaustion before
+   * its stored reset (its waiters then recheck on a bounded backoff). Best
+   * effort: a failure leaves the stored state, and placement decides.
+   */
+  refreshBeforeReconcile?: (
+    services: { db: Database; settings: Settings },
+    scope: { accountId: string; workspaceId: string },
+  ) => Promise<void>;
 };
 
 /** Codex's binding (each call resolves the Codex-named entry point at call time). */
@@ -293,7 +304,11 @@ export async function reconcileCoreCodexCapacityWait(
  * waiter of the binding's provider.
  */
 export async function reconcileCoreCapacityWait(
-  services: CoreCodexWakeServices & { bus: EventBus },
+  services: CoreCodexWakeServices & {
+    bus: EventBus;
+    /** Present on the workflow's reconcile; the in-turn arm has just placed. */
+    settings?: Settings;
+  },
   binding: CoreWaitBinding,
   input: {
     accountId: string;
@@ -303,7 +318,7 @@ export async function reconcileCoreCapacityWait(
     generation: number;
   },
 ): Promise<CoreCodexReconcileResult | null> {
-  const waiter = await binding.getWaiterById(services.db, input);
+  let waiter = await binding.getWaiterById(services.db, input);
   if (!waiter) return null;
   // Repair: drain this workspace's typed wakes that a crash left behind.
   await deliverSubscriptionCoreCodexWakes(services, {
@@ -312,6 +327,18 @@ export async function reconcileCoreCapacityWait(
   }).catch(() => undefined);
   if (waiter.accountId !== input.accountId || waiter.generation !== input.generation) {
     return { action: "stale" };
+  }
+  if (binding.refreshBeforeReconcile && services.settings && waiter.blockedTurnLive !== false) {
+    await binding
+      .refreshBeforeReconcile(
+        { db: services.db, settings: services.settings },
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+      )
+      .catch(() => undefined);
+    // A recovery the re-read found woke this waiter: evaluate at that revision.
+    waiter = await binding.getWaiterById(services.db, input);
+    if (!waiter || waiter.accountId !== input.accountId || waiter.generation !== input.generation)
+      return { action: "stale" };
   }
   // A row left behind by a Steer, Cancel or other transition is superseded by
   // the reconcile without placing (a non-run evaluation never resumes).

@@ -4365,12 +4365,27 @@ SuperGrok on the core:
   cache clock before the core lease is released (a title request does not).
   The per-turn SuperGrok quota call runs
   only on the legacy route; on the core, quota is observed on refusal (and
-  by X2a's billing re-read before placement and its out-of-turn probe). A
-  connection that re-read finds recovered wakes the SuperGrok core waiters
-  through the same provider-neutral database wake as X1b's health recovery
-  (`wakeSubscriptionCoreCapacityWaiters`); the generic session workflow wake
-  committed with it reaches the waiter, so that wake does not depend on the
-  typed signal being drained.
+  by X2a's billing re-read of exhausted shared connections, which runs
+  before placement and before each reconcile of a parked SuperGrok core
+  turn). A connection that re-read finds recovered wakes the SuperGrok core
+  waiters through the same provider-neutral database wake as X1b's health
+  recovery (`wakeSubscriptionCoreCapacityWaiters`); the generic session
+  workflow wake committed with it reaches the waiter, so that wake does not
+  depend on the typed signal being drained.
+- Waits that can end before their reset: a SuperGrok billing read can end a
+  quota exhaustion before its stored reset (the adapter's
+  `usageReadEndsQuotaExhaustion`). Its core waiter therefore rechecks on the
+  bounded control-plane backoff, 60 seconds doubling to 15 minutes and
+  capped at the reset (`reset_kind = bounded_refresh`), and its reconcile
+  (`CoreWaitBinding.refreshBeforeReconcile`) re-reads billing for the
+  workspace's exhausted shared connections before placement evaluates, as
+  the legacy waiter re-read billing. Without this, a parked turn in a quiet
+  organization would sleep until the end of the credit period after credits
+  were back. A personal connection is never probed out of turn (X2a, shared
+  only); its exhaustion ends at its reset or when a turn observes it. Codex
+  waiters are unchanged: they sleep until an authoritative reset. The waiter
+  vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
+  conformance suite checks that the two agree.
 - Compaction: X1b adds no compaction change. A compaction turn whose
   placement waits is still cancelled with its request preserved (as for
   Codex) and never parks; a test asserts it arms no waiter.
