@@ -44,7 +44,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
 
 /** Read-only maintenance work checks (migrations 0730 and 0732) and the claim
  * each one previews, which fixes its owner and runtime grant. */
-const MAINTENANCE_WORK_PROBE_ROUTINES = [
+export const MAINTENANCE_WORK_PROBE_ROUTINES = [
   ["session_workflow_wakes_due_v1()", "claim_session_workflow_wakes(integer)", "private"],
   [
     "automatic_session_title_fanout_due_v1()",
