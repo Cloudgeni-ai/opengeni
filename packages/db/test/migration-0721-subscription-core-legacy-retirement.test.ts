@@ -99,13 +99,34 @@ const POLICYLESS_FACTORY_TABLES = [
   "xai_session_account_pins",
 ];
 const NO_CHANGE = { removed: [], added: [], changed: [] };
+/** Stored v1 SuperGrok and Claude authority values, which X4 and C4 keep deciding on. */
+const V1_VALUES = "(xai|claude)_provider_account_authority_snapshot";
 
 /** A posture signature (`oidvectortypes` form) as `regprocedure` prints it to the admin. */
 const regprocedure = (schema: string, signature: string) =>
   `${schema === "target" ? "" : `${schema}.`}${signature.replaceAll(", ", ",")}`;
 
+/**
+ * Whether SQL text names one of the objects, literally or as a name built at
+ * run time around its provider token: a format() pattern
+ * (`'resolve_%s_authority_pool'`) or the literals of a concatenation
+ * (`'resolve_' || provider || '_authority_pool'`), the shapes the
+ * migration's preflight refuses.
+ */
+function namesAny(body: string, names: readonly string[]): boolean {
+  if (new RegExp(`(?<![A-Za-z0-9_])(?:${names.join("|")})(?![A-Za-z0-9_])`).test(body)) return true;
+  return names.some((name) => {
+    const [, head, , tail] = /^(.*?)(xai|claude|codex)(.*)$/.exec(name)!;
+    return (
+      new RegExp(`(?:'|%[-0-9$*]*[sIL])${tail}(?![A-Za-z0-9_])`).test(body) &&
+      (head === "" || new RegExp(`(?<![A-Za-z0-9_])${head}(?:'|%)`).test(body))
+    );
+  });
+}
+
 type Catalog = Map<string, string>;
 type Org = { accountId: string; ownerSubjectId: string };
+type SqlText = { object: string; digest: string; body: string };
 
 let database: OwnerMigratedTestDatabase | null = null;
 let owner: postgres.Sql | null = null;
@@ -113,6 +134,7 @@ let org: Org;
 let connections: Record<"reach" | "mismatch" | "keyed", string>;
 let pending: Catalog;
 let retired: Catalog;
+let v1Pending: SqlText[];
 
 /** Every routine, policy, trigger, relation and constraint the retirement could touch. */
 async function catalog(db = database!): Promise<Catalog> {
@@ -126,7 +148,8 @@ async function catalog(db = database!): Promise<Catalog> {
     await admin<{ key: string; value: string }[]>`
       select proc.oid::regprocedure::text as key,
         concat_ws(' | ', proc.prosecdef::text, coalesce(proc.proconfig::text, '-'),
-          coalesce(proc.proacl::text, '-'), pg_get_userbyid(proc.proowner), md5(proc.prosrc)) as value
+          coalesce(proc.proacl::text, '-'), pg_get_userbyid(proc.proowner),
+          md5(coalesce(proc.prosrc, '') || coalesce(pg_get_function_sqlbody(proc.oid), ''))) as value
       from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
       where namespace.nspname in ('public', 'opengeni_private', 'opengeni_subscription_internal')`,
   );
@@ -169,6 +192,50 @@ async function catalog(db = database!): Promise<Catalog> {
         and constraint_row.conrelid <> 0`,
   );
   return entries;
+}
+
+/** Every SQL text through which an object could name another, by object. */
+async function sqlTexts(db = database!): Promise<SqlText[]> {
+  return db.admin<SqlText[]>`
+    select object, md5(body) as digest, body from (
+      select 'routine ' || routine.oid::regprocedure::text as object,
+        coalesce(routine.prosrc, '') || ' ' || coalesce(pg_get_function_sqlbody(routine.oid), '') as body
+      from pg_proc routine join pg_namespace namespace on namespace.oid = routine.pronamespace
+      where namespace.nspname not in ('pg_catalog', 'information_schema')
+      union all
+      select 'policy ' || policy.polrelid::regclass::text || '.' || policy.polname,
+        coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') || ' '
+          || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')
+      from pg_policy policy
+      union all
+      select 'trigger ' || trigger_row.tgrelid::regclass::text || '.' || trigger_row.tgname,
+        pg_get_triggerdef(trigger_row.oid)
+      from pg_trigger trigger_row where not trigger_row.tgisinternal
+      union all
+      select 'view ' || relation.oid::regclass::text, pg_get_viewdef(relation.oid)
+      from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
+      where relation.relkind in ('v', 'm') and namespace.nspname not in ('pg_catalog', 'information_schema')
+      union all
+      select 'default ' || attribute_default.adrelid::regclass::text || '.' || attribute.attname,
+        pg_get_expr(attribute_default.adbin, attribute_default.adrelid)
+      from pg_attrdef attribute_default join pg_attribute attribute
+        on attribute.attrelid = attribute_default.adrelid and attribute.attnum = attribute_default.adnum
+      union all
+      select 'constraint ' || constraint_row.conname, pg_get_constraintdef(constraint_row.oid)
+      from pg_constraint constraint_row
+      join pg_namespace namespace on namespace.oid = constraint_row.connamespace
+      where constraint_row.contype = 'c' and namespace.nspname not in ('pg_catalog', 'information_schema')
+    ) texts
+    order by object`;
+}
+
+/** The routines and policies whose SQL reads stored v1 SuperGrok or Claude authority values. */
+async function v1Readers(db = database!): Promise<SqlText[]> {
+  return (await sqlTexts(db)).filter(
+    ({ object, body }) =>
+      (object.startsWith("routine ") || object.startsWith("policy ")) &&
+      new RegExp(V1_VALUES).test(body),
+  );
 }
 
 function diff(before: Catalog, after: Catalog) {
@@ -348,6 +415,7 @@ beforeAll(async () => {
   });
   await drained();
   pending = await catalog();
+  v1Pending = await v1Readers();
 }, 600_000);
 
 afterAll(async () => {
@@ -550,12 +618,71 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
           "0721 found a kept object that names a retired object: routine r0721_trigger_dependent()",
       },
       {
+        // A string in a SQL-standard body has no catalog dependency.
+        change: `CREATE FUNCTION public.r0721_atomic_named() RETURNS text LANGUAGE sql
+          BEGIN ATOMIC SELECT 'revalidate_xai_subscription_authority'; END`,
+        restore: `DROP FUNCTION public.r0721_atomic_named()`,
+        code: "2BP01",
+        message:
+          "0721 found a kept object that names a retired object: routine r0721_atomic_named()",
+      },
+      {
+        // A name built at run time: a format() pattern, a concatenation
+        // around the provider and a name that starts with the provider.
+        change: `CREATE FUNCTION public.r0721_built_format(provider text) RETURNS void LANGUAGE plpgsql AS
+            $body$ BEGIN EXECUTE format('SELECT resolve_%s_authority_pool(NULL, NULL, NULL, NULL)', provider); END $body$;
+          CREATE FUNCTION public.r0721_built_concat(provider text) RETURNS void LANGUAGE plpgsql AS
+            $body$ BEGIN EXECUTE 'SELECT opengeni_private.subscription_' || provider || '_reach(NULL, NULL)'; END $body$;
+          CREATE FUNCTION public.r0721_built_leading(provider text) RETURNS void LANGUAGE plpgsql AS
+            $body$ BEGIN EXECUTE 'SELECT ' || quote_ident(provider || '_subscription_pool_visible')
+              || '(NULL, NULL, NULL, NULL, NULL)'; END $body$`,
+        restore: `DROP FUNCTION public.r0721_built_format(text);
+          DROP FUNCTION public.r0721_built_concat(text);
+          DROP FUNCTION public.r0721_built_leading(text)`,
+        code: "2BP01",
+        message:
+          "0721 found a kept object that names a retired object: routine r0721_built_concat(text), routine r0721_built_format(text), routine r0721_built_leading(text)",
+      },
+      {
+        // A CHECK constraint, a default, a trigger's arguments and a view.
+        change: `CREATE FUNCTION public.r0721_pass_through() RETURNS trigger LANGUAGE plpgsql AS
+            $body$ BEGIN RETURN NEW; END $body$;
+          CREATE TABLE public.r0721_named (
+            routine text DEFAULT format('%s_subscription_pool_visible', 'claude'),
+            CONSTRAINT r0721_named_check CHECK (routine <> 'revalidate_' || 'xai' || '_subscription_authority'));
+          CREATE TRIGGER r0721_named_trigger BEFORE INSERT ON public.r0721_named FOR EACH ROW
+            EXECUTE FUNCTION public.r0721_pass_through('disconnect_claude_subscription_credential');
+          CREATE VIEW public.r0721_named_view AS SELECT 'xai_subscription_scope'::text AS policy`,
+        restore: `DROP VIEW public.r0721_named_view;
+          DROP TABLE public.r0721_named;
+          DROP FUNCTION public.r0721_pass_through()`,
+        code: "2BP01",
+        message:
+          "0721 found a kept object that names a retired object: constraint r0721_named_check, default r0721_named.routine, trigger r0721_named.r0721_named_trigger, view r0721_named_view",
+      },
+      {
+        change: `CREATE POLICY r0721_policy_named ON xai_rotation_settings AS RESTRICTIVE
+          USING (format('%s_subscription_authority_live', 'claude') IS NOT NULL)`,
+        restore: `DROP POLICY r0721_policy_named ON xai_rotation_settings`,
+        code: "2BP01",
+        message:
+          "0721 found a kept object that names a retired object: policy xai_rotation_settings.r0721_policy_named",
+      },
+      {
         change: `CREATE FUNCTION public.r0721_reach_dependent() RETURNS bigint LANGUAGE plpgsql AS
           $body$ BEGIN RETURN (SELECT count(*) FROM ${CODEX_REACH}); END $body$`,
         restore: `DROP FUNCTION public.r0721_reach_dependent()`,
         code: "2BP01",
         message:
           "0721 found a kept object that names a Codex-named reach object: routine r0721_reach_dependent()",
+      },
+      {
+        change: `CREATE FUNCTION public.r0721_reach_built(provider text) RETURNS void LANGUAGE plpgsql AS
+          $body$ BEGIN EXECUTE format('TRUNCATE opengeni_private.subscription_%s_auto_assignments', provider); END $body$`,
+        restore: `DROP FUNCTION public.r0721_reach_built(text)`,
+        code: "2BP01",
+        message:
+          "0721 found a kept object that names a Codex-named reach object: routine r0721_reach_built(text)",
       },
     ];
     for (const { change, restore, code, message } of cases) {
@@ -764,38 +891,25 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
     present("relation opengeni_private.claude_subscription_runtime_capabilities");
   }, 180_000);
 
-  test("leaves no routine, policy, view or default that names a retired object", async () => {
+  test("leaves nothing that names a retired or renamed-from object, literally or built at run time", async () => {
     const names = [
       ...SUBSCRIPTION_RETIRED_ROUTINE_NAMES,
       ...SUBSCRIPTION_RETIRED_POLICIES.map(({ policy }) => policy),
       ...SUBSCRIPTION_RETIRED_TRIGGERS.map(({ trigger }) => trigger),
+      ...SUBSCRIPTION_RENAMED_ROUTINES.map(({ from }) => from.slice(0, -2)),
       ...SUBSCRIPTION_RENAMED_POLICIES.map(({ from }) => from),
       ...SUBSCRIPTION_RENAMED_TRIGGERS.map(({ from }) => from),
       ...SUBSCRIPTION_RENAMED_RELATIONS.map(({ from }) => from),
       CODEX_AUTO_ASSIGN_SETTING.slice("opengeni.".length),
     ];
-    const pattern = `\\m(${[...new Set(names)].join("|")})\\M`;
+    // Routine bodies (SQL-standard ones too), policies, whole trigger
+    // definitions, views, defaults and CHECK constraints.
+    const texts = await sqlTexts();
+    expect(texts.length).toBeGreaterThan(1000);
+    expect(texts.filter(({ body }) => namesAny(body, names)).map(({ object }) => object)).toEqual(
+      [],
+    );
     const admin = database!.admin;
-    const named = await admin<{ object: string }[]>`
-      select 'routine ' || routine.oid::regprocedure::text as object
-      from pg_proc routine join pg_namespace namespace on namespace.oid = routine.pronamespace
-      where namespace.nspname not in ('pg_catalog', 'information_schema')
-        and routine.prosrc ~ ${pattern}
-      union all
-      select 'policy ' || policy.polrelid::regclass::text || '.' || policy.polname
-      from pg_policy policy
-      where coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') || ' '
-        || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '') ~ ${pattern}
-      union all
-      select 'view ' || relation.oid::regclass::text
-      from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
-      where relation.relkind in ('v', 'm') and namespace.nspname not in ('pg_catalog', 'information_schema')
-        and pg_get_viewdef(relation.oid) ~ ${pattern}
-      union all
-      select 'default ' || attribute_default.adrelid::regclass::text
-      from pg_attrdef attribute_default
-      where pg_get_expr(attribute_default.adbin, attribute_default.adrelid) ~ ${pattern}`;
-    expect(named.map(({ object }) => object)).toEqual([]);
     // And none of the dropped or renamed-from names survives anywhere.
     const [left] = await admin<{ routines: number; policies: number; triggers: number }[]>`
       select
@@ -809,6 +923,45 @@ describe.skipIf(!realDb)("migration 0721: the drained subscription legacy retire
           ...SUBSCRIPTION_RENAMED_TRIGGERS.map(({ from }) => from),
         ]}::text[])) as triggers`;
     expect(left).toEqual({ routines: 0, policies: 0, triggers: 0 });
+  }, 180_000);
+
+  test("the SQL that still decides on stored v1 SuperGrok or Claude values is unchanged and reaches no retired routine", async () => {
+    // X4 and C4 keep stored v1 values deciding (scheduled dispatch and the
+    // revision authority among them). No such routine or policy may call,
+    // name or build the name of a routine this migration drops, and the
+    // migration changes none of them.
+    const objects = (rows: readonly SqlText[]) => rows.map(({ object }) => object);
+    const dropped = new Set(
+      SUBSCRIPTION_RETIRED_ROUTINES.map(
+        ({ schema, signature }) => `routine ${regprocedure(schema, signature)}`,
+      ),
+    );
+    const after = await v1Readers();
+    for (const scheduled of [
+      "routine admit_scheduled_agent_run_execution()",
+      "routine record_scheduled_task_revision_authority(uuid,uuid,uuid,bigint)",
+    ]) {
+      expect(objects(v1Pending)).toContain(scheduled);
+      expect(objects(after)).toContain(scheduled);
+    }
+    // Only the dropped pool routines stop reading them.
+    expect(objects(v1Pending).filter((object) => dropped.has(object))).toEqual([
+      "routine resolve_claude_authority_pool(uuid,uuid,text,jsonb)",
+      "routine resolve_xai_authority_pool(uuid,uuid,text,jsonb)",
+      "routine revalidate_claude_subscription_authority(uuid,text,uuid,jsonb)",
+      "routine revalidate_xai_subscription_authority(uuid,text,uuid,jsonb)",
+    ]);
+    expect(after).toEqual(v1Pending.filter(({ object }) => !dropped.has(object)));
+    const names = [
+      ...SUBSCRIPTION_RETIRED_ROUTINE_NAMES,
+      ...SUBSCRIPTION_RETIRED_POLICIES.map(({ policy }) => policy),
+      ...SUBSCRIPTION_RETIRED_TRIGGERS.map(({ trigger }) => trigger),
+    ];
+    expect(
+      v1Pending
+        .filter(({ object, body }) => !dropped.has(object) && namesAny(body, names))
+        .map(({ object }) => object),
+    ).toEqual([]);
   }, 180_000);
 
   test("the factory tables keep FORCE RLS and deny the application role", async () => {

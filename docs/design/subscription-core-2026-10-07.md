@@ -4909,8 +4909,17 @@ transaction. Runbook:
   reach routines, triggers and policies exist under their Codex names only.
   Then it refuses with `2BP01` if anything that stays depends on a retired
   object. It checks `pg_depend`, then searches every kept routine body
-  (PL/pgSQL `prosrc` and SQL-standard bodies), policy expression, view
-  definition and column default for a retired name or a Codex reach name.
+  (PL/pgSQL `prosrc` and SQL-standard bodies), policy expression, trigger
+  `WHEN` clause and arguments, view definition, column default and `CHECK`
+  constraint for a retired name or a Codex reach name. It matches the name
+  written literally or built at run time around its provider token, as a
+  `format()` pattern (`'resolve_%s_authority_pool'`) or as concatenated
+  literals (`'resolve_' || provider || '_authority_pool'`). This also
+  covers the SQL that X4 and C4 leave deciding on stored v1 values
+  (`admit_scheduled_agent_run_execution`,
+  `record_scheduled_task_revision_authority` and their peers): none calls,
+  names or builds the name of a dropped routine, and the 0721 suite asserts
+  that they are unchanged.
 - **Drops, dependents first.**
   - 21 policies: each provider's `*_subscription_scope` and four
     `*_subscription_pool_scope`, `claude_usage_account_scope`, and the

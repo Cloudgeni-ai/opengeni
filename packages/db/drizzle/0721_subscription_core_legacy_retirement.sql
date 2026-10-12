@@ -37,6 +37,83 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- The kept objects that name one of the given objects, for the preflight's
+-- refusal. A kept object can reach an object by name through a routine body
+-- (PL/pgSQL, SQL string or SQL-standard), a policy expression, a trigger's
+-- WHEN clause or arguments, a view query, a column default or generation
+-- expression, or a CHECK constraint, and it can write the name literally or
+-- build it at run time around its provider token: as a format() pattern
+-- ('resolve_%s_authority_pool') or as the literals of a concatenation
+-- ('resolve_' || provider || '_authority_pool'). Catalog dependencies are
+-- checked separately through pg_depend. Session-local objects (this run's
+-- own helpers and earlier migrations' staging) are not kept.
+CREATE FUNCTION pg_temp.subscription_retirement_naming_objects(
+  names text[], routines oid[], policies oid[], triggers oid[], relations oid[]
+) RETURNS text LANGUAGE plpgsql STABLE AS $subscription_retirement_naming_objects$
+DECLARE
+  name_pattern text;
+  tail_pattern text;
+  found text;
+BEGIN
+  IF coalesce(cardinality(names), 0) = 0 OR EXISTS (SELECT 1 FROM unnest(names) name
+      WHERE name IS NULL OR name !~ '^[a-z0-9_]*(xai|claude|codex)[a-z0-9_]*$') THEN
+    RAISE EXCEPTION '0721 received an invalid retired name' USING ERRCODE = '55000';
+  END IF;
+  -- One literal and one tail prefilter keep the per-name check to the rare
+  -- object that has a tail.
+  SELECT '\m(' || string_agg(DISTINCT name, '|') || ')\M',
+    '(''|%[-0-9$*]*[sIL])(' || string_agg(DISTINCT parts[3], '|') || ')\M'
+  INTO name_pattern, tail_pattern
+  FROM unnest(names) name, regexp_match(name, '^(.*?)(xai|claude|codex)(.*)$') parts;
+  SELECT string_agg(DISTINCT kept.object, ', ' ORDER BY kept.object) INTO found
+  FROM (
+    SELECT 'routine ' || routine.oid::regprocedure::text AS object,
+      coalesce(routine.prosrc, '') || ' ' || coalesce(pg_get_function_sqlbody(routine.oid), '') AS body
+    FROM pg_proc routine JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND namespace.nspname !~ '^pg_(toast_)?temp_' AND NOT (routine.oid = ANY(routines))
+    UNION ALL
+    SELECT 'policy ' || relation.relname || '.' || policy.polname,
+      coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') || ' '
+        || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')
+    FROM pg_policy policy JOIN pg_class relation ON relation.oid = policy.polrelid
+    WHERE relation.relpersistence <> 't' AND NOT (policy.oid = ANY(policies))
+    UNION ALL
+    SELECT 'trigger ' || relation.relname || '.' || trigger_row.tgname,
+      coalesce(substring(definition FROM ' WHEN (.*) EXECUTE FUNCTION '), '') || ' '
+        || coalesce(substring(definition FROM ' EXECUTE FUNCTION [^(]*(\(.*\))$'), '')
+    FROM pg_trigger trigger_row JOIN pg_class relation ON relation.oid = trigger_row.tgrelid
+    CROSS JOIN LATERAL pg_get_triggerdef(trigger_row.oid) definition
+    WHERE NOT trigger_row.tgisinternal AND relation.relpersistence <> 't'
+      AND NOT (trigger_row.oid = ANY(triggers))
+    UNION ALL
+    SELECT 'view ' || relation.oid::regclass::text, pg_get_viewdef(relation.oid)
+    FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE relation.relkind IN ('v', 'm') AND relation.relpersistence <> 't'
+      AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND NOT (relation.oid = ANY(relations))
+    UNION ALL
+    SELECT 'default ' || relation.oid::regclass::text || '.' || attribute.attname,
+      pg_get_expr(attribute_default.adbin, attribute_default.adrelid)
+    FROM pg_attrdef attribute_default
+    JOIN pg_class relation ON relation.oid = attribute_default.adrelid
+    JOIN pg_attribute attribute ON attribute.attrelid = attribute_default.adrelid
+      AND attribute.attnum = attribute_default.adnum
+    WHERE relation.relpersistence <> 't'
+    UNION ALL
+    SELECT 'constraint ' || constraint_row.conname, pg_get_constraintdef(constraint_row.oid)
+    FROM pg_constraint constraint_row JOIN pg_namespace namespace ON namespace.oid = constraint_row.connamespace
+    WHERE constraint_row.contype = 'c' AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND namespace.nspname !~ '^pg_(toast_)?temp_'
+  ) kept
+  WHERE kept.body ~ name_pattern
+    OR (kept.body ~ tail_pattern AND EXISTS (
+      SELECT 1 FROM unnest(names) name, regexp_match(name, '^(.*?)(xai|claude|codex)(.*)$') parts
+      WHERE kept.body ~ ('(''|%[-0-9$*]*[sIL])' || parts[3] || '\M')
+        AND (parts[1] = '' OR kept.body ~ ('\m' || parts[1] || '(''|%)'))));
+  RETURN found;
+END $subscription_retirement_naming_objects$;
+
 DO $retirement_preflight$
 DECLARE
   data_schema text := current_schema();
@@ -159,6 +236,7 @@ DECLARE
   ];
   renamed text[];
   renamed_routine_ids oid[] := '{}';
+  renamed_trigger_ids oid[] := '{}';
   renamed_policy_ids oid[] := '{}';
   reach_view oid := to_regclass('opengeni_private.subscription_core_auto_assignments');
   reach_table oid := to_regclass('opengeni_private.subscription_codex_auto_assignments');
@@ -288,9 +366,13 @@ BEGIN
 
   -- 5. Nothing that stays depends on a retired routine. Catalog dependencies
   -- (policies, triggers, views, defaults, constraints and SQL-standard
-  -- bodies) are in pg_depend; PL/pgSQL and SQL-string bodies and policy
-  -- expressions are searched by name, together with the retired policy and
-  -- trigger names that dynamic SQL in a kept routine could use.
+  -- bodies) are in pg_depend; every text a kept object could use to reach
+  -- one by name (see pg_temp.subscription_retirement_naming_objects) is
+  -- searched for the retired names, together with the retired policy and
+  -- trigger names that dynamic SQL in a kept routine could use. This covers
+  -- the scheduled-task authority routines that still read stored v1
+  -- SuperGrok and Claude values (admit_scheduled_agent_run_execution,
+  -- record_scheduled_task_revision_authority and their peers).
   SELECT string_agg(DISTINCT pg_describe_object(d.classid, d.objid, d.objsubid), ', ') INTO finding
   FROM pg_depend d
   WHERE d.refclassid = 'pg_proc'::regclass AND d.refobjid = ANY(retired_routine_ids)
@@ -304,23 +386,8 @@ BEGIN
   retired_names := retired_names
     || ARRAY(SELECT split_part(entry, '.', 2) FROM unnest(retired_policies) entry)
     || ARRAY(SELECT split_part(entry, '.', 2) FROM unnest(retired_triggers) entry);
-  SELECT string_agg(DISTINCT dependent, ', ') INTO finding
-  FROM (
-    SELECT 'routine ' || p.oid::regprocedure::text AS dependent
-    FROM pg_proc p
-    JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND NOT (p.oid = ANY(retired_routine_ids))
-      AND EXISTS (SELECT 1 FROM unnest(retired_names) retired
-        WHERE p.prosrc ~ ('\m' || retired || '\M'))
-    UNION ALL
-    SELECT 'policy ' || relation.relname || '.' || policy.polname
-    FROM pg_policy policy JOIN pg_class relation ON relation.oid = policy.polrelid
-    WHERE NOT (policy.oid = ANY(retired_policy_ids))
-      AND EXISTS (SELECT 1 FROM unnest(retired_names) retired
-        WHERE coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') || ' '
-          || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '') ~ ('\m' || retired || '\M'))
-  ) dependents;
+  finding := pg_temp.subscription_retirement_naming_objects(
+    retired_names, retired_routine_ids, retired_policy_ids, retired_trigger_ids, '{}');
   IF finding IS NOT NULL THEN
     RAISE EXCEPTION '0721 found a kept object that names a retired object: %', finding
       USING ERRCODE = '2BP01';
@@ -377,6 +444,10 @@ BEGIN
       RAISE EXCEPTION '0721 found a reach trigger missing, changed or already renamed: %.%; see the runbook',
         renamed[1], renamed[2] USING ERRCODE = '55000';
     END IF;
+    renamed_trigger_ids := renamed_trigger_ids || (SELECT trigger_row.oid FROM pg_trigger trigger_row
+      JOIN pg_class relation ON relation.oid = trigger_row.tgrelid
+      WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
+        AND trigger_row.tgname = renamed[2] AND NOT trigger_row.tgisinternal);
   END LOOP;
   FOREACH renamed SLICE 1 IN ARRAY renamed_policies LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_policy policy
@@ -400,32 +471,24 @@ BEGIN
         AND policy.polname = renamed[2]);
   END LOOP;
   -- The two trigger functions and two policies that use the setting are
-  -- redefined in step 11; nothing else may name a Codex-named reach object.
-  SELECT string_agg(DISTINCT dependent, ', ') INTO finding
-  FROM (
-    SELECT 'routine ' || p.oid::regprocedure::text AS dependent
-    FROM pg_proc p
-    JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND NOT (p.oid = ANY(retired_routine_ids)) AND NOT (p.oid = ANY(renamed_routine_ids))
-      AND p.prosrc ~ ('\m(subscription_codex_auto_assignments|subscription_codex_auto_assign|'
-        || array_to_string(ARRAY(SELECT unnest(renamed_routines[1:3][1:1])
-          UNION ALL SELECT unnest(renamed_triggers[1:3][2:2])
-          UNION ALL SELECT unnest(renamed_policies[1:2][2:2])), '|') || ')\M')
-    UNION ALL
-    SELECT 'policy ' || relation.relname || '.' || policy.polname
-    FROM pg_policy policy JOIN pg_class relation ON relation.oid = policy.polrelid
-    WHERE NOT (policy.oid = ANY(retired_policy_ids)) AND NOT (policy.oid = ANY(renamed_policy_ids))
-      AND coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') || ' '
-        || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')
-        ~ '\m(subscription_codex_auto_assignments|subscription_codex_auto_assign)\M'
-  ) dependents;
+  -- redefined in step 11, their triggers follow the renamed functions and
+  -- step 10 drops 0713's view; nothing else may name a Codex-named reach
+  -- object (the table, the setting or a renamed routine, trigger or policy).
+  finding := pg_temp.subscription_retirement_naming_objects(
+    ARRAY['subscription_codex_auto_assignments', 'subscription_codex_auto_assign']
+      || ARRAY(SELECT unnest(renamed_routines[1:3][1:1]))
+      || ARRAY(SELECT unnest(renamed_triggers[1:3][2:2]))
+      || ARRAY(SELECT unnest(renamed_policies[1:2][2:2])),
+    retired_routine_ids || renamed_routine_ids, retired_policy_ids || renamed_policy_ids,
+    retired_trigger_ids || renamed_trigger_ids, ARRAY[reach_view]);
   IF finding IS NOT NULL THEN
     RAISE EXCEPTION '0721 found a kept object that names a Codex-named reach object: %', finding
       USING ERRCODE = '2BP01';
   END IF;
 END
 $retirement_preflight$;
+
+DROP FUNCTION pg_temp.subscription_retirement_naming_objects(text[], oid[], oid[], oid[], oid[]);
 
 -- 7. The policies that call the retired routines or read the retired
 -- runtime-capability tables: the legacy factory tables' scope policies, the
