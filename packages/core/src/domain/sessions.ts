@@ -147,7 +147,6 @@ import {
   getChannel,
   getRig,
   getWorkspaceDefaultRigId,
-  listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
   listInstalledPortableSkills,
   listEnabledMcpCapabilityServers,
@@ -3526,27 +3525,10 @@ async function createSessionForRequestInFileScope(
     sandboxId: string;
     workingDir: string | null;
   } | null = null;
-  // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace VariableSet is
-  // creation-time box state — the box's manifest env is fixed when it is cold-
-  // created, and the SDK's provided-session guard rejects any manifest-env delta
-  // at attach. A session carrying a DIFFERENT VariableSet than the box it joins
-  // is therefore a genuine shared-state conflict TODAY: its first turn on a warm
-  // box dies with "Live sandbox sessions cannot change manifest variableSet
-  // variables" (proven live, sessions 5aee77e9 + 63d18823). Until the VariableSet
-  // is evicted from the manifest (per-exec, like the git token), grouping must be
-  // env-aware: the INHERITED default falls back to an own box on mismatch (a
-  // credentialed worker spawned from a credential-less manager just works), and
-  // an EXPLICIT shared/{groupId} request with a mismatched VariableSet fails
-  // fast at create (422) instead of poisoning the session's first turn.
-  // The env conflict is a BOX property, so a boxless group is exempt: a
-  // backend:"none" session runs in-process with no sandbox, no manifest, and no
-  // provided-session attach — no shared box state exists to conflict, and
-  // env-differing spawns from such parents shared safely before the env-aware
-  // check. They keep sharing (and keep inheriting "none").
-  const requestedVariableSetIds = variableSets.map((variableSet) => variableSet.id);
-  const variableSetsMatchGroup = (memberVariableSetIds: readonly string[]): boolean =>
-    stableJson(memberVariableSetIds) === stableJson(requestedVariableSetIds);
-  // RIG-AWARE GROUPING (M3), the exact sibling of the env-aware gate above: the
+  // Variable Sets no longer split boxes (W1 secrets delivery): user secrets are
+  // resolved per command from `{{secret:…}}` references and never ride the box
+  // manifest, so sessions with different selections share a box safely.
+  // RIG-AWARE GROUPING (M3): the
   // box's rig-baked setup/tooling is fixed at cold-create, so a session joining a
   // shared box must ride the SAME frozen rig_version_id. A mismatch is a genuine
   // shared-state conflict (the box was set up for a different rig) — the INHERITED
@@ -3569,7 +3551,6 @@ async function createSessionForRequestInFileScope(
     }
     const parent = parentSession;
     const parentBoxed = parent.sandboxBackend !== "none";
-    const variableSetMismatch = parentBoxed && !variableSetsMatchGroup(parent.variableSetIds);
     let rigMismatch = parentBoxed && !rigVersionMatchesGroup(parent.rigVersionId ?? null);
     if (parentBoxed && !rigMismatch) {
       const memberRigVersionIds = await listDistinctRigVersionIdsInGroup(
@@ -3581,16 +3562,13 @@ async function createSessionForRequestInFileScope(
         rigVersionMatchesGroup(memberRigVersionId),
       );
     }
-    if (variableSetMismatch || rigMismatch) {
+    if (rigMismatch) {
       if (payload.sandbox === "shared") {
-        // The caller explicitly asked to share while carrying a different
-        // VariableSet / rig — surface the conflict at create time, not turn time.
-        // VariableSet is checked first so its (pre-rig) message is unchanged for
-        // the env-only mismatch the existing gate already covered.
+        // The caller explicitly asked to share while carrying a different rig —
+        // surface the conflict at create time, not turn time.
         throw new HTTPException(422, {
-          message: variableSetMismatch
-            ? "sandbox:'shared' requires the same variableSet / same environment as the creator's box (the box variable set/environment is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet/environment."
-            : "sandbox:'shared' requires the same sandbox environment as the creator's box (setup is fixed at creation); omit sandbox or pass 'new' when selecting a different sandbox environment.",
+          message:
+            "sandbox:'shared' requires the same sandbox environment as the creator's box (setup is fixed at creation); omit sandbox or pass 'new' when selecting a different sandbox environment.",
         });
       }
       // Inherited default: deterministic separation on the genuine shared-state
@@ -3620,26 +3598,7 @@ async function createSessionForRequestInFileScope(
       });
     }
     if (member.sandboxBackend !== "none") {
-      // Compare against EVERY member, not one arbitrary row: a legacy env-blind
-      // group can carry mixed variableSetIds, and an any-member read would make
-      // the join verdict nondeterministic. Post-env-aware groups are homogeneous
-      // (both join paths enforce equality), so this reads one distinct value in
-      // the common case; a mixed legacy group deterministically rejects.
-      const memberVariableSetSelections = await listDistinctVariableSetSelectionsInGroup(
-        db,
-        workspaceId,
-        sandboxChoice.groupId,
-      );
-      if (
-        !memberVariableSetSelections.every((memberVariableSetIds) =>
-          variableSetsMatchGroup(memberVariableSetIds),
-        )
-      ) {
-        throw new HTTPException(422, {
-          message: `sandbox group ${sandboxChoice.groupId} runs a different variableSet / different environment (the box variable set/environment is fixed at creation); create with the group's variableSet/environment or omit sandbox for an own box.`,
-        });
-      }
-      // Same deterministic all-members check for the frozen rig version (M3): the
+      // Deterministic all-members check for the frozen rig version (M3): the
       // box's rig setup is fixed at creation, so every member must ride the rig
       // this create resolved (or the group is rig-less and so is this create).
       const memberRigVersionIds = await listDistinctRigVersionIdsInGroup(

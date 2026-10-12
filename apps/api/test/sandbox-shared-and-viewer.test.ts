@@ -751,7 +751,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     ).rejects.toMatchObject({ status: 422 });
   }, 60_000);
 
-  test("ENV-AWARE: inherited default with a DIFFERENT environment falls back to an OWN box (break mode 1 dissolved)", async () => {
+  test("W1: inherited default with a DIFFERENT environment shares the creator's box (no env split)", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const environmentId = await freshEnvironment(accountId, workspaceId);
@@ -762,9 +762,9 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       initialMessage: "manager",
       sandboxBackend: "modal",
     });
-    // B: credentialed worker spawned FROM INSIDE A, sandbox OMITTED. The old
-    // env-blind default joined A's box and the first turn died on the SDK's
-    // manifest-env guard; env-aware grouping gives B its own box instead.
+    // B: credentialed worker spawned FROM INSIDE A, sandbox OMITTED. Variable
+    // Sets no longer ride the box manifest (secrets resolve per command), so
+    // there is no shared-state conflict and B joins A's box.
     const g = {
       ...grant(accountId, workspaceId, a.id),
       permissions: [
@@ -779,8 +779,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       environmentId,
     });
     expect(b.parentSessionId).toBe(a.id);
-    expect(b.sandboxGroupId).toBe(b.id); // own singleton box, NOT a's group
-    expect(b.sandboxGroupId).not.toBe(a.sandboxGroupId);
+    expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
   test("ENV-AWARE: inherited default with the SAME environment still shares", async () => {
@@ -818,7 +817,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
-  test("ENV-AWARE: EXPLICIT 'shared' with a different environment ⇒ 422 at create (not a dead first turn)", async () => {
+  test("W1: EXPLICIT 'shared' with a different environment shares", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const environmentId = await freshEnvironment(accountId, workspaceId);
@@ -836,16 +835,15 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
-    await expect(
-      createSessionForRequest(deps(bus), g, workspaceId, {
-        initialMessage: "worker",
-        environmentId,
-        sandbox: "shared",
-      }),
-    ).rejects.toThrow(/same environment/);
+    const b = await createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "worker",
+      environmentId,
+      sandbox: "shared",
+    });
+    expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
-  test("ENV-AWARE: {groupId} join with a different environment ⇒ 422 at create", async () => {
+  test("W1: {groupId} join with a different environment joins", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const environmentId = await freshEnvironment(accountId, workspaceId);
@@ -863,16 +861,15 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
-    await expect(
-      createSessionForRequest(deps(bus), g, workspaceId, {
-        initialMessage: "joiner",
-        environmentId,
-        sandbox: { groupId: a.sandboxGroupId! },
-      }),
-    ).rejects.toThrow(/different environment/);
+    const b = await createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "joiner",
+      environmentId,
+      sandbox: { groupId: a.sandboxGroupId! },
+    });
+    expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
-  test("ENV-AWARE: a legacy MIXED-env group rejects a {groupId} join DETERMINISTICALLY (all members compared)", async () => {
+  test("W1: a legacy MIXED-env group accepts a {groupId} join from either selection", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const environmentId = await freshEnvironment(accountId, workspaceId);
@@ -882,8 +879,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       initialMessage: "founder",
       sandboxBackend: "modal",
     });
-    // Simulate a LEGACY env-blind share through the low-level persistence API:
-    // the current request-layer environment check would refuse this grouping.
+    // A LEGACY mixed-env share through the low-level persistence API.
     await createSession(db, {
       accountId,
       workspaceId,
@@ -906,22 +902,24 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
-    // A joiner matching EITHER member must reject: the group is mixed, so no
-    // environment matches ALL members — the verdict cannot depend on which
-    // member an arbitrary single-row read happens to return.
-    await expect(
-      createSessionForRequest(deps(bus), g, workspaceId, {
-        initialMessage: "joiner with the env",
-        environmentId,
-        sandbox: { groupId: a.sandboxGroupId! },
-      }),
-    ).rejects.toThrow(/different environment/);
-    await expect(
-      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+    // Variable Sets are no longer box state, so a mixed group is valid and
+    // either selection joins it.
+    const withEnv = await createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "joiner with the env",
+      environmentId,
+      sandbox: { groupId: a.sandboxGroupId! },
+    });
+    expect(withEnv.sandboxGroupId).toBe(a.sandboxGroupId);
+    const withoutEnv = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
         initialMessage: "joiner without an env",
         sandbox: { groupId: a.sandboxGroupId! },
-      }),
-    ).rejects.toThrow(/different environment/);
+      },
+    );
+    expect(withoutEnv.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
   test("ENV-AWARE EXEMPTION: a boxless backend:'none' parent SHARES with an env-differing child (no box ⇒ no conflict)", async () => {

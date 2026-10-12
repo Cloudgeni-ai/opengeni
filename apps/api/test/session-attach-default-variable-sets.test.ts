@@ -1,9 +1,8 @@
 // A session bound to a Sandbox Environment whose default Variable Sets the
-// session did not select itself (API/SDK, Slack, scheduled and child sessions)
-// must still open its terminal, Files, Git and desktop viewer. The attach lane
-// materializes the environment defaults in the same order as an agent turn; before
-// migration 0531 the database seam admitted only the session's own selection,
-// raised P0002, and every attach answered HTTP 500 with no logged cause.
+// session did not select itself must still open its terminal, Files, Git and
+// desktop viewer. Since W1 (secrets delivery) the attach lane never materializes
+// Variable Set values: the manifest carries deployment constants only, and user
+// secrets reach a command only through `{{secret:…}}` references.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission, type Session } from "@opengeni/contracts";
 import {
@@ -175,23 +174,24 @@ async function channelA(
   );
 }
 
-describe("session attach with unselected Sandbox Environment default Variable Sets", () => {
-  test("terminal and Files open with the environment default values", async () => {
+describe("session attach never injects Variable Set values (W1 delivery)", () => {
+  test("terminal and Files open; no variable-set value reaches the attach env", async () => {
     if (!available) return;
     const value = await fixture();
 
     const exec = await channelA(value, "terminal/exec", {
-      command: 'printf %s "$ENVIRONMENT_DEFAULT_TOKEN"',
+      command: 'printf %s "${ENVIRONMENT_DEFAULT_TOKEN:-unset}"',
     });
     expect(exec.status).toBe(200);
     const execBody = (await exec.json()) as { stdout: string; exitCode: number };
     expect(execBody.exitCode).toBe(0);
-    expect(execBody.stdout).toContain(value.value);
+    expect(execBody.stdout).toBe("unset");
+    expect(execBody.stdout).not.toContain(value.value);
 
     const list = await channelA(value, "fs/list", { path: "/workspace" });
     expect(list.status).toBe(200);
 
-    // The desktop viewer/stream resolvers build the same attach environment.
+    // The desktop viewer/stream resolvers build the same constants-only env.
     const stored = await getSession(client.db, value.grant.workspaceId, value.session.id);
     const environment = await sessionAttachEnvironment(
       { db: client.db, settings } as never,
@@ -199,19 +199,18 @@ describe("session attach with unselected Sandbox Environment default Variable Se
       stored as Session,
       value.grant.subjectId,
     );
-    expect(environment.ENVIRONMENT_DEFAULT_TOKEN).toBe(value.value);
+    expect(environment.ENVIRONMENT_DEFAULT_TOKEN).toBeUndefined();
+    expect(JSON.stringify(environment)).not.toContain(value.value);
 
     const [materialized] = await shared!.admin<Array<{ count: number }>>`
       select count(*)::int as count from audit_events
       where workspace_id = ${value.grant.workspaceId}
         and action = 'variable_set.materialized'
-        and target_id = ${value.variableSetId}
-        and metadata->>'actorKind' = 'session_attach'
         and metadata->>'sessionId' = ${value.session.id}`;
-    expect(materialized!.count).toBeGreaterThan(0);
+    expect(materialized!.count).toBe(0);
   });
 
-  test("a default set the session can no longer use is a 403 with a denial fact", async () => {
+  test("a deleted default set no longer blocks attach", async () => {
     if (!available) return;
     const value = await fixture();
     expect(
@@ -225,29 +224,12 @@ describe("session attach with unselected Sandbox Environment default Variable Se
         value.variableSetId,
       ),
     ).toBe(true);
-
     for (const [path, body] of [
       ["terminal/exec", { command: "true" }],
       ["fs/list", { path: "/workspace" }],
     ] as const) {
       const response = await channelA(value, path, body);
-      expect(response.status).toBe(403);
-      const envelope = (await response.json()) as {
-        error: { code: string; retryable: boolean; details?: Record<string, unknown> };
-      };
-      expect(envelope.error).toMatchObject({
-        code: "forbidden",
-        retryable: false,
-        details: { variableSetId: value.variableSetId, source: "sandbox_environment_default" },
-      });
+      expect(response.status).toBe(200);
     }
-
-    const [denied] = await shared!.admin<Array<{ count: number }>>`
-      select count(*)::int as count from audit_events
-      where workspace_id = ${value.grant.workspaceId}
-        and action = 'variable_set.materialize.denied'
-        and target_id = ${value.variableSetId}
-        and metadata->>'sessionId' = ${value.session.id}`;
-    expect(denied!.count).toBe(2);
   });
 });

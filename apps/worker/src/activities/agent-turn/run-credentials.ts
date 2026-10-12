@@ -25,7 +25,7 @@ import {
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
-  type loadWorkspaceEnvironmentForRunWithCredentials,
+  type WorkspaceEnvironmentForRun,
 } from "../environment";
 import type { mergeResourceRefs } from "../common";
 import type { withFirstPartyTools } from "../goals";
@@ -95,7 +95,7 @@ export type PrepareRunCredentialsDeps = {
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
-  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
+  workspaceVariableSet: WorkspaceEnvironmentForRun | null;
   turnResources: ReturnType<typeof mergeResourceRefs>;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
@@ -111,7 +111,6 @@ export type PrepareRunCredentialsDeps = {
   groupBoxBackend: Settings["sandboxBackend"];
   sandboxCreationBackend: Settings["sandboxBackend"];
   effectiveRunCredentialBackend: Settings["sandboxBackend"];
-  sandboxWorkspaceEnvironmentValues: Record<string, string>;
   connectionScope: { accountId: string; workspaceId: string };
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
 };
@@ -142,7 +141,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     groupBoxBackend,
     sandboxCreationBackend,
     effectiveRunCredentialBackend,
-    sandboxWorkspaceEnvironmentValues,
     connectionScope,
     runWorkspaceMutationForSandbox,
   } = deps;
@@ -371,24 +369,17 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     codemodeToken: sandboxCodemodeToken,
     codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
   } = await waitForTurnOperation(
-    sandboxEnvironmentForRun(
-      sandboxEnvironmentSettings,
-      platformGitResources,
-      // Rig default sets merged BELOW the session set (session wins); rig-less
-      // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
-      sandboxWorkspaceEnvironmentValues,
-      {
-        skipGitHubToken: activeSandboxBackend === "selfhosted",
-        codemodeDelivery: activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
-        deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-        scope: connectionScope,
-        ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-        gitCredentials: connectionCredentials?.gitCredentials,
-        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
-        authorizeGitHubTokenMint,
-        codemodeAuthority,
-      },
-    ),
+    sandboxEnvironmentForRun(sandboxEnvironmentSettings, platformGitResources, {
+      skipGitHubToken: activeSandboxBackend === "selfhosted",
+      codemodeDelivery: activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
+      deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
+      scope: connectionScope,
+      ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+      gitCredentials: connectionCredentials?.gitCredentials,
+      personalGitHubCredentials: personalGitHubCredentials ?? undefined,
+      authorizeGitHubTokenMint,
+      codemodeAuthority,
+    }),
     cancellationSignal,
     undefined,
   );

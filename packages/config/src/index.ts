@@ -8826,6 +8826,36 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
 
 const DEFAULT_SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/** Platform-owned manifest env names that are not `OPENGENI_*` pointers. */
+const PLATFORM_SANDBOX_ENVIRONMENT_NAMES = new Set([
+  "HOME",
+  "PATH",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+]);
+
+/**
+ * The manifest-env constants predicate (W1 secrets delivery, RM-3). A sandbox
+ * manifest may carry only deployment constants: HOME, PATH, git identity and
+ * askpass pointers, `OPENGENI_*` pointers, and the deployment allowlist
+ * (`sandboxEnvironmentVariableNames`). User secrets never qualify: they are
+ * resolved per command from `{{secret:…}}` references. Used by `buildManifest`
+ * and the persisted-envelope strip as a defensive filter.
+ */
+export function sandboxManifestEnvironmentNamePredicate(
+  settings: Settings,
+): (name: string) => boolean {
+  const deployment = new Set(sandboxEnvironmentVariableNames(settings));
+  return (name) =>
+    PLATFORM_SANDBOX_ENVIRONMENT_NAMES.has(name) ||
+    name.startsWith("OPENGENI_") ||
+    deployment.has(name);
+}
+
 function prependPathEntry(pathValue: string | undefined, entry: string): string {
   const parts = (pathValue ?? DEFAULT_SANDBOX_PATH).split(":").filter(Boolean);
   return [entry, ...parts.filter((part) => part !== entry)].join(":");
@@ -8842,9 +8872,9 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * manifest lacks or carries a different value for).
  *
  * Precedence (lowest → highest): deployment allowlist (`collectSandboxEnvironment`)
- * < git identity (`collectGitIdentityEnvironment`) < the session's attached
- * workspace environment < the backend-aware HOME default. Reserved-name validation
- * at write time keeps workspace values from colliding with platform entries.
+ * < git identity (`collectGitIdentityEnvironment`) < the backend-aware HOME default.
+ * The manifest holds deployment constants only: user secrets never ride it.
+ * They are resolved per command from `{{secret:…}}` references (W1 delivery).
  *
  * DELIBERATELY EXCLUDES the per-run, ROTATING git provider token VALUES that
  * `sandboxEnvironmentForRun` mints when a repository resource is
@@ -8860,18 +8890,15 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * the platform never mints or seeds git provider tokens there. The attach
  * surfaces have only the `Session` (no repo resources) and so never seed a token,
  * but unwritten files simply yield no auth; the BLOCKING attach-vs-turn error
- * this helper fixes is for the common (no-repo) and workspace-environment-attached
- * provisioned-box cases.
+ * this helper fixes is for the common (no-repo) provisioned-box case.
  */
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
-  workspaceEnvironment: Record<string, string> = {},
   options: { workspaceId?: string } = {},
 ): Record<string, string> {
   const environment: Record<string, string> = {
     ...collectSandboxEnvironment(settings),
     ...collectGitIdentityEnvironment(settings),
-    ...workspaceEnvironment,
   };
   // Backend-aware HOME: a provisioned box (docker + every cloud provider) runs the
   // agent under the descriptor's workspaceRoot. `local` runs in-process as the host

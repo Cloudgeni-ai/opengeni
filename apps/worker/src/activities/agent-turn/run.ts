@@ -1420,7 +1420,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnTools,
             connectionScope,
             workspaceVariableSet,
-            sandboxWorkspaceEnvironmentValues,
           } = toolPolicy;
 
           let knowledgeRecoveryNote: string | undefined;
@@ -1575,7 +1574,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             groupBoxBackend,
             sandboxCreationBackend,
             effectiveRunCredentialBackend,
-            sandboxWorkspaceEnvironmentValues,
             connectionScope,
             runWorkspaceMutationForSandbox,
           });
