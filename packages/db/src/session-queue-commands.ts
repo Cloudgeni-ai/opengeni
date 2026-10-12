@@ -1,5 +1,7 @@
-import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
-import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "@opengeni/contracts";
 import {
   receiverSubscriptionAuthorityV2InTransaction,
   receiverSubscriptionAuthorityInTransaction,
@@ -2201,18 +2203,14 @@ export async function submitHumanPromptInTransaction(
     ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.claudeProviderAccountAuthoritySnapshot,
       )
-    : (nonHumanAuthority?.claude ??
-      (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
-        workspaceId: input.workspaceId,
-      })));
-  // v2 accepted authority for every provider on the shared core (M3 PR 2a,
-  // 3b; M4 X2b): an edit keeps its source turn's frozen value; a human
-  // prompt, whether sent or steered, resolves that human's own owner-caused
-  // authority; agent-submitted work copies the receiving session's value
-  // exactly as its v1 pools do (EP-T14); every other actor (service,
-  // operator, API key) freezes none. NULL until some provider's cutover is
-  // enabled for the account. Reads each registered provider's cutover row on
-  // every non-edit prompt (one indexed lookup each).
+    : (nonHumanAuthority?.claude ?? WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
+  // Codex v2 accepted authority (M3 PR 2a, 3b): an edit keeps its source
+  // turn's frozen value; a human prompt, whether sent or steered, resolves
+  // that human's own owner-caused authority; agent-submitted work copies the
+  // receiving session's value exactly as its v1 pools do (EP-T14); every
+  // other actor (service, operator, API key) freezes none. NULL until the
+  // account's Codex cutover is enabled. Reads the cutover row on every
+  // non-edit prompt (one indexed lookup).
   const subscriptionAuthority = editedSourceTurn
     ? (editedSourceTurn.subscriptionAuthority ?? null)
     : input.actor.type === "agent_attempt"

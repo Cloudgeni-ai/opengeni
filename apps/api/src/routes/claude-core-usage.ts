@@ -1,8 +1,7 @@
 // Claude usage routes on the shared subscription core (design 5.3, Claude
 // track C2a, EP-N24 and EP-S13). The usage routes read the organization's
-// Claude provider route once after authentication: `legacy` (no cutover
-// receipt) runs the legacy handlers unchanged, `maintenance` answers a typed
-// 503, and `core` projects the connection's core quota in the legacy
+// Claude provider route once after authentication: missing or disabled
+// receipts answer a typed 503; `core` projects the connection's quota in the legacy
 // `ClaudeSubscriptionUsage` shape. Paths, auth checks and cache headers are
 // the legacy ones. A refresh reads live: a shared connection of the
 // workspace's pool through the core connection seam, the caller's own
@@ -41,20 +40,20 @@ export type CoreClaudeUsageCaller = {
 };
 
 /**
- * Claude's provider route for one authenticated usage caller: `legacy` or
- * `core`; maintenance fails closed with the typed 503 the Codex routes use.
+ * Require Claude's core route for an authenticated usage caller. Missing or
+ * disabled receipts fail closed with the typed 503 the Codex routes use.
  */
 export async function claudeUsageRoute(
   deps: ApiRouteDeps,
   accountId: string,
   workspaceId: string | null,
-): Promise<"legacy" | "core"> {
+): Promise<"core"> {
   const route = await readSubscriptionCoreProviderRouteForWorkspace(deps.db, {
     accountId,
     workspaceId,
     provider: "claude",
   });
-  if (route === "maintenance") {
+  if (route !== "core") {
     throw new ApiHttpError(503, {
       code: "upstream_unavailable",
       message: "Claude subscriptions are paused for maintenance in this organization",

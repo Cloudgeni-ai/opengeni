@@ -28,7 +28,6 @@ import {
   updateModelConnectionAccess,
   updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
-  getClaudeSubscriptionAccountAuthoritySnapshot,
   listOrganizationModelProviderCustomModels,
   getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
@@ -38,11 +37,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
 import { codexRouteDisposition } from "./codex-core";
-import { requireSubscriptionCoreRoute, subscriptionCoreRoute } from "./subscription-pool-core";
-import {
-  requirePrivateSubscriptionHuman,
-  requireSubscriptionScopeMutation,
-} from "./subscription-pool-access";
+import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 
 const Kind = z.enum([
   "codex",
@@ -81,7 +76,7 @@ async function coreAccessDisposition(
   if (kind === "supergrok")
     return await requireSubscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
   if (kind === "claude_subscription")
-    return await subscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
+    return await requireSubscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
   return "legacy";
 }
 
@@ -119,23 +114,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       const sharedCore =
         (kind === "supergrok" || kind === "claude_subscription") &&
         (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
-      if (kind === "claude_subscription" && !sharedCore) {
-        const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
-          workspaceId: scopeId,
-          subjectId: grant.subjectId,
-          credentialId: connectionId,
-        });
-        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
-        if (snapshot.scope === "user") {
-          const human = await requirePrivateSubscriptionHuman(c, deps, scopeId, "Claude");
-          if (human.subjectId !== grant.subjectId)
-            throw new HTTPException(403, { message: "Subscription owner required" });
-        }
-        if (mutate) {
-          if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
-          await requireSubscriptionScopeMutation(c, deps, scopeId, snapshot.scope, "Claude");
-        }
-      } else if (mutate) {
+      if (mutate) {
         // A core Claude change keeps the legacy same-origin browser check.
         if (kind === "claude_subscription" && !c.req.header("authorization"))
           requireSameOriginBrowserMutation(c, deps);

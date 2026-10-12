@@ -12,30 +12,11 @@ import {
   updateModelConnectionAccess,
 } from "../src/model-connection-access";
 import { assertModelConnectionAllowsTurn } from "../src/workspace-model-connection-access";
-import {
-  createClaudeSubscriptionAccount,
-  upsertClaudeSubscriptionAccount,
-  setInitialActiveClaudeCredential,
-  getClaudeRotationSettings,
-  disconnectClaudeSubscriptionAccount,
-  materializeClaudeSubscriptionAccountForRun,
-} from "../src/claude-subscription-accounts";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
-
-// Characterizes the legacy Claude runtime, which runs only before the drained
-// Claude cutover: the database withholds that migration. Removed with the
-// legacy runtime.
-const LEGACY_CLAUDE_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
-};
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase(
-    "workspace-provider-rotation-access",
-    LEGACY_CLAUDE_WORLD,
-  );
+  shared = await acquireSharedTestDatabase("workspace-provider-rotation-access");
   if (!shared) throw new Error("Real PostgreSQL required for credential access regression");
   client = createDb(shared.appUrl);
 }, 180_000);
@@ -45,8 +26,8 @@ afterAll(async () => {
 }, 180_000);
 
 // 0598 retires the legacy Claude API-key store. Anthropic/Gateway/OpenRouter
-// keep its rotate/replay contract; Claude now reconnects an exact pool account
-// generation (docs/model-providers.md, Claude subscription usage).
+// keep its rotate/replay contract; Claude subscription connections live in the
+// shared core (design 5.3, C3/C4) and are covered by its conformance suites.
 for (const kind of ["anthropic", "openrouter", "vercel_gateway"] as const) {
   for (const denyAll of [false, true]) {
     test(`${kind} rotation preserves ${denyAll ? "deny-all" : "allowlist"} and policy revision`, async () => {
@@ -209,147 +190,4 @@ for (const kind of ["anthropic", "openrouter", "vercel_gateway"] as const) {
       ).toBeNull();
     });
   }
-}
-
-for (const denyAll of [false, true]) {
-  test(`Claude pool reconnect preserves ${denyAll ? "deny-all" : "allowlist"}, policy revision and active identity`, async () => {
-    if (!shared || !client) throw new Error("Real PostgreSQL required");
-    const [account] = await shared.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('Claude pool policy test') returning id`;
-    const [workspace] = await shared.admin<{ id: string }[]>`
-      insert into workspaces (account_id, name) values (${account!.id}, 'Claude pool policy') returning id`;
-    const scope = {
-      accountId: account!.id,
-      workspaceId: workspace!.id,
-      subjectId: "rotation-policy-test",
-    };
-    const encryptionKey = Buffer.alloc(32, 47);
-    const secret = {
-      version: 1 as const,
-      token: "sk-ant-oat01-original-fixture",
-      identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-    };
-    const input = {
-      ...scope,
-      encryptionKey,
-      secret,
-      providerAccountId: secret.identity.accountUuid,
-    };
-    await expect(createClaudeSubscriptionAccount(client.db, input)).rejects.toMatchObject({
-      cause: { code: "42501" },
-    });
-    expect(
-      await shared.admin`select id from claude_subscription_credentials
-      where workspace_id = ${scope.workspaceId}`,
-    ).toHaveLength(0);
-    await shared.admin`insert into workspace_memberships(account_id, workspace_id, subject_id, role)
-      values (${scope.accountId}, ${scope.workspaceId}, ${scope.subjectId}, 'owner')`;
-    const original = await createClaudeSubscriptionAccount(client.db, input);
-    await setInitialActiveClaudeCredential(client.db, {
-      ...scope,
-      credentialId: original.account.id,
-      authoritySnapshot: original.authoritySnapshot,
-    });
-    const target = {
-      ...scope,
-      kind: "claude_subscription" as const,
-      connectionId: original.account.id,
-    };
-    const allowedModel = "workspace-claude-subscription/allowed";
-    const deniedModel = "workspace-claude-subscription/denied";
-    const policy = await updateModelConnectionAccess(client.db, target, {
-      allowedModels: denyAll ? [] : [allowedModel],
-      allowedWorkspaces: null,
-      allowPersonalWorkspaces: false,
-      version: 1,
-    });
-    expect(policy?.version).toBe(2);
-    const policyAudit = () => shared!.admin`select allowed_model_ids, allowed_workspace_ids,
-      allow_personal_workspaces, access_policy_version, access_policy_updated_by, access_policy_updated_at
-      from claude_subscription_credentials where id = ${original.account.id}`;
-    const originalAudit = await policyAudit();
-    const rotation = await getClaudeRotationSettings(client.db, {
-      ...scope,
-      authoritySnapshot: original.authoritySnapshot,
-    });
-    const reconnect = {
-      ...input,
-      credentialId: original.account.id,
-      expectedCredentialVersion: original.account.version,
-      expectedProviderAccountId: original.account.providerAccountId,
-      authoritySnapshot: original.authoritySnapshot,
-      secret: { ...secret, token: "sk-ant-oat01-replacement-fixture" },
-    };
-    await expect(
-      upsertClaudeSubscriptionAccount(client.db, {
-        ...reconnect,
-        expectedCredentialVersion: original.account.version + 1,
-      }),
-    ).rejects.toThrow("changed");
-    const replaced = await upsertClaudeSubscriptionAccount(client.db, reconnect);
-    expect(replaced.account.id).toBe(original.account.id);
-    expect(replaced.account.version).toBe(original.account.version + 1);
-    expect(replaced.authoritySnapshot).toEqual(original.authoritySnapshot);
-    expect(await getModelConnectionAccess(client.db, target)).toEqual(policy);
-    expect([...(await policyAudit())]).toEqual([...originalAudit]);
-    const materialized = await materializeClaudeSubscriptionAccountForRun(client.db, {
-      ...scope,
-      credentialId: original.account.id,
-      encryptionKey,
-      authoritySnapshot: original.authoritySnapshot,
-    });
-    expect(materialized.secret).toEqual(reconnect.secret);
-    expect(materialized.version).toBe(replaced.account.version);
-    expect(
-      await getClaudeRotationSettings(client.db, {
-        ...scope,
-        authoritySnapshot: original.authoritySnapshot,
-      }),
-    ).toEqual(rotation);
-    // Canonical reconnect is generation-fenced, not legacy operation-id replay.
-    await expect(upsertClaudeSubscriptionAccount(client.db, reconnect)).rejects.toThrow("changed");
-    expect(await getModelConnectionAccess(client.db, target)).toEqual(policy);
-    const gate = (modelId: string) =>
-      assertModelConnectionAllowsTurn(client!.db, {
-        workspaceId: scope.workspaceId,
-        subjectId: scope.subjectId,
-        modelId,
-        claudeCredentialId: original.account.id,
-        claudeAuthoritySnapshot: original.authoritySnapshot,
-      });
-    await expect(gate(deniedModel)).rejects.toThrow("disabled");
-    if (denyAll) await expect(gate(allowedModel)).rejects.toThrow("disabled");
-    else await gate(allowedModel);
-    const updated = await updateModelConnectionAccess(client.db, target, {
-      ...policy!,
-      allowedModels: denyAll ? [allowedModel] : [],
-      allowPersonalWorkspaces: true,
-    });
-    expect(updated?.version).toBe(3);
-    const updatedAudit = await policyAudit();
-    const signedInAgain = await upsertClaudeSubscriptionAccount(client.db, {
-      ...reconnect,
-      expectedCredentialVersion: replaced.account.version,
-      secret: { ...secret, token: "sk-ant-oat01-signin-again-fixture" },
-    });
-    expect(signedInAgain.account.id).toBe(original.account.id);
-    expect(signedInAgain.account.version).toBe(3);
-    expect(await getModelConnectionAccess(client.db, target)).toEqual(updated);
-    expect([...(await policyAudit())]).toEqual([...updatedAudit]);
-    if (denyAll) await gate(allowedModel);
-    else await expect(gate(allowedModel)).rejects.toThrow("disabled");
-    for (const returned of [original, replaced, signedInAgain]) {
-      expect(JSON.stringify(returned)).not.toContain("sk-ant-oat01-");
-      expect(returned.account).not.toHaveProperty("credentialEncrypted");
-    }
-    expect(
-      await disconnectClaudeSubscriptionAccount(client.db, {
-        ...scope,
-        credentialId: original.account.id,
-        authoritySnapshot: original.authoritySnapshot,
-      }),
-    ).toBe(true);
-    expect(await getModelConnectionAccess(client.db, target)).toBeNull();
-    await expect(gate(allowedModel)).rejects.toThrow("disabled");
-  });
 }

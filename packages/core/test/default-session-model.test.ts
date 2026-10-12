@@ -12,13 +12,9 @@ import {
   applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   connectSubscriptionCoreXaiConnection,
-  createClaudeSubscriptionAccount,
   createDb,
-  disconnectClaudeSubscriptionAccount,
   encryptEnvironmentValue,
-  setInitialActiveClaudeCredential,
   saveNewSessionDraftInTransaction,
-  upsertOrganizationClaudeSubscription,
   withWorkspaceSubjectRls,
   type Database,
   type DbClient,
@@ -44,17 +40,6 @@ import {
 } from "../src/default-session-model";
 import { createSessionForRequest } from "../src/domain/sessions";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
-
-// Characterizes the legacy SuperGrok and Claude runtimes, which run only before
-// their drained subscription-core cutovers: the database withholds those
-// migrations. Removed with the legacy runtimes.
-const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-  ],
-};
 
 test("scoped grants choose a funded credit model without overriding saved choices", () => {
   const settings = hostedSettings();
@@ -403,7 +388,7 @@ beforeAll(async () => {
     slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
   });
   restoreModelsProbe = () => modelsProbe.mockRestore();
-  shared = await acquireSharedTestDatabase("core-default-session-model", LEGACY_SUBSCRIPTION_WORLD);
+  shared = await acquireSharedTestDatabase("core-default-session-model");
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
       throw new Error("Default model integration tests require real PostgreSQL");
@@ -542,48 +527,6 @@ async function connectPersonalSupergrok(
   });
 }
 
-async function connectClaudePool(
-  settings: Settings,
-  grant: AccessGrant & { workspaceId: string },
-  scope: "workspace" | "user" | "organization",
-) {
-  const secret = {
-    version: 1 as const,
-    token: "sk-ant-oat01-readiness-fixture",
-    identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-  };
-  const encryptionKey = Buffer.from(settings.environmentsEncryptionKey!, "base64");
-  if (scope === "organization") {
-    await shared!.admin`
-      update organization_memberships set role = 'owner'
-      where account_id = ${grant.accountId} and subject_id = ${grant.subjectId}`;
-    await upsertOrganizationClaudeSubscription(db, {
-      organizationId: grant.accountId,
-      actorSubjectId: grant.subjectId,
-      encryptionKey,
-      secret,
-      providerAccountId: secret.identity.accountUuid,
-      label: null,
-      accountEmail: null,
-      expiresAt: null,
-    });
-    return { authoritySnapshot: { version: 1, scope: "organization" } as const };
-  }
-  const created = await createClaudeSubscriptionAccount(db, {
-    ...grant,
-    scope,
-    encryptionKey,
-    secret,
-    providerAccountId: secret.identity.accountUuid,
-  });
-  await setInitialActiveClaudeCredential(db, {
-    ...grant,
-    credentialId: created.account.id,
-    authoritySnapshot: created.authoritySnapshot,
-  });
-  return created;
-}
-
 function routeDeps(settings: Settings): ApiRouteDeps {
   const noop = async () => undefined;
   return {
@@ -607,91 +550,13 @@ function routeDeps(settings: Settings): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-describe("canonical Claude pool readiness", () => {
-  test.each(["workspace", "user", "organization"] as const)(
-    "current and frozen %s authority use metadata-only canonical readiness",
-    async (scope) => {
-      if (!available) return;
-      const settings = hostedSettings({ claudeSubscriptionEnabled: true });
-      const grant = await workspaceFixture();
-      await organizationMember(grant.accountId, grant.subjectId);
-      expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, grant)).toEqual({
-        workspace: false,
-        organization: false,
-      });
-      const connected = await connectClaudePool(settings, grant, scope);
-      // Readiness cannot depend on decrypting credential material with this key.
-      const metadataSettings = {
-        ...settings,
-        environmentsEncryptionKey: Buffer.alloc(32, 8).toString("base64"),
-      };
-      const expected = {
-        workspace: scope !== "organization",
-        organization: scope === "organization",
-      };
-      expect(await loadWorkspaceClaudeSubscriptionReadiness(db, metadataSettings, grant)).toEqual(
-        expected,
-      );
-      expect(
-        await loadWorkspaceClaudeSubscriptionReadiness(db, metadataSettings, {
-          ...grant,
-          claudeAuthoritySnapshot: connected.authoritySnapshot,
-        }),
-      ).toEqual(expected);
-    },
-    180_000,
-  );
-
-  test("private authority never borrows another member's pool or replaces a stale frozen pool", async () => {
+describe("Claude pool readiness on the shared core", () => {
+  test("the shared core answers readiness; an organization without a Claude pool is not ready", async () => {
     if (!available) return;
     const settings = hostedSettings({ claudeSubscriptionEnabled: true });
-    const owner = await workspaceFixture();
-    const other = { ...owner, subjectId: `user:default-model-${crypto.randomUUID()}` };
-    const service = { ...owner, subjectId: `service:claude-readiness-${crypto.randomUUID()}` };
-    await shared!.admin`
-      insert into workspace_memberships (workspace_id, account_id, subject_id, role)
-      values (${owner.workspaceId}, ${owner.accountId}, ${other.subjectId}, 'member'),
-             (${owner.workspaceId}, ${owner.accountId}, ${service.subjectId}, 'member')`;
-    await organizationMember(owner.accountId, owner.subjectId);
-    await organizationMember(other.accountId, other.subjectId);
-    const personal = await connectClaudePool(settings, owner, "user");
-    const frozen = { ...owner, claudeAuthoritySnapshot: personal.authoritySnapshot };
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, frozen)).toEqual({
-      workspace: true,
-      organization: false,
-    });
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, other)).toEqual({
-      workspace: false,
-      organization: false,
-    });
-    expect(
-      await loadWorkspaceClaudeSubscriptionReadiness(db, settings, {
-        ...other,
-        claudeAuthoritySnapshot: personal.authoritySnapshot,
-      }),
-    ).toEqual({ workspace: false, organization: false });
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, service)).toEqual({
-      workspace: false,
-      organization: false,
-    });
-    expect(
-      await loadWorkspaceClaudeSubscriptionReadiness(db, settings, {
-        ...service,
-        claudeAuthoritySnapshot: personal.authoritySnapshot,
-      }),
-    ).toEqual({ workspace: false, organization: false });
-    if (!("account" in personal)) throw new Error("Expected a private Claude account");
-    await disconnectClaudeSubscriptionAccount(db, {
-      ...owner,
-      credentialId: personal.account.id,
-      authoritySnapshot: personal.authoritySnapshot,
-    });
-    await connectClaudePool(settings, owner, "workspace");
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, owner)).toEqual({
-      workspace: true,
-      organization: false,
-    });
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, frozen)).toEqual({
+    const grant = await workspaceFixture();
+    await organizationMember(grant.accountId, grant.subjectId);
+    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, grant)).toEqual({
       workspace: false,
       organization: false,
     });
@@ -708,15 +573,13 @@ describe("canonical Claude pool readiness", () => {
       workspaceId: crypto.randomUUID(),
       subjectId: "user:disabled-claude",
     };
-    for (const frozen of [undefined, { version: 1, scope: "workspace" } as const]) {
-      expect(
-        await loadWorkspaceClaudeSubscriptionReadiness(
-          unreadableDb,
-          hostedSettings({ claudeSubscriptionEnabled: false }),
-          { ...context, claudeAuthoritySnapshot: frozen },
-        ),
-      ).toEqual({ workspace: false, organization: false });
-    }
+    expect(
+      await loadWorkspaceClaudeSubscriptionReadiness(
+        unreadableDb,
+        hostedSettings({ claudeSubscriptionEnabled: false }),
+        context,
+      ),
+    ).toEqual({ workspace: false, organization: false });
   });
 });
 

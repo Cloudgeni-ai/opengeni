@@ -616,7 +616,6 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           grant.subjectId,
           undefined,
-          undefined,
           core?.restrictions,
         ),
       ),

@@ -34,8 +34,6 @@ import {
   createDb,
   createScheduledTask,
   createSession,
-  createXaiSubscriptionCredential,
-  disconnectXaiSubscriptionCredential,
   submitHumanPromptInTransaction,
   withRlsContext,
   withWorkspaceSubjectSessionActivityRls,
@@ -45,6 +43,7 @@ import { rawRows } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { subscriptionAuthorityCompatForCarriersInTransaction } from "../src/subscription-core-acceptance-authority";
+import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src";
 
 setDefaultTimeout(180_000);
 
@@ -491,6 +490,17 @@ beforeAll(async () => {
   if (!realDb) return;
   database = await acquireOwnerMigratedTestDatabase("subscription-authority-fences-receipt");
   if (!database) throw new Error("Real PostgreSQL is required");
+  // This fixture installs its own receipts after staging historical authority.
+  // Keep both real drained cutovers out of that pre-receipt world.
+  const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
+  try {
+    await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
+    await owner`insert into schema_migrations(name) values
+      (${SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!}),
+      (${SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!})`;
+  } finally {
+    await owner.end();
+  }
   await migrate(database.ownerUrl);
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   const url = new URL(database.ownerUrl);
@@ -767,3 +777,8 @@ describe.skipIf(!realDb)("0717 subscription authority fences after a provider's 
     });
   });
 });
+
+import {
+  createXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredential,
+} from "./fixtures/legacy-xai";

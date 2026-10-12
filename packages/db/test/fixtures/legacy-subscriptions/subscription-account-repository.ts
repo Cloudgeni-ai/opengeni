@@ -1,6 +1,7 @@
-import { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+// TEST ONLY: frozen pre-cutover pool implementation for historical migration fixtures.
+import { SubscriptionAccountChangedError } from "../../../src/subscription-account-conflict";
 import { subscriptionAccountShardIndex, selectSubscriptionAccount } from "@opengeni/config";
-import { assignedConnectionDefault, connectionModelAllowed } from "./model-connection-access";
+import { assignedConnectionDefault, connectionModelAllowed } from "../../../src/model-connection-access";
 import { heartbeatSubscriptionCredentialLeaseUntil as heartbeatPoolCredentialLeaseUntil } from "./subscription-credential-leases";
 import {
   OrganizationMember,
@@ -9,19 +10,19 @@ import {
   type XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshot,
 } from "@opengeni/contracts";
 import { inArray, and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
-import type { Database } from "./database";
-import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "./database";
-import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
-import * as schema from "./schema";
+import type { Database } from "../../../src/database";
+import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "../../../src/database";
+import { decryptEnvironmentValue, encryptEnvironmentValue } from "../../../src/environment-crypto";
+import * as schema from "../../../src/schema";
 import {
   subscriptionPoolWorkerSubject,
   withPoolWakeServiceScopeInTransaction,
   withSubscriptionPoolSessionAccess,
-} from "./subscription-session-access";
-import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
+} from "../../../src/subscription-session-access";
+import { subjectHasLiveWorkspaceAuthorityInScope } from "../../../src/workspace-authority";
 
-import type { SubscriptionPoolTables } from "./subscription-pool-schema";
-import { subscriptionProviderCutoverCommittedInTransaction } from "./subscription-core-acceptance-authority";
+import type { SubscriptionPoolTables } from "../../../src/subscription-pool-schema";
+import { subscriptionProviderCutoverCommittedInTransaction } from "../../../src/subscription-core-acceptance-authority";
 
 export type SubscriptionAccountCapacity = {
   available: boolean;

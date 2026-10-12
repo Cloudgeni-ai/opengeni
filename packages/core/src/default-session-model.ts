@@ -33,9 +33,6 @@ import {
   getBillingBalance,
   getOrganizationModelDefaults,
   spendableCreditMicros,
-  ClaudeAuthorityPoolInactiveError,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
-  workspaceClaudeSubscriptionActiveForAuthority,
   type ConnectionModelRestrictions,
   type Database,
   type WorkspaceCustomModelProviderKind,
@@ -379,8 +376,7 @@ export async function loadCoreRoutedClaudeCatalogReadiness(
     workspaceId: context.workspaceId,
     provider: "claude",
   });
-  if (route === "legacy") return null;
-  if (route === "maintenance") return SUBSCRIPTION_CORE_CLAUDE_NOT_READY;
+  if (route !== "core") return SUBSCRIPTION_CORE_CLAUDE_NOT_READY;
   return await readSubscriptionCoreClaudeCatalogReadiness(db, {
     accountId: context.accountId,
     workspaceId: context.workspaceId,
@@ -446,25 +442,7 @@ export async function loadWorkspaceClaudeSubscriptionReadiness(
     claudeCoreReadiness === undefined
       ? await loadCoreRoutedClaudeCatalogReadiness(db, settings, context)
       : claudeCoreReadiness;
-  if (core) return { workspace: core.workspace, organization: core.organization };
-  const authoritySnapshot =
-    context.claudeAuthoritySnapshot ??
-    (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, context));
-  let active: boolean;
-  try {
-    active = await workspaceClaudeSubscriptionActiveForAuthority(db, settings, {
-      ...context,
-      authoritySnapshot,
-    });
-  } catch (error) {
-    if (!context.claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
-      throw error;
-    active = false;
-  }
-  return {
-    workspace: active && authoritySnapshot.scope !== "organization",
-    organization: active && authoritySnapshot.scope === "organization",
-  };
+  return { workspace: core?.workspace ?? false, organization: core?.organization ?? false };
 }
 
 /** Load the same inputs the workspace model catalog route evaluates. */

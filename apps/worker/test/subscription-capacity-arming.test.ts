@@ -1,19 +1,14 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import * as opengeniDb from "@opengeni/db";
-import { AnthropicRequestError } from "@opengeni/runtime";
-import { ApplicationFailure } from "@temporalio/activity";
+import * as db from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { isPostClaimDatabaseRecoveryCandidate } from "../src/activities/agent-turn/errors";
-import {
-  settleTurnFailure,
-  type TurnFailureDeps,
-} from "../src/activities/agent-turn/failure-settlement";
 import {
   subscriptionCapacityArmingDiagnostic,
   subscriptionCapacityArmingFailure,
 } from "../src/activities/agent-turn/subscription-capacity-arming";
-import { selectClaudeTurnCapacity } from "../src/activities/agent-turn/scoped-subscription-capacity";
+import { parkCoreSubscriptionTurn } from "../src/activities/agent-turn/subscription-core-capacity";
 import type { CapacityPhaseDeps } from "../src/activities/agent-turn/codex-capacity";
+import type { CoreWaitBinding } from "../src/activities/subscription-core-codex-waits";
 
 const restorers: Array<{ mockRestore(): void }> = [];
 afterEach(() => {
@@ -35,14 +30,13 @@ const armErrors = {
     drizzleWrapped(Object.assign(new Error("private driver detail"), { code: "ECONNRESET" })),
 };
 
+const providers = { codex: "Codex", claude: "Claude", xai: "SuperGrok" } as const;
+
 test("SUB-WAIT-05: a capacity wait that cannot be armed becomes an explicit, secret-safe user state", () => {
-  for (const provider of ["claude", "xai"] as const) {
-    const failure = subscriptionCapacityArmingFailure(
-      provider,
-      new Error("Session not found: private-row-identifier"),
-    );
+  for (const provider of ["codex", "claude", "xai"] as const) {
+    const failure = subscriptionCapacityArmingFailure(provider, armErrors.plain());
     expect(failure).toEqual({
-      error: expect.stringContaining(provider === "claude" ? "Claude" : "SuperGrok"),
+      error: expect.stringContaining(providers[provider]),
       code: provider + "_capacity_wait_unavailable",
       retryable: true,
       recovery: "user_message",
@@ -59,7 +53,6 @@ test("SUB-WAIT-05: structured database outages keep their exact-attempt recovery
 test("only own-client database failures are recovery candidates (strict running-turn lane)", () => {
   expect(isPostClaimDatabaseRecoveryCandidate(armErrors.connectionLost())).toBe(true);
   expect(isPostClaimDatabaseRecoveryCandidate(armErrors.socketReset())).toBe(true);
-  // A transport-looking code without an ORM/persistence boundary is not ours.
   const bareTimeout = { code: "ETIMEDOUT" };
   expect(isPostClaimDatabaseRecoveryCandidate(bareTimeout)).toBe(false);
   expect(
@@ -71,23 +64,21 @@ test("only own-client database failures are recovery candidates (strict running-
   });
 });
 
-test("a permanent database rejection fails the turn but keeps its class and SQLSTATE for operators", () => {
+test("a permanent database rejection keeps its class and SQLSTATE only for operators", () => {
   const denied = drizzleWrapped(
-    postgresError("42501", "permission denied for private-table private-row-identifier"),
+    postgresError("42501", "permission denied for private-row-identifier"),
   );
   expect(isPostClaimDatabaseRecoveryCandidate(denied)).toBe(false);
   const failure = subscriptionCapacityArmingFailure("claude", denied);
   expect(failure).toMatchObject({ code: "claude_capacity_wait_unavailable", retryable: true });
   expect(JSON.stringify(failure)).not.toContain("42501");
   expect(JSON.stringify(failure)).not.toContain("private-row-identifier");
-  const diagnostic = subscriptionCapacityArmingDiagnostic("claude", denied);
-  expect(diagnostic).toEqual({
+  expect(subscriptionCapacityArmingDiagnostic("claude", denied)).toEqual({
     errorClass: "DrizzleQueryError",
     errorCode: "claude_capacity_wait_unavailable",
     origin: "database",
     sqlState: "42501",
   });
-  expect(JSON.stringify(diagnostic)).not.toContain("private");
   expect(subscriptionCapacityArmingDiagnostic("xai", armErrors.plain())).toEqual({
     errorClass: "Error",
     errorCode: "xai_capacity_wait_unavailable",
@@ -95,261 +86,107 @@ test("a permanent database rejection fails the turn but keeps its class and SQLS
   });
 });
 
-function observabilityFixture() {
-  return {
-    incrementCounter: () => undefined,
-    observeHistogram: () => undefined,
-    warn: mock((_message: string, _attributes?: Record<string, unknown>) => undefined),
-    error: () => undefined,
-  };
-}
-
-function control() {
-  return {
-    cancellationRequestedAt: null,
-    activityStatus: "unknown",
-    turnMetricOutcome: null as string | null,
-    activityError: null as unknown,
-    acknowledgeQuiescence: false,
-  };
-}
-
-const claimedResult = (value: Record<string, unknown>) => ({
-  ...value,
-  turnId: "turn-1",
-  attemptId: "attempt-1",
-});
-
-const expectedUnavailableSettlement = {
-  events: [
-    {
-      type: "turn.failed",
-      payload: {
-        error: expect.stringContaining("Claude"),
-        code: "claude_capacity_wait_unavailable",
-        retryable: true,
-        recovery: "user_message",
-      },
-    },
-    { type: "session.status.changed", payload: { status: "idle" } },
-  ],
-  turnStatus: "failed",
-  sessionStatus: "idle",
-  activeTurnId: null,
-};
-
-describe("turn-start capacity arming", () => {
-  function capacityDeps() {
-    const settle = mock(async (_settlement: unknown) => true);
-    const observability = observabilityFixture();
+// Turn-start placement and refusal settlement both use this shared arming
+// boundary. A failure must never pretend the waiter was durably installed.
+describe.each(["codex", "claude", "xai"] as const)("%s core capacity arming", (provider) => {
+  function fixture(error: Error, settlementAccepted = true) {
+    const settle = mock(async (_settlement: unknown) => settlementAccepted);
+    const warn = mock((_message: string, _attributes: unknown) => undefined);
+    const acknowledge = mock(() => undefined);
+    const arm = mock(async () => {
+      throw error;
+    });
     const deps = {
       input: {
         accountId: "account-1",
         workspaceId: "workspace-1",
         sessionId: "session-1",
         attemptId: "attempt-1",
-        workflowId: "session-session-1",
       },
-      settings: {},
       db: {},
       bus: {},
-      observability,
-      dispatchId: "dispatch-1",
-      control: control(),
-      billingState: { isClaudeTurn: true, isXaiTurn: false },
-      eventing: { publish: async () => [], settle },
-      providerTurn: {},
-      leases: { claude: { held: false, subjectId: null }, xai: { held: false } },
-      claimedResult,
-      turn: {
-        id: "turn-1",
-        source: "user",
-        initiatingHumanSubjectId: "user:owner",
-        claudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
-      },
-      turnExecutionPolicy: { upstreamModelId: "claude-opus-fixture", productModelId: "fixture" },
-    } as unknown as CapacityPhaseDeps;
-    restorers.push(
-      spyOn(opengeniDb, "getClaudeSessionAccountPin").mockResolvedValue(null),
-      spyOn(opengeniDb, "getSessionGoal").mockResolvedValue(null),
-      spyOn(opengeniDb, "acquireClaudeCredentialLease").mockResolvedValue({
-        credentialId: null,
-        rotationEnabled: false,
-        holderId: null,
-        generation: null,
-        leasedUntil: null,
-        nextCheckAt: null,
-        accounts: [
-          {
-            id: "credential-1",
-            allowedModelIds: null,
-            allocatorEnabled: true,
-            exhaustedUntil: null,
-          },
-        ],
-      } as never),
-    );
-    return { deps, settle, observability };
-  }
-
-  test("SUB-WAIT-05: a plain arming error fails the turn explicitly and leaves the session idle", async () => {
-    const { deps, settle, observability } = capacityDeps();
-    const armError = armErrors.plain();
-    const arm = spyOn(opengeniDb, "armClaudeCapacityWait").mockRejectedValue(armError);
-    restorers.push(arm);
-    expect(await selectClaudeTurnCapacity(deps)).toEqual({
-      exit: { status: "idle", turnId: "turn-1", attemptId: "attempt-1" },
-    });
-    expect(arm.mock.calls[0]![1]).toMatchObject({
-      subjectId: opengeniDb.subscriptionPoolWorkerSubject("claude"),
-      turnId: "turn-1",
-    });
-    expect(settle).toHaveBeenCalledTimes(1);
-    expect(settle.mock.calls[0]![0]).toEqual(expectedUnavailableSettlement);
-    expect(JSON.stringify(settle.mock.calls[0]![0])).not.toContain("private-row-identifier");
-    expect(deps.control).toMatchObject({
-      activityStatus: "idle",
-      turnMetricOutcome: "failed",
-      activityError: armError,
-    });
-    expect(observability.warn).toHaveBeenCalledWith(expect.any(String), {
-      errorClass: "Error",
-      errorCode: "claude_capacity_wait_unavailable",
-      origin: "worker",
-    });
-  });
-
-  for (const kind of ["connectionLost", "socketReset"] as const)
-    test(`a Drizzle-wrapped ${kind} arming error is rethrown to database recovery`, async () => {
-      const { deps, settle } = capacityDeps();
-      const armError = armErrors[kind]();
-      restorers.push(spyOn(opengeniDb, "armClaudeCapacityWait").mockRejectedValue(armError));
-      await expect(selectClaudeTurnCapacity(deps)).rejects.toBe(armError);
-      expect(settle).not.toHaveBeenCalled();
-    });
-});
-
-describe("failure-settlement capacity arming", () => {
-  function failureDeps() {
-    const settle = mock(async (_settlement: unknown) => true);
-    const observability = observabilityFixture();
-    const error = new AnthropicRequestError(
-      "Synthetic provider failure",
-      429,
-      "anthropic_http_error",
-      { type: "rate_limit_error", message: "Fixture" },
-      new Headers({ "retry-after": "120", "request-id": "req_exact_fixture" }),
-    );
-    const deps = {
-      error,
-      input: {
-        accountId: "account-1",
-        workspaceId: "workspace-1",
-        sessionId: "session-1",
-        attemptId: "attempt-1",
-        workflowId: "session-session-1",
-      },
-      settings: { environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64") },
-      db: {},
-      bus: {},
-      observability,
-      wakeSessionWorkflow: async () => undefined,
-      cancellationSignal: undefined,
-      sandboxRotationController: new AbortController(),
-      noteCancellationRequested: () => undefined,
-      codexWorkspaceKey: "workspace-key",
-      control: control(),
-      attempt: {
+      observability: { warn },
+      control: { activityStatus: "running", turnMetricOutcome: null, activityError: null },
+      attempt: { turnId: "turn-1" },
+      eventing: { settle },
+      claimedResult: (value: Record<string, unknown>) => ({
+        ...value,
         turnId: "turn-1",
-        dispatchId: "dispatch-1",
-        triggerEventId: "trigger-1",
-        executionGeneration: 1,
-        providerRecoveryCount: 0,
-        modelRequestStarted: true,
-        redispatchesAtDispatch: 0,
-        triggerType: "user",
-      },
-      billingState: { isCodexTurn: false, isXaiTurn: false, isClaudeTurn: true },
-      eventing: { publish: async () => [], turnStartedPublished: true, settle },
-      providerTurn: {
-        effectiveClaudeCredentialId: "credential-fixture",
-        effectiveClaudeCredentialVersion: 3,
-        claudeAuthoritySnapshot: { version: 1, scope: "workspace" },
-        claudeUpstreamModelId: "claude-opus-fixture",
-        latestClaudeUsage: new Map([
-          [
-            "fixture",
-            {
-              scope: "workspace",
-              token: "sk-ant-oat01-fixture",
-              expectedConnectionId: "credential-fixture",
-              expectedCredentialVersion: 3,
-              responseStatus: 429,
-              requestId: "req_exact_fixture",
-              upstreamModelId: "claude-opus-fixture",
-            },
-          ],
-        ]),
-      },
-      leases: {
-        codex: { lost: false },
-        xai: { lost: false },
-        claude: {
-          lost: false,
-          held: true,
-          subjectId: opengeniDb.subscriptionPoolWorkerSubject("claude"),
-          holderId: "holder-fixture",
-          generation: 7,
+        attemptId: "attempt-1",
+      }),
+      acknowledgeLostAttemptOwnership: acknowledge,
+    } as unknown as CapacityPhaseDeps;
+    restorers.push(spyOn(db, "getSessionGoal").mockResolvedValue(null));
+    const run = () =>
+      parkCoreSubscriptionTurn(
+        deps,
+        {
+          kind: "wait",
+          reason: "no_eligible_capacity",
+          earliestResetAt: null,
+          healthRetryAt: null,
         },
-      },
-      historySink: { reconcileConversationTruth: async () => undefined },
-      claimedResult,
-      flushRuntimeBatcher: async () => undefined,
-      acknowledgeLostAttemptOwnership: () => undefined,
-      acknowledgeRecoveryQuiescence: () => undefined,
-    } as unknown as TurnFailureDeps;
-    restorers.push(
-      spyOn(opengeniDb, "getSessionGoal").mockResolvedValue(null),
-      spyOn(opengeniDb, "recordClaudeAccountUsage").mockResolvedValue({} as never),
-    );
-    return { deps, settle, observability };
+        { provider, arm } as unknown as CoreWaitBinding,
+        providers[provider],
+      );
+    return { deps, settle, warn, arm, acknowledge, run };
   }
 
-  test("SUB-WAIT-05: a plain arming error fails the turn explicitly and leaves the session idle", async () => {
-    const { deps, settle, observability } = failureDeps();
-    const armError = armErrors.plain();
-    const arm = spyOn(opengeniDb, "armClaudeCapacityWait").mockRejectedValue(armError);
-    restorers.push(arm);
-    expect(await settleTurnFailure(deps)).toEqual({
-      status: "idle",
-      turnId: "turn-1",
-      attemptId: "attempt-1",
+  test.each(["plain", "permission"] as const)(
+    "%s arming failure settles explicitly, without a fake waiter",
+    async (kind) => {
+      const error =
+        kind === "plain"
+          ? armErrors.plain()
+          : drizzleWrapped(postgresError("42501", "private-row-identifier"));
+      const f = fixture(error);
+      expect(await f.run()).toEqual({
+        exit: { status: "idle", turnId: "turn-1", attemptId: "attempt-1" },
+      });
+      expect(f.arm).toHaveBeenCalledTimes(1);
+      expect(f.settle).toHaveBeenCalledWith({
+        events: [
+          { type: "turn.failed", payload: subscriptionCapacityArmingFailure(provider, error) },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+      });
+      expect(JSON.stringify(f.settle.mock.calls)).not.toContain("private-row-identifier");
+      expect(f.deps.control).toMatchObject({
+        activityStatus: "idle",
+        turnMetricOutcome: "failed",
+        activityError: error,
+      });
+      expect(f.warn).toHaveBeenCalledWith(
+        expect.any(String),
+        subscriptionCapacityArmingDiagnostic(provider, error),
+      );
+      expect(f.acknowledge).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each(["connectionLost", "socketReset"] as const)(
+    "%s preserves the exact error for database recovery",
+    async (kind) => {
+      const error = armErrors[kind]();
+      const f = fixture(error);
+      await expect(f.run()).rejects.toBe(error);
+      expect(f.settle).not.toHaveBeenCalled();
+      expect(f.acknowledge).not.toHaveBeenCalled();
+    },
+  );
+
+  test("a superseded attempt cannot settle its successor", async () => {
+    const f = fixture(armErrors.plain(), false);
+    expect(await f.run()).toEqual({
+      exit: { status: "cancelled", turnId: "turn-1", attemptId: "attempt-1" },
     });
-    expect(arm).toHaveBeenCalledTimes(1);
-    expect(settle).toHaveBeenCalledTimes(1);
-    expect(settle.mock.calls[0]![0]).toEqual(expectedUnavailableSettlement);
-    expect(deps.control).toMatchObject({
-      activityStatus: "idle",
-      turnMetricOutcome: "failed",
-      activityError: armError,
-    });
-    expect(observability.warn).toHaveBeenCalledWith(expect.any(String), {
-      errorClass: "Error",
-      errorCode: "claude_capacity_wait_unavailable",
-      origin: "worker",
+    expect(f.acknowledge).toHaveBeenCalledTimes(1);
+    expect(f.deps.control).toMatchObject({
+      activityStatus: "cancelled",
+      turnMetricOutcome: "cancelled",
     });
   });
-
-  for (const kind of ["connectionLost", "socketReset"] as const)
-    test(`a Drizzle-wrapped ${kind} arming error is rethrown to database recovery`, async () => {
-      const { deps, settle } = failureDeps();
-      restorers.push(
-        spyOn(opengeniDb, "armClaudeCapacityWait").mockRejectedValue(armErrors[kind]()),
-      );
-      const failure = await settleTurnFailure(deps).catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(ApplicationFailure);
-      expect((failure as ApplicationFailure).type).toBe("OpenGeniPostClaimDatabaseRecovery");
-      expect(deps.control.activityStatus).toBe("recovering");
-      expect(settle).not.toHaveBeenCalled();
-    });
 });

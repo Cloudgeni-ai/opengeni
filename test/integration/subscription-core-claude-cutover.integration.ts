@@ -24,13 +24,10 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import {
-  armClaudeCapacityWait,
-  createClaudeSubscriptionAccount,
   createDb,
   createSession,
   peekSessionWork,
   subscriptionPoolWorkerSubject,
-  wakeClaudeCapacityWaiters,
   wakeSubscriptionCoreProviderCapacityWaiters,
   withSessionActivityRlsContext,
   type DbClient,
@@ -38,6 +35,15 @@ import {
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
+// The legacy Claude runtime is deleted (design 5.3, C4). The pre-cutover world
+// is staged with the retired account writers (now only a test fixture), the
+// frozen legacy waiter and the exact historical peek activity body.
+import {
+  createClaudeSubscriptionAccount,
+  wakeClaudeCapacityWaiters,
+} from "../../packages/db/test/fixtures/legacy-claude/accounts";
+import { armClaudeCapacityWait } from "../../packages/db/test/fixtures/legacy-codex";
+import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtures/legacy-codex/peek";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0739_subscription_core_claude_cutover.sql";
@@ -128,6 +134,9 @@ describe.skipIf(!realDb)(
             wakeSessionWorkflow: undefined,
           }) as never,
       );
+
+    const historicalPeek = () =>
+      createHistoricalCodexCapacityPeek(async () => ({ db: client!.db }) as never);
 
     beforeAll(async () => {
       const fixture = await acquireOwnerMigratedTestDatabase("claude-cutover-seam");
@@ -286,9 +295,9 @@ describe.skipIf(!realDb)(
         reason: "usage_refreshed",
       });
 
-      // The peek activity completes before the migration; its result is what
-      // the workflow history records.
-      const recorded = await activities().getCodexCapacityWait({
+      // The legacy peek activity completes before the migration; its result
+      // is what the workflow history records.
+      const recorded = await historicalPeek().getCodexCapacityWait({
         accountId,
         workspaceId,
         sessionId,
@@ -375,12 +384,9 @@ describe.skipIf(!realDb)(
     }, 180_000);
 
     // The recorded `provider: "claude"` reference reaches the migrated waiter
-    // through the runtime's peek and reconcile paths, with no re-arm. The
-    // Claude core wait binding arrives with C1b; without it the runtime peeks
-    // a core Claude waiter without its provider and reconciles a Claude
-    // reference against the legacy table. These merge-gate cases are
-    // deliberately ordinary: they stay red until C1b is in the base, so C3
-    // cannot pass its validation, or merge, ahead of the Claude core runtime.
+    // through the runtime's peek and reconcile paths, with no re-arm (the
+    // Claude core wait binding of C1b; the legacy Claude waiter arms are
+    // deleted in C4).
     const coreWaiters = async () =>
       await owned.admin<
         {

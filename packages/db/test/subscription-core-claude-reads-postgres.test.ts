@@ -54,8 +54,8 @@ const {
   refreshSubscriptionCoreClaudeWorkspaceUsage,
   resetSubscriptionCoreClaudeUsageThrottle,
   subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization,
-  upsertOrganizationClaudeSubscription,
 } = await import("../src");
+const { upsertOrganizationClaudeSubscription } = await import("./fixtures/legacy-claude/accounts");
 const {
   rawRows,
   setSubjectRlsContext,
@@ -492,7 +492,7 @@ describe("before the Claude cutover receipt (legacy route)", () => {
     expect(productionProviderIds).toContain("claude");
   });
 
-  test("the route is legacy and organization admission keeps its v1 rule", async () => {
+  test("without the cutover receipt admission fails closed even with a valid legacy pool", async () => {
     const org = await organization();
     await setCutover(org, true);
     expect(
@@ -520,7 +520,7 @@ describe("before the Claude cutover receipt (legacy route)", () => {
       accountEmail: null,
       expiresAt: null,
     });
-    expect(await admit(org, org.opus, organizationSnapshot)).toBe(org.opus);
+    expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
     expect(
       await admit(org, org.opus, { authoritySnapshot: { version: 1, scope: "workspace" } }),
     ).toBeNull();

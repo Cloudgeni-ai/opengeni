@@ -5227,98 +5227,32 @@ export function describeSubscriptionCoreConformance<Credential>(
     });
 
     const sessionWaits = subject.sessionWaits;
-    test.skipIf(!sessionWaits)(
-      "a placement wait parks the session on its core waiter; only this provider's wake reaches it; capacity resumes it",
-      async () => {
-        const waits = sessionWaits!;
-        const org = await organization();
-        const connection = await sharedConnection(org, `parked-${crypto.randomUUID()}`);
-        const turn = await runningTurn(org);
-        const now = Date.now();
-        const resetAt = now + 3_600_000;
-        expect(await placeChecked(turn, new Date(now))).toMatchObject({
-          kind: "run",
-          connectionId: connection,
-        });
-        await callUpstream(
-          turn,
-          connection,
-          [{ kind: "rate_limited", retryAfterSeconds: 3_600 }],
-          now,
-        );
-        const waiting = await placeChecked(turn, new Date(now));
-        if (waiting.kind !== "wait") throw new Error("expected a wait");
-        const armed = await armSubscriptionCoreCapacityWait(db(), waits.provider, {
-          accountId: org.accountId,
-          workspaceId: turn.identity.workspaceId,
-          sessionId: turn.identity.sessionId,
-          turnId: turn.identity.turnId,
-          attemptId: turn.attemptId,
-          waitReason: waiting.reason,
-          earliestResetAt: waiting.earliestResetAt,
-          failurePayload: { code: "subscription_capacity_unavailable" },
-        });
-        if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
-        expect(armed.waiter).toMatchObject({
-          provider: waits.provider,
-          blockedTurnId: turn.identity.turnId,
-          generation: 1,
-          wakeRevision: 1,
-        });
-        expect(instantOf(armed.waiter, "earliestResetAt")).toBe(resetAt);
-        // A provider whose usage read can end an exhaustion early (the
-        // adapter's flag, which the waiter vocabulary mirrors) rechecks on the
-        // bounded backoff capped at the reset; any other sleeps until it.
-        const rechecks = subscriptionCoreWaiterRechecksBeforeReset(waits.provider);
-        expect(rechecks).toBe(provider.adapter.usageReadEndsQuotaExhaustion === true);
-        const armedCheckAt = armed.waiter.nextCheckAt.getTime();
-        if (rechecks) {
-          expect(armed.waiter).toMatchObject({ resetKind: "bounded_refresh", refreshAttempt: 0 });
-          expect(armedCheckAt).toBeGreaterThanOrEqual(now + 60_000);
-          expect(armedCheckAt).toBeLessThanOrEqual(Date.now() + 60_000);
-        } else {
-          expect(armed.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
-          expect(armedCheckAt).toBe(resetAt);
-        }
-        expect(armed.events.map((event): string => event.type)).toEqual([
-          waits.events.waiting,
-          "session.status.changed",
-        ]);
-        const [row] = await admin()<{ provider: string }[]>`
-          select provider from subscription_capacity_waiters
-          where session_id = ${turn.identity.sessionId}::uuid`;
-        expect(row?.provider).toBe(providerId);
-        // The workflow peek and the activity lookup see the waiter; its ref
-        // names the provider only when it is not Codex (the legacy shape).
-        const ref = subscriptionCoreCapacityWaitRef(armed.waiter);
-        expect("provider" in ref).toBe(waits.provider !== "codex");
-        expect(
-          await peekSessionWork(db(), turn.identity.workspaceId, turn.identity.sessionId),
-        ).toEqual({
-          kind: "capacity-wait",
-          ref,
-        });
-        expect(
-          await getSubscriptionCoreCapacityWaitForSession(
-            db(),
-            turn.identity.workspaceId,
-            turn.identity.sessionId,
-          ),
-        ).toMatchObject({ waiterId: armed.waiter.waiterId, provider: waits.provider });
-        // A parked session is not runnable: a claim finds no work.
-        expect(
-          await claimSessionWorkForAttempt(db(), turn.identity.workspaceId, {
-            sessionId: turn.identity.sessionId,
-            workflowId: `session-${turn.identity.sessionId}`,
-            workflowRunId: crypto.randomUUID(),
-            dispatchId: crypto.randomUUID(),
-            attemptId: crypto.randomUUID(),
-            trigger: { kind: "next" },
-          }),
-        ).toMatchObject({ action: "unclaimed", reason: "no-work" });
-        // Re-arming the same attempt is an idempotent no-op.
-        expect(
-          await armSubscriptionCoreCapacityWait(db(), waits.provider, {
+    // OPE-700 section 4 / SUB-ACCESS-03: the same core arm, workflow peek,
+    // wake and recovery must work for private and shared sessions. The
+    // isolation helper suite separately inverts access to other owners.
+    for (const visibility of ["workspace_shared", "user_private"] as const) {
+      test.skipIf(!sessionWaits)(
+        `${visibility}: a placement wait parks the session on its core waiter; only this provider's wake reaches it; capacity resumes it`,
+        async () => {
+          const waits = sessionWaits!;
+          const org = await organization();
+          const connection = await sharedConnection(org, `parked-${crypto.randomUUID()}`);
+          const turn = await runningTurn(org, { visibility });
+          const now = Date.now();
+          const resetAt = now + 3_600_000;
+          expect(await placeChecked(turn, new Date(now))).toMatchObject({
+            kind: "run",
+            connectionId: connection,
+          });
+          await callUpstream(
+            turn,
+            connection,
+            [{ kind: "rate_limited", retryAfterSeconds: 3_600 }],
+            now,
+          );
+          const waiting = await placeChecked(turn, new Date(now));
+          if (waiting.kind !== "wait") throw new Error("expected a wait");
+          const armed = await armSubscriptionCoreCapacityWait(db(), waits.provider, {
             accountId: org.accountId,
             workspaceId: turn.identity.workspaceId,
             sessionId: turn.identity.sessionId,
@@ -5327,100 +5261,174 @@ export function describeSubscriptionCoreConformance<Credential>(
             waitReason: waiting.reason,
             earliestResetAt: waiting.earliestResetAt,
             failurePayload: { code: "subscription_capacity_unavailable" },
-          }),
-        ).toMatchObject({ action: "waiting", events: [] });
+          });
+          if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
+          expect(armed.waiter).toMatchObject({
+            provider: waits.provider,
+            blockedTurnId: turn.identity.turnId,
+            generation: 1,
+            wakeRevision: 1,
+          });
+          expect(instantOf(armed.waiter, "earliestResetAt")).toBe(resetAt);
+          // A provider whose usage read can end an exhaustion early (the
+          // adapter's flag, which the waiter vocabulary mirrors) rechecks on the
+          // bounded backoff capped at the reset; any other sleeps until it.
+          const rechecks = subscriptionCoreWaiterRechecksBeforeReset(waits.provider);
+          expect(rechecks).toBe(provider.adapter.usageReadEndsQuotaExhaustion === true);
+          const armedCheckAt = armed.waiter.nextCheckAt.getTime();
+          if (rechecks) {
+            expect(armed.waiter).toMatchObject({ resetKind: "bounded_refresh", refreshAttempt: 0 });
+            expect(armedCheckAt).toBeGreaterThanOrEqual(now + 60_000);
+            expect(armedCheckAt).toBeLessThanOrEqual(Date.now() + 60_000);
+          } else {
+            expect(armed.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
+            expect(armedCheckAt).toBe(resetAt);
+          }
+          expect(armed.events.map((event): string => event.type)).toEqual([
+            waits.events.waiting,
+            "session.status.changed",
+          ]);
+          const [row] = await admin()<{ provider: string }[]>`
+          select provider from subscription_capacity_waiters
+          where session_id = ${turn.identity.sessionId}::uuid`;
+          expect(row?.provider).toBe(providerId);
+          // The workflow peek and the activity lookup see the waiter; its ref
+          // names the provider only when it is not Codex (the legacy shape).
+          const ref = subscriptionCoreCapacityWaitRef(armed.waiter);
+          expect("provider" in ref).toBe(waits.provider !== "codex");
+          expect(
+            await peekSessionWork(db(), turn.identity.workspaceId, turn.identity.sessionId),
+          ).toEqual({
+            kind: "capacity-wait",
+            ref,
+          });
+          expect(
+            await getSubscriptionCoreCapacityWaitForSession(
+              db(),
+              turn.identity.workspaceId,
+              turn.identity.sessionId,
+            ),
+          ).toMatchObject({ waiterId: armed.waiter.waiterId, provider: waits.provider });
+          // A parked session is not runnable: a claim finds no work.
+          expect(
+            await claimSessionWorkForAttempt(db(), turn.identity.workspaceId, {
+              sessionId: turn.identity.sessionId,
+              workflowId: `session-${turn.identity.sessionId}`,
+              workflowRunId: crypto.randomUUID(),
+              dispatchId: crypto.randomUUID(),
+              attemptId: crypto.randomUUID(),
+              trigger: { kind: "next" },
+            }),
+          ).toMatchObject({ action: "unclaimed", reason: "no-work" });
+          // Re-arming the same attempt is an idempotent no-op.
+          expect(
+            await armSubscriptionCoreCapacityWait(db(), waits.provider, {
+              accountId: org.accountId,
+              workspaceId: turn.identity.workspaceId,
+              sessionId: turn.identity.sessionId,
+              turnId: turn.identity.turnId,
+              attemptId: turn.attemptId,
+              waitReason: waiting.reason,
+              earliestResetAt: waiting.earliestResetAt,
+              failurePayload: { code: "subscription_capacity_unavailable" },
+            }),
+          ).toMatchObject({ action: "waiting", events: [] });
 
-        const wakeRevision = async () => {
-          const [waiter] = await admin()<{ wake_revision: string }[]>`
+          const wakeRevision = async () => {
+            const [waiter] = await admin()<{ wake_revision: string }[]>`
             select wake_revision::text as wake_revision from subscription_capacity_waiters
             where waiter_id = ${armed.waiter.waiterId}::uuid`;
-          return waiter ? Number(waiter.wake_revision) : null;
-        };
-        // Another provider's account-wide wake never reaches this waiter (an
-        // unregistered provider's wake fails closed before any write).
-        const other: SubscriptionCoreWaiterProvider = waits.provider === "codex" ? "xai" : "codex";
-        await wakeSubscriptionCoreProviderCapacityWaiters(db(), other, {
-          accountId: org.accountId,
-          reason: "quota_observed_available",
-        }).catch(() => []);
-        expect(await wakeRevision()).toBe(1);
-        const scopes = await wakeSubscriptionCoreProviderCapacityWaiters(db(), waits.provider, {
-          accountId: org.accountId,
-          reason: "quota_observed_available",
-        });
-        expect(scopes.map((scope) => scope.workspaceId)).toContain(turn.identity.workspaceId);
-        expect(await wakeRevision()).toBe(2);
-        // The provider-neutral delivery entry point (a quota recovery's wake)
-        // reaches the same armed waiter.
-        await deliverSubscriptionCoreProviderWake(db(), providerId, {
-          accountId: org.accountId,
-          reason: "usage_recovered",
-        });
-        expect(await wakeRevision()).toBe(3);
-
-        const reconcileInput = {
-          accountId: org.accountId,
-          workspaceId: turn.identity.workspaceId,
-          sessionId: turn.identity.sessionId,
-          waiterId: armed.waiter.waiterId,
-          generation: 1,
-          evaluatedWakeRevision: 3,
-          provider: waits.provider,
-        };
-        const beforeRecheck = Date.now();
-        const rechecked = await reconcileSubscriptionCoreCapacityWait(db(), {
-          ...reconcileInput,
-          evaluation: {
-            kind: "wait",
-            waitReason: waiting.reason,
-            earliestResetAt: waiting.earliestResetAt,
-            healthRetryAt: null,
-          },
-        });
-        if (rechecked.action !== "waiting")
-          throw new Error(`reconcile returned ${rechecked.action}`);
-        const recheckAt = rechecked.waiter.nextCheckAt.getTime();
-        if (rechecks) {
-          // The backoff grows across rechecks (60 s, then 120 s, ...).
-          expect(rechecked.waiter).toMatchObject({
-            resetKind: "bounded_refresh",
-            refreshAttempt: 1,
+            return waiter ? Number(waiter.wake_revision) : null;
+          };
+          // Another provider's account-wide wake never reaches this waiter (an
+          // unregistered provider's wake fails closed before any write).
+          const other: SubscriptionCoreWaiterProvider =
+            waits.provider === "codex" ? "xai" : "codex";
+          await wakeSubscriptionCoreProviderCapacityWaiters(db(), other, {
+            accountId: org.accountId,
+            reason: "quota_observed_available",
+          }).catch(() => []);
+          expect(await wakeRevision()).toBe(1);
+          const scopes = await wakeSubscriptionCoreProviderCapacityWaiters(db(), waits.provider, {
+            accountId: org.accountId,
+            reason: "quota_observed_available",
           });
-          expect(recheckAt).toBeGreaterThanOrEqual(beforeRecheck + 120_000);
-          expect(recheckAt).toBeLessThanOrEqual(Date.now() + 120_000);
-        } else {
-          expect(rechecked.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
-          expect(recheckAt).toBe(resetAt);
-        }
-        // After the reset the connection serves again and the same turn resumes.
-        expect(await evaluateChecked(turn, new Date(resetAt + 1_000))).toMatchObject({
-          kind: "run",
-          connectionId: connection,
-        });
-        const resumed = await reconcileSubscriptionCoreCapacityWait(db(), {
-          ...reconcileInput,
-          evaluation: { kind: "run" },
-        });
-        expect(resumed.action).toBe("resumed");
-        expect(resumed.events.map((event): string => event.type)).toEqual([
-          waits.events.resumed,
-          "session.status.changed",
-        ]);
-        const [state] = await admin()<{ session_status: string; turn_status: string }[]>`
+          expect(scopes.map((scope) => scope.workspaceId)).toContain(turn.identity.workspaceId);
+          expect(await wakeRevision()).toBe(2);
+          // The provider-neutral delivery entry point (a quota recovery's wake)
+          // reaches the same armed waiter.
+          await deliverSubscriptionCoreProviderWake(db(), providerId, {
+            accountId: org.accountId,
+            reason: "usage_recovered",
+          });
+          expect(await wakeRevision()).toBe(3);
+
+          const reconcileInput = {
+            accountId: org.accountId,
+            workspaceId: turn.identity.workspaceId,
+            sessionId: turn.identity.sessionId,
+            waiterId: armed.waiter.waiterId,
+            generation: 1,
+            evaluatedWakeRevision: 3,
+            provider: waits.provider,
+          };
+          const beforeRecheck = Date.now();
+          const rechecked = await reconcileSubscriptionCoreCapacityWait(db(), {
+            ...reconcileInput,
+            evaluation: {
+              kind: "wait",
+              waitReason: waiting.reason,
+              earliestResetAt: waiting.earliestResetAt,
+              healthRetryAt: null,
+            },
+          });
+          if (rechecked.action !== "waiting")
+            throw new Error(`reconcile returned ${rechecked.action}`);
+          const recheckAt = rechecked.waiter.nextCheckAt.getTime();
+          if (rechecks) {
+            // The backoff grows across rechecks (60 s, then 120 s, ...).
+            expect(rechecked.waiter).toMatchObject({
+              resetKind: "bounded_refresh",
+              refreshAttempt: 1,
+            });
+            expect(recheckAt).toBeGreaterThanOrEqual(beforeRecheck + 120_000);
+            expect(recheckAt).toBeLessThanOrEqual(Date.now() + 120_000);
+          } else {
+            expect(rechecked.waiter).toMatchObject({
+              resetKind: "authoritative",
+              refreshAttempt: 0,
+            });
+            expect(recheckAt).toBe(resetAt);
+          }
+          // After the reset the connection serves again and the same turn resumes.
+          expect(await evaluateChecked(turn, new Date(resetAt + 1_000))).toMatchObject({
+            kind: "run",
+            connectionId: connection,
+          });
+          const resumed = await reconcileSubscriptionCoreCapacityWait(db(), {
+            ...reconcileInput,
+            evaluation: { kind: "run" },
+          });
+          expect(resumed.action).toBe("resumed");
+          expect(resumed.events.map((event): string => event.type)).toEqual([
+            waits.events.resumed,
+            "session.status.changed",
+          ]);
+          const [state] = await admin()<{ session_status: string; turn_status: string }[]>`
           select session.status as session_status, turn.status as turn_status
           from sessions session join session_turns turn on turn.session_id = session.id
           where turn.id = ${turn.identity.turnId}::uuid`;
-        expect(state).toEqual({ session_status: "recovering", turn_status: "recovering" });
-        expect(await wakeRevision()).toBeNull();
-        expect(
-          await reconcileSubscriptionCoreCapacityWait(db(), {
-            ...reconcileInput,
-            evaluation: { kind: "run" },
-          }),
-        ).toEqual({ action: "stale", events: [] });
-      },
-    );
-
+          expect(state).toEqual({ session_status: "recovering", turn_status: "recovering" });
+          expect(await wakeRevision()).toBeNull();
+          expect(
+            await reconcileSubscriptionCoreCapacityWait(db(), {
+              ...reconcileInput,
+              evaluation: { kind: "run" },
+            }),
+          ).toEqual({ action: "stale", events: [] });
+        },
+      );
+    }
     test.skipIf(!sessionWaits)(
       "a false resumption counts toward the shared breaker; at its limit the turn stops with this provider's code",
       async () => {

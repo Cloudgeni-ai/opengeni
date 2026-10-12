@@ -65,17 +65,8 @@ export function assignedConnectionDefault(
 }
 
 function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition: SQL } {
-  if (target.kind === "codex" || target.kind === "supergrok")
-    throw new Error("Codex and SuperGrok access policies use the shared core");
-  if (target.kind === "claude_subscription")
-    return {
-      table: sql.identifier("claude_subscription_credentials"),
-      condition: sql`id = ${target.connectionId}::uuid AND account_id = ${target.accountId}::uuid AND ${
-        target.workspaceId === null
-          ? sql`authority_scope = 'organization'`
-          : sql`workspace_id = ${target.workspaceId}::uuid AND authority_scope <> 'organization'`
-      }`,
-    };
+  if (subscriptionCoreProviderOfKind(target.kind))
+    throw new Error("Subscription access policies use the shared core");
   if (target.workspaceId === null)
     return {
       table: sql.identifier("organization_model_provider_connections"),
@@ -96,7 +87,7 @@ export async function getModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
-  if (target.kind === "codex" || target.kind === "supergrok")
+  if (subscriptionCoreProviderOfKind(target.kind))
     return await getSubscriptionCoreProviderModelConnectionAccess(db, target);
   return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
@@ -215,7 +206,7 @@ export async function updateModelConnectionAccess(
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
-  if (target.kind === "codex" || target.kind === "supergrok") return null;
+  if (subscriptionCoreProviderOfKind(target.kind)) return null;
   if (policy.allowedPeople != null)
     throw new Error("Only accounts on the shared subscription core can be limited to people");
   return await withModelConnectionAccessScope(db, target, async (tx) => {

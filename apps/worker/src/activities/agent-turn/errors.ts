@@ -1,7 +1,6 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
-import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -1175,8 +1174,10 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   // request recovers exactly like one on an ordinary request: failure
   // settlement rotates to another account or waits for capacity on the same
   // logical turn. Its wording or retry hint never makes it a terminal quota.
-  if (isClaudeSubscriptionTransportError(error) && classifyClaudeCredentialFailure(error))
-    return true;
+  const claudeRefusal = isClaudeSubscriptionTransportError(error)
+    ? classifyClaudeProviderError(error)
+    : null;
+  if (claudeRefusal?.kind === "unauthorized" || claudeRefusal?.kind === "rate_limited") return true;
   // Codex may reject an opaque artifact it minted itself on the compaction
   // request exactly as it can on an ordinary request. Failure settlement
   // invalidates only the exact participating artifacts and recovers the same
@@ -1755,9 +1756,6 @@ function baseAgentRunFailurePayload(
       ...(Object.keys(database).length > 0 ? { database } : {}),
     };
   }
-  if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
-    return { error: error.message, code: error.code, retryable: false };
-  }
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
   }
@@ -2330,38 +2328,6 @@ export function codexUsageLimitFailurePayload(
 // open indefinitely for a goal-bearing session; cap the continuation hold so the
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
-
-/** A definitive refusal of the serving account on the scoped legacy (Claude) path. */
-export type ScopedCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit";
-  cooldownMs: number | null;
-};
-
-/** Only typed provider backpressure or a verified reconnect requirement can rotate Claude. */
-export function classifyClaudeCredentialFailure(
-  error: unknown,
-): (ScopedCredentialFailure & { requestId?: string }) | null {
-  if (isProviderSafetyRefusal(error)) return null;
-  let current: unknown = error;
-  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
-    if (current instanceof ClaudeSubscriptionReconnectRequired)
-      return { kind: "auth", cooldownMs: null };
-    if (current instanceof AnthropicRequestError && current.status === 401)
-      return {
-        kind: "auth",
-        cooldownMs: null,
-        ...(current.request_id ? { requestId: current.request_id } : {}),
-      };
-    if (current instanceof AnthropicRequestError && current.status === 429)
-      return {
-        kind: "rate_limit",
-        cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-        ...(current.request_id ? { requestId: current.request_id } : {}),
-      };
-    current = current.cause;
-  }
-  return null;
-}
 
 /**
  * Claude's classification of a failed model request as a shared provider

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
@@ -8,7 +8,7 @@ import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
-  armClaudeCapacityWait,
+  armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
   childWaitingCapacityDedupeKey,
   claimPendingSessionSystemUpdateOutbox,
@@ -50,11 +50,7 @@ let client: ReturnType<typeof createDb>;
 setDefaultTimeout(60_000);
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("child-lifecycle-notices", {
-    // The xai capacity wait case drives the legacy SuperGrok waiters, which
-    // the drained cutover makes read-only.
-    withheldMigrations: ["0738_subscription_core_xai_cutover.sql"],
-  });
+  const acquired = await acquireSharedTestDatabase("child-lifecycle-notices");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl);
@@ -1081,18 +1077,15 @@ describe("child lifecycle notices", () => {
       },
     });
 
-    // The scoped (legacy-pool) waiter: only Claude still runs on it; the
-    // SuperGrok one was deleted with its legacy runtime (M4 X4).
+    // Claude uses the same provider-neutral waiter and child notice writer.
     const claudeChild = await startSession(grant, { parent, message: "claude work" });
-    const claude = await armClaudeCapacityWait(client.db, {
+    const claude = await armSubscriptionCoreCapacityWait(client.db, "claude", {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
       sessionId: claudeChild.session.id,
       turnId: claudeChild.turn.id,
       attemptId: claudeChild.attemptId,
-      workflowId: `session-${claudeChild.session.id}`,
-      authoritySnapshot: WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+      waitReason: "capacity",
       earliestResetAt: null,
       failurePayload: { error: "all connected Claude subscriptions are unavailable" },
     });
@@ -1102,7 +1095,7 @@ describe("child lifecycle notices", () => {
         grant,
         childWaitingCapacityDedupeKey({
           childSessionId: claudeChild.session.id,
-          waiterId: claude.waiter.id,
+          waiterId: claude.waiter.waiterId,
         }),
       ),
     ).toMatchObject({

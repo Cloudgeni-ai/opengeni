@@ -1,8 +1,7 @@
 import {
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   XAI_CREDENTIAL_LEASE_TTL_MS,
-  CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-  heartbeatClaudeCredentialLeaseUntil,
+  SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
   releaseSubscriptionTurnLease,
   assertSubscriptionTurnLeaseCurrent,
   renewSubscriptionTurnLease,
@@ -48,8 +47,8 @@ type LeaseCallbacks = Pick<SubscriptionLeaseDeps, "onLost" | "onRenewed" | "onEr
  * any provider (generalized from the M3 Codex lease). After core placement
  * (`useSubscriptionCoreLease`) heartbeat renewal, the dispatch fence and
  * release go to the canonical per-turn `subscription_leases` row of this
- * provider; before it, a provider with a legacy lease keeps its own
- * heartbeat. The DB row is the cross-replica fairness primitive; the
+ * provider; before placement, a holder cannot renew. The DB row is the
+ * cross-replica fairness primitive; the
  * heartbeat here only extends its short TTL. A killed worker stops
  * heartbeating and the holder self-expires.
  */
@@ -66,8 +65,6 @@ export class CoreSubscriptionTurnLease extends SubscriptionTurnLease {
       id: string;
       displayName: string;
       ttlMs: number;
-      /** The legacy heartbeat used while no core lease is held (none: no renewal). */
-      legacyHeartbeat?: SubscriptionLeaseDeps["heartbeat"];
     },
     callbacks: LeaseCallbacks,
   ) {
@@ -98,9 +95,7 @@ export class CoreSubscriptionTurnLease extends SubscriptionTurnLease {
             ),
           );
         }
-        return provider.legacyHeartbeat
-          ? provider.legacyHeartbeat(identity)
-          : Promise.resolve(null);
+        return Promise.resolve(null);
       },
       ...callbacks,
     });
@@ -295,33 +290,15 @@ export class XaiTurnLease extends CoreSubscriptionTurnLease {
   }
 }
 /**
- * The Claude credential holder: the legacy scoped lease keyed by subject
- * until the organization's Claude cutover, the core turn lease (provider
- * `claude`) after core placement. Both modes keep the legacy lost error code
- * and warnings.
+ * The Claude credential holder: the core turn lease (provider `claude`),
+ * held only after core placement (the legacy Claude lease is deleted). It
+ * keeps the legacy lost error code and warnings.
  */
 export class ClaudeTurnLease extends CoreSubscriptionTurnLease {
-  /** The legacy lease's subject; null on the core path. */
-  subjectId: string | null = null;
   constructor(deps: TurnCredentialLeaseDeps) {
     super(
       deps,
-      {
-        id: "claude",
-        displayName: "Claude",
-        ttlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-        legacyHeartbeat: ({ turnId, holderId, generation }) =>
-          this.subjectId
-            ? heartbeatClaudeCredentialLeaseUntil(deps.db, {
-                workspaceId: deps.workspaceId,
-                subjectId: this.subjectId,
-                turnId,
-                holderId,
-                generation,
-                leaseTtlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-              })
-            : Promise.resolve(null),
-      },
+      { id: "claude", displayName: "Claude", ttlMs: SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS },
       scopedLeaseCallbacks(deps, { name: "Claude", code: "claude_credential_lease_lost" }),
     );
   }

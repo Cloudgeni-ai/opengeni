@@ -84,25 +84,8 @@ function mock<K extends keyof typeof opengeniDb>(name: K, impl: (...args: never[
   return spy as unknown as { mock: { calls: unknown[][] } };
 }
 
-const LEGACY_ACCESSORS = [
-  "getClaudeSubscriptionAccountAuthoritySnapshot",
-  "getClaudeSubscriptionAccountMetadata",
-  "listClaudeAccountUsage",
-  "listOrganizationClaudeSubscriptions",
-  "resolveClaudeAccountCredential",
-  "recordClaudeAccountUsage",
-] as const;
-
 function route(value: "legacy" | "core" | "maintenance") {
-  const read = mock("readSubscriptionCoreProviderRouteForWorkspace", async () => value);
-  if (value !== "legacy") {
-    for (const legacy of LEGACY_ACCESSORS) {
-      mock(legacy, async () => {
-        throw new Error(`legacy Claude accessor ${legacy} must not run`);
-      });
-    }
-  }
-  return read;
+  return mock("readSubscriptionCoreProviderRouteForWorkspace", async () => value);
 }
 
 const observedAt = "2026-10-11T12:00:00.000Z";
@@ -364,34 +347,17 @@ describe("organization Claude usage on the core route", () => {
 });
 
 describe("the legacy route (no Claude cutover receipt)", () => {
-  test("runs the legacy handlers unchanged after one route read", async () => {
+  test("fails closed after one route read without reading any account", async () => {
     const read = route("legacy");
     const core = mock("readSubscriptionCoreClaudeWorkspaceUsageTarget", async () => {
       throw new Error("the legacy route must not read the core");
     });
-    const legacyUsage = {
-      connected: true,
-      credentialVersion: 7,
-      windows: [],
-      observedAt: null,
-      source: null,
-      refreshStatus: "not_checked",
-      refreshCheckedAt: null,
-    };
-    mock("getClaudeSubscriptionAccountAuthoritySnapshot", async () => ({
-      version: 1,
-      scope: "workspace",
-    }));
-    mock("getClaudeSubscriptionAccountMetadata", async () => ({ id: CONNECTION, version: 7 }));
-    const list = mock("listClaudeAccountUsage", async () => new Map([[CONNECTION, legacyUsage]]));
     const response = await app().request(workspacePath, {
       headers: { authorization: await bearer(["workspace:read"]) },
     });
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
-    expect(await response.json()).toEqual(legacyUsage);
     expect(read.mock.calls).toHaveLength(1);
-    expect(list.mock.calls).toHaveLength(1);
     expect(core.mock.calls).toHaveLength(0);
   });
 });

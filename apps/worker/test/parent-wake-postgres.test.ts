@@ -6,17 +6,14 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   createDb,
   createSession,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   markSessionWorkflowWakeDelivered,
-  setInitialActiveClaudeCredential,
   settleConnectedMachineSessionBackgroundCommand,
   settleSessionInputWait,
   settleSessionIdleWithParentOutbox,
-  upsertOrganizationClaudeSubscription,
   waitForSessionInputWithEvent,
   type SessionWorkflowWakeDeliveryResult,
 } from "@opengeni/db";
@@ -24,17 +21,6 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
-
-// Characterizes the legacy SuperGrok and Claude runtimes, which run only before
-// their drained subscription-core cutovers: the database withholds those
-// migrations. Removed with the legacy runtimes.
-const LEGACY_SUBSCRIPTION_WORLD = {
-  withheldMigrations: [
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-  ],
-};
 
 // The child-to-parent handoff with real PostgreSQL. Only the Temporal
 // transport is replaced: the recorder stands in for signalWithStart and then
@@ -49,7 +35,7 @@ let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb> | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-parent-wake", LEGACY_SUBSCRIPTION_WORLD);
+  shared = await acquireSharedTestDatabase("worker-parent-wake");
   if (!shared) {
     if (requireRealDatabase) throw new Error("Parent wake PostgreSQL harness is unavailable");
     console.warn("[worker-parent-wake] PostgreSQL unavailable, skipping");
@@ -77,7 +63,6 @@ test.each(["organization", "personal"] as const)(
     const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name) values (${accountId}, 'Shared test workspace') returning id`;
     const workspaceId = workspace!.id;
-    const encryptionKey = new Uint8Array(32).fill(23);
     const [personalWorkspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name) values (${accountId}, 'Personal test fixture') returning id`;
     await admin`insert into workspace_inference_controls (account_id, workspace_id) values (${accountId}, ${workspaceId})`;
@@ -94,49 +79,12 @@ test.each(["organization", "personal"] as const)(
         ${accountId}, ${workspaceId}, ${subjectId}, 'owner', '[]'::jsonb
       )`;
 
-    if (scope === "personal") {
-      const claudeIdentity = crypto.randomUUID();
-      const claude = await createClaudeSubscriptionAccount(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        scope: "user",
-        encryptionKey,
-        secret: {
-          version: 1,
-          token: "sk-ant-oat01-parent-wake-personal",
-          identity: { accountUuid: claudeIdentity, deviceId: "d".repeat(64) },
-        },
-        providerAccountId: claudeIdentity,
-        label: null,
-        accountEmail: null,
-        planType: "claude_max",
-        expiresAt: null,
-      });
-      await setInitialActiveClaudeCredential(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        authoritySnapshot: claude.authoritySnapshot,
-        credentialId: claude.account.id,
-      });
-    } else {
-      const claudeIdentity = crypto.randomUUID();
-      await upsertOrganizationClaudeSubscription(db, {
-        organizationId: accountId,
-        actorSubjectId: subjectId,
-        encryptionKey,
-        secret: {
-          version: 1,
-          token: "sk-ant-oat01-parent-wake-org",
-          identity: { accountUuid: claudeIdentity, deviceId: "e".repeat(64) },
-        },
-        providerAccountId: claudeIdentity,
-        label: null,
-        accountEmail: null,
-        expiresAt: null,
-      });
-    }
+    // Already-accepted pre-cutover authority is copied, not recomputed from
+    // today's live pool. No retired credential repository participates.
+    const acceptedClaude: PoolSnapshot =
+      scope === "personal"
+        ? { version: 1, scope: "user", authorityGeneration: 1 }
+        : { version: 1, scope: "organization" };
 
     async function start(
       message: string,
@@ -169,7 +117,7 @@ test.each(["organization", "personal"] as const)(
                 executionGeneration: parent.turn.executionGeneration,
               },
             }
-          : {}),
+          : { initialClaudeProviderAccountAuthoritySnapshot: acceptedClaude }),
         initialMessage: message,
         resources: [],
         tools: [],

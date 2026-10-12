@@ -26,6 +26,10 @@ import {
 import type { CoreSubscriptionTurnLease } from "./credential-leases";
 import type { SubscriptionCoreTurn } from "./turn-context";
 import { reconcileCoreCapacityWait, type CoreWaitBinding } from "../subscription-core-codex-waits";
+import {
+  subscriptionCapacityArmingDiagnostic,
+  subscriptionCapacityArmingFailure,
+} from "./subscription-capacity-arming";
 
 type WaitPlacement = Extract<SubscriptionCorePlacement, { kind: "wait" }>;
 type RunPlacement = Extract<SubscriptionCorePlacement, { kind: "run" }>;
@@ -334,23 +338,54 @@ export async function parkCoreSubscriptionTurn(
   const turnId = attempt.turnId!;
   const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
   const activeGoal = goal?.status === "active" ? goal : null;
-  const armed = await waits.arm(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    turnId,
-    attemptId: input.attemptId,
-    goalId: activeGoal?.id ?? null,
-    goalVersion: activeGoal?.version ?? null,
-    waitReason: wait.reason,
-    earliestResetAt: wait.earliestResetAt,
-    healthRetryAt: wait.healthRetryAt,
-    failurePayload: subscriptionCoreCapacityWaitPayload(
-      wait.reason,
-      wait.earliestResetAt,
-      displayName,
-    ),
-  });
+  let armed: Awaited<ReturnType<CoreWaitBinding["arm"]>>;
+  try {
+    armed = await waits.arm(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId,
+      attemptId: input.attemptId,
+      goalId: activeGoal?.id ?? null,
+      goalVersion: activeGoal?.version ?? null,
+      waitReason: wait.reason,
+      earliestResetAt: wait.earliestResetAt,
+      healthRetryAt: wait.healthRetryAt,
+      failurePayload: subscriptionCoreCapacityWaitPayload(
+        wait.reason,
+        wait.earliestResetAt,
+        displayName,
+      ),
+    });
+  } catch (error) {
+    // Connectivity failures may hide a committed waiter: recover this exact
+    // attempt rather than overwriting it with a terminal failure.
+    const failure = subscriptionCapacityArmingFailure(waits.provider, error);
+    if (!failure) throw error;
+    deps.observability.warn(
+      "Subscription capacity wait could not be armed",
+      subscriptionCapacityArmingDiagnostic(waits.provider, error),
+    );
+    const settled = await deps.eventing.settle({
+      events: [
+        { type: "turn.failed", payload: failure },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+    });
+    if (!settled) {
+      acknowledgeLostAttemptOwnership();
+      control.turnMetricOutcome = "cancelled";
+      control.activityStatus = "cancelled";
+      return { exit: claimedResult({ status: "cancelled" }) };
+    }
+    control.activityError = error;
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = "idle";
+    return { exit: claimedResult({ status: "idle" }) };
+  }
   await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
   if (armed.action === "stopped") {
     control.turnMetricOutcome = "failed";

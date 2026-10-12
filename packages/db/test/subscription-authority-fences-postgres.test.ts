@@ -23,21 +23,25 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   createDb,
   createScheduledTask,
   createSession,
-  disconnectClaudeSubscriptionAccount,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
   sendAgentMessageInTransaction,
-  setInitialActiveClaudeCredential,
   submitHumanPromptInTransaction,
   withRlsContext,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src";
+// Historical 0717 staging writes pre-fence Claude accounts with the legacy
+// account writers, which stay only for the API until C2b (design 5.3, C4).
+import {
+  createClaudeSubscriptionAccount,
+  disconnectClaudeSubscriptionAccount,
+  setInitialActiveClaudeCredential,
+} from "./fixtures/legacy-claude/accounts";
 import { rawRows } from "../src/database";
 // 0717 is applied before the SuperGrok cutover, so its pre-cutover SuperGrok
 // rows are written with the test-only snapshot of the deleted legacy writers.

@@ -1,47 +1,33 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
+import { bootstrapWorkspace, createDb, type DbClient } from "../src";
+import { withWorkspaceSubjectRls } from "../src/database";
+import { encryptEnvironmentValue } from "../src/environment-crypto";
 import {
-  upsertOrganizationClaudeSubscription,
-  updateOrganizationClaudeSubscription,
-  getClaudeRotationSettings,
-  selectClaudeCredentialForUse,
-} from "../src/claude-subscription-accounts";
-import {
-  getModelConnectionAccess,
-  updateModelConnectionAccess,
-} from "../src/model-connection-access";
-import {
-  withRlsContext,
-  withSessionRlsActorContext,
-  withWorkspaceSubjectRls,
-} from "../src/database";
+  createWorkspaceProviderCustomModel,
+  lockActiveWorkspaceProviderCustomModelForAdmission,
+} from "../src/model-catalog";
 import {
   createOrganizationModelProviderCustomModel,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   retireOrganizationModelProviderCustomModel,
-  type OrganizationClaudeModelAdmissionAuthority,
 } from "../src/organization-model-providers";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+import { readSubscriptionCoreRouteFunding } from "../src/subscription-core/route-readiness";
 
-// Characterizes the legacy Claude runtime, which runs only before the drained
-// Claude cutover: the database withholds that migration. Removed with the
-// legacy runtime.
-const LEGACY_CLAUDE_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
-};
-
+// Claude subscription custom-model admission after the drained cutover
+// (design 5.3, C4): the legacy pool admission is deleted, so at both scopes a
+// Claude custom model is live only while the shared core serves it in the
+// workspace (the 0720 receipt, an enabled organization cutover and a serving
+// shared Claude connection that allows the exact product model). Everything
+// else fails closed. Runs on the fully migrated schema (the 0720 receipt is
+// present) as the non-owner application role.
 let shared: SharedTestDatabase;
 let client: DbClient;
-const organizationAuthority = { version: 1, scope: "organization" } as const;
-const encryptionKey = Buffer.alloc(32, 7);
+const key = Buffer.alloc(32, 41);
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase(
-    "organization-claude-model-admission",
-    LEGACY_CLAUDE_WORLD,
-  );
-  if (!acquired) throw new Error("Organization Claude admission tests require real PostgreSQL");
+  const acquired = await acquireSharedTestDatabase("organization-claude-model-admission");
+  if (!acquired) throw new Error("Claude custom-model admission tests require real PostgreSQL");
   shared = acquired;
   client = createDb(shared.appUrl);
 }, 180_000);
@@ -66,203 +52,244 @@ async function fixture() {
   const [personal] = await shared.admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
     values (${grant.accountId}, 'Claude admission Personal workspace') returning id`;
-  await shared.admin`
+  const [membership] = await shared.admin<{ id: string }[]>`
     insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
-    values (${grant.accountId}, ${grant.subjectId}, 'owner', 'active', ${personal!.id})`;
+    values (${grant.accountId}, ${grant.subjectId}, 'owner', 'active', ${personal!.id})
+    returning id::text as id`;
   const actor = { organizationId: grant.accountId, actorSubjectId: grant.subjectId };
-  const model = await createOrganizationModelProviderCustomModel(client.db, {
+  const organizationModel = await createOrganizationModelProviderCustomModel(client.db, {
     ...actor,
     providerKind: "claude_subscription",
     upstreamModelId: "claude-opus-5-5",
     operationId: crypto.randomUUID(),
   });
-  return { grant, actor, model };
-}
-
-async function connect(input: Awaited<ReturnType<typeof fixture>>) {
-  const secret = {
-    version: 1 as const,
-    token: "sk-ant-oat01-admission-fixture",
-    identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-  };
-  return await upsertOrganizationClaudeSubscription(client.db, {
-    ...input.actor,
-    encryptionKey,
-    secret,
-    providerAccountId: secret.identity.accountUuid,
-    label: null,
-    accountEmail: null,
-    expiresAt: null,
+  await createWorkspaceProviderCustomModel(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    providerKind: "claude_subscription",
+    upstreamModelId: "claude-sonnet-5-5",
+    operationId: crypto.randomUUID(),
+    requestHash: "c".repeat(64),
+    createdBySubjectId: grant.subjectId,
   });
-}
-
-function admissionInput(input: Awaited<ReturnType<typeof fixture>>) {
   return {
-    accountId: input.grant.accountId,
-    workspaceId: input.grant.workspaceId,
-    providerKind: "claude_subscription" as const,
-    upstreamModelId: input.model.upstreamModelId,
+    grant,
+    actor,
+    organizationModel,
+    membershipId: membership!.id,
+    personalWorkspaceId: personal!.id as string,
   };
 }
 
-async function admit(
-  input: Awaited<ReturnType<typeof fixture>>,
-  claudeAuthority: OrganizationClaudeModelAdmissionAuthority | undefined = {
-    authoritySnapshot: organizationAuthority,
-  },
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+async function setCutover(input: Fixture, enabled: boolean) {
+  await shared.admin`
+    insert into subscription_provider_cutovers (account_id, provider, enabled)
+    values (${input.grant.accountId}::uuid, 'claude', ${enabled})
+    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
+}
+
+async function addConnection(
+  input: Fixture,
+  allowedModelIds: string[] | null = null,
+  workspaceIds: string[] | null = null,
 ) {
-  return await withWorkspaceSubjectRls(
+  const label = `claude-admission-${crypto.randomUUID()}`;
+  const [row] = await shared.admin<{ id: string }[]>`
+    insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      allow_personal_workspaces, provider_account_id, provider_subject_id, label,
+      status, allowed_model_ids
+    ) values (
+      ${input.grant.accountId}::uuid, 'claude', 'subscription',
+      ${encryptEnvironmentValue(key, "claude-admission-credential")}, 'shared',
+      ${workspaceIds ? "workspaces" : "organization"}, ${!workspaceIds},
+      ${label}, ${label}, ${label}, 'active', ${allowedModelIds}::text[]
+    ) returning id::text as id`;
+  for (const workspaceId of workspaceIds ?? [])
+    await shared.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${input.grant.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid)`;
+  return row!.id;
+}
+
+/** The fixture subject's own personal Claude connection (all models allowed). */
+async function addPersonalConnection(input: Fixture) {
+  const connectionId = crypto.randomUUID();
+  const authorityId = crypto.randomUUID();
+  const label = `claude-admission-personal-${connectionId}`;
+  await shared.admin`
+    insert into organization_user_resource_authorities (
+      id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
+    ) values (
+      ${authorityId}::uuid, ${input.grant.accountId}::uuid, ${input.membershipId}::uuid,
+      'subscription_connection', ${connectionId}::uuid, 1, 'active'
+    )`;
+  await shared.admin`
+    insert into subscription_connections (
+      id, account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      owner_organization_membership_id, owner_subject_id, authority_id,
+      authority_resource_kind, authority_generation, provider_account_id,
+      provider_subject_id, label, status
+    ) values (
+      ${connectionId}::uuid, ${input.grant.accountId}::uuid, 'claude', 'subscription',
+      ${encryptEnvironmentValue(key, "claude-admission-personal")}, 'personal', 'people',
+      ${input.membershipId}::uuid, ${input.grant.subjectId}, ${authorityId}::uuid,
+      'subscription_connection', 1, ${label}, ${label}, ${label}, 'active'
+    )`;
+  return connectionId;
+}
+
+async function admitOrganization(
+  input: Fixture,
+  workspaceId: string = input.grant.workspaceId,
+): Promise<boolean> {
+  const admitted = await withWorkspaceSubjectRls(
     client.db,
-    input.grant.workspaceId,
+    workspaceId,
     input.grant.subjectId,
     (tx) =>
       lockActiveOrganizationModelProviderCustomModelForAdmission(tx, {
-        ...admissionInput(input),
-        ...(claudeAuthority ? { claudeAuthority } : {}),
+        accountId: input.grant.accountId,
+        workspaceId,
+        providerKind: "claude_subscription",
+        upstreamModelId: "claude-opus-5-5",
       }),
   );
+  return admitted !== null;
 }
 
-test("organization Claude admission requires canonical readiness, with no legacy credential row", async () => {
-  const input = await fixture();
-  expect(await admit(input)).toBeNull();
-  await connect(input);
-  expect((await admit(input))?.id).toBe(input.model.id);
-  const [legacy] = await shared.admin<{ count: number }[]>`
-    select count(*)::integer as count from organization_model_provider_connections
-    where account_id = ${input.grant.accountId} and provider_kind = 'claude_subscription'`;
-  expect(legacy?.count).toBe(0);
-  await withWorkspaceSubjectRls(
+async function admitWorkspace(
+  input: Fixture,
+  workspaceId: string = input.grant.workspaceId,
+): Promise<boolean> {
+  const admitted = await withWorkspaceSubjectRls(
     client.db,
-    input.grant.workspaceId,
+    workspaceId,
     input.grant.subjectId,
-    async (tx) => {
-      expect(
-        await lockActiveOrganizationModelProviderCustomModelForAdmission(tx, admissionInput(input)),
-      ).toBeNull();
-    },
-  );
-  for (const authoritySnapshot of [
-    { version: 1, scope: "workspace" } as const,
-    { version: 1, scope: "user", authorityGeneration: 1 } as const,
-  ]) {
-    expect(await admit(input, { authoritySnapshot })).toBeNull();
-  }
-  expect(
-    await withRlsContext(client.db, admissionInput(input), (tx) =>
-      lockActiveOrganizationModelProviderCustomModelForAdmission(tx, {
-        ...admissionInput(input),
-        claudeAuthority: { authoritySnapshot: organizationAuthority },
-      }),
-    ),
-  ).toBeNull();
-});
-
-test("organization readiness matches the primary assigned to this workspace", async () => {
-  const input = await fixture();
-  const primary = await connect(input);
-  const assigned = await connect(input);
-  const target = {
-    accountId: input.grant.accountId,
-    workspaceId: null,
-    subjectId: input.grant.subjectId,
-    kind: "claude_subscription" as const,
-    connectionId: primary.account.id,
-  };
-  const original = (await getModelConnectionAccess(client.db, target))!;
-  const excluded = (await updateModelConnectionAccess(client.db, target, {
-    ...original,
-    allowedWorkspaces: [],
-  }))!;
-  const selection = {
-    accountId: input.grant.accountId,
-    workspaceId: input.grant.workspaceId,
-    subjectId: input.grant.subjectId,
-    authoritySnapshot: organizationAuthority,
-    shardKey: crypto.randomUUID(),
-    modelId: `organization-claude-subscription/${input.model.upstreamModelId}`,
-    upstreamModelId: input.model.upstreamModelId,
-  };
-  expect((await getClaudeRotationSettings(client.db, selection))?.activeCredentialId).toBe(
-    assigned.account.id,
-  );
-  expect((await selectClaudeCredentialForUse(client.db, selection)).credentialId).toBe(
-    assigned.account.id,
-  );
-  expect((await admit(input))?.id).toBe(input.model.id);
-
-  // A visible paused primary remains explicit intent, even with another healthy account.
-  await updateModelConnectionAccess(client.db, target, {
-    ...excluded,
-    allowedWorkspaces: null,
-  });
-  await updateOrganizationClaudeSubscription(client.db, {
-    ...input.actor,
-    credentialId: primary.account.id,
-    allocatorEnabled: false,
-    expectedAllocatorVersion: primary.account.allocatorVersion,
-  });
-  expect((await getClaudeRotationSettings(client.db, selection))?.activeCredentialId).toBe(
-    primary.account.id,
-  );
-  expect((await selectClaudeCredentialForUse(client.db, selection)).credentialId).toBeNull();
-  expect(await admit(input)).toBeNull();
-});
-
-test("session-source admission keeps the stored pool instead of selecting a live organization pool", async () => {
-  const input = await fixture();
-  await connect(input);
-  const session = (
-    authoritySnapshot: typeof organizationAuthority | { version: 1; scope: "workspace" },
-  ) =>
-    withSessionRlsActorContext({ subjectId: input.grant.subjectId }, () =>
-      createSession(client.db, {
+    (tx) =>
+      lockActiveWorkspaceProviderCustomModelForAdmission(tx, {
         accountId: input.grant.accountId,
-        workspaceId: input.grant.workspaceId,
-        initialMessage: "Accepted Claude authority fixture",
-        resources: [],
-        metadata: {},
-        model: `organization-claude-subscription/${input.model.upstreamModelId}`,
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        createdBy: { kind: "subject", subjectId: input.grant.subjectId },
-        subjectId: input.grant.subjectId,
-        initialClaudeProviderAccountAuthoritySnapshot: authoritySnapshot,
+        workspaceId,
+        providerKind: "claude_subscription",
+        upstreamModelId: "claude-sonnet-5-5",
       }),
-    );
-  const workspace = await session({ version: 1, scope: "workspace" });
-  expect(await admit(input, { sessionId: workspace.id })).toBeNull();
-  const organization = await session(organizationAuthority);
-  expect((await admit(input, { sessionId: organization.id }))?.id).toBe(input.model.id);
-  expect(await admit(input, { sessionId: crypto.randomUUID() })).toBeNull();
+  );
+  return admitted !== null;
+}
+
+async function admitBoth(input: Fixture, workspaceId: string = input.grant.workspaceId) {
+  return {
+    organization: await admitOrganization(input, workspaceId),
+    workspace: await admitWorkspace(input, workspaceId),
+  };
+}
+
+test("runs as the non-owner application role", async () => {
+  const [posture] = await shared.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+    select rolsuper, rolbypassrls from pg_roles where rolname = 'opengeni_app'`;
+  expect(posture).toEqual({ rolsuper: false, rolbypassrls: false });
 });
 
-test("allocator-disabled, disconnected and retired organization Claude sources fail closed", async () => {
+test("both scopes are admitted on the core route with a serving connection", async () => {
   const input = await fixture();
-  const connected = await connect(input);
-  expect((await admit(input))?.id).toBe(input.model.id);
-  await updateOrganizationClaudeSubscription(client.db, {
-    ...input.actor,
-    credentialId: connected.account.id,
-    allocatorEnabled: false,
-    expectedAllocatorVersion: connected.account.allocatorVersion,
-  });
-  expect(await admit(input)).toBeNull();
-  await updateOrganizationClaudeSubscription(client.db, {
-    ...input.actor,
-    credentialId: connected.account.id,
-    disconnect: true,
-  });
-  expect(await admit(input)).toBeNull();
-  await connect(input);
-  expect((await admit(input))?.id).toBe(input.model.id);
+  // Receipt present, but the organization has no cutover row: maintenance.
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  await setCutover(input, true);
+  // Core route, but no serving shared Claude connection.
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  await addConnection(input);
+  expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
+  // An operator hold (maintenance) refuses both again.
+  await setCutover(input, false);
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+});
+
+test("the serving connection must allow the exact product model", async () => {
+  const input = await fixture();
+  await setCutover(input, true);
+  await addConnection(input, ["organization-claude-subscription/claude-opus-5-5"]);
+  expect(await admitBoth(input)).toEqual({ organization: true, workspace: false });
+  await addConnection(input, ["workspace-claude-subscription/claude-sonnet-5-5"]);
+  expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
+});
+
+test("an unhealthy connection does not serve, and a retired model is never admitted", async () => {
+  const input = await fixture();
+  await setCutover(input, true);
+  const connectionId = await addConnection(input);
+  await shared.admin`
+    update subscription_connections set status = 'error'
+    where id = ${connectionId}::uuid`;
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  await addConnection(input);
+  expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
   await retireOrganizationModelProviderCustomModel(client.db, {
     ...input.actor,
     providerKind: "claude_subscription",
-    customModelId: input.model.id,
-    expectedVersion: input.model.version,
+    customModelId: input.organizationModel.id,
+    expectedVersion: input.organizationModel.version,
     operationId: crypto.randomUUID(),
   });
-  expect(await admit(input)).toBeNull();
+  expect(await admitOrganization(input)).toBe(false);
+  // The workspace model is a separate definition and stays admitted.
+  expect(await admitWorkspace(input)).toBe(true);
+});
+
+test("a personal Claude connection never admits, not even in its owner's Personal workspace", async () => {
+  const input = await fixture();
+  await setCutover(input, true);
+  // The same Claude workspace-scope model in the owner's Personal workspace.
+  await shared.admin`
+    insert into workspace_gateway_custom_models (
+      account_id, workspace_id, provider_kind, upstream_model_id, create_operation_id,
+      create_request_hash, created_by_subject_id
+    ) values (
+      ${input.grant.accountId}::uuid, ${input.personalWorkspaceId}::uuid, 'claude_subscription',
+      'claude-sonnet-5-5', ${crypto.randomUUID()}::uuid, ${"d".repeat(64)}, ${input.grant.subjectId}
+    )`;
+  // Only the admitting subject's own personal connection exists. Admission
+  // runs under that owner's subject, but asks the core for shared capacity
+  // only, so the personal connection serves neither scope anywhere.
+  await addPersonalConnection(input);
+  // The connection is serviceable: the core funds its owner's own turn in
+  // the Personal workspace with it.
+  expect(
+    await readSubscriptionCoreRouteFunding(client.db, {
+      provider: "claude",
+      accountId: input.grant.accountId,
+      workspaceId: input.personalWorkspaceId,
+      subjectId: input.grant.subjectId,
+      productModelId: "organization-claude-subscription/claude-opus-5-5",
+    }),
+  ).toEqual({ route: "core", value: true });
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  expect(await admitBoth(input, input.personalWorkspaceId)).toEqual({
+    organization: false,
+    workspace: false,
+  });
+  // A shared organization connection (personal workspaces allowed) admits
+  // both workspaces, so the refusals above came from the personal ownership.
+  await addConnection(input);
+  expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
+  expect(await admitBoth(input, input.personalWorkspaceId)).toEqual({
+    organization: true,
+    workspace: true,
+  });
+});
+
+test("a shared connection scoped to other workspaces does not admit here", async () => {
+  const input = await fixture();
+  await setCutover(input, true);
+  const [other] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${input.grant.accountId}, 'Claude admission other workspace') returning id::text as id`;
+  const connectionId = await addConnection(input, null, [other!.id]);
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  // Covering this workspace too admits it.
+  await shared.admin`
+    insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+    values (${input.grant.accountId}::uuid, ${connectionId}::uuid, ${input.grant.workspaceId}::uuid)`;
+  expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
 });

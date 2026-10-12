@@ -26,7 +26,6 @@ import {
   createEnrollment,
   createOrganizationInvitation,
   createScheduledTask,
-  createXaiSubscriptionCredential,
   deadLetterHostExportHead,
   disableHostExportConsumer,
   installPortableSkill,
@@ -36,9 +35,9 @@ import {
   revokeConnection,
   saveSlackBotUserLink,
   upsertOrganizationModelProviderConnection,
-  upsertOrganizationClaudeSubscription,
   type DbClient,
 } from "../src";
+import { upsertOrganizationClaudeSubscription } from "./fixtures/legacy-claude/accounts";
 import postgres from "postgres";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
 
@@ -940,3 +939,5 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
     expect(await lifecycleRows()).toHaveLength(before);
   });
 });
+
+import { createXaiSubscriptionCredential } from "./fixtures/legacy-xai";

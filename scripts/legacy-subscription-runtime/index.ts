@@ -1,8 +1,10 @@
+import { LEGACY_CLAUDE_RUNTIME } from "./claude";
 import { LEGACY_CODEX_RUNTIME } from "./codex";
 import type { LegacySubscriptionRetirement } from "./types";
 import { LEGACY_XAI_RUNTIME } from "./xai";
 
 export type { LegacyRuntimeException, LegacySubscriptionRetirement } from "./types";
+export { LEGACY_CLAUDE_RUNTIME } from "./claude";
 export { LEGACY_CODEX_RUNTIME } from "./codex";
 export { LEGACY_XAI_RUNTIME } from "./xai";
 
@@ -14,4 +16,5 @@ export { LEGACY_XAI_RUNTIME } from "./xai";
 export const LEGACY_SUBSCRIPTION_RETIREMENTS: readonly LegacySubscriptionRetirement[] = [
   LEGACY_CODEX_RUNTIME,
   LEGACY_XAI_RUNTIME,
+  LEGACY_CLAUDE_RUNTIME,
 ];

@@ -1,6 +1,6 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
-import { bootstrapWorkspace, createClaudeSubscriptionAccount, createDb } from "../src";
+import { bootstrapWorkspace, createDb } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
@@ -9,9 +9,10 @@ import postgres from "postgres";
 // The genuine complete migration replay runs as a non-bypass owner.
 setDefaultTimeout(180_000);
 const migrationName = "0602_claude_account_lifecycle_facts.sql";
-// Characterizes the legacy Claude runtime, which runs only before the drained
-// Claude cutover: its ledger row is recorded and never run. Removed with the
-// legacy runtime.
+// Characterizes the historical 0602 trigger replay. The legacy Claude account
+// writer is deleted (design 5.3, C4), so accounts are inserted directly the way
+// that writer stored them; the drained Claude cutover stays recorded and
+// unrun so the table still accepts connections at this point of history.
 const claudeCutover = SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!;
 
 test("Claude account connection facts follow real insert, privacy and export boundaries without backfill", async () => {
@@ -63,20 +64,14 @@ test("Claude account connection facts follow real insert, privacy and export bou
       const token = `sk-ant-oat01-lifecycle-${crypto.randomUUID()}`;
       const label = `private-account-label-${crypto.randomUUID()}`;
       secrets.push(providerAccountId, token, label);
-      return await createClaudeSubscriptionAccount(app!.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        subjectId,
-        scope: "workspace",
-        encryptionKey: Buffer.alloc(32, 7),
-        providerAccountId,
-        label,
-        secret: {
-          version: 1,
-          token,
-          identity: { accountUuid: providerAccountId, deviceId: "a".repeat(64) },
-        },
-      });
+      await owned.admin`
+        insert into claude_subscription_credentials (
+          account_id, workspace_id, authority_scope, credential_encrypted,
+          provider_account_id, label, connected_by_subject_id
+        ) values (
+          ${grant.accountId}, ${grant.workspaceId}, 'workspace', ${`v1:${token}`},
+          ${providerAccountId}, ${label}, ${subjectId}
+        )`;
     };
     const facts = () => owned.admin<
       Array<{

@@ -9,7 +9,7 @@
  * receipt-gated policies.
  */
 import * as schema from "../../src/schema";
-import { createSubscriptionAccountRepository } from "../../src/subscription-account-repository";
+import { createSubscriptionAccountRepository } from "./legacy-subscriptions/subscription-account-repository";
 
 /** The production factory now types only Claude; SuperGrok used the same code. */
 type RetiredProviderOptions = Parameters<

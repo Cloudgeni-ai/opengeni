@@ -1,4 +1,5 @@
-import { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+// TEST ONLY: frozen pre-cutover pool implementation for historical migration fixtures.
+import { SubscriptionAccountChangedError } from "../../../src/subscription-account-conflict";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import {
   withRlsContext,
@@ -6,9 +7,9 @@ import {
   withWorkspaceSubjectRls,
   rawRows,
   type Database,
-} from "./database";
-import { encryptEnvironmentValue } from "./environment-crypto";
-import type { SubscriptionPoolTables } from "./subscription-pool-schema";
+} from "../../../src/database";
+import { encryptEnvironmentValue } from "../../../src/environment-crypto";
+import type { SubscriptionPoolTables } from "../../../src/subscription-pool-schema";
 import type { createSubscriptionAccountRepository } from "./subscription-account-repository";
 
 /** The organization-scope legacy pool of a provider not yet on the core (Claude until C4). */

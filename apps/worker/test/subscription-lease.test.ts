@@ -156,55 +156,82 @@ test.each(["released", "lost", "different_turn"] as const)(
   },
 );
 
-test("Claude participates in the shared serving lease with its exact scoped holder fence", async () => {
-  const db = await import("@opengeni/db");
-  const { createTurnCredentialLeases } =
-    await import("../src/activities/agent-turn/credential-leases");
-  const heartbeat = spyOn(db, "heartbeatClaudeCredentialLeaseUntil").mockResolvedValue(
-    new Date(Date.now() + 300_000),
-  );
-  try {
-    const dependencies = {
-      db: {} as TurnCredentialLeaseDeps["db"],
-      observability: {
-        incrementCounter() {},
-        warn() {},
-      } as unknown as TurnCredentialLeaseDeps["observability"],
-      accountId: crypto.randomUUID(),
-      workspaceId: crypto.randomUUID(),
-      codexWorkspaceKey: "fixture",
-      getTurnId: () => "fixture-turn",
-    };
-    const leases = createTurnCredentialLeases(dependencies);
-    Object.assign(leases.claude, {
-      held: true,
-      subjectId: "user:fixture",
-      holderId: "fixture-holder",
-      generation: 3,
-      confirmedUntilMs: performance.now() + 10_000,
-    });
-    await leases.renewServing("model_usage");
-    expect(heartbeat).toHaveBeenCalledTimes(1);
-    expect(heartbeat.mock.calls[0]?.[1]).toEqual({
-      workspaceId: dependencies.workspaceId,
-      subjectId: "user:fixture",
-      turnId: "fixture-turn",
-      holderId: "fixture-holder",
-      generation: 3,
-      leaseTtlMs: db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-    });
-    expect(leases.servingLost()).toBe(false);
-    heartbeat.mockResolvedValue(null);
-    leases.claude.confirmedUntilMs = performance.now() + 10_000;
-    await leases.renewServing("runtime_event");
-    expect(leases.servingLost()).toBe(true);
-    expect(() => leases.claude.assertUsable()).toThrow(
-      "Claude credential lease is not usable for provider dispatch",
+test.each(["codex", "claude", "xai"] as const)(
+  "%s participates in the shared serving lease only through its core lease",
+  async (provider) => {
+    const db = await import("@opengeni/db");
+    const { createTurnCredentialLeases } =
+      await import("../src/activities/agent-turn/credential-leases");
+    const renew = spyOn(db, "renewSubscriptionTurnLease").mockResolvedValue(
+      new Date(Date.now() + 300_000),
     );
-  } finally {
-    heartbeat.mockRestore();
-  }
-});
+    const rls = spyOn(db, "withRlsContext").mockImplementation(async (_db, _context, callback) =>
+      callback({} as TurnCredentialLeaseDeps["db"]),
+    );
+    try {
+      const dependencies = {
+        db: {} as TurnCredentialLeaseDeps["db"],
+        observability: {
+          incrementCounter() {},
+          warn() {},
+        } as unknown as TurnCredentialLeaseDeps["observability"],
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        codexWorkspaceKey: "fixture",
+        getTurnId: () => "fixture-turn",
+        getSessionId: () => "fixture-session",
+      };
+      // A holder without core placement is lost, never renewed in another table.
+      const unplaced = createTurnCredentialLeases(dependencies);
+      Object.assign(unplaced[provider], {
+        held: true,
+        holderId: "fixture-holder",
+        generation: 3,
+        confirmedUntilMs: performance.now() + 10_000,
+      });
+      await unplaced.renewServing("model_usage");
+      expect(renew).not.toHaveBeenCalled();
+      expect(unplaced.servingLost()).toBe(true);
+
+      const leases = createTurnCredentialLeases(dependencies);
+      Object.assign(leases[provider], {
+        held: true,
+        holderId: "fixture-holder",
+        generation: 3,
+        confirmedUntilMs: performance.now() + 10_000,
+      });
+      leases[provider].useSubscriptionCoreLease("fixture-connection");
+      await leases.renewServing("model_usage");
+      expect(renew).toHaveBeenCalledTimes(1);
+      expect(renew.mock.calls[0]?.[1]).toEqual({
+        accountId: dependencies.accountId,
+        workspaceId: dependencies.workspaceId,
+        sessionId: "fixture-session",
+        turnId: "fixture-turn",
+        provider,
+        connectionId: "fixture-connection",
+        holderId: "fixture-holder",
+        generation: 3,
+        ttlMs: {
+          codex: db.CODEX_CREDENTIAL_LEASE_TTL_MS,
+          claude: db.SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
+          xai: db.XAI_CREDENTIAL_LEASE_TTL_MS,
+        }[provider],
+      });
+      expect(leases.servingLost()).toBe(false);
+      renew.mockResolvedValue(null);
+      leases[provider].confirmedUntilMs = performance.now() + 10_000;
+      await leases.renewServing("runtime_event");
+      expect(leases.servingLost()).toBe(true);
+      expect(() => leases[provider].assertUsable()).toThrow(
+        "credential lease is not usable for provider dispatch",
+      );
+    } finally {
+      renew.mockRestore();
+      rls.mockRestore();
+    }
+  },
+);
 
 test("a runtime-event and model-usage burst reuses its fresh lease confirmation", async () => {
   let calls = 0;

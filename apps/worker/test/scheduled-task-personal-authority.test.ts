@@ -31,7 +31,6 @@ import {
   appendSessionEvents,
   enqueueSessionTurn,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   bindScheduledTaskRunSessionInTransaction,
   createDb,
   createRig,
@@ -52,7 +51,6 @@ import {
   requestSessionTurnRecovery,
   requireSession,
   setVariableSetVariable,
-  setInitialActiveClaudeCredential,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
@@ -70,6 +68,14 @@ import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../src/activities/environment";
 import type { ActivityServices } from "../src/activities/types";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+import {
+  createXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredential,
+} from "../../../packages/db/test/fixtures/legacy-xai";
+import {
+  createClaudeSubscriptionAccount,
+  setInitialActiveClaudeCredential,
+} from "../../../packages/db/test/fixtures/legacy-claude/accounts";
 
 // Characterizes the legacy Claude runtime, which runs only before the drained
 // Claude cutover: the database withholds that migration. Removed with the
@@ -341,37 +347,29 @@ describe("scheduled task personal MCP authority", () => {
     async (scope) => {
       if (!available) return;
       const workspace = await workspaceFixture();
-      let claudeSnapshot:
-        | {
-            version: 1;
-            scope: "organization";
-          }
-        | {
-            version: 1;
-            scope: "user";
-            authorityGeneration: number;
-          };
+      // This task already accepted its legacy pool before migration. The
+      // dispatcher copies it verbatim even though fresh selection uses v2.
+      let claudeSnapshot =
+        scope === "personal"
+          ? { version: 1 as const, scope: "user" as const, authorityGeneration: 1 }
+          : { version: 1 as const, scope: "organization" as const };
       // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
       // workspace default, never computed from live pools, and copied verbatim.
       const xaiSnapshot = { version: 1, scope: "workspace" } as const;
       if (scope === "personal") {
-        await admin`insert into workspace_memberships (
-        account_id, workspace_id, subject_id, role, permissions
-      ) values (
-        ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-        'owner', '[]'::jsonb
-      ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
-        const claudeIdentity = crypto.randomUUID();
-        const claude = await createClaudeSubscriptionAccount(client.db, {
+        await admin`update workspace_memberships set role = 'owner'
+          where workspace_id = ${workspace.workspaceId} and subject_id = ${workspace.subjectId}`;
+        const accountUuid = crypto.randomUUID();
+        const credential = await createClaudeSubscriptionAccount(client.db, {
           ...workspace,
           scope: "user",
           encryptionKey: new Uint8Array(32).fill(23),
           secret: {
             version: 1,
             token: "sk-ant-oat01-scheduled-personal",
-            identity: { accountUuid: claudeIdentity, deviceId: "c".repeat(64) },
+            identity: { accountUuid, deviceId: "c".repeat(64) },
           },
-          providerAccountId: claudeIdentity,
+          providerAccountId: accountUuid,
           label: null,
           accountEmail: null,
           planType: "claude_max",
@@ -379,12 +377,12 @@ describe("scheduled task personal MCP authority", () => {
         });
         await setInitialActiveClaudeCredential(client.db, {
           ...workspace,
-          authoritySnapshot: claude.authoritySnapshot,
-          credentialId: claude.account.id,
+          authoritySnapshot: credential.authoritySnapshot,
+          credentialId: credential.account.id,
         });
-        claudeSnapshot = claude.authoritySnapshot;
-      } else {
-        claudeSnapshot = { version: 1, scope: "organization" };
+        if (credential.authoritySnapshot.scope !== "user")
+          throw new Error("Expected personal fixture");
+        claudeSnapshot = credential.authoritySnapshot;
       }
       const task = await createScheduledTask(client.db, {
         ...workspace,

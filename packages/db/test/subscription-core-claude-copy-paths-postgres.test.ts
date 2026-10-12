@@ -434,7 +434,14 @@ let foreign: { grant: Grant; caller: Agent; target: { id: string } } | null = nu
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-claude-copy-paths");
+  shared = await acquireSharedTestDatabase("subscription-core-claude-copy-paths", {
+    // This suite constructs pre-cutover carriers, then installs its own
+    // receipt. Neither provider cutover may pre-mark those source rows.
+    withheldMigrations: [
+      "0738_subscription_core_xai_cutover.sql",
+      "0739_subscription_core_claude_cutover.sql",
+    ],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
   // Every source is accepted before the receipt.

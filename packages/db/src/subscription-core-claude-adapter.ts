@@ -34,7 +34,7 @@ import {
   claudeRefreshedCredential,
   ClaudeSubscriptionReconnectRequired,
   requestClaudeTokenRefresh,
-} from "./claude-subscription-tokens";
+} from "./subscription-core-claude-oauth";
 import { subscriptionCoreDefaultErrors } from "./subscription-core/errors";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import {

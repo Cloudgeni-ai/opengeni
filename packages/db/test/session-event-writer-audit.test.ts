@@ -142,20 +142,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#armScopedCapacityWait": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
-  "packages/db/src/index.ts#supersedeScopedCapacityWaitInTransaction": {
-    inserts: 1,
-    contract: "owned_suffix",
-  },
-  "packages/db/src/index.ts#reconcileScopedCapacityWait": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
   "packages/db/src/index.ts#applyContextCompaction": {
     inserts: 1,
     contract: "turn_attempt_fence",
@@ -395,7 +381,6 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
     "reconcileSubscriptionCoreCapacityWait",
   ],
-  supersedeScopedCapacityWaitInTransaction: ["reconcileScopedCapacityWait"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   recordSessionAttemptQuiescenceInTransaction: [
     "commitSessionAttemptQuiescence",
@@ -408,7 +393,6 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armSubscriptionCoreCapacityWait",
-    "armScopedCapacityWait",
     "cancelSessionSubtreeInTransaction",
     "failSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
@@ -479,7 +463,7 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "failSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait", "armScopedCapacityWait"],
+  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
@@ -905,9 +889,9 @@ function subscriptionWaiterBindings(): Map<string, string[]> {
     visit(sourceFile.program);
   }
   for (const [factory, tables] of factories) {
-    // SuperGrok's legacy waiter instance was deleted with its runtime (M4 X4);
-    // its table is read-only after the 0721 receipt.
-    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters"]);
+    // All providers use shared-core waiters. Reintroducing a legacy runtime
+    // factory is forbidden even if its old lock contract would still pass.
+    expect(tables.sort(), factory).toEqual([]);
   }
   return factories;
 }
@@ -1135,8 +1119,11 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
-  test("scoped capacity waiters retain activity admission in both authority branches", () => {
-    const source = readFileSync(join(repoRoot, "packages/db/src/index.ts"), "utf8");
+  test("the historical scoped-waiter fixture proves activity-gate detection in both branches", () => {
+    const source = readFileSync(
+      join(repoRoot, "packages/db/test/fixtures/legacy-codex.ts"),
+      "utf8",
+    );
     const wrapper = expectScopedCapacityWaiterActivityBoundary(source);
     const fixture = `function createScopedSubscriptionCapacityWaiters() { ${wrapper} }`;
     for (const [gated, ungated] of [
@@ -1178,10 +1165,7 @@ describe("session_events writer inventory", () => {
     const violations: string[] = [];
     const aliasedWriters: Record<string, string[]> = {};
     const bindings = new Map([
-      [
-        "createScopedSubscriptionCapacityWaiters",
-        ["claude_capacity_waiters", "xai_capacity_waiters"],
-      ],
+      ["createScopedSubscriptionCapacityWaiters", ["xai_capacity_waiters"]],
     ]);
     const visit = (node: t.Node): void => {
       if (isCallExpression(node) && insertsSessionEvents(node)) {
@@ -1199,8 +1183,8 @@ describe("session_events writer inventory", () => {
     visit(sourceFile.program);
     expect(violations).toEqual(["unprotectedWriter"]);
     expect(aliasedWriters).toEqual({
-      protectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
-      unprotectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+      protectedWriter: ["xai_capacity_waiters"],
+      unprotectedWriter: ["xai_capacity_waiters"],
     });
     expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
     const factory = sourceFile.program.body[0]!;
@@ -1298,11 +1282,12 @@ describe("session_events writer inventory", () => {
       };
       visit(sourceFile.program);
     }
-    // The legacy Codex and SuperGrok waiter tables stay fenced in the database,
+    // All legacy provider waiter tables stay fenced in the database,
     // but the retired runtimes no longer write them from TypeScript.
     const retiredTables = new Set<string>([
       tenancyQuiescenceTables.codexCapacityWaiters,
       tenancyQuiescenceTables.xaiCapacityWaiters,
+      tenancyQuiescenceTables.claudeCapacityWaiters,
     ]);
     expect([...discovered].sort()).toEqual(
       Object.values(tenancyQuiescenceTables)

@@ -9,7 +9,7 @@ export type SubscriptionCapacityArmingFailurePayload = {
   recovery: "user_message";
 };
 
-const PROVIDER_NAMES = { claude: "Claude", xai: "SuperGrok" } as const;
+const PROVIDER_NAMES = { codex: "Codex", claude: "Claude", xai: "SuperGrok" } as const;
 
 /**
  * Translate a failure to arm a durable capacity wait into an explicit,

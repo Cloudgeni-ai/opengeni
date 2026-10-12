@@ -49,6 +49,7 @@ import { readXaiCoreStatus } from "../xai-subscription-core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 import { databaseUnavailableHttpError } from "../http/api-error";
+import { requirePrivateSubscriptionHuman } from "./subscription-pool-access";
 
 type SuperGrokConnectState = {
   externalContinuationEncrypted?: string;

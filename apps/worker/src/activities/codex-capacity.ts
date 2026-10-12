@@ -1,8 +1,6 @@
 import {
   getSubscriptionCoreCapacityWaitForSession,
   subscriptionCoreCapacityWaitRef,
-  getClaudeCapacityWaitForSession,
-  reconcileClaudeCapacityWait as reconcileClaudeCapacityWaitDb,
 } from "@opengeni/db";
 
 import {
@@ -33,23 +31,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       input.sessionId,
     );
     if (coreWaiter) return subscriptionCoreCapacityWaitRef(coreWaiter);
-    const waiter = await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    return waiter
-      ? {
-          provider: "claude" as const,
-          waiterId: waiter.id,
-          generation: waiter.generation,
-          // A capacity mutation may have committed while its Temporal signal
-          // was lost or while the workflow continued-as-new. Reconstruct that
-          // outbox edge as an immediate re-evaluation rather than waiting for
-          // the older timer.
-          nextCheckAt:
-            waiter.wakeRevision > waiter.observedWakeRevision
-              ? new Date(0).toISOString()
-              : waiter.nextCheckAt.toISOString(),
-          wakeRevision: waiter.wakeRevision,
-        }
-      : null;
+    return null;
   }
 
   async function reconcileCodexCapacityWait(
@@ -72,43 +54,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
           generation: input.generation,
         },
       );
-      if (core) return core;
-    }
-    if (input.provider === "claude") {
-      const current = await getClaudeCapacityWaitForSession(
-        resolved.db,
-        input.workspaceId,
-        input.sessionId,
-      );
-      if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
-        return { action: "stale" };
-      }
-      const result = await reconcileClaudeCapacityWaitDb(resolved.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        waiterId: input.waiterId,
-        generation: input.generation,
-      });
-      if (result.events.length > 0) {
-        try {
-          await resolved.bus.publish(input.workspaceId, input.sessionId, result.events);
-        } catch {
-          // Postgres is authoritative; SSE replay/gap fill repairs missed fanout.
-        }
-      }
-      if (result.action === "resumed") return { action: "resumed" };
-      if (result.action === "waiting") {
-        return {
-          action: "waiting",
-          provider: input.provider,
-          waiterId: result.waiter.id,
-          generation: result.waiter.generation,
-          nextCheckAt: result.waiter.nextCheckAt.toISOString(),
-          wakeRevision: result.waiter.wakeRevision,
-        };
-      }
-      return { action: result.action };
+      return core ?? { action: "stale" };
     }
     // The same reference may name a core waiter (looked up by its exact id).
     const core = await reconcileCoreCodexCapacityWait(resolved, {

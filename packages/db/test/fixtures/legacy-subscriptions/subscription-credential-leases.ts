@@ -1,5 +1,6 @@
+// TEST ONLY: frozen pre-cutover pool implementation for historical migration fixtures.
 import { sql } from "drizzle-orm";
-import { rawRows, type Database } from "./database";
+import { rawRows, type Database } from "../../../src/database";
 
 /** Called inside the provider's authorized RLS transaction, never grants scope. */
 export async function heartbeatSubscriptionCredentialLeaseUntil(

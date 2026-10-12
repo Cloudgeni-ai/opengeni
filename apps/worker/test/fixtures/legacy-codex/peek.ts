@@ -4,10 +4,10 @@
 import {
   getSubscriptionCoreCodexCapacityWaitForSession,
   subscriptionCoreCodexCapacityWaitRef,
-  getClaudeCapacityWaitForSession,
 } from "@opengeni/db";
 import {
   getCodexCapacityWaitForSession,
+  getClaudeCapacityWaitForSession,
   getXaiCapacityWaitForSession,
 } from "../../../../../packages/db/test/fixtures/legacy-codex";
 import type { ControlActivityServices, GetCodexCapacityWaitInput } from "../../../src/activities/types";

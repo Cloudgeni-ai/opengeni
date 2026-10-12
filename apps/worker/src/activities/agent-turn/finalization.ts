@@ -1,14 +1,12 @@
 import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
-  recordClaudeAccountUsage,
-  releaseClaudeCredentialLease,
   type SessionAttemptQuiescenceCommit,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import type { Settings } from "@opengeni/config";
 
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
@@ -423,37 +421,6 @@ async function finalizeTurnAttemptSteps(
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
     monitor.enter("provider_leases");
-    const claudeEncryptionKey = environmentsEncryptionKeyBytes(settings);
-    if (claudeEncryptionKey && providerTurn.claudeAuthoritySnapshot && leases.claude.subjectId) {
-      for (const snapshot of providerTurn.latestClaudeUsage.values()) {
-        if (
-          (!snapshot.observation && !snapshot.refresh) ||
-          snapshot.expectedConnectionId !== providerTurn.effectiveClaudeCredentialId ||
-          snapshot.expectedCredentialVersion !== providerTurn.effectiveClaudeCredentialVersion
-        )
-          continue;
-        await waitForTurnFinalizerStep(
-          recordClaudeAccountUsage(
-            db,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: leases.claude.subjectId,
-              credentialId: snapshot.expectedConnectionId,
-              authoritySnapshot: providerTurn.claudeAuthoritySnapshot,
-            },
-            {
-              encryptionKey: claudeEncryptionKey,
-              token: snapshot.token,
-              expectedCredentialVersion: snapshot.expectedCredentialVersion,
-              ...(snapshot.observation ? { observation: snapshot.observation } : {}),
-              ...(snapshot.refresh ? { refresh: snapshot.refresh } : {}),
-            },
-          ).catch(() => null),
-          finalizerSignal,
-        );
-      }
-    }
     const coreCodex = providerTurn.codexSubscriptionCore;
     if (coreCodex) {
       // Shared-core turn: usage headers become a quota observation on the
@@ -517,8 +484,8 @@ async function finalizeTurnAttemptSteps(
       );
       leases.xai.held = false;
     }
-    // The same for a core-placed Claude turn (its legacy usage receipts and
-    // legacy release never run: they need the legacy authority and subject).
+    // The same for a Claude turn (always core-placed: the legacy Claude
+    // runtime, its usage receipts and its lease release are deleted).
     if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
       // Queued quota writes still need this lease's fence. Cancellation and
       // housekeeping timeouts may detach only the wake, never that write join.
@@ -537,28 +504,6 @@ async function finalizeTurnAttemptSteps(
         finalizerSignal,
       );
       leases.claude.held = false;
-    }
-    for (const [lease, release] of [[leases.claude, releaseClaudeCredentialLease]] as const) {
-      lease.stopHeartbeat();
-      if (
-        lease.held &&
-        attempt.turnId &&
-        lease.subjectId &&
-        lease.holderId &&
-        lease.generation !== null
-      ) {
-        await waitForTurnFinalizerStep(
-          release(db, {
-            workspaceId: input.workspaceId,
-            subjectId: lease.subjectId,
-            turnId: attempt.turnId,
-            holderId: lease.holderId,
-            generation: lease.generation,
-          }).catch(() => undefined),
-          finalizerSignal,
-        );
-        lease.held = false;
-      }
     }
     // Workbench v2 turn-end workspace capture — runs FIRST in
     // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last

@@ -1,10 +1,4 @@
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
-import {
-  listClaudeSubscriptionAccountsMetadataForAuthority,
-  getClaudeRotationSettings,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
-  ClaudeAuthorityPoolInactiveError,
-} from "./claude-subscription-accounts";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -79,43 +73,6 @@ export async function getWorkspaceConnectionModelRestrictions(
     rows.some((row) => row.allowedModelIds == null)
       ? null
       : [...new Set(rows.flatMap((row) => row.allowedModelIds ?? []))];
-  const claudeAuthority = claudeCoreRestrictions
-    ? null
-    : (claudeAuthoritySnapshot ??
-      (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, {
-        workspaceId,
-        subjectId,
-      })));
-  let claudeModels: string[] | null = [];
-  if (claudeAuthority) {
-    try {
-      const [claude, claudeRotation] = await Promise.all([
-        listClaudeSubscriptionAccountsMetadataForAuthority(db, {
-          workspaceId,
-          subjectId,
-          authoritySnapshot: claudeAuthority,
-        }),
-        getClaudeRotationSettings(db, {
-          workspaceId,
-          subjectId,
-          authoritySnapshot: claudeAuthority,
-        }),
-      ]);
-      claudeModels = union(
-        claude.filter(
-          (row) =>
-            row.status === "active" &&
-            row.allocatorEnabled &&
-            (claudeRotation?.rotationEnabled || row.id === claudeRotation?.activeCredentialId),
-        ),
-      );
-    } catch (error) {
-      // An accepted private pool cannot be replaced by the caller's current pool.
-      // Catalog readiness closes this rail; execution still rejects stale authority.
-      if (!claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
-        throw error;
-    }
-  }
   const restrictions: ConnectionModelRestrictions = {
     "codex/": union(codex.filter((row) => row.status === "active" && row.allocatorEnabled)),
     "supergrok/": [],
@@ -125,18 +82,14 @@ export async function getWorkspaceConnectionModelRestrictions(
     "workspace-anthropic/": [],
     "workspace-claude-subscription/": claudeCoreRestrictions
       ? copied(claudeCoreRestrictions["workspace-claude-subscription/"])
-      : claudeAuthority?.scope === "organization"
-        ? []
-        : claudeModels,
+      : [],
     "organization-gateway/": [],
     "organization-openrouter/": [],
     "organization-opper/": [],
     "organization-anthropic/": [],
     "organization-claude-subscription/": claudeCoreRestrictions
       ? copied(claudeCoreRestrictions["organization-claude-subscription/"])
-      : claudeAuthority?.scope === "organization"
-        ? claudeModels
-        : [],
+      : [],
   };
   await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) => {
     const rows = await rawRows<{
@@ -184,8 +137,6 @@ export async function assertModelConnectionAllowsTurn(
     subjectId: string;
     modelId: string;
     codexCredentialId?: string | null;
-    claudeCredentialId?: string | null;
-    claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
     workspaceProviderConnectionId?: string;
   },
 ): Promise<void> {
@@ -208,24 +159,13 @@ export async function assertModelConnectionAllowsTurn(
   }
   if (
     model.startsWith("workspace-claude-subscription/") ||
-    model.startsWith("organization-claude-subscription/")
+    model.startsWith("organization-claude-subscription/") ||
+    model.startsWith("codex/") ||
+    model.startsWith("supergrok/")
   ) {
-    const snapshot = input.claudeAuthoritySnapshot;
-    if (!input.claudeCredentialId || !snapshot)
-      throw new Error("No subscription is available for this model");
-    if (
-      model.startsWith("organization-claude-subscription/") !==
-      (snapshot.scope === "organization")
-    )
-      throw new Error("This model does not belong to the accepted subscription pool");
-    query = sql`SELECT c.allowed_model_ids AS models FROM claude_subscription_credentials c
-      JOIN revalidate_claude_subscription_authority(${input.workspaceId}::uuid, ${input.subjectId}, ${input.claudeCredentialId}::uuid, ${JSON.stringify(snapshot)}::jsonb) a ON a.id = c.id
-      WHERE c.id = ${input.claudeCredentialId}::uuid AND c.status = 'active'`;
-  } else if (model.startsWith("codex/") || model.startsWith("supergrok/")) {
-    // Codex and SuperGrok must already have passed the exact core
-    // placement/lease boundary. Reaching this legacy-provider helper is not
-    // authority to dispatch them.
-    throw new Error("Codex and SuperGrok model access requires shared-core placement");
+    // Subscription requests require the exact core placement and lease;
+    // this API-key helper cannot authorize a subscription dispatch.
+    throw new Error("Subscription model access requires shared-core placement");
   } else if (
     model.startsWith("organization-gateway/") ||
     model.startsWith("organization-openrouter/") ||

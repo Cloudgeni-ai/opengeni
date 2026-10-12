@@ -959,7 +959,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? "worker:model-access",
-          claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
         });
         return {
           selections: resolveWorkspaceModelSelection(selectionInput),

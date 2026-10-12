@@ -13,7 +13,7 @@
  * binding below) and the test database gets its registry row. Run this file in
  * its own process: the registration replaces module bindings process-wide.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
@@ -31,19 +31,9 @@ const registryPath = Bun.resolveSync(
   import.meta.dir,
 );
 const realRegistry = await import(registryPath);
-const { SUBSCRIPTION_CORE_CLAUDE } = await import(
-  Bun.resolveSync("../../../packages/db/src/subscription-core-claude-adapter.ts", import.meta.dir)
-);
+
 const productionIds: string[] = realRegistry.subscriptionCoreProviderIds();
-const realProvider = realRegistry.subscriptionCoreProvider;
-const lookup = (providerId: string) =>
-  providerId === "claude" ? SUBSCRIPTION_CORE_CLAUDE : realProvider(providerId);
-mock.module(registryPath, () => ({
-  ...realRegistry,
-  subscriptionCoreProviderIds: () => [...productionIds, "claude"].sort(),
-  subscriptionCoreProvider: lookup,
-  subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
-}));
+
 const opengeniDb = await import("@opengeni/db");
 const { Hono } = await import("hono");
 const { registerClaudeSubscriptionAccountRoutes } =
@@ -260,12 +250,11 @@ const oauthScope = (workspace: string) => ({
 });
 
 describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
-  test("without the receipt the legacy routes answer", async () => {
-    expect(productionIds).not.toContain("claude");
-    // The routes run as the restricted application role.
-    const [role] = await shared!.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
-      select rolsuper, rolbypassrls from pg_catalog.pg_roles
-      where rolname = ${new URL(shared!.appUrl).username}`;
+  test("the production core serves the established account response shape", async () => {
+    expect(productionIds).toContain("claude");
+    const [role] = await shared!.admin<
+      { rolsuper: boolean; rolbypassrls: boolean }[]
+    >`select rolsuper, rolbypassrls from pg_catalog.pg_roles where rolname = ${new URL(shared!.appUrl).username}`;
     expect(new URL(shared!.appUrl).username).toBe("opengeni_app");
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
     legacyEmpty = await listed();
@@ -277,72 +266,16 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     const listing = await listed();
     expect(listing.accounts).toHaveLength(1);
     legacyShape = shapeOf(listing);
-    const disconnected = await request(`/claude/accounts/${body.accountId}`, {
-      method: "DELETE",
-    });
-    expect(disconnected.status).toBe(200);
-    expect((await listed()).accounts).toEqual([]);
-    // Legacy authorizes the setup token exactly as before the core: an
-    // explicit grant (a custom organization key policy, which implies
-    // nothing) with workspace:admin and no workspace:read connects a shared
-    // account; the read grant is taken only once a receipt exists.
-    const adminOnlyToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
-    const adminOnlyKey = await opengeniDb.createOrganizationApiKey(client!.db, {
-      accountId,
-      name: "Workspace admin only",
-      prefix: adminOnlyToken.slice(0, 14),
-      keyHash: new Bun.CryptoHasher("sha256").update(adminOnlyToken).digest("hex"),
-      permissions: ["workspace:admin"],
-      policy: {
-        preset: "custom",
-        permissions: ["workspace:admin"],
-        workspaceScope: { kind: "all" },
-      },
-    });
-    // The legacy writer requires the connecting subject's workspace grant.
-    await shared!.admin`
-      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-      values (${accountId}::uuid, ${workspaceId}::uuid, ${`api_key:${adminOnlyKey.id}`}, 'admin',
-        '["workspace:admin"]'::jsonb)`;
-    const adminOnly = await app!.request(
-      `http://x/v1/workspaces/${workspaceId}/claude/accounts/setup-token`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${adminOnlyToken}`,
-          origin: ORIGIN,
-          "sec-fetch-site": "same-origin",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ token: setupToken(), scope: "workspace", label: "Admin only" }),
-      },
+    expect((await request(`/claude/accounts/${body.accountId}`, { method: "DELETE" })).status).toBe(
+      200,
     );
-    expect({ status: adminOnly.status, body: await adminOnly.clone().text() }).toMatchObject({
-      status: 200,
-    });
-    const adminOnlyBody = await adminOnly.json();
-    expect(adminOnlyBody).toMatchObject({ connected: true, scope: "workspace" });
-    expect(
-      (await request(`/claude/accounts/${adminOnlyBody.accountId}`, { method: "DELETE" })).status,
-    ).toBe(200);
     expect((await listed()).accounts).toEqual([]);
-    // The legacy OAuth start answers for the deployment key.
     expect((await keyOAuthStart()).status).toBe(200);
-    const [core] = await shared!.admin<{ count: number }[]>`
-      select count(*)::int as count from subscription_connections where provider = 'claude'`;
-    expect(core!.count).toBe(0);
   });
 
   test("after the receipt, without an enabled switch row, every route fails closed", async () => {
-    await shared!.admin`
-      insert into opengeni_private.subscription_core_providers (provider, extra_credits,
-        primary_setting_column)
-      values ('claude', false, 'claude_primary_connection_id')`;
-    await shared!.admin`
-      insert into opengeni_private.subscription_provider_cutover_receipts (
-        provider, migration, committed_at, seed_rotation
-      ) values ('claude', '0899_subscription_core_claude_cutover.sql', clock_timestamp(),
-        '{"mode":"spread"}')`;
+    await shared!
+      .admin`update subscription_provider_cutovers set enabled = false where provider = 'claude'`;
     const id = crypto.randomUUID();
     for (const [path, method, body] of [
       ["/claude/accounts", "GET", undefined],
@@ -368,7 +301,7 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
   test("with the switch row the same routes answer from core connections", async () => {
     await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'claude', true)`;
+      values (${accountId}::uuid, 'claude', true) on conflict (account_id, provider) do update set enabled = true`;
     expect(await listed()).toEqual(legacyEmpty as never);
 
     const connected = await connectSetupToken();
