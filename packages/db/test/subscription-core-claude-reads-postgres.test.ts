@@ -414,12 +414,17 @@ async function storedQuota(connectionId: string) {
 
 function scriptedUsage(respond: () => Response) {
   const calls: string[] = [];
-  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input instanceof Request ? input.url : input);
-    if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
-    calls.push(new Headers(init?.headers).get("authorization") ?? "");
-    return respond();
-  }) as typeof fetch;
+  // An injected transport of the administered reads aborts and joins its
+  // work for a signal; this one has none in flight after it returns.
+  const fetchImpl = Object.assign(
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
+      calls.push(new Headers(init?.headers).get("authorization") ?? "");
+      return respond();
+    },
+    { abortAndJoin: async () => {} },
+  ) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
 
@@ -1434,6 +1439,170 @@ describe("live refresh outside a workspace pool (C2c)", () => {
     ).usage;
     expect(usage.refreshStatus).toBe("reconnect");
     expect(await storedQuota(revokedId)).toBeNull();
+  });
+
+  test("a refusing seam answers the stored projection with no check time, keeps scope_required, and is not remembered", async () => {
+    resetSubscriptionCoreClaudeUsageThrottle();
+    const org = await organization();
+    await setCutover(org, true);
+    const oauthId = await sharedConnection(org, "refused-oauth");
+    const setupId = await sharedConnection(org, "refused-setup", { kind: "setup" });
+    const personal = await personalConnection(org, "refused-own");
+    const upstream = liveUsage();
+    // Each refresh runs 31 seconds after the previous one on the injected
+    // clock, so neither a stored reading nor a remembered attempt answers.
+    let clock = Date.now();
+    const tick = () => (clock += 31_000);
+    const organizationUsage = async (connectionId: string) => {
+      tick();
+      return await refreshSubscriptionCoreClaudeOrganizationUsage(
+        client.db,
+        settings,
+        {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+          row: await organizationRow(org, connectionId),
+        },
+        { fetchImpl: upstream.fetchImpl, now: () => clock },
+      );
+    };
+    const ownUsage = async () => {
+      tick();
+      const target = (await readSubscriptionCoreClaudeWorkspaceUsageTarget(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.personalWorkspaceId,
+        subjectId: org.ownerSubjectId,
+        accountIdParam: personal,
+      }))!;
+      return await refreshSubscriptionCoreClaudeWorkspaceUsage(
+        client.db,
+        settings,
+        {
+          accountId: org.accountId,
+          workspaceId: org.personalWorkspaceId,
+          subjectId: org.ownerSubjectId,
+          target,
+        },
+        { fetchImpl: upstream.fetchImpl, now: () => clock },
+      );
+    };
+    // A stored reading on each OAuth connection first.
+    const organizationRead = await organizationUsage(oauthId);
+    const ownRead = await ownUsage();
+    expect(organizationRead.usage.refreshStatus).toBe("available");
+    expect(ownRead.usage.refreshStatus).toBe("available");
+    expect(upstream.calls).toHaveLength(2);
+    const stored = {
+      organization: await storedQuota(oauthId),
+      own: await storedQuota(personal),
+    };
+    const refusedAs = (
+      result: Awaited<ReturnType<typeof ownUsage>>,
+      previous: Awaited<ReturnType<typeof ownUsage>>,
+    ) => {
+      expect(result.recovered).toBe(false);
+      expect(result.usage.refreshStatus).toBe("unavailable");
+      expect(result.usage.refreshCheckedAt).toBeNull();
+      expect(result.usage.windows.map((window) => window.id)).toEqual(
+        previous.usage.windows.map((window) => window.id),
+      );
+    };
+
+    // Maintenance: the organization route refuses (stored usage, no check
+    // time; the setup token keeps `scope_required`), then reads live again
+    // once the cutover is enabled.
+    await setCutover(org, false);
+    refusedAs(await organizationUsage(oauthId), organizationRead);
+    const setup = await organizationUsage(setupId);
+    expect(setup.usage.refreshStatus).toBe("scope_required");
+    expect(setup.usage.refreshCheckedAt).toBeNull();
+    await setCutover(org, true);
+    expect(upstream.calls).toHaveLength(2);
+    expect(await storedQuota(oauthId)).toEqual(stored.organization);
+    expect(await storedQuota(setupId)).toBeNull();
+    expect((await organizationUsage(oauthId)).usage.refreshStatus).toBe("available");
+    expect(upstream.calls).toHaveLength(3);
+
+    // A revoked authority: the owner's refresh refuses, then reads again
+    // once the authority is restored.
+    await shared.admin`update organization_user_resource_authorities
+      set status = 'revoked', revoked_at = now() where resource_id = ${personal}::uuid`;
+    refusedAs(await ownUsage(), ownRead);
+    await shared.admin`update organization_user_resource_authorities
+      set status = 'active', revoked_at = null where resource_id = ${personal}::uuid`;
+    expect(upstream.calls).toHaveLength(3);
+    expect(await storedQuota(personal)).toEqual(stored.own);
+    expect((await ownUsage()).usage.refreshStatus).toBe("available");
+    expect(upstream.calls).toHaveLength(4);
+
+    // Personal connections switched off for the organization: refused, and
+    // a connection without the usage scope keeps `scope_required`.
+    const ownBefore = await storedQuota(personal);
+    await shared.admin`update subscription_settings set personal_connections_allowed = false
+      where account_id = ${org.accountId}::uuid and workspace_id is null`;
+    refusedAs(await ownUsage(), ownRead);
+    await shared.admin`update subscription_connections
+      set provider_state = ${shared.admin.json({ oauthScopes: ["user:inference"] })}::jsonb
+      where id = ${personal}::uuid`;
+    const scopeless = await ownUsage();
+    expect(scopeless.usage.refreshStatus).toBe("scope_required");
+    expect(scopeless.usage.refreshCheckedAt).toBeNull();
+    expect(upstream.calls).toHaveLength(4);
+    expect(await storedQuota(personal)).toEqual(ownBefore);
+    await shared.admin`update subscription_connections
+      set provider_state = ${shared.admin.json({ oauthScopes: ["user:inference", "user:profile"] })}::jsonb
+      where id = ${personal}::uuid`;
+    await shared.admin`update subscription_settings set personal_connections_allowed = true
+      where account_id = ${org.accountId}::uuid and workspace_id is null`;
+    expect((await ownUsage()).usage.refreshStatus).toBe("available");
+    expect(upstream.calls).toHaveLength(5);
+  });
+
+  test("a stored needs_relogin answers reconnect on both new paths, with no provider call and no quota", async () => {
+    resetSubscriptionCoreClaudeUsageThrottle();
+    const org = await organization();
+    await setCutover(org, true);
+    const organizationId = await sharedConnection(org, "relogin-org");
+    const personal = await personalConnection(org, "relogin-own");
+    await shared.admin`update subscription_connections
+      set status = 'needs_relogin', last_error = 'Sign-in expired'
+      where id in (${organizationId}::uuid, ${personal}::uuid)`;
+    const upstream = liveUsage();
+    const organizationResult = await refreshSubscriptionCoreClaudeOrganizationUsage(
+      client.db,
+      settings,
+      {
+        organizationId: org.accountId,
+        subjectId: org.ownerSubjectId,
+        row: await organizationRow(org, organizationId),
+      },
+      { fetchImpl: upstream.fetchImpl },
+    );
+    const target = (await readSubscriptionCoreClaudeWorkspaceUsageTarget(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.personalWorkspaceId,
+      subjectId: org.ownerSubjectId,
+      accountIdParam: personal,
+    }))!;
+    expect(target.scope).toBe("user");
+    const ownResult = await refreshSubscriptionCoreClaudeWorkspaceUsage(
+      client.db,
+      settings,
+      {
+        accountId: org.accountId,
+        workspaceId: org.personalWorkspaceId,
+        subjectId: org.ownerSubjectId,
+        target,
+      },
+      { fetchImpl: upstream.fetchImpl },
+    );
+    for (const result of [organizationResult, ownResult]) {
+      expect(result.usage.refreshStatus).toBe("reconnect");
+      expect(result.recovered).toBe(false);
+    }
+    expect(upstream.calls).toEqual([]);
+    expect(await storedQuota(organizationId)).toBeNull();
+    expect(await storedQuota(personal)).toBeNull();
   });
 
   test("the owner-only routines refuse every other context", async () => {

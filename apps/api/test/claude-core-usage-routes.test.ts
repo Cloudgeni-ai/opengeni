@@ -342,6 +342,25 @@ describe("organization Claude usage on the core route", () => {
     const missing = await app().fetch(organizationAdminRequest(organizationPath));
     expect(missing.status).toBe(404);
   });
+
+  test("POST keeps reconnect for a connection that needs a new sign-in, with no provider read", async () => {
+    route("core");
+    mock("assertOrganizationCodexAdministrator", async () => undefined);
+    mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () =>
+      connectionRow({ status: "needs_relogin" }),
+    );
+    // The real refresh: it answers before any read (the database is poisoned).
+    const wakes: unknown[] = [];
+    mock("deliverSubscriptionCoreProviderWake", async (...args: never[]) => {
+      wakes.push(args.slice(1));
+    });
+    const relogin = await app().fetch(
+      organizationAdminRequest(`${organizationPath}/refresh`, { method: "POST", body: "{}" }),
+    );
+    expect(relogin.status).toBe(200);
+    expect(((await relogin.json()) as { refreshStatus: string }).refreshStatus).toBe("reconnect");
+    expect(wakes).toEqual([]);
+  });
 });
 
 describe("the legacy route (no Claude cutover receipt)", () => {

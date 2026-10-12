@@ -239,6 +239,22 @@ export function resetSubscriptionCoreClaudeUsageThrottle(): void {
 }
 
 /**
+ * The stored projection of a connection a refresh could not read (C2a's
+ * rule): `unavailable` with no check time, never `available` for a read that
+ * did not happen, unless the connection itself needs a new sign-in or lacks
+ * the usage scope.
+ */
+function unreadableClaudeUsage(
+  row: SubscriptionCoreConnectionRow,
+  now: number,
+): ClaudeSubscriptionUsage {
+  const stored = projectSubscriptionCoreClaudeUsage(row, undefined, { now });
+  return stored.refreshStatus === "reconnect" || stored.refreshStatus === "scope_required"
+    ? stored
+    : projectSubscriptionCoreClaudeUsage(row, { status: "unavailable", checkedAt: null }, { now });
+}
+
+/**
  * A live usage refresh of one Claude connection a usage route may refresh:
  * a shared connection of the workspace's pool through the core connection
  * seam (workspace scope), or the caller's own personal connection in their
@@ -408,6 +424,13 @@ async function refreshClaudeUsage(plan: {
       recovered: false,
     };
   const probe = await plan.probe();
+  // A seam that refuses (not visible here: another scope, maintenance, a
+  // revoked authority, personal connections switched off) or cannot read
+  // reads nothing: the stored projection, `unavailable` with no check time
+  // unless the row itself needs a new sign-in or the usage scope. Nothing
+  // was sent, so the refusal is not remembered and never outlives its cause.
+  if (probe.kind === "not_visible" || probe.kind === "unsupported")
+    return { usage: unreadableClaudeUsage(plan.row, now()), recovered: false };
   const checkedAt = new Date(now()).toISOString();
   const reading =
     probe.kind === "read" ? (probe.response as SubscriptionCoreClaudeUsageReading) : null;
@@ -420,7 +443,7 @@ async function refreshClaudeUsage(plan: {
         }
       : probe.kind === "relogin"
         ? { status: "reconnect", checkedAt }
-        : // Not readable here, unsupported, or a refresh or transport failure.
+        : // A credential or transport failure: a remembered failed attempt.
           { status: "unavailable", checkedAt };
   rememberAttempt(key, { at: now(), refresh });
   // The reading (or a relogin the refresh seam recorded) is read back as

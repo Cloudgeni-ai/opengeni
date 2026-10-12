@@ -213,18 +213,23 @@ async function connectionVersion(connectionId: string): Promise<number> {
   return row!.version;
 }
 
-const scriptedUsage = (async (input: string | URL | Request) => {
-  const url = String(input instanceof Request ? input.url : input);
-  if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
-  usageCalls.push(url);
-  return new Response(
-    JSON.stringify({
-      five_hour: { utilization: 12, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
-      seven_day: { utilization: 30, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
-    }),
-    { status: 200, headers: { "content-type": "application/json" } },
-  );
-}) as typeof fetch;
+// An injected transport of the administered reads aborts and joins its work
+// for a signal; this one has none in flight after it returns.
+const scriptedUsage = Object.assign(
+  async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
+    usageCalls.push(url);
+    return new Response(
+      JSON.stringify({
+        five_hour: { utilization: 12, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
+        seven_day: { utilization: 30, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  },
+  { abortAndJoin: async () => {} },
+) as unknown as typeof fetch;
 
 function app() {
   return createApp({
@@ -632,11 +637,15 @@ describe("the owner's personal connection on the core route", () => {
     expect(usageCalls).toHaveLength(1);
     const read = await api.request(usagePath(org.personalWorkspaceId), { headers: browser });
     expect(read.status).toBe(200);
-    expect(
-      ((await read.json()) as { windows: Array<{ id: string }> }).windows.map(
-        (window) => window.id,
-      ),
-    ).toContain("five_hour");
+    expect(read.headers.get("cache-control")).toBe("private, no-store");
+    const stored = (await read.json()) as {
+      connected: boolean;
+      credentialVersion: number;
+      windows: Array<{ id: string }>;
+    };
+    expect(stored.connected).toBe(true);
+    expect(stored.credentialVersion).toBe(await connectionVersion(personal));
+    expect(stored.windows.map((window) => window.id)).toContain("five_hour");
     usageCalls.length = 0;
   });
 });

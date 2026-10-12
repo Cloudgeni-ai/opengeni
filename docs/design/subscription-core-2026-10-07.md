@@ -5286,10 +5286,14 @@ core read before C3 fails closed in the registry.
   `available`. A recovery wakes the Claude core waiters
   (`usage_recovered`); a failed wake is dropped and never fails the
   committed read, on every path. Any seam that refuses (not visible,
-  maintenance, a revoked authority) reads nothing and answers the stored
+  maintenance, a revoked authority, personal connections switched off for
+  the organization) or cannot read (no usage read) reads nothing and answers the stored
   projection with `unavailable` and no check time (`reconnect` and
   `scope_required` kept), the Codex rule that a connection the caller's
-  context cannot read reports no data (5.1.1, PR 2c).
+  context cannot read reports no data (5.1.1, PR 2c). A refusal sent
+  nothing, so the throttle does not remember it and it never outlives its
+  cause; a credential or transport failure is a remembered failed attempt
+  (`unavailable` with its check time).
 - Administered refresh (C2c; D-01 parity: legacy read organization and
   user-scope accounts live). This closes the live refresh gap C2a recorded
   (the C3 precondition in the Claude track's C3 row). The organization
