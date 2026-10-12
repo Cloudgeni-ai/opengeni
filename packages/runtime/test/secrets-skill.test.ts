@@ -113,7 +113,13 @@ describe("opengeni-secrets bundled Skill (AG-3)", () => {
       "\\{{secret:Item}}",
     ])
       expect(skill).toContain(form);
-    for (const tool of ["secret_search", "secret_save", "secret_get", "secret_move", "secret_delete"])
+    for (const tool of [
+      "secret_search",
+      "secret_save",
+      "secret_get",
+      "secret_move",
+      "secret_delete",
+    ])
       expect(skill).toContain(tool);
     const card = file("references/ask-card.md");
     for (const field of [

@@ -67,7 +67,9 @@ describe("interaction attempt tools", () => {
     expect(auth).toContain("Reuse a saved sign-in, the first rung of the login ladder");
     expect(auth).toContain("sign in yourself");
     expect(auth).toContain("solve CAPTCHAs yourself");
-    expect(auth).not.toContain("If an operation returns needs_human, call interaction_request_human");
+    expect(auth).not.toContain(
+      "If an operation returns needs_human, call interaction_request_human",
+    );
     const human = description("interaction_request_human");
     expect(human).toContain("a push approval on their phone, a hardware security key");
     expect(human).toContain("never hand over a CAPTCHA or a step you can do");
