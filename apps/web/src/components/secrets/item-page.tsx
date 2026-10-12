@@ -354,7 +354,7 @@ function FieldHistory({
         </ol>
       )}
       {versions.length > 1 ? (
-        <div className="mt-3 flex min-w-0 flex-col gap-1">
+        <div className="mt-1 flex min-w-0 flex-col gap-1 border-t border-border pt-3">
           <span className="text-xs leading-4.5 text-fg-muted">
             The previous value stays usable for a while after a change:
           </span>
