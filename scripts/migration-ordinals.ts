@@ -136,6 +136,36 @@ export function findOrdinalCollisions(
   return { collisions, duplicates };
 }
 
+/**
+ * Compare all protected ledgers without treating published history on one as
+ * new work on another. A duplicate group must already coexist on ONE base;
+ * combining independent allocations from main and production is not evidence
+ * that either branch accepted that collision. SQL names are migration receipt
+ * identities, so a published pair must not be "repaired" by replaying a rename.
+ */
+export function findProtectedOrdinalCollisions(
+  head: readonly MigrationName[],
+  bases: readonly { ref: string; files: readonly MigrationName[] }[],
+): { collisions: (OrdinalCollision & { ref: string })[]; duplicates: string[][] } {
+  const published = bases.map((base) => new Set(base.files.map((migration) => migration.file)));
+  const coexists = (files: readonly string[]) =>
+    published.some((ledger) => files.every((file) => ledger.has(file)));
+  const collisions: (OrdinalCollision & { ref: string })[] = [];
+  const duplicates = new Map<string, string[]>();
+  for (const base of bases) {
+    const found = findOrdinalCollisions(head, base.files);
+    for (const collision of found.collisions) {
+      if (!coexists([collision.headFile, collision.baseFile])) {
+        collisions.push({ ref: base.ref, ...collision });
+      }
+    }
+    for (const files of found.duplicates) {
+      if (!coexists(files)) duplicates.set([...files].sort().join("\n"), files);
+    }
+  }
+  return { collisions, duplicates: [...duplicates.values()] };
+}
+
 export type RenumberRename = { from: string; to: string };
 export type RenumberEdit = { path: string; replacements: number; bareOrdinal: number };
 export type RenumberPlan = {

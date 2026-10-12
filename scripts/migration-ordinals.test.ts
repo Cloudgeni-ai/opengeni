@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   findOrdinalCollisions,
+  findProtectedOrdinalCollisions,
   nextFreeOrdinal,
   parseHashMismatch,
   parseLsTree,
@@ -235,6 +236,47 @@ describe("migration ordinal helpers", () => {
       collisions: [],
       duplicates: [],
     });
+  });
+
+  test("preserves a published pair across lagging protected bases, but rejects new collisions", () => {
+    const pair = [
+      name("0730_maintenance_work_probes.sql"),
+      name("0730_subscription_core_personal_connection_versions.sql"),
+    ];
+    for (const lagging of [[], [pair[0]!], [pair[1]!]]) {
+      for (const bases of [
+        [
+          { ref: "main", files: pair },
+          { ref: "production", files: lagging },
+        ],
+        [
+          { ref: "production", files: lagging },
+          { ref: "main", files: pair },
+        ],
+      ]) {
+        expect(findProtectedOrdinalCollisions([...pair, name("0731_next.sql")], bases)).toEqual({
+          collisions: [],
+          duplicates: [],
+        });
+        expect(
+          findProtectedOrdinalCollisions([...pair, name("0730_new.sql")], bases).collisions.length,
+        ).toBeGreaterThan(0);
+        expect(
+          findProtectedOrdinalCollisions([...pair, name("0731_a.sql"), name("0731_b.sql")], bases)
+            .duplicates,
+        ).toEqual([["0731_a.sql", "0731_b.sql"]]);
+      }
+    }
+    // Two individually published allocations are still a cross-branch conflict.
+    const split = [
+      { ref: "main", files: [pair[0]!] },
+      { ref: "production", files: [pair[1]!] },
+    ];
+    expect(findProtectedOrdinalCollisions(pair, split).collisions).toHaveLength(2);
+    expect(findProtectedOrdinalCollisions(pair, [{ ref: "main", files: [] }]).duplicates).toEqual([
+      pair.map((migration) => migration.file),
+    ]);
+    expect(nextFreeOrdinal(pair)).toBe("0731");
   });
 
   test("rewrites the basename, companion slug, and bare ordinal without touching neighbours", () => {
@@ -512,6 +554,26 @@ describe("migration ordinal CLIs", () => {
     expect(
       existsSync(join(root, "packages/db/test/migration-0004-scheduled-authority.test.ts")),
     ).toBe(true);
+  });
+
+  test("published main duplicates survive a lagging production comparison without renaming", async () => {
+    const { root } = await fixtureRepo();
+    await git(root, "push", "-q", "origin", "origin/main:refs/heads/production");
+    await git(root, "merge", "-q", "--no-edit", "origin/main");
+    await git(root, "push", "-q", "origin", "HEAD:refs/heads/main");
+    await git(root, "fetch", "-q", "origin");
+    const guard = ["bun", join(scripts, "check-migration-ordinals.ts")];
+    const published = await run(root, guard);
+    expect(published.code).toBe(0);
+    expect(published.stdout).toContain("next 0004");
+    expect(await git(root, "status", "--porcelain")).toBe("");
+    await writeFile(
+      join(root, "packages/db/drizzle/0003_unpublished.sql"),
+      "-- deployment-mode: rolling\nselect 3;\n",
+    );
+    const collision = await run(root, guard);
+    expect(collision.code).toBe(1);
+    expect(collision.stderr).toContain("0003_unpublished.sql");
   });
 
   test("--to refuses to fill a gap below the ledger head unless --allow-gap", async () => {
