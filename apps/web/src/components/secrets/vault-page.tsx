@@ -336,7 +336,7 @@ export function VaultPage({
         leading={<VaultTile vault={vault} />}
         title={vault.name}
         // Sync status is the banner below, so the header doesn't repeat it.
-        chips={<VaultChips vault={vault} showOwner />}
+        chips={<VaultChips vault={vault} inHeader />}
         meta={[
           <span key="count">{itemsLabel(vault.itemCount)}</span>,
           <span key="audience">{vaultAudience(vault, organizationName)}</span>,

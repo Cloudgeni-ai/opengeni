@@ -69,20 +69,20 @@ export function VaultTile({ vault }: { vault: VaultSummary }) {
  */
 export function VaultChips({
   vault,
-  showOwner = false,
+  inHeader = false,
 }: {
   vault: VaultSummary;
-  /** Also name "Only me" / "This workspace" (outside the grouped list). */
-  showOwner?: boolean;
+  /**
+   * The vault page header: its meta line already says who can use the vault,
+   * so only the organization owner and the 1Password source get a chip.
+   */
+  inHeader?: boolean;
 }) {
   const chips: ReactNode[] = [];
   if (vault.ownerKind === "organization") chips.push(<MetaChip key="org">Organization</MetaChip>);
-  else if (vault.ownerKind === "task") chips.push(<MetaChip key="task">This task</MetaChip>);
-  else if (showOwner)
-    chips.push(
-      <MetaChip key="owner">{vault.ownerKind === "user" ? "Only me" : "This workspace"}</MetaChip>,
-    );
-  if (vault.source === "onepassword" && showOwner)
+  else if (vault.ownerKind === "task" && !inHeader)
+    chips.push(<MetaChip key="task">This task</MetaChip>);
+  if (vault.source === "onepassword" && inHeader)
     chips.push(<MetaChip key="source">1Password</MetaChip>);
   if (vault.mode === "read_only") chips.push(<MetaChip key="mode">Read-only</MetaChip>);
   if (chips.length === 0) return null;

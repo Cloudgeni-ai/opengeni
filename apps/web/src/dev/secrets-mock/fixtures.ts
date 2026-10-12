@@ -157,8 +157,9 @@ function item(
     lastUsedAt: spec.lastUsedAgo === null ? null : iso(-(spec.lastUsedAgo ?? 5 * HOUR)),
     updatedAt,
     references: {
-      primary: primary ? refPath(owner.name, spec.name) : null,
-      otp: totp ? refPath(owner.name, spec.name, "otp") : null,
+      // As the API's vaultItemReferences: every reference names its field.
+      primary: primary ? refPath(owner.name, spec.name, primary.name) : null,
+      otp: totp ? `${refPath(owner.name, spec.name, totp.name).slice(0, -2)}/otp}}` : null,
       byField: Object.fromEntries(fields.map((field) => [field.name, field.reference])),
     },
     fields,

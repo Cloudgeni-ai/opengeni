@@ -366,8 +366,8 @@ function routes(state: MockState): Route[] {
           lastUsedAt: null,
           updatedAt: now,
           references: {
-            primary: primary ? `{{secret:${vault.name}/${body.name}}}` : null,
-            otp: totp ? `{{secret:${vault.name}/${body.name}/otp}}` : null,
+            primary: primary ? `{{secret:${vault.name}/${body.name}/${primary.name}}}` : null,
+            otp: totp ? `{{secret:${vault.name}/${body.name}/${totp.name}/otp}}` : null,
             byField: Object.fromEntries(fields.map((field) => [field.name, field.reference])),
           },
           fields,
