@@ -10468,6 +10468,18 @@ export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
 export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS = 60;
 export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS = 30 * 24 * 60 * 60;
 
+/**
+ * A schedule that follows the workspace's default connectors at each run,
+ * the way a new chat does. Connectors a person turned off stay off.
+ */
+export const ScheduledTaskToolPolicy = /* @__PURE__ */ z
+  .object({
+    mode: z.literal("workspace_default"),
+    excludedMcpServerIds: SessionExcludedMcpServerIds,
+  })
+  .strict();
+export type ScheduledTaskToolPolicy = z.infer<typeof ScheduledTaskToolPolicy>;
+
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
     .object({
@@ -10494,6 +10506,15 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
           .max(SCHEDULED_TASK_TOOL_MAX_COUNT - 1)
           .default([])
       : z.array(ToolRef).default([]),
+    /**
+     * How a schedule that starts its own session chooses connectors.
+     * `workspace_default`: every run gets the workspace's default connectors
+     * as they are when it starts (except `excludedMcpServerIds`), like a new
+     * chat, plus the tools listed in `tools`. Absent: runs get exactly
+     * `tools`. A schedule that posts into an existing chat never has it; that
+     * chat supplies its connectors.
+     */
+    toolPolicy: ScheduledTaskToolPolicy.optional(),
     metadata: bounded
       ? ScheduledTaskMetadataInput.default({})
       : z.record(z.string(), z.unknown()).default({}),

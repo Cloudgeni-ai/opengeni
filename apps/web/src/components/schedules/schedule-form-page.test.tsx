@@ -56,6 +56,7 @@ const context = {
   model: "example-model",
   reasoningEffort: "high",
   selectedCapabilityToolIds: new Set<string>(),
+  workspaceDefaultToolIds: [] as string[],
   workspaceCapabilityCatalog: ["retained", "empty", "added"].map((id) => ({
     name: id,
     enabled: true,

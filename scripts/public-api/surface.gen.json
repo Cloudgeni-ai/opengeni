@@ -21932,6 +21932,7 @@
         "$.sandboxBackend": "ref(SandboxBackend)?",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
+        "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
         "$.tools": "array!",
         "$.tools[]": "ref(ToolRef)"
       }
@@ -21964,6 +21965,7 @@
         "$.sandboxBackend": "ref(SandboxBackend)?",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
+        "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)"
       }
@@ -22114,6 +22116,18 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"active\\\"\",\"\\\"paused\\\"\"]"
+      }
+    },
+    "ScheduledTaskToolPolicy": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.excludedMcpServerIds": "array!",
+        "$.excludedMcpServerIds[]": "string",
+        "$.mode": "const!=[\"\\\"workspace_default\\\"\"]"
       }
     },
     "ScheduledTaskTriggerType": {
@@ -29283,6 +29297,7 @@
       "ScheduledTaskRunStatus": "type",
       "ScheduledTaskScheduleSpec": "type",
       "ScheduledTaskStatus": "type",
+      "ScheduledTaskToolPolicy": "type",
       "ScheduledTaskTriggerType": "type",
       "ScopedKnowledgeScope": "type",
       "SendMessageInput": "type",

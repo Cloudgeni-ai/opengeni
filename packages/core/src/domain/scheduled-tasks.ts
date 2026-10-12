@@ -144,7 +144,7 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
-  withWorkspaceDefaultMcpTools,
+  scheduledTaskRunTools,
 } from "./resources";
 
 /**
@@ -560,8 +560,11 @@ export async function createValidatedScheduledTask(input: {
       : runtimeSettings;
   // Prove the creator may use the schedule's connectors and repositories, and
   // that every pinned account resolves for the owner. Nothing it resolves is
-  // saved: each run resolves the owner's current accounts again.
-  if (!knowledgeAction && effectiveRuntimeSettings)
+  // saved: each run resolves the owner's current accounts again, and a
+  // schedule that follows the workspace defaults resolves them again too.
+  if (!knowledgeAction && effectiveRuntimeSettings) {
+    const creationWorkspaceSettings = (await requireWorkspace(input.db, input.grant.workspaceId))
+      .settings;
     await freezeConnectionAccounts({
       db: input.db,
       accountId: input.grant.accountId,
@@ -572,7 +575,12 @@ export async function createValidatedScheduledTask(input: {
         input.grant.workspaceId,
         effectiveRuntimeSettings,
         target,
-        agentConfig.tools,
+        scheduledTaskRunTools({
+          agentConfig,
+          settings: input.settings,
+          runtimeSettings: effectiveRuntimeSettings,
+          workspaceDefaults: resolveWorkspaceSessionToolDefaults(creationWorkspaceSettings),
+        }),
         input.grant.subjectId,
       ),
       resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
@@ -581,9 +589,10 @@ export async function createValidatedScheduledTask(input: {
       ...scheduledConnectionSurfaceEligibility(
         effectiveRuntimeSettings,
         target,
-        (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
+        creationWorkspaceSettings,
       ),
     });
+  }
   const storedAgentConfig = knowledgeAction
     ? agentConfig
     : withScheduledTaskPins(agentConfig, requestedPins, requestedPinsRequired);
@@ -1816,6 +1825,9 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
       ...(materializedReusable ? { retainedCreationConfig: input.existing.agentConfig } : {}),
+      ...(input.existing.agentConfig.toolPolicy
+        ? { existingToolPolicy: input.existing.agentConfig.toolPolicy }
+        : {}),
     });
     if (
       materializedReusable &&
@@ -1987,12 +1999,26 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       if (!nextTarget || nextTarget.accountId !== input.existing.accountId)
         throw new HTTPException(409, { message: "Scheduled task chat is unavailable" });
     }
+    const updateWorkspaceDefaults = resolveWorkspaceSessionToolDefaults(
+      (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
+    );
+    // Pins are judged against what a run gets: its own tools plus the
+    // workspace defaults it follows.
+    const runToolsFor = (config: ScheduledTaskAgentConfig) =>
+      scheduledTaskRunTools({
+        agentConfig: config,
+        settings: input.settings,
+        runtimeSettings,
+        workspaceDefaults: updateWorkspaceDefaults,
+      });
+    const nextRunTools = runToolsFor(nextAgentConfig);
+    const priorRunTools = runToolsFor(input.existing.agentConfig);
     const nextConnectionTools = await scheduledConnectionTools(
       input.db,
       input.grant.workspaceId,
       runtimeSettings,
       nextTarget,
-      nextAgentConfig.tools,
+      nextRunTools,
       ownerSubjectId ?? undefined,
     );
     const priorTargetSessionId =
@@ -2019,11 +2045,11 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       input.grant.workspaceId,
       runtimeSettings,
       priorTarget,
-      input.existing.agentConfig.tools,
+      priorRunTools,
       ownerSubjectId ?? undefined,
     );
     const priorAccountSurfaceIds = new Set(
-      [...input.existing.agentConfig.tools, ...(priorTarget?.tools ?? []), ...priorConnectionTools]
+      [...priorRunTools, ...(priorTarget?.tools ?? []), ...priorConnectionTools]
         .filter((tool) => tool.kind === "mcp")
         .map((tool) => tool.id),
     );
@@ -2033,7 +2059,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     // its chat still names keeps its pin even while the chat has it turned
     // off, so only an edit that removes the connector removes the pin.
     const nextAccountSurfaceIds = new Set(
-      [...nextAgentConfig.tools, ...(nextTarget?.tools ?? []), ...nextConnectionTools]
+      [...nextRunTools, ...(nextTarget?.tools ?? []), ...nextConnectionTools]
         .filter((tool) => tool.kind === "mcp")
         .map((tool) => tool.id),
     );
@@ -2506,6 +2532,12 @@ async function validateScheduledTaskAgentConfig(input: {
   toolsProvided?: boolean;
   /** Only an already materialized reusable chat may retain unused creation defaults. */
   retainedCreationConfig?: ScheduledTaskAgentConfig;
+  /**
+   * The connector policy the schedule already follows. An edit that does not
+   * name a policy keeps it, so replacing the configuration (for example with
+   * the tools a read returned) never turns the defaults into a fixed list.
+   */
+  existingToolPolicy?: ScheduledTaskAgentConfig["toolPolicy"];
 }): Promise<ScheduledTaskAgentConfig> {
   const existingChat = input.payload.runMode === "existing_session";
   if (existingChat)
@@ -2579,21 +2611,24 @@ async function validateScheduledTaskAgentConfig(input: {
     });
   }
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
-  // A task whose creator did not choose tools gets the workspace's exact
-  // session defaults (or the deployment compatibility default), exactly like
-  // a session created without a tools key. Scheduled runs are sessions too;
-
-  // kept falling into (a maintenance task that cannot reach its workspace's
-  // notebook MCP cannot do its job).
-  const tools =
-    retainTools || (input.toolsProvided ?? true)
-      ? requestedTools
-      : withWorkspaceDefaultMcpTools(
-          requestedTools,
-          input.settings,
-          runtimeSettings,
-          workspaceSessionToolDefaults,
-        );
+  // A schedule that starts its own session and whose creator did not choose
+  // tools follows the workspace's default connectors at each run, exactly
+  // like a new chat: nothing about the defaults is copied into the schedule,
+  // so a connector the workspace adds later reaches its next run. A request
+  // may also say so explicitly (`toolPolicy`), with the defaults a person
+  // turned off; its `tools` are then added on top. An edit keeps the policy
+  // the schedule already follows. Only a new schedule created with a list of
+  // tools and no policy gets exactly that list.
+  // A knowledge sync reads one source and never follows the defaults.
+  const toolPolicy =
+    existingChat || input.payload.agentConfig.knowledgeSource
+      ? undefined
+      : (input.payload.agentConfig.toolPolicy ??
+        input.existingToolPolicy ??
+        (retainTools || (input.toolsProvided ?? true)
+          ? undefined
+          : { mode: "workspace_default" as const, excludedMcpServerIds: [] }));
+  const tools = requestedTools;
   const prompt = input.payload.agentConfig.prompt.trim();
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });
@@ -2670,15 +2705,27 @@ async function validateScheduledTaskAgentConfig(input: {
       });
     }
   }
+  const { toolPolicy: _requestedToolPolicy, ...requestedConfig } = input.payload.agentConfig;
   const validated = {
-    ...input.payload.agentConfig,
+    ...requestedConfig,
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,
     tools,
+    ...(toolPolicy ? { toolPolicy } : {}),
   };
-  validateIncidentTelemetryPreflightSelection(input.settings, validated);
+  // Incident preflight names the connectors it needs; judge it on what a run
+  // would get now, including the defaults the schedule follows.
+  validateIncidentTelemetryPreflightSelection(input.settings, {
+    ...validated,
+    tools: scheduledTaskRunTools({
+      agentConfig: validated,
+      settings: input.settings,
+      runtimeSettings,
+      workspaceDefaults: workspaceSessionToolDefaults,
+    }),
+  });
   return existingChat ? scheduledSessionMessageConfig(validated) : validated;
 }
 

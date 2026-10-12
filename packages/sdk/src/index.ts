@@ -1143,6 +1143,7 @@ export type {
   ScheduledTaskAccountPlan,
   ScheduledTaskAccountPlanAccount,
   ScheduledTaskAccountPlanConnector,
+  ScheduledTaskToolPolicy,
   ScheduledTaskAgentConfig,
   ScheduledTaskAgentConfigInput,
   ScheduledTaskDayOfWeek,

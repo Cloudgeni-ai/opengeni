@@ -71,6 +71,53 @@ function scheduledTask(): ScheduledTask {
 }
 
 describe("scheduled task form projection", () => {
+  test("a schedule that follows the workspace defaults saves only what a person changed", () => {
+    const defaults = ["opengeni", "linear", "notion"];
+    const task = scheduledTask();
+    task.agentConfig = {
+      ...task.agentConfig,
+      tools: [
+        { kind: "mcp", id: "opengeni" },
+        { kind: "mcp", id: "github" },
+      ],
+      toolPolicy: { mode: "workspace_default", excludedMcpServerIds: ["notion"] },
+    };
+    const form = formStateFromScheduledTask(task, { workspaceDefaultToolIds: defaults });
+    // The picker shows what the next run gets: its addition plus the defaults left on.
+    expect(form.followsWorkspaceDefaults).toBe(true);
+    expect([...(form.mcpServerIds ?? [])].sort()).toEqual(["github", "linear"]);
+    // Saved back unchanged, it lists only the addition and keeps notion off.
+    const saved = agentConfigFromFormState(form, task);
+    expect(saved.toolPolicy).toEqual({
+      mode: "workspace_default",
+      excludedMcpServerIds: ["notion"],
+    });
+    expect(saved.tools.map((tool) => tool.id).filter((id) => id !== "opengeni")).toEqual([
+      "github",
+    ]);
+    // Turning linear off and notion back on is saved as exclusions, never as a copy.
+    const changed = agentConfigFromFormState({ ...form, mcpServerIds: ["github", "notion"] }, task);
+    expect(changed.toolPolicy?.excludedMcpServerIds).toEqual(["linear"]);
+    expect(changed.tools.map((tool) => tool.id).filter((id) => id !== "opengeni")).toEqual([
+      "github",
+    ]);
+  });
+
+  test("a new schedule starts from the defaults and a schedule with a fixed list keeps it", () => {
+    const fresh = newScheduledTaskFormState(false, [], {
+      workspaceDefaultToolIds: ["opengeni", "linear"],
+    });
+    expect(fresh.followsWorkspaceDefaults).toBe(true);
+    expect(fresh.workspaceDefaultToolIds).toEqual(["linear"]);
+    const fixed = scheduledTask();
+    fixed.agentConfig = { ...fixed.agentConfig, tools: [{ kind: "mcp", id: "linear" }] };
+    const form = formStateFromScheduledTask(fixed, { workspaceDefaultToolIds: ["notion"] });
+    expect(form.followsWorkspaceDefaults).toBe(false);
+    const saved = agentConfigFromFormState(form, fixed);
+    expect(saved.toolPolicy).toBeUndefined();
+    expect(saved.tools.map((tool) => tool.id)).toEqual(["linear"]);
+  });
+
   test("labels on-demand connector cadence and summarizes deterministic sync counts", () => {
     expect(scheduleLabel({ type: "manual" })).toBe("On demand");
     expect(

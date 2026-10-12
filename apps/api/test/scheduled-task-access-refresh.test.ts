@@ -3,10 +3,19 @@ import { createHash, randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { Settings } from "@opengeni/config";
-import type { AccessGrant, Permission, ScheduledTask } from "@opengeni/contracts";
 import {
+  CreateScheduledTaskRequest,
+  UpdateScheduledTaskRequest,
+  type AccessGrant,
+  type Permission,
+  type ScheduledTask,
+} from "@opengeni/contracts";
+import {
+  createValidatedScheduledTask,
   listScheduledTaskAccessAttention,
   refreshScheduledTaskAccess,
+  updateScheduledTaskForApi,
+  validatedScheduledTaskUpdate,
   withScheduledTaskPolicyDrift,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
@@ -228,6 +237,115 @@ async function expectHttpError(work: Promise<unknown>, status: number, message: 
 }
 
 describe("scheduled task access drift and refresh", () => {
+  test("a schedule created without tools follows the workspace defaults and keeps following them", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const authorization = signedIn(workspace, workspace.owner);
+    const created = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: authorization.grant,
+      authorization,
+      toolsProvided: false,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Morning digest",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "Summarize what changed overnight" },
+      }),
+    });
+    // Nothing about the defaults is copied into the schedule.
+    expect(created.agentConfig.toolPolicy).toEqual({
+      mode: "workspace_default",
+      excludedMcpServerIds: [],
+    });
+    expect(created.agentConfig.tools.map((tool) => tool.id)).not.toContain("linear");
+    expect(created.agentConfig.tools.map((tool) => tool.id)).not.toContain("notion");
+
+    // It never lacks a default, and its account plan covers the defaults it gets.
+    const [view] = await withScheduledTaskPolicyDrift({
+      db: client.db,
+      settings: settings(),
+      authorization,
+      tasks: [created],
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+    });
+    expect(view?.policyDrift?.missingConnectors ?? []).toEqual([]);
+    expect(view?.accountPlan?.connectors.map((connector) => connector.id)).toContain("linear");
+
+    // Replacing the configuration (as an agent does with the tools a read
+    // returned) keeps following the defaults instead of fixing a list.
+    const update = await validatedScheduledTaskUpdate({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: authorization.grant,
+      authorization,
+      existing: created,
+      toolsProvided: true,
+      payload: UpdateScheduledTaskRequest.parse({
+        agentConfig: {
+          prompt: "Summarize what changed overnight, briefly",
+          tools: created.agentConfig.tools,
+          resources: [],
+        },
+      }),
+    });
+    const updated = await updateScheduledTaskForApi(
+      client.db,
+      authorization.grant,
+      created.id,
+      update,
+    );
+    expect(updated.agentConfig.toolPolicy).toEqual(created.agentConfig.toolPolicy);
+
+    // A person's exclusions are kept as they chose them.
+    const narrowed = await updateScheduledTaskForApi(
+      client.db,
+      authorization.grant,
+      created.id,
+      await validatedScheduledTaskUpdate({
+        settings: settings(),
+        db: client.db,
+        objectStorage: null,
+        grant: authorization.grant,
+        authorization,
+        existing: updated,
+        toolsProvided: true,
+        payload: UpdateScheduledTaskRequest.parse({
+          agentConfig: {
+            ...updated.agentConfig,
+            toolPolicy: { mode: "workspace_default", excludedMcpServerIds: ["notion"] },
+          },
+        }),
+      }),
+    );
+    expect(narrowed.agentConfig.toolPolicy?.excludedMcpServerIds).toEqual(["notion"]);
+  }, 60_000);
+
+  test("a schedule created with a list of tools gets exactly that list", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const authorization = signedIn(workspace, workspace.owner);
+    const created = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: authorization.grant,
+      authorization,
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Notion only",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "Tidy the notes", tools: [{ kind: "mcp", id: "notion" }] },
+      }),
+    });
+    expect(created.agentConfig.toolPolicy).toBeUndefined();
+    expect(created.agentConfig.tools.map((tool) => tool.id)).toEqual(["notion"]);
+  }, 60_000);
+
   test("names what is out of date only for the owner", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

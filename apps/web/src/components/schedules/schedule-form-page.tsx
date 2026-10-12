@@ -332,6 +332,7 @@ function AgentScheduleForm({
       modelFollowsDefault: true,
       defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
       defaultMachineSandboxId,
+      workspaceDefaultToolIds: context.workspaceDefaultToolIds,
     };
     const formDefaults = {
       model: defaults.model,
@@ -339,6 +340,7 @@ function AgentScheduleForm({
       modelFollowsDefault: true,
       defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
       defaultMachineSandboxId,
+      workspaceDefaultToolIds: context.workspaceDefaultToolIds,
     };
     if (task) {
       const fromTask: ScheduleDraft = {
@@ -373,12 +375,21 @@ function AgentScheduleForm({
     if (template) return draftFromTemplate(template, defaults);
     return newScheduleDraft(defaults);
   });
-  const [draft, setDraft] = useState<ScheduleDraft>(() => ({
-    ...initial,
-    mcpServerIds:
-      initial.mcpServerIds ??
-      [...context.selectedCapabilityToolIds].filter((id) => id !== "opengeni"),
-  }));
+  const [draft, setDraft] = useState<ScheduleDraft>(() => {
+    const workspaceDefaultToolIds =
+      initial.workspaceDefaultToolIds ??
+      context.workspaceDefaultToolIds.filter((id) => id !== "opengeni");
+    return {
+      ...initial,
+      // A new schedule that follows the defaults starts from them, like a new chat.
+      mcpServerIds:
+        initial.mcpServerIds ??
+        (initial.followsWorkspaceDefaults
+          ? workspaceDefaultToolIds
+          : [...context.selectedCapabilityToolIds].filter((id) => id !== "opengeni")),
+      workspaceDefaultToolIds,
+    };
+  });
   const savedReusableSessionId =
     editing && task?.runMode === "reusable_session" ? task.reusableSessionId : null;
   const materializedSessionId =

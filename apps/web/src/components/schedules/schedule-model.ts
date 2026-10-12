@@ -247,6 +247,7 @@ export interface DraftDefaults {
   modelFollowsDefault?: boolean;
   defaultSandboxBackend?: ScheduledTaskFormState["sandboxBackend"] | undefined;
   defaultMachineSandboxId?: string;
+  workspaceDefaultToolIds?: readonly string[];
 }
 
 function formDefaults(defaults: DraftDefaults) {
@@ -256,6 +257,7 @@ function formDefaults(defaults: DraftDefaults) {
     modelFollowsDefault: defaults.modelFollowsDefault,
     defaultSandboxBackend: defaults.defaultSandboxBackend || undefined,
     defaultMachineSandboxId: defaults.defaultMachineSandboxId,
+    workspaceDefaultToolIds: defaults.workspaceDefaultToolIds,
   };
 }
 

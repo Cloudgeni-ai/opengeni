@@ -49,7 +49,7 @@ export function scheduledTaskCreateToolInput() {
           ),
         agentConfig: z
           .object(ScheduledTaskAgentConfigInput.shape)
-          .omit({ slackBotChannelId: true })
+          .omit({ slackBotChannelId: true, toolPolicy: true })
           .strict()
           .optional()
           .describe(

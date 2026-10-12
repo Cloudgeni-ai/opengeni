@@ -99,6 +99,14 @@ export type ScheduledTaskFormState = {
   includeOpenGeniTool: boolean;
   mcpServerIds?: string[];
   /**
+   * The schedule follows the workspace's default connectors at each run, like
+   * a new chat; `mcpServerIds` then shows what it gets now. Saving keeps the
+   * defaults a person turned off off, and lists only connectors added on top.
+   */
+  followsWorkspaceDefaults?: boolean;
+  /** The workspace defaults `mcpServerIds` was built from. */
+  workspaceDefaultToolIds?: string[];
+  /**
    * Accounts a person pinned for a schedule that starts its own session.
    * Connectors without a pin use the owner's current accounts at each run;
    * an existing-chat schedule never has pins.
@@ -153,6 +161,53 @@ export function scheduledTaskStateLabel(task: ScheduledTask): {
   return { label: "Active", active: true, reason: "active" };
 }
 
+function withoutCarrier(ids: readonly string[]): string[] {
+  return [...new Set(ids)].filter((id) => id !== "opengeni");
+}
+
+/**
+ * The connectors a schedule's next run gets, as a picker selection: its own
+ * tools, plus, when it follows the workspace defaults, every default it has
+ * not turned off.
+ */
+export function scheduledTaskConnectorSelection(
+  task: Pick<ScheduledTask, "agentConfig">,
+  workspaceDefaultToolIds: readonly string[],
+): string[] {
+  const own = task.agentConfig.tools
+    .filter((tool) => tool.id !== "opengeni")
+    .map((tool) => tool.id);
+  const policy = task.agentConfig.toolPolicy;
+  if (!policy) return own;
+  const excluded = new Set(policy.excludedMcpServerIds);
+  return withoutCarrier([
+    ...own.filter((id) => !excluded.has(id)),
+    ...withoutCarrier(workspaceDefaultToolIds).filter((id) => !excluded.has(id)),
+  ]);
+}
+
+/**
+ * How a picker selection is saved for a schedule that follows the workspace
+ * defaults: the defaults left unselected are turned off, and only connectors
+ * outside the defaults are listed. Nothing about the defaults themselves is
+ * copied into the schedule.
+ */
+export function scheduledTaskConnectorPolicyFromSelection(
+  selection: readonly string[],
+  workspaceDefaultToolIds: readonly string[],
+): { toolPolicy: NonNullable<ScheduledTaskAgentConfig["toolPolicy"]>; additions: string[] } {
+  const chosen = new Set(withoutCarrier(selection));
+  const defaults = withoutCarrier(workspaceDefaultToolIds);
+  const defaultSet = new Set(defaults);
+  return {
+    toolPolicy: {
+      mode: "workspace_default",
+      excludedMcpServerIds: defaults.filter((id) => !chosen.has(id)).sort(),
+    },
+    additions: [...chosen].filter((id) => !defaultSet.has(id)),
+  };
+}
+
 export function newScheduledTaskFormState(
   includeOpenGeniTool: boolean,
   resources: ResourceRef[] = [],
@@ -163,6 +218,7 @@ export function newScheduledTaskFormState(
     modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
+    workspaceDefaultToolIds?: readonly string[];
   } = {},
 ): ScheduledTaskFormState {
   const machineDefault = defaults.defaultSandboxBackend === "selfhosted";
@@ -187,6 +243,11 @@ export function newScheduledTaskFormState(
     workingDir: "",
     overlapPolicy: "allow_concurrent",
     includeOpenGeniTool,
+    // A new schedule that starts its own session follows the defaults, like a new chat.
+    followsWorkspaceDefaults: true,
+    ...(defaults.workspaceDefaultToolIds
+      ? { workspaceDefaultToolIds: withoutCarrier(defaults.workspaceDefaultToolIds) }
+      : {}),
     slackBotConnectionId: "",
     slackBotChannelId: "",
     resources,
@@ -207,6 +268,7 @@ export function recurringSessionTaskFormState(
     modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
+    workspaceDefaultToolIds?: readonly string[];
   } = {},
 ): ScheduledTaskFormState {
   return {
@@ -229,6 +291,7 @@ export function formStateFromScheduledTask(
     modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
+    workspaceDefaultToolIds?: readonly string[];
   } = {},
 ): ScheduledTaskFormState {
   const schedule = task.schedule;
@@ -255,9 +318,15 @@ export function formStateFromScheduledTask(
   }
   return {
     ...base,
-    mcpServerIds: task.agentConfig.tools
-      .filter((tool) => tool.id !== "opengeni")
-      .map((tool) => tool.id),
+    // A schedule that follows the defaults shows what its next run gets. One
+    // that posts into a chat has no connectors of its own; if it is switched
+    // to start its own session, it starts from the defaults like a new one.
+    mcpServerIds:
+      task.runMode === "existing_session"
+        ? withoutCarrier(defaults.workspaceDefaultToolIds ?? [])
+        : scheduledTaskConnectorSelection(task, defaults.workspaceDefaultToolIds ?? []),
+    followsWorkspaceDefaults:
+      task.runMode === "existing_session" || task.agentConfig.toolPolicy !== undefined,
     pinnedAccounts:
       task.runMode === "existing_session" ? [] : (task.agentConfig.pinnedAccounts ?? []),
     name: task.name,
@@ -392,8 +461,22 @@ export function agentConfigFromFormState(
   initial?: ScheduledTaskFormState,
 ): ScheduledTaskAgentConfig {
   const savedTools = new Map(existingTask?.agentConfig.tools.map((tool) => [tool.id, tool]));
+  // A schedule that starts its own session and follows the defaults saves
+  // which defaults are off and what is added on top, never the defaults.
+  const followsDefaults =
+    form.followsWorkspaceDefaults === true &&
+    form.runMode !== "existing_session" &&
+    form.mcpServerIds !== undefined;
+  const connectorPolicy = followsDefaults
+    ? scheduledTaskConnectorPolicyFromSelection(
+        form.mcpServerIds!,
+        form.workspaceDefaultToolIds ?? [],
+      )
+    : null;
   const tools = (
-    form.mcpServerIds?.map((id) => savedTools.get(id) ?? { kind: "mcp" as const, id }) ??
+    (connectorPolicy ? connectorPolicy.additions : form.mcpServerIds)?.map(
+      (id) => savedTools.get(id) ?? { kind: "mcp" as const, id },
+    ) ??
     existingTask?.agentConfig.tools ??
     []
   ).filter((tool) => !(tool.kind === "mcp" && tool.id === "opengeni"));
@@ -421,10 +504,12 @@ export function agentConfigFromFormState(
     // Pins travel as their own request field, never inside the config.
     pinnedAccounts: _pins,
     pinnedAccountsRequired: _pinsRequired,
+    toolPolicy: _toolPolicy,
     ...retainedConfig
   } = {
     pinnedAccounts: undefined,
     pinnedAccountsRequired: undefined,
+    toolPolicy: undefined,
     ...existingTask?.agentConfig,
   };
   const agent =
@@ -443,6 +528,7 @@ export function agentConfigFromFormState(
       : {}),
     resources: form.resources,
     tools,
+    ...(connectorPolicy ? { toolPolicy: connectorPolicy.toolPolicy } : {}),
     metadata: existingTask?.agentConfig.metadata ?? {},
     ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
     // A task that continues an existing chat never posts on its own.

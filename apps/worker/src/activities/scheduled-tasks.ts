@@ -19,6 +19,7 @@ import {
   normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  resolveWorkspaceSessionToolDefaults,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   TurnExecutionPolicyV1,
@@ -42,6 +43,7 @@ import {
   ConnectionAccountSelectionError,
   scheduledConnectionSurfaceEligibility,
   scheduledConnectionTools,
+  scheduledTaskRunTools,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
@@ -570,7 +572,24 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         settings.openaiReasoningEffort;
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
       let sandboxOs: "linux" | "macos" | "windows" = "linux";
-      let taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
+      // A schedule that follows the workspace defaults gets them as they are
+      // now, from the owner's registry; nothing about them was saved with it.
+      const runTools = task.agentConfig.toolPolicy
+        ? scheduledTaskRunTools({
+            agentConfig: task.agentConfig,
+            settings,
+            runtimeSettings: await settingsWithEnabledCapabilityMcpServers(
+              db,
+              task.workspaceId,
+              settings,
+              taskAuthoritySubjectId ? { subjectId: taskAuthoritySubjectId } : {},
+            ),
+            workspaceDefaults: resolveWorkspaceSessionToolDefaults(
+              (await requireWorkspace(db, task.workspaceId)).settings,
+            ),
+          })
+        : task.agentConfig.tools;
+      let taskTools = withFirstPartyTools(settings, runTools);
       // A task created by a live agent attempt froze its creator's effective
       // first-party selection, permission set, and session access policy;
       // its generated sessions inherit that boundary under today's
@@ -613,7 +632,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             firstPartyMcpTools,
             tools: taskTools,
             toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
-            productServerIds: task.agentConfig.tools.map((tool) => tool.id),
+            productServerIds: runTools.map((tool) => tool.id),
           });
           firstPartyMcpTools = written.firstPartyMcpTools;
           taskTools = written.tools;
@@ -979,6 +998,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           task,
           session: responderSession,
           personalConnectionDelegations: taskPersonalConnectionDelegations,
+          plannedTools: taskTools,
           personalResourceAuthoritySubjectId: taskAuthoritySubjectId,
           executionPolicy: targetSessionExecution
             ? {

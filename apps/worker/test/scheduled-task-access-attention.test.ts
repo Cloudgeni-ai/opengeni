@@ -419,6 +419,41 @@ describe("the owner is told when a schedule cannot use a connector", () => {
     expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toEqual([]);
   }, 180_000);
 
+  test("a default connector the workspace adds after saving reaches the next run", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      sessionToolDefaults: { mcpServerIds: [] },
+    })} where id = ${workspace.workspaceId}`;
+    const task = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: person(workspace, workspace.owner),
+      authorization: signedIn(workspace, workspace.owner),
+      toolsProvided: false,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Follows the defaults",
+        schedule: { type: "manual" },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "Summarize" },
+      }),
+    });
+    expect(task.agentConfig.tools.map((tool) => tool.id)).not.toContain("mail");
+    // Later the workspace makes mail a default and the owner connects it.
+    await admin`update workspaces set settings = settings || ${admin.json({
+      sessionToolDefaults: { mcpServerIds: ["mail"] },
+    })} where id = ${workspace.workspaceId}`;
+    const account = await connectPersonalMail(workspace);
+    const run = await startRun(workspace, task.id);
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: run.runId,
+    });
+    expect(accepted?.resolvedTools.map((tool) => tool.id)).toContain("mail");
+    expect(accepted?.mcpAccountBindings?.map((binding) => binding.connectionId)).toEqual([account]);
+  }, 180_000);
+
   test("a schedule that requires its pinned accounts skips the occurrence instead", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

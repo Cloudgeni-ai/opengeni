@@ -3216,6 +3216,11 @@ export type ScheduledTaskAgentConfig = {
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /**
+   * Present when runs follow the workspace's default connectors (minus the
+   * excluded ones) plus `tools`; absent when runs get exactly `tools`.
+   */
+  toolPolicy?: ScheduledTaskToolPolicy | undefined;
   metadata: Record<string, unknown>;
   slackBotConnectionId?: string | undefined;
   /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
@@ -3331,6 +3336,15 @@ export type PrivateScheduledTaskSummary = {
 export type ScheduledTaskAccessConnector = {
   id: string;
   name: string;
+};
+
+/**
+ * A schedule that follows the workspace's default connectors at each run,
+ * the way a new chat does. Connectors a person turned off stay off.
+ */
+export type ScheduledTaskToolPolicy = {
+  mode: "workspace_default";
+  excludedMcpServerIds: string[];
 };
 
 /**
@@ -6815,7 +6829,14 @@ export type ScheduledTaskAgentConfigInput = {
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
+  /**
+   * Connectors added on top of the workspace defaults when `toolPolicy` is
+   * set; otherwise the exact list. Omit both on a schedule that starts its
+   * own session to follow the workspace defaults at each run.
+   */
   tools?: ToolRef[] | undefined;
+  /** Follow the workspace's default connectors at each run, except the excluded ones. */
+  toolPolicy?: ScheduledTaskToolPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
   slackBotConnectionId?: string | undefined;
   /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */

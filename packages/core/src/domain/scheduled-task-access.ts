@@ -76,7 +76,7 @@ import {
   visibleMcpAccountConnections,
   type PersonalConnectionDelegationSource,
 } from "./personal-connection-delegations";
-import { withWorkspaceDefaultMcpTools } from "./resources";
+import { scheduledTaskRunTools, withWorkspaceDefaultMcpTools } from "./resources";
 import { requireVisibleScheduledTask } from "./scheduled-task-audience";
 import {
   assertScheduledTaskMutationOwner,
@@ -513,15 +513,16 @@ export async function computeScheduledTaskAccessPlan(input: {
     ? settingsWithSessionMcpServerMetadata(ownerRegistry, target.mcpServers)
     : ownerRegistry;
   const names = new Map([...registryNames(callerRegistry), ...registryNames(accountRegistry)]);
+  const workspaceDefaults = resolveWorkspaceSessionToolDefaults(workspaceSettings);
+  // A schedule that follows the workspace defaults never lacks one: its runs
+  // get them as they are. Only the tools it lists itself can go stale.
+  const followsDefaults = task.agentConfig.toolPolicy !== undefined;
   const connectors = followsTask
     ? planScheduledTaskConnectors({
         taskTools: task.agentConfig.tools,
-        defaultTools: withWorkspaceDefaultMcpTools(
-          [],
-          settings,
-          ownerRegistry,
-          resolveWorkspaceSessionToolDefaults(workspaceSettings),
-        ),
+        defaultTools: followsDefaults
+          ? []
+          : withWorkspaceDefaultMcpTools([], settings, ownerRegistry, workspaceDefaults),
         availableServerIds: new Set(callerRegistry.mcpServers.map((server) => server.id)),
         names,
         leaveOut: new Set(input.leaveOut?.connectors ?? []),
@@ -532,7 +533,14 @@ export async function computeScheduledTaskAccessPlan(input: {
     task.workspaceId,
     accountRegistry,
     target,
-    connectors.tools,
+    followsTask
+      ? scheduledTaskRunTools({
+          agentConfig: { tools: connectors.tools, toolPolicy: task.agentConfig.toolPolicy },
+          settings,
+          runtimeSettings: ownerRegistry,
+          workspaceDefaults,
+        })
+      : connectors.tools,
     ownerSubjectId ?? undefined,
   );
   const connectionToolIds = new Set(connectionTools.map((tool) => tool.id));

@@ -180,10 +180,14 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
 
 - **Connectors** (only when runs create sessions from the task's own tools:
   `new_session_per_run`, or `reusable_session` before its session exists).
-  Connectors the task already has are kept. Connectors the workspace no longer
-  sets up are dropped (`unavailableConnectors`). The workspace defaults a new
-  schedule gets (`sessionToolDefaults`, or the enabled capability default) are
-  added (`missingConnectors`). A refresh never removes a connector the owner
+  A task that follows the workspace defaults (`agentConfig.toolPolicy` with
+  mode `workspace_default`) never lacks one: each run gets them as they are
+  then, so it reports no `missingConnectors` and a refresh adds none. For a
+  task with a fixed list, connectors the task already has are kept,
+  connectors the workspace no longer sets up are dropped
+  (`unavailableConnectors`), and the workspace defaults a new schedule gets
+  (`sessionToolDefaults`, or the enabled capability default) are added
+  (`missingConnectors`). A refresh never removes a connector the owner
   deliberately kept.
 - **Pinned accounts** are reported, never changed. A pin whose account can no
   longer be used is listed in `unavailableAccounts`; runs go ahead without that
@@ -268,8 +272,9 @@ page's `expectedExecutionDigest`; a working pin changes only in the editor.
   the creator session policy, which the refresh never changes.
 
 This is the one writer of the creator policy's tools and permissions after
-create. Auto-following workspace defaults at each run was considered and
-rejected: it would conflict with the creator-policy freeze.
+create. Opengeni tools do not follow the workspace defaults at each run: that
+would conflict with the creator-policy freeze. Connectors do (see below); they
+carry no permissions of their own and each run resolves the owner's accounts.
 
 The optional `leaveOut` (`{ connectors?, openGeniTools? }`) names workspace
 default connectors and Opengeni tools the person wants kept off this schedule.
@@ -277,7 +282,41 @@ The plan then neither adds them nor, for an Opengeni tool, the permissions it
 would need. It only narrows what the refresh adds; it never removes anything
 the task already has, and an unknown tool name is refused (400).
 
-## Keeping defaults off
+## Which connectors a run gets
+
+A schedule that posts into an existing chat has no connectors of its own: each
+run uses the chat's connectors and the owner's current accounts. A reusable
+schedule whose session exists likewise follows that session.
+
+A schedule that starts its own session follows the workspace's default
+connectors at each run, the way a new chat does, when it is created without
+choosing tools. It stores `agentConfig.toolPolicy`:
+
+```json
+{ "mode": "workspace_default", "excludedMcpServerIds": ["notion"] }
+```
+
+Each run gets the defaults as they are when it starts, minus
+`excludedMcpServerIds`, plus the connectors listed in `agentConfig.tools`.
+Nothing about the defaults is copied into the schedule, so a connector the
+workspace makes a default later reaches the next run, and one it removes stops
+being used. The schedule editor saves a person's choices this way: defaults
+they turn off become exclusions, and connectors outside the defaults become
+`tools`.
+
+Creating a schedule with a list of `tools` and no `toolPolicy` gives it exactly
+that list. An edit that does not name a `toolPolicy` keeps the one the
+schedule has, so replacing `agentConfig` (for example with the tools a read
+returned) never turns the defaults into a fixed list. Agents cannot set
+`toolPolicy`; they omit `tools` to follow the defaults or list them to fix
+them. Knowledge syncs never follow the defaults.
+
+Migration 0740 moved schedules whose list nobody chose to follow the defaults:
+those an agent or a service created, which start their own session. Their
+saved tools stayed as additions, so no run lost a connector. A list a person
+created directly was kept exactly.
+
+## Keeping defaults off in the drift view
 
 A person may deliberately leave a default connector or Opengeni tool off a
 schedule, and drift would otherwise name it forever. The schedule's page offers
