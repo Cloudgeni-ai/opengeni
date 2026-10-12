@@ -814,8 +814,8 @@ function Setup({
       {!inheritsChatSettings && task.variableSetId ? (
         <DetailFact label="Variable set">
           <Link
-            to="/workspaces/$workspaceId/variable-sets/$variableSetId"
-            params={{ workspaceId, variableSetId: task.variableSetId }}
+            to="/workspaces/$workspaceId/secrets/$vaultId"
+            params={{ workspaceId, vaultId: task.variableSetId }}
             className="rounded-[6px] font-medium og-link"
           >
             {setName ?? (variableSets.loading ? "Loading…" : "Attached variable set")}

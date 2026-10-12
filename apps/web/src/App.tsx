@@ -7,8 +7,10 @@
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /sessions/:sessionId                     → authorized compatibility redirect
-//   /workspaces/:id/variable-sets            → variable sets (?view=new)
-//   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
+//   /workspaces/:id/secrets                  → vaults (?view=new|connect-1password)
+//   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
+//   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
+//   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
@@ -116,10 +118,7 @@ const LazyConnectAgentRoute = lazyRouteComponent(
   () => import("@/routes/connect-agent"),
   "ConnectAgentRoute",
 );
-const LazyVariableSetsRoute = lazyRouteComponent(
-  () => import("@/routes/variable-sets"),
-  "VariableSetsRoute",
-);
+const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
@@ -410,31 +409,54 @@ const workspaceSessionRoute = createRoute({
   }),
   component: SessionView,
 });
+const workspaceSecretsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "secrets",
+  // The list, each vault and each item share one component, so moving between
+  // them never re-reads the vaults. The child routes only match the URL.
+  component: Secrets,
+});
+const workspaceSecretsIndexRoute = createRoute({
+  getParentRoute: () => workspaceSecretsRoute,
+  path: "/",
+  validateSearch: (search: Record<string, unknown>): { view?: "new" | "connect-1password" } =>
+    search.view === "new" || search.view === "connect-1password" ? { view: search.view } : {},
+});
+const workspaceSecretsVaultRoute = createRoute({
+  getParentRoute: () => workspaceSecretsRoute,
+  path: "$vaultId",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: "availability" | "new-item"; type?: string } => ({
+    ...(search.view === "availability" || search.view === "new-item"
+      ? { view: search.view }
+      : {}),
+    ...(search.view === "new-item" && typeof search.type === "string"
+      ? { type: search.type }
+      : {}),
+  }),
+});
+const workspaceSecretsItemRoute = createRoute({
+  getParentRoute: () => workspaceSecretsRoute,
+  path: "$vaultId/$itemId",
+  validateSearch: (search: Record<string, unknown>): { view?: "edit" } =>
+    search.view === "edit" ? { view: "edit" } : {},
+});
+// Variable sets became Secrets (Q-48): old links land on the same place.
 const workspaceVariableSetsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "variable-sets",
-  // The list and each set's page share one component, so moving between them
-  // never re-reads the sets. The child routes only match the URL.
-  component: VariableSets,
-});
-const workspaceVariableSetsIndexRoute = createRoute({
-  getParentRoute: () => workspaceVariableSetsRoute,
-  path: "/",
-  validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
-    search.view === "new" ? { view: "new" } : {},
+  component: SecretsRedirect,
 });
 const workspaceVariableSetDetailRoute = createRoute({
-  getParentRoute: () => workspaceVariableSetsRoute,
-  path: "$variableSetId",
-  validateSearch: (search: Record<string, unknown>): { view?: "add" | "paste" | "edit" } =>
-    search.view === "add" || search.view === "paste" || search.view === "edit"
-      ? { view: search.view }
-      : {},
+  getParentRoute: () => workspaceRoute,
+  path: "variable-sets/$variableSetId",
+  component: SecretsRedirect,
 });
 const workspaceEnvironmentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "environments",
-  component: VariableSetsRedirect,
+  component: SecretsRedirect,
 });
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -786,10 +808,13 @@ const routeTree = rootRoute.addChildren([
     workspaceRetiredAgentsRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
-    workspaceVariableSetsRoute.addChildren([
-      workspaceVariableSetsIndexRoute,
-      workspaceVariableSetDetailRoute,
+    workspaceSecretsRoute.addChildren([
+      workspaceSecretsIndexRoute,
+      workspaceSecretsVaultRoute,
+      workspaceSecretsItemRoute,
     ]),
+    workspaceVariableSetsRoute,
+    workspaceVariableSetDetailRoute,
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
@@ -910,18 +935,34 @@ function SessionDeepLink() {
   return <LazySessionDeepLinkRoute sessionId={sessionId} />;
 }
 
-function VariableSets() {
-  const { workspaceId } = workspaceVariableSetsRoute.useParams();
-  const { variableSetId } = useParams({ strict: false });
-  const { view } = useSearch({ strict: false });
+function Secrets() {
+  const { workspaceId } = workspaceSecretsRoute.useParams();
+  const { vaultId, itemId } = useParams({ strict: false });
+  const { view, type } = useSearch({ strict: false });
   return (
-    <LazyVariableSetsRoute workspaceId={workspaceId} variableSetId={variableSetId} view={view} />
+    <LazySecretsRoute
+      workspaceId={workspaceId}
+      vaultId={vaultId}
+      itemId={itemId}
+      view={view}
+      type={type}
+    />
   );
 }
 
-function VariableSetsRedirect() {
-  const { workspaceId } = workspaceEnvironmentsRoute.useParams();
-  return <Navigate to="/workspaces/$workspaceId/variable-sets" params={{ workspaceId }} replace />;
+function SecretsRedirect() {
+  const { workspaceId, variableSetId } = useParams({ strict: false });
+  if (!workspaceId) return null;
+  // A variable set's id is kept by its vault, so its page maps one to one.
+  return variableSetId ? (
+    <Navigate
+      to="/workspaces/$workspaceId/secrets/$vaultId"
+      params={{ workspaceId, vaultId: variableSetId }}
+      replace
+    />
+  ) : (
+    <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
+  );
 }
 
 function Rigs() {
