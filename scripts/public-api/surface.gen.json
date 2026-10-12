@@ -21170,6 +21170,8 @@
         "$.source": "ref(ResolvedAgentConfigSource)!",
         "$.unavailable": "array!",
         "$.unavailable[]": "ref(AgentCapabilityId)",
+        "$.unavailableReasons": "object?",
+        "$.unavailableReasons{}": "string",
         "$.version": "const!=[\"1\"]"
       }
     },
