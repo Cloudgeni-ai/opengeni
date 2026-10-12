@@ -29,6 +29,14 @@ type Entry = {
   value: string;
 };
 type Writer = { id: string | null; epoch: number; live: boolean };
+/** Exact existing stdin admission, supplied by the trusted process route. The
+ * admission UUID is also the immutable request UUID: one payload per admission. */
+export type NativeBrokerRetainedInput = {
+  sessionId: string;
+  processId: string;
+  admissionId: string;
+  commandId: string;
+};
 /** Implemented by the scoped DB adapter. All state/receipt writes in a callback
  * commit atomically, or none do. No callback performs provider I/O. */
 export type NativeBrokerTransportPort = {
@@ -45,7 +53,18 @@ export type NativeBrokerTransportPort = {
       save(state: unknown): void;
     }) => Promise<T>,
   ): Promise<T>;
+  retainedInputTransaction?<T>(
+    input: NativeBrokerRetainedInput,
+    operation: (
+      tx: NativeBrokerTransportTransaction & {
+        reserveInput(byteLength: number): Promise<number>;
+      },
+    ) => Promise<T>,
+  ): Promise<T>;
 };
+type NativeBrokerTransportTransaction = Parameters<
+  Parameters<NativeBrokerTransportPort["transaction"]>[0]
+>[0];
 type Identity = { brokerId: string; sandboxId: string; taskId: string };
 export type NativeBrokerTransportState = {
   version: 1;
@@ -99,6 +118,72 @@ export function initialNativeBrokerTransportState(identity: Identity): NativeBro
  * Only `dispatchIntent` returns provider bytes, after the DB commit resolves.
  */
 export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, identity: Identity) {
+  const reserve = async (
+    tx: NativeBrokerTransportTransaction,
+    writerId: string,
+    epoch: number,
+    request: NativeBrokerRequest,
+  ) => {
+    tx.requireWriter(writerId, epoch);
+    const state = validate(tx.state, identity);
+    if (state.output.providerEof || state.input.writerEpoch !== epoch) invalid();
+    const old = await tx.read("request", request.requestId);
+    if (old) {
+      const frame = requestFromWire(old.value, identity);
+      if (
+        frame.requestId !== request.requestId ||
+        frame.kind !== request.kind ||
+        frame.commandId !== request.commandId ||
+        frame.offset !== request.offset ||
+        !Buffer.from(frame.payload).equals(request.payload) ||
+        old.sequence !== frame.sequence
+      )
+        invalid();
+      return { index: frame.sequence, alreadyReserved: true };
+    }
+    state.input = reserveNativeBrokerInput(state.input, epoch, request);
+    const pending = state.input.pending!;
+    await tx.insert({
+      kind: "request",
+      key: request.requestId,
+      sequence: pending.providerInputIndex,
+      value: Buffer.from(pending.frameBase64, "base64").toString("ascii"),
+    });
+    tx.save(state);
+    return { index: pending.providerInputIndex, alreadyReserved: false };
+  };
+  const dispatchIntent = async (
+    tx: NativeBrokerTransportTransaction,
+    writerId: string,
+    epoch: number,
+    requestId: string,
+    stdin?: NativeBrokerRetainedInput,
+  ) => {
+    tx.requireWriter(writerId, epoch);
+    const state = validate(tx.state, identity);
+    if (state.output.providerEof) invalid();
+    const entry = await tx.read("request", requestId);
+    if (!entry) invalid();
+    const frame = requestFromWire(entry.value, identity);
+    if (
+      stdin
+        ? frame.kind !== "stdin" ||
+          frame.commandId !== stdin.commandId ||
+          frame.requestId !== stdin.admissionId
+        : frame.kind === "stdin"
+    )
+      invalid();
+    if (entry.sequence! <= state.input.lastAcceptedInputIndex) return null;
+    if (
+      !state.input.pending ||
+      entry.sequence !== state.input.pending.providerInputIndex ||
+      Buffer.from(state.input.pending.frameBase64, "base64").toString("ascii") !== entry.value
+    )
+      invalid();
+    state.input = markNativeBrokerInputDispatchIntent(state.input, epoch);
+    tx.save(state);
+    return pendingNativeBrokerProviderWrite(state.input, epoch);
+  };
   return {
     async claimWriter(id: string) {
       return store.transaction(async (tx) => {
@@ -115,55 +200,46 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
       });
     },
     async reserve(writerId: string, epoch: number, request: NativeBrokerRequest) {
-      return store.transaction(async (tx) => {
-        tx.requireWriter(writerId, epoch);
-        const state = validate(tx.state, identity);
-        if (state.output.providerEof) invalid();
-        if (state.input.writerEpoch !== epoch) invalid();
-        const old = await tx.read("request", request.requestId);
-        if (old) {
-          const frame = requestFromWire(old.value, identity);
-          if (
-            frame.requestId !== request.requestId ||
-            frame.kind !== request.kind ||
-            frame.commandId !== request.commandId ||
-            frame.offset !== request.offset ||
-            !Buffer.from(frame.payload).equals(request.payload) ||
-            old.sequence !== frame.sequence
-          )
-            invalid();
-          return { index: frame.sequence, alreadyReserved: true };
-        }
-        state.input = reserveNativeBrokerInput(state.input, epoch, request);
-        const pending = state.input.pending!;
-        await tx.insert({
-          kind: "request",
-          key: request.requestId,
-          sequence: pending.providerInputIndex,
-          value: Buffer.from(pending.frameBase64, "base64").toString("ascii"),
+      if (request.kind === "stdin") invalid();
+      return store.transaction((tx) => reserve(tx, writerId, epoch, request));
+    },
+    async reserveRetainedStdin(
+      writerId: string,
+      epoch: number,
+      input: NativeBrokerRetainedInput,
+      payload: Uint8Array,
+    ) {
+      if (!store.retainedInputTransaction || !payload.length) invalid();
+      input = { ...input };
+      const bytes = Buffer.from(payload);
+      return store.retainedInputTransaction(input, async (tx) => {
+        const old = await tx.read("request", input.admissionId);
+        const offset = old
+          ? requestFromWire(old.value, identity).offset
+          : await tx.reserveInput(bytes.length);
+        const reserved = await reserve(tx, writerId, epoch, {
+          requestId: input.admissionId,
+          commandId: input.commandId,
+          kind: "stdin",
+          offset,
+          payload: bytes,
         });
-        tx.save(state);
-        return { index: pending.providerInputIndex, alreadyReserved: false };
+        return { ...reserved, offset };
       });
     },
     async dispatchIntent(writerId: string, epoch: number, requestId: string) {
-      return store.transaction(async (tx) => {
-        tx.requireWriter(writerId, epoch);
-        const state = validate(tx.state, identity);
-        if (state.output.providerEof) invalid();
-        const entry = await tx.read("request", requestId);
-        if (!entry) invalid();
-        if (entry.sequence! <= state.input.lastAcceptedInputIndex) return null;
-        if (
-          !state.input.pending ||
-          entry.sequence !== state.input.pending.providerInputIndex ||
-          Buffer.from(state.input.pending.frameBase64, "base64").toString("ascii") !== entry.value
-        )
-          invalid();
-        state.input = markNativeBrokerInputDispatchIntent(state.input, epoch);
-        tx.save(state);
-        return pendingNativeBrokerProviderWrite(state.input, epoch);
-      });
+      return store.transaction((tx) => dispatchIntent(tx, writerId, epoch, requestId));
+    },
+    async dispatchRetainedStdinIntent(
+      writerId: string,
+      epoch: number,
+      input: NativeBrokerRetainedInput,
+    ) {
+      if (!store.retainedInputTransaction) invalid();
+      input = { ...input };
+      return store.retainedInputTransaction(input, (tx) =>
+        dispatchIntent(tx, writerId, epoch, input.admissionId, input),
+      );
     },
     async providerAcknowledged(writerId: string, epoch: number, requestId: string) {
       return store.transaction(async (tx) => {

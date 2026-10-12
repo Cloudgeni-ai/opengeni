@@ -140,7 +140,8 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
     sessionId: f.sessionId,
     processId,
   };
-  await database.admin`update sandbox_leases set workspace_generation = greatest(workspace_generation, ${handle}) where id=${b.leaseId}`;
+  const [birth] =
+    await database.admin`update sandbox_leases set workspace_generation = workspace_generation + 1 where id=${b.leaseId} returning workspace_generation`;
   await database.admin`insert into sandbox_lease_holders ${database.admin({
     account_id: b.accountId,
     workspace_id: b.workspaceId,
@@ -165,7 +166,7 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
     provider_instance_id: b.sandboxId,
     route_kind: "active",
     route_epoch: 0,
-    workspace_generation: handle,
+    workspace_generation: birth!.workspace_generation,
     operation: "terminalExec",
     provider_outcome: "retained",
   })}`;
@@ -193,6 +194,32 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
   return {
     scope,
     persistence: retainedProviderCommandPersistence(client.db, scope),
+    inputAdmission: async () => {
+      const childId = crypto.randomUUID();
+      const [lease] = await database.admin`update sandbox_leases
+        set workspace_generation = workspace_generation + 1 where id = ${b.leaseId}
+        returning workspace_generation`;
+      await database.admin`insert into sandbox_workspace_mutation_admissions ${database.admin({
+        id: childId,
+        account_id: b.accountId,
+        workspace_id: b.workspaceId,
+        lease_id: b.leaseId,
+        sandbox_group_id: b.sandboxGroupId,
+        session_id: f.sessionId,
+        actor_kind: "process",
+        actor_id: processId,
+        holder_kind: "process",
+        holder_id: `process:${processId}`,
+        lease_epoch: b.createEpoch,
+        provider_backend: "modal",
+        provider_instance_id: b.sandboxId,
+        route_kind: "active",
+        route_epoch: 0,
+        workspace_generation: lease!.workspace_generation,
+        operation: "writeStdin",
+      })}`;
+      return { sessionId: f.sessionId, processId, admissionId: childId, commandId: command.execId };
+    },
     settle: async (exitCode = 0) => {
       const expected = await getRetainedProcess(client.db, scope);
       if (!expected) throw new Error("Native retained fixture missing");
@@ -207,6 +234,180 @@ async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderComma
     },
   };
 }
+
+async function stdinFixture() {
+  const f = await fixture();
+  const active = await start(f);
+  await f
+    .service()
+    .captureOutput("0-0", page(f, Buffer.from(accepted(f, active.write.input)).toString()));
+  const id = crypto.randomUUID();
+  const command = ModalBrokerProviderCommand.parse({
+    kind: "modal-broker-v1",
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    execId: id,
+    pty: false,
+    supervision: {
+      protocol: "native-subreaper-broker-channel-v1",
+      invocationId: id,
+      brokerId: f.binding.brokerId,
+      launchRequestId: crypto.randomUUID(),
+      launchEpoch: 1,
+    },
+    capture: { sequence: 0, receiptAckObserved: false },
+    streams: {
+      stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    },
+  });
+  const custody = await retainNativeFixture(f, command);
+  const input = await custody.inputAdmission();
+  const counter = async () => {
+    const [row] =
+      await database.admin`select provider_command_input_index from sandbox_retained_processes where id=${input.processId}`;
+    return Number(row!.provider_command_input_index);
+  };
+  return { f, active, custody, input, counter };
+}
+
+test("retained stdin commits one byte reservation and one immutable request under concurrent replay", async () => {
+  const { f, active, input, counter, custody } = await stdinFixture();
+  const bytes = Buffer.from("hello\u0000binary");
+  const results = await Promise.all(
+    [1, 2].map(() => f.service().reserveRetainedStdin(active.writerId, 1, input, bytes)),
+  );
+  expect(results.map((r) => [r.index, r.offset])).toEqual([
+    [2, 0],
+    [2, 0],
+  ]);
+  expect(results.filter((r) => r.alreadyReserved)).toHaveLength(1);
+  expect(await counter()).toBe(bytes.length);
+  await expect(custody.persistence.reserveInput!(1)).rejects.toThrow("atomically");
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, input, Buffer.from("changed")),
+  ).rejects.toThrow();
+  await expect(f.service().dispatchIntent(active.writerId, 1, input.admissionId)).rejects.toThrow();
+  expect(await counter()).toBe(bytes.length);
+  const write = (await f.service().dispatchRetainedStdinIntent(active.writerId, 1, input))!;
+  await f
+    .service()
+    .captureOutput("1-0", page(f, Buffer.from(accepted(f, write.input, 2)).toString(), "2-0"));
+  const second = await custody.inputAdmission();
+  expect(
+    await f.service().reserveRetainedStdin(active.writerId, 1, second, Buffer.from("next")),
+  ).toMatchObject({ index: 3, offset: bytes.length });
+  expect(await counter()).toBe(bytes.length + 4);
+});
+
+test("busy channel, invalid writer and oversized stdin roll back the canonical byte offset", async () => {
+  const { f, active, input, counter, custody } = await stdinFixture();
+  await expect(
+    f.service().reserveRetainedStdin(crypto.randomUUID(), 1, input, Buffer.from("x")),
+  ).rejects.toThrow();
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, input, new Uint8Array(16384)),
+  ).rejects.toThrow();
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, input, new Uint8Array()),
+  ).rejects.toThrow();
+  expect(await counter()).toBe(0);
+  expect(await f.service().request(input.admissionId)).toBeNull();
+  await f.service().reserveRetainedStdin(active.writerId, 1, input, Buffer.from("first"));
+  const second = await custody.inputAdmission();
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, second, Buffer.from("lost")),
+  ).rejects.toThrow();
+  expect(await counter()).toBe(5);
+  expect(await f.service().request(second.admissionId)).toBeNull();
+  await expect(
+    f.store.retainedInputTransaction(second, async (tx) => {
+      await tx.reserveInput(7);
+      throw new Error("fixture rollback after byte reservation");
+    }),
+  ).rejects.toThrow();
+  expect(await counter()).toBe(5);
+});
+
+test("stdin reservation requires exact session, process, command and existing child admission", async () => {
+  const { f, active, input, counter } = await stdinFixture();
+  const other = await stdinFixture();
+  for (const changed of [
+    { sessionId: other.input.sessionId },
+    { processId: other.input.processId },
+    { commandId: other.input.commandId },
+    { admissionId: other.input.admissionId },
+    { admissionId: crypto.randomUUID() },
+  ])
+    await expect(
+      f
+        .service()
+        .reserveRetainedStdin(active.writerId, 1, { ...input, ...changed }, Buffer.from("x")),
+    ).rejects.toThrow();
+  await database.admin`update sandbox_workspace_mutation_admissions set settled_at=now(), provider_outcome='rejected' where id=${input.admissionId}`;
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, input, Buffer.from("x")),
+  ).rejects.toThrow();
+  expect(await counter()).toBe(0);
+  expect(await f.service().request(input.admissionId)).toBeNull();
+  expect(await other.counter()).toBe(0);
+});
+
+test("cancel closes new stdin but preserves the exact already committed request for reconciliation", async () => {
+  const { f, active, input, counter, custody } = await stdinFixture();
+  const bytes = Buffer.from("original");
+  await f.service().reserveRetainedStdin(active.writerId, 1, input, bytes);
+  const before = (await f.service().dispatchRetainedStdinIntent(active.writerId, 1, input))!;
+  const fresh = await custody.inputAdmission();
+  await custody.persistence.requestCancellation!("explicit_stop");
+  await database.admin`update sandbox_workspace_mutation_admissions set settled_at=now(), provider_outcome='rejected' where id=${input.admissionId}`;
+  await database.admin`update native_command_broker_transports set writer_until=now()-interval '1 second', revision=revision+1 where id=${f.binding.brokerId}`;
+  const next = crypto.randomUUID();
+  expect(await f.service().claimWriter(next)).toMatchObject({ epoch: 2 });
+  expect(await f.service().reserveRetainedStdin(next, 2, input, bytes)).toMatchObject({
+    alreadyReserved: true,
+    offset: 0,
+  });
+  const replay = await f.service().dispatchRetainedStdinIntent(next, 2, input);
+  expect(replay).toEqual(before);
+  await expect(
+    f.service().reserveRetainedStdin(next, 2, fresh, Buffer.from("new")),
+  ).rejects.toThrow();
+  expect(await counter()).toBe(bytes.length);
+});
+
+test("stdin driver never silently repeats an unknown write and requires exact recovery scope", async () => {
+  const { f, active, input, counter } = await stdinFixture();
+  const writes: Uint8Array[] = [];
+  const channel: NativeBrokerChannel = {
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    async write(value) {
+      writes.push(value.input);
+      throw new Error("fixture unknown acknowledgement");
+    },
+    async *output() {},
+  };
+  const driver = new NativeBrokerDriver(f.service(), channel, active.writerId);
+  await expect(driver.sendRetainedStdin(input, Buffer.from("once"))).rejects.toBeInstanceOf(
+    NativeBrokerDispatchUnknownError,
+  );
+  expect(await driver.sendRetainedStdin(input, Buffer.from("once"))).toMatchObject({
+    state: "reconciliation_required",
+    offset: 0,
+  });
+  await expect(driver.replayPending()).rejects.toThrow("exact retained admission");
+  await expect(
+    driver.replayPending(undefined, { ...input, processId: crypto.randomUUID() }),
+  ).rejects.toThrow();
+  expect(writes).toHaveLength(1);
+  await expect(driver.replayPending(undefined, input)).rejects.toBeInstanceOf(
+    NativeBrokerDispatchUnknownError,
+  );
+  expect(writes).toHaveLength(2);
+  expect(writes[1]).toEqual(writes[0]);
+  expect(await counter()).toBe(4);
+});
 function fence() {
   return {
     requestId: crypto.randomUUID(),
@@ -989,7 +1190,15 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       await request("fence");
       expect(await driver.send(release)).toMatchObject({ state: "accepted" });
       const binary = Uint8Array.from({ length: 256 }, (_, i) => i);
-      await request("stdin", id, binary);
+      const stdinAdmission = await custody.inputAdmission();
+      expect(await driver.sendRetainedStdin(stdinAdmission, binary)).toMatchObject({
+        state: "provider_acknowledged",
+        offset: 0,
+      });
+      await observeUntil(
+        async () => (await f.service().request(stdinAdmission.admissionId))?.accepted === true,
+      );
+      await database.admin`update sandbox_workspace_mutation_admissions set settled_at=now(), provider_outcome='resolved' where id=${stdinAdmission.admissionId}`;
       await request("eof", id, new Uint8Array(), binary.length);
       let receipt:
         | { protocol: string; invocationId: string; receiptId: string; leaderExitCode: number }

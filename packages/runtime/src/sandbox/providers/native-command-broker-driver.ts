@@ -1,6 +1,9 @@
 import type { NativeBrokerOutputPage } from "./native-command-broker-output";
 import type { NativeBrokerRequest } from "./native-command-broker-input";
-import type { DurableNativeBrokerTransport } from "./native-command-broker-transport";
+import type {
+  DurableNativeBrokerTransport,
+  NativeBrokerRetainedInput,
+} from "./native-command-broker-transport";
 import { NativeBrokerFrameDecoder } from "./native-command-broker-wire";
 
 /** Exact authenticated initial-process channels, never TaskExec, guest files,
@@ -74,9 +77,16 @@ export class NativeBrokerDriver {
     return this.journal.claimWriter(this.writerId);
   }
 
-  private async dispatch(epoch: number, requestId: string, signal?: AbortSignal) {
+  private async dispatch(
+    epoch: number,
+    requestId: string,
+    signal?: AbortSignal,
+    stdin?: NativeBrokerRetainedInput,
+  ) {
     signal?.throwIfAborted();
-    const write = await this.journal.dispatchIntent(this.writerId, epoch, requestId);
+    const write = stdin
+      ? await this.journal.dispatchRetainedStdinIntent(this.writerId, epoch, stdin)
+      : await this.journal.dispatchIntent(this.writerId, epoch, requestId);
     if (!write) return { state: "accepted" as const };
     try {
       // The intent is committed before this call. Even abort immediately after
@@ -88,6 +98,44 @@ export class NativeBrokerDriver {
     } catch (error) {
       throw new NativeBrokerDispatchUnknownError(requestId, write.index, error);
     }
+  }
+
+  /** One canonical stdin admission owns one bounded immutable payload. The DB
+   * reserves its command byte offset and transport index in the same commit.
+   * Re-entry never increments the offset or silently repeats physical input. */
+  async sendRetainedStdin(
+    input: NativeBrokerRetainedInput,
+    payload: Uint8Array,
+    signal?: AbortSignal,
+  ) {
+    input = { ...input };
+    const bytes = Buffer.from(payload);
+    return this.exclusive(async () => {
+      signal?.throwIfAborted();
+      await this.identity();
+      const writer = await this.journal.claimWriter(this.writerId);
+      const reserved = await this.journal.reserveRetainedStdin(
+        this.writerId,
+        writer.epoch,
+        input,
+        bytes,
+      );
+      const old = await this.journal.request(input.admissionId);
+      if (!old) throw new Error("Native broker reserved stdin is absent");
+      if (old.accepted)
+        return { state: "accepted" as const, index: reserved.index, offset: reserved.offset };
+      if (old.phase !== "reserved")
+        return {
+          state: "reconciliation_required" as const,
+          index: reserved.index,
+          offset: reserved.offset,
+        };
+      return {
+        ...(await this.dispatch(writer.epoch, input.admissionId, signal, input)),
+        index: reserved.index,
+        offset: reserved.offset,
+      };
+    });
   }
 
   /** A new reservation may be dispatched once. Re-entering a known request
@@ -114,7 +162,8 @@ export class NativeBrokerDriver {
    * Inspect/capture available output first. Replay retains the original body,
    * epoch and provider index even after a writer takeover; it never skips an
    * unresolved input to send a newer fence. No automatic retry loop exists. */
-  async replayPending(signal?: AbortSignal) {
+  async replayPending(signal?: AbortSignal, stdin?: NativeBrokerRetainedInput) {
+    stdin = stdin ? { ...stdin } : undefined;
     return this.exclusive(async () => {
       signal?.throwIfAborted();
       await this.identity();
@@ -126,7 +175,13 @@ export class NativeBrokerDriver {
       decoder.finish();
       if (!frame || frame.direction !== "request")
         throw new Error("Native broker pending input is corrupt");
-      return this.dispatch(writer.epoch, frame.requestId, signal);
+      if (
+        frame.kind === "stdin"
+          ? !stdin || stdin.admissionId !== frame.requestId || stdin.commandId !== frame.commandId
+          : stdin !== undefined
+      )
+        throw new Error("Native broker stdin recovery requires its exact retained admission");
+      return this.dispatch(writer.epoch, frame.requestId, signal, stdin);
     });
   }
 

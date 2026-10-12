@@ -68,6 +68,9 @@ the task-router adapter explicitly refuses that separate locator.
 `NativeBrokerRetainedCommand` joins protected persistence to bounded committed
 output and exact control requests. A request-keyed immutable control-reply index
 distinguishes positive pre-dispatch rejection from unknown control outcomes.
+The retained-input transaction locks an existing stdin admission and commits
+its command byte offset with the encrypted request. Standalone offset allocation
+and generic broker dispatch refuse this path; recovery retains the exact bytes.
 This bridge does not yet select a protocol or admit application commands.
 The native supervisor's distinct `broker` mode multiplexes initial-process
 input/output and launches sealed per-command supervisors through its private

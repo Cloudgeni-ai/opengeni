@@ -10,6 +10,7 @@ export type {
   NativeBrokerTransportPort,
   NativeBrokerTransportState,
   DurableNativeBrokerTransport,
+  NativeBrokerRetainedInput,
 } from "./providers/native-command-broker-transport";
 export {
   NativeBrokerDriver,

@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { canonicalModalCheckpointProviderBinding } from "@opengeni/contracts";
+import {
+  canonicalModalCheckpointProviderBinding,
+  ModalBrokerProviderCommand,
+} from "@opengeni/contracts";
 import { rawRows, withRlsContext, isTransactionHandle, type Database } from "./database";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "./environment-crypto";
 
@@ -61,7 +64,24 @@ export type NativeBrokerTransportTransaction = {
 };
 export type NativeBrokerTransportStore = {
   transaction<T>(operation: (tx: NativeBrokerTransportTransaction) => Promise<T>): Promise<T>;
+  retainedInputTransaction<T>(
+    input: NativeBrokerRetainedInput,
+    operation: (
+      tx: NativeBrokerTransportTransaction & {
+        reserveInput(byteLength: number): Promise<number>;
+      },
+    ) => Promise<T>,
+  ): Promise<T>;
 };
+const retainedInputSchema = z
+  .object({
+    sessionId: uuid,
+    processId: uuid,
+    admissionId: uuid,
+    commandId: uuid,
+  })
+  .strict();
+export type NativeBrokerRetainedInput = z.infer<typeof retainedInputSchema>;
 const TTL_SECONDS = 30;
 const MAX_VALUE_BYTES = 2 * 1024 * 1024;
 
@@ -199,183 +219,262 @@ export function nativeBrokerTransportStore(
   if (isTransactionHandle(db))
     throw new Error("Native broker transport requires an outer commit boundary");
   const binding = bindingSchema.parse(input);
-  return {
-    transaction: async (operation) =>
-      withRlsContext(db, binding, async (dbtx) => {
-        // Consistent order: scoped workspace fence -> lease -> broker. Late output
-        // remains capturable after physical replacement, but no input is allowed.
-        const lease = await lockLease(dbtx, binding);
-        const rows = (await rawRows(
-          dbtx,
-          sql`SELECT binding, revision::text, writer_id,
+  const transaction = async <T>(
+    operation: (
+      tx: NativeBrokerTransportTransaction & {
+        reserveInput(byteLength: number): Promise<number>;
+      },
+    ) => Promise<T>,
+    retainedInput?: NativeBrokerRetainedInput,
+  ): Promise<T> =>
+    withRlsContext(db, binding, async (dbtx) => {
+      // Retained input follows settlement's process -> admission -> lease
+      // order. Ordinary journal transactions never acquire process locks.
+      const reserveInput = retainedInput
+        ? await lockRetainedInput(dbtx, binding, retainedInput)
+        : async (_byteLength: number): Promise<number> => fenced();
+      // Consistent order: scoped workspace fence -> lease -> broker. Late output
+      // remains capturable after physical replacement, but no input is allowed.
+      const lease = await lockLease(dbtx, binding);
+      const rows = (await rawRows(
+        dbtx,
+        sql`SELECT binding, revision::text, writer_id,
       writer_epoch::text, writer_until > clock_timestamp() AS writer_live, state_encrypted
       FROM native_command_broker_transports WHERE id = ${binding.brokerId}::uuid
       AND ${scoped(binding)} FOR UPDATE`,
-        )) as {
-          binding: unknown;
-          revision: string;
-          writer_id: string | null;
-          writer_epoch: string;
-          writer_live: boolean | null;
-          state_encrypted: string;
-        }[];
-        const row = rows[0];
-        if (rows.length !== 1 || !row || !isDeepStrictEqual(row.binding, binding)) fenced();
-        const revision = Number(row.revision),
-          epoch = Number(row.writer_epoch);
-        if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(epoch)) fenced();
-        let state = JSON.parse(unseal(encryptionKey, binding, "state", row.state_encrypted));
-        const writer = { id: row.writer_id, epoch, live: row.writer_live === true };
-        let changed = false,
-          renew = false,
-          requireLiveAtCommit = false;
-        const currentInstance =
-          lease.instance_id === binding.sandboxId &&
-          ["warming", "warm", "draining"].includes(lease.liveness);
-        const tx: NativeBrokerTransportTransaction = {
-          state,
-          writer: { ...writer },
-          currentInstance,
-          async read(kind, key) {
-            validateEntryIdentity(kind, key, null, false);
-            const found = (await rawRows(
-              dbtx,
-              sql`SELECT sequence::text, sha256, value_encrypted
+      )) as {
+        binding: unknown;
+        revision: string;
+        writer_id: string | null;
+        writer_epoch: string;
+        writer_live: boolean | null;
+        state_encrypted: string;
+      }[];
+      const row = rows[0];
+      if (rows.length !== 1 || !row || !isDeepStrictEqual(row.binding, binding)) fenced();
+      const revision = Number(row.revision),
+        epoch = Number(row.writer_epoch);
+      if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(epoch)) fenced();
+      let state = JSON.parse(unseal(encryptionKey, binding, "state", row.state_encrypted));
+      const writer = { id: row.writer_id, epoch, live: row.writer_live === true };
+      let changed = false,
+        renew = false,
+        requireLiveAtCommit = false;
+      const currentInstance =
+        lease.instance_id === binding.sandboxId &&
+        ["warming", "warm", "draining"].includes(lease.liveness);
+      const tx: NativeBrokerTransportTransaction & {
+        reserveInput(byteLength: number): Promise<number>;
+      } = {
+        reserveInput,
+        state,
+        writer: { ...writer },
+        currentInstance,
+        async read(kind, key) {
+          validateEntryIdentity(kind, key, null, false);
+          const found = (await rawRows(
+            dbtx,
+            sql`SELECT sequence::text, sha256, value_encrypted
           FROM native_command_broker_entries WHERE broker_id = ${binding.brokerId}::uuid
           AND ${scoped(binding)} AND kind = ${kind} AND entry_key = ${key}`,
-            )) as {
-              sequence: string | null;
-              sha256: string;
-              value_encrypted: string;
-            }[];
-            if (!found.length) return null;
-            const value = unseal(
-              encryptionKey,
-              binding,
-              `${kind}:${key}`,
-              found[0]!.value_encrypted,
-            );
-            if (sha(value) !== found[0]!.sha256) fenced();
-            return {
-              kind,
-              key,
-              sequence: found[0]!.sequence === null ? null : Number(found[0]!.sequence),
-              sha256: found[0]!.sha256,
-              value,
-            };
-          },
-          async insert(entry) {
-            validateEntryIdentity(entry.kind, entry.key, entry.sequence, true);
-            validateValue(entry.value);
-            const old = await tx.read(entry.kind, entry.key);
-            const complete = { ...entry, sha256: sha(entry.value) };
-            if (old) {
-              if (!isDeepStrictEqual(old, complete)) fenced();
-              return old;
-            }
-            await dbtx.execute(sql`INSERT INTO native_command_broker_entries
+          )) as {
+            sequence: string | null;
+            sha256: string;
+            value_encrypted: string;
+          }[];
+          if (!found.length) return null;
+          const value = unseal(encryptionKey, binding, `${kind}:${key}`, found[0]!.value_encrypted);
+          if (sha(value) !== found[0]!.sha256) fenced();
+          return {
+            kind,
+            key,
+            sequence: found[0]!.sequence === null ? null : Number(found[0]!.sequence),
+            sha256: found[0]!.sha256,
+            value,
+          };
+        },
+        async insert(entry) {
+          validateEntryIdentity(entry.kind, entry.key, entry.sequence, true);
+          validateValue(entry.value);
+          const old = await tx.read(entry.kind, entry.key);
+          const complete = { ...entry, sha256: sha(entry.value) };
+          if (old) {
+            if (!isDeepStrictEqual(old, complete)) fenced();
+            return old;
+          }
+          await dbtx.execute(sql`INSERT INTO native_command_broker_entries
           (broker_id,account_id,workspace_id,kind,entry_key,sequence,sha256,value_encrypted)
           VALUES (${binding.brokerId}::uuid,${binding.accountId}::uuid,${binding.workspaceId}::uuid,
             ${entry.kind},${entry.key},${entry.sequence},${complete.sha256},
             ${seal(encryptionKey, binding, `${entry.kind}:${entry.key}`, entry.value)})`);
-            return complete;
-          },
-          async framesAfter(sequence, limit) {
-            if (
-              !Number.isSafeInteger(sequence) ||
-              sequence < 0 ||
-              !Number.isInteger(limit) ||
-              limit < 1 ||
-              limit > 128
-            )
-              fenced();
-            const found = await rawRows(
-              dbtx,
-              sql`SELECT entry_key, sequence::text, sha256, value_encrypted
+          return complete;
+        },
+        async framesAfter(sequence, limit) {
+          if (
+            !Number.isSafeInteger(sequence) ||
+            sequence < 0 ||
+            !Number.isInteger(limit) ||
+            limit < 1 ||
+            limit > 128
+          )
+            fenced();
+          const found = await rawRows(
+            dbtx,
+            sql`SELECT entry_key, sequence::text, sha256, value_encrypted
               FROM native_command_broker_entries
               WHERE broker_id = ${binding.brokerId}::uuid AND ${scoped(binding)}
                 AND kind = 'frame' AND sequence > ${sequence}
               ORDER BY native_command_broker_entries.sequence LIMIT ${limit}`,
-            );
-            return found.map((entryRow) => {
-              const entrySequence = Number(entryRow.sequence);
-              const entryKey = String(entryRow.entry_key);
-              validateEntryIdentity("frame", entryKey, entrySequence, true);
-              const value = unseal(
-                encryptionKey,
-                binding,
-                `frame:${entryKey}`,
-                String(entryRow.value_encrypted),
-              );
-              if (sha(value) !== entryRow.sha256) fenced();
-              return {
-                kind: "frame",
-                key: entryKey,
-                sequence: entrySequence,
-                sha256: String(entryRow.sha256),
-                value,
-              };
-            });
-          },
-          claimWriter(id) {
-            if (
-              !uuid.safeParse(id).success ||
-              !currentInstance ||
-              (writer.live && writer.id !== id)
-            )
-              fenced();
-            if (writer.live) requireLiveAtCommit = true;
-            if (writer.id !== null && !writer.live) {
-              if (writer.epoch === Number.MAX_SAFE_INTEGER) fenced();
-              writer.epoch += 1;
-            }
-            writer.id = id;
-            writer.live = true;
-            changed = renew = true;
-            return { ...writer };
-          },
-          requireWriter(id, expectedEpoch) {
-            if (
-              !currentInstance ||
-              !writer.live ||
-              writer.id !== id ||
-              writer.epoch !== expectedEpoch
-            )
-              fenced();
-            // A writer first claimed in this transaction has no persisted deadline
-            // yet. Existing claims must also be live at commit, not just at read.
-            if (row.writer_live === true) requireLiveAtCommit = true;
-          },
-          save(next) {
-            serialize(next);
-            state = next;
-            changed = true;
-          },
-        };
-        const result = await operation(tx);
-        if (requireLiveAtCommit) {
-          const live = await rawRows(
-            dbtx,
-            sql`SELECT id FROM native_command_broker_transports
-        WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)} AND writer_until > clock_timestamp()`,
           );
-          if (live.length !== 1) fenced();
-        }
-        if (changed) {
-          if (revision === Number.MAX_SAFE_INTEGER) fenced();
-          const updated = await rawRows(
-            dbtx,
-            sql`UPDATE native_command_broker_transports SET
+          return found.map((entryRow) => {
+            const entrySequence = Number(entryRow.sequence);
+            const entryKey = String(entryRow.entry_key);
+            validateEntryIdentity("frame", entryKey, entrySequence, true);
+            const value = unseal(
+              encryptionKey,
+              binding,
+              `frame:${entryKey}`,
+              String(entryRow.value_encrypted),
+            );
+            if (sha(value) !== entryRow.sha256) fenced();
+            return {
+              kind: "frame",
+              key: entryKey,
+              sequence: entrySequence,
+              sha256: String(entryRow.sha256),
+              value,
+            };
+          });
+        },
+        claimWriter(id) {
+          if (!uuid.safeParse(id).success || !currentInstance || (writer.live && writer.id !== id))
+            fenced();
+          if (writer.live) requireLiveAtCommit = true;
+          if (writer.id !== null && !writer.live) {
+            if (writer.epoch === Number.MAX_SAFE_INTEGER) fenced();
+            writer.epoch += 1;
+          }
+          writer.id = id;
+          writer.live = true;
+          changed = renew = true;
+          return { ...writer };
+        },
+        requireWriter(id, expectedEpoch) {
+          if (
+            !currentInstance ||
+            !writer.live ||
+            writer.id !== id ||
+            writer.epoch !== expectedEpoch
+          )
+            fenced();
+          // A writer first claimed in this transaction has no persisted deadline
+          // yet. Existing claims must also be live at commit, not just at read.
+          if (row.writer_live === true) requireLiveAtCommit = true;
+        },
+        save(next) {
+          serialize(next);
+          state = next;
+          changed = true;
+        },
+      };
+      const result = await operation(tx);
+      if (requireLiveAtCommit) {
+        const live = await rawRows(
+          dbtx,
+          sql`SELECT id FROM native_command_broker_transports
+        WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)} AND writer_until > clock_timestamp()`,
+        );
+        if (live.length !== 1) fenced();
+      }
+      if (changed) {
+        if (revision === Number.MAX_SAFE_INTEGER) fenced();
+        const updated = await rawRows(
+          dbtx,
+          sql`UPDATE native_command_broker_transports SET
         revision = revision + 1, writer_id = ${writer.id}::uuid, writer_epoch = ${writer.epoch},
         writer_until = CASE WHEN ${renew} THEN clock_timestamp() + ${TTL_SECONDS} * interval '1 second' ELSE writer_until END,
         state_encrypted = ${seal(encryptionKey, binding, "state", serialize(state))}
         WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)} AND revision = ${revision}
         RETURNING id`,
-          );
-          if (updated.length !== 1) fenced();
-        }
-        return result;
-      }),
+        );
+        if (updated.length !== 1) fenced();
+      }
+      return result;
+    });
+  return {
+    transaction: (operation) => transaction(operation),
+    retainedInputTransaction: (scope, operation) =>
+      transaction(operation, retainedInputSchema.parse(scope)),
+  };
+}
+
+/** Locks only existing authority, never creates an admission. Reconciliation
+ * may read the original request after cancellation/settlement; only a NEW byte
+ * reservation requires an active process and its exact unsettled admission.
+ * Both the byte counter and encrypted request commit in the enclosing journal
+ * transaction. Busy/fenced/failed reservations therefore consume neither. */
+async function lockRetainedInput(
+  db: Database,
+  binding: NativeBrokerTransportBinding,
+  scope: NativeBrokerRetainedInput,
+): Promise<(byteLength: number) => Promise<number>> {
+  const rows = await rawRows(
+    db,
+    sql`SELECT provider_command, provider_command_input_index,
+    state, cancellation_requested_at, supervision_receipt, lease_epoch
+    FROM sandbox_retained_processes WHERE id = ${scope.processId}::uuid
+    AND ${scoped(binding)} AND session_id = ${scope.sessionId}::uuid
+    AND lease_id = ${binding.leaseId}::uuid AND sandbox_group_id = ${binding.sandboxGroupId}::uuid
+    AND provider_backend = 'modal' AND provider_instance_id = ${binding.sandboxId}
+    AND provider_binding_key = ${binding.providerBindingKey} FOR UPDATE`,
+  );
+  const row = rows[0];
+  if (rows.length !== 1 || !row) fenced();
+  const command = ModalBrokerProviderCommand.parse(row.provider_command);
+  if (
+    command.execId !== scope.commandId ||
+    command.supervision.brokerId !== binding.brokerId ||
+    command.sandboxId !== binding.sandboxId ||
+    command.taskId !== binding.taskId
+  )
+    fenced();
+  const admissions = await rawRows(
+    db,
+    sql`SELECT settled_at FROM sandbox_workspace_mutation_admissions
+    WHERE id = ${scope.admissionId}::uuid AND ${scoped(binding)}
+    AND session_id = ${scope.sessionId}::uuid AND actor_kind = 'process' AND actor_id = ${scope.processId}::uuid
+    AND holder_kind = 'process' AND holder_id = ${`process:${scope.processId}`}
+    AND lease_id = ${binding.leaseId}::uuid AND sandbox_group_id = ${binding.sandboxGroupId}::uuid
+    AND lease_epoch = ${row.lease_epoch} AND provider_backend = 'modal'
+    AND provider_instance_id = ${binding.sandboxId} AND operation = 'writeStdin' FOR UPDATE`,
+  );
+  if (admissions.length !== 1) fenced();
+  let used = false;
+  return async (byteLength) => {
+    if (
+      used ||
+      row.state !== "active" ||
+      row.cancellation_requested_at ||
+      row.supervision_receipt ||
+      admissions[0]!.settled_at ||
+      !Number.isSafeInteger(byteLength) ||
+      byteLength <= 0
+    )
+      fenced();
+    const offset = Number(row.provider_command_input_index);
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(offset + byteLength))
+      fenced();
+    used = true;
+    const updated = await rawRows(
+      db,
+      sql`UPDATE sandbox_retained_processes
+      SET provider_command_input_index = ${offset + byteLength}
+      WHERE id = ${scope.processId}::uuid AND ${scoped(binding)}
+      AND session_id = ${scope.sessionId}::uuid AND provider_command_input_index = ${offset}
+      RETURNING id`,
+    );
+    if (updated.length !== 1) fenced();
+    return offset;
   };
 }
 

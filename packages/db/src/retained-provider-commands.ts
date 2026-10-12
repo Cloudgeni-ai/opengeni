@@ -337,9 +337,9 @@ export async function reserveRetainedProviderInput(
       throw new Error("Active retained provider command is unavailable");
     if (row.cancellationRequestedAt || row.supervisionReceipt)
       throw new Error("Retained command input is closed");
-    const byteAddressed =
-      row.providerCommand.kind === "modal-router-v1" ||
-      row.providerCommand.kind === "modal-broker-v1";
+    if (row.providerCommand.kind === "modal-broker-v1")
+      throw new Error("Broker stdin must reserve its bytes and journal request atomically");
+    const byteAddressed = row.providerCommand.kind === "modal-router-v1";
     if (byteAddressed && (!Number.isSafeInteger(byteLength) || byteLength! <= 0))
       throw new Error("Byte-offset stdin requires a positive byte reservation");
     const index = row.providerCommandInputIndex + (byteAddressed ? byteLength! : 1);

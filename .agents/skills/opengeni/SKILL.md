@@ -103,6 +103,9 @@ Then open the smallest source files that answer the question:
   `native-command-broker-retained-command.ts` owns bounded capture and exact
   retained controls. Its immutable `control_reply` journal index permits only
   explicitly proven pre-dispatch rejection successors, never unknown replay.
+  Broker stdin uses the transport's retained-input transaction to commit its
+  exact existing child admission's byte reservation and encrypted request
+  together; never call the legacy standalone input-index allocator for it.
   Journal capture/dispatch and a passing native fixture do not imply canonical
   application admission or old-group enrollment. Follow the remaining gates in
   `docs/design/native-command-broker.md` before enabling that path.

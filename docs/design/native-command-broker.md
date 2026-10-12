@@ -381,11 +381,31 @@ dispatch, after the response is captured. Unknown outcomes, missing supervisors,
 malformed replies and exhausted rejection chains confer no retry authority.
 Transport acceptance alone is never reported as native control completion.
 
+Retained stdin uses `reserveRetainedStdin` and the DB adapter's
+`retainedInputTransaction`, not a separate call to the legacy input-index
+allocator. The transaction locks the exact process, its existing `writeStdin`
+child admission, then the physical lease and broker. The canonical command byte
+offset and encrypted indexed request commit together. A busy channel, expired
+writer, invalid payload or failed commit advances neither. The admission UUID
+is the request UUID, so reconnect compares the complete original payload and
+does not allocate another offset. Scope includes the owning session, process,
+command, lease, provider namespace and physical broker/task.
+
+`sendRetainedStdin` dispatches only after that commit. Generic transport dispatch
+cannot send stdin. Explicit pending-stdin recovery requires the same admission
+and exact stored bytes; cancellation/settlement closes new reservations without
+erasing an already committed operation. This permits reconciliation of its
+original outcome, not a new stdin authorization. The path currently accepts one
+native-frame-bounded payload per admission; a future application adapter must
+not silently split larger input into fresh admissions or truncate it. Shared
+channel scheduling and application input routing remain unimplemented gates.
+
 The opt-in local static-ELF/real-PostgreSQL test in
 `packages/core/test/native-command-broker-transport.integration.test.ts` runs
 with `OPENGENI_NATIVE_BROKER_LOCAL=1` after building the static artifact with
 `make -C agent/native/command-supervisor test-static`. It checks unknown
-dispatch, exact replay, writer takeover, duplicate-release refusal, binary I/O,
+dispatch, exact replay, writer takeover, duplicate-release refusal, atomically
+admitted binary stdin,
 canonical receipt-before-ACK, atomic retained output and independent exit using
 the actual broker. It also exercises the retained controller against a second
 TERM-ignoring command through cancellation, repeated status, reconnect, durable
