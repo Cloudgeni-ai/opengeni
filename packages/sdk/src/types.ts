@@ -4065,6 +4065,119 @@ export type UpdateOrganizationModelDefaultsRequest = {
   modelCompactionThresholds?: Record<string, number | null> | undefined;
 };
 
+/** A model-account setting an organization sets, and may lock for every workspace. */
+export type ModelAccountSettingKey =
+  | "rotation"
+  | "providers"
+  | "crossProviderFailover"
+  | "fallbackOrder"
+  | "personalConnectionsAllowed"
+  | "personalFallbackAllowed";
+
+/**
+ * Where an effective value comes from: the organization, this workspace's
+ * override, or the organization with a lock workspaces cannot override.
+ */
+export type ModelAccountSettingSource = "organization" | "workspace" | "locked";
+
+export type ModelAccountRotationMode = "spread" | "primary_first";
+
+/** Effective model-account settings. */
+export type ModelAccountSettingValues = {
+  /** How the shared core spreads load across eligible accounts, per provider. */
+  rotation: Record<
+    string,
+    { mode: ModelAccountRotationMode; primaryConnectionId?: string | null | undefined }
+  >;
+  providers: Record<
+    string,
+    {
+      inferenceSource?: "automatic" | "workspace" | "organization" | undefined;
+      useOrganizationAccounts: boolean;
+      enabled: boolean;
+    }
+  >;
+  crossProviderFailover: boolean;
+  /** Ordered fallback models for a preferred model. */
+  fallbackOrder: Record<string, string[]>;
+  personalConnectionsAllowed: boolean;
+  /** Use the person's own account when shared accounts are exhausted (never in background work). */
+  personalFallbackAllowed: boolean;
+};
+
+/** One source per setting and, for map-valued settings, per entry. */
+export type ModelAccountSettingsView = {
+  values: ModelAccountSettingValues;
+  sources: Record<ModelAccountSettingKey, ModelAccountSettingSource>;
+  entrySources: {
+    rotation: Record<string, "organization" | "workspace">;
+    providers: Record<string, "organization" | "workspace">;
+    fallbackOrder: Record<string, "organization" | "workspace">;
+  };
+};
+
+/** `GET/PATCH /v1/organizations/:id/model-account-settings` (owners and admins). */
+export type OrganizationModelAccountSettings = {
+  organizationId: string;
+  values: ModelAccountSettingValues;
+  locked: ModelAccountSettingKey[];
+  version: number;
+  updatedAt: string | null;
+};
+
+/**
+ * Organization change: omitted fields are kept; `fallbackOrder` and `locked`
+ * replace the stored value. Locking a setting clears every workspace override of it.
+ */
+export type UpdateOrganizationModelAccountSettingsRequest = {
+  crossProviderFailover?: boolean | undefined;
+  fallbackOrder?: Record<string, string[]> | undefined;
+  personalConnectionsAllowed?: boolean | undefined;
+  personalFallbackAllowed?: boolean | undefined;
+  rotation?: Record<string, { mode: ModelAccountRotationMode }> | undefined;
+  locked?: ModelAccountSettingKey[] | undefined;
+  /** Refuse the write (409) if the settings changed since this version was read. */
+  expectedVersion?: number | undefined;
+};
+
+/** `GET/PATCH /v1/workspaces/:id/model-account-settings`. */
+export type WorkspaceModelAccountSettings = ModelAccountSettingsView & {
+  workspaceId: string;
+  locked: ModelAccountSettingKey[];
+  /** The workspace's stored overrides; null follows the organization. */
+  overrides: {
+    rotation: Record<string, unknown> | null;
+    providers: Record<string, unknown> | null;
+    crossProviderFailover: boolean | null;
+    fallbackOrder: Record<string, string[]> | null;
+    personalConnectionsAllowed: boolean | null;
+    personalFallbackAllowed: boolean | null;
+  };
+  version: number;
+  updatedAt: string | null;
+  canEdit: boolean;
+};
+
+/**
+ * Workspace change: `null` follows the organization again; `fallbackOrder`
+ * and `rotation` change entry by entry. A locked setting answers 409.
+ */
+export type UpdateWorkspaceModelAccountSettingsRequest = {
+  crossProviderFailover?: boolean | null | undefined;
+  personalConnectionsAllowed?: boolean | null | undefined;
+  personalFallbackAllowed?: boolean | null | undefined;
+  fallbackOrder?: Record<string, string[] | null> | null | undefined;
+  rotation?: Record<string, { mode: ModelAccountRotationMode } | null> | null | undefined;
+  expectedVersion?: number | undefined;
+};
+
+/** Every shared workspace's effective settings and sources, one page. */
+export type ModelAccountSettingsOverview = {
+  organization: OrganizationModelAccountSettings;
+  workspaces: (ModelAccountSettingsView & { workspaceId: string; name: string })[];
+  nextCursor: string | null;
+};
+
 /**
  * Whether owners and admins may give agent sessions admin access. Off by
  * default; turning it off ends every session's admin access.

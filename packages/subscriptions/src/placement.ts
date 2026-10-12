@@ -11,7 +11,7 @@ import {
   type Ineligibility,
 } from "./eligibility";
 import { mapReasoningLevel } from "./reasoning";
-import { rotationFor } from "./settings";
+import { fallbackOrderFor, rotationFor } from "./settings";
 import { spreadHash } from "./spread";
 import type {
   ModelDescriptor,
@@ -43,7 +43,7 @@ export function failoverCandidateModels(input: PlacementInput): ModelId[] {
   if (session.onlyThisModel || session.binding?.choice === "explicit") return [preferredId];
   const preferred = findModel(input, preferredId);
   const candidates: ModelId[] = [preferredId];
-  for (const modelId of settings.fallbackOrder[preferredId] ?? []) {
+  for (const modelId of fallbackOrderFor(settings, preferredId)) {
     if (candidates.includes(modelId)) continue;
     const model = findModel(input, modelId);
     if (!model) continue;

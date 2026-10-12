@@ -4929,6 +4929,75 @@ ORDER BY 1, 2, 3, 4;
 Staging and production were not queried when 0717 was written; run the
 inventory there before deploying it.
 
+### Organization settings locks (0724)
+
+Migration `0724_subscription_settings_locks.sql` is **rolling**. It changes no
+column, no existing routine and no stored value, so every workspace's
+effective model-account settings are the same before and after it. It adds:
+
+- two CHECKs on `subscription_settings` (`locked_settings` names only the six
+  setting keys; `fallback_order` maps each model to an array of model ids),
+  added `NOT VALID` and validated in place without a rewrite;
+- a `BEFORE INSERT OR UPDATE` guard on workspace rows that refuses (SQLSTATE
+  42501, detail `subscription_setting_locked:<key>`) a write setting or
+  changing a setting the organization locked, from every writer;
+- an `AFTER INSERT OR UPDATE OF locked_settings` trigger on the organization
+  row that clears newly locked settings from the organization's workspace
+  rows in the same transaction;
+- a `BEFORE UPDATE OF account_id, workspace_id` trigger that keeps every
+  settings row in its organization and workspace (42501, detail
+  `subscription_settings_identity_immutable`);
+- an owner-only `SELECT` policy through which the guard reads the
+  organization row, and `EXECUTE` on the four new `opengeni_private`
+  routines for the configured application roles (so an older binary's
+  posture check stays clean before roles are provisioned again).
+
+A workspace-row write that sets or changes any setting, and a lock change,
+run only at READ COMMITTED (SQLSTATE 0A000, detail
+`subscription_settings_requires_read_committed`, otherwise); writes that only
+clear or keep values are unaffected. Application writers pin READ COMMITTED on
+their own transactions. A database whose `default_transaction_isolation` is
+stricter must run any later migration that writes workspace overrides (for
+example a provider cutover) at READ COMMITTED.
+
+A lock change never waits for a workspace row: the trigger locks the rows it
+clears with `NOWAIT` and raises 55P03 (detail
+`subscription_settings_lock_busy`) when one is held. The API queues for the
+organization's settings lock first, retries, and answers 503 `settings_busy`
+(nothing written) if it stays busy for about 5 to 8 seconds. Writers outside
+this release's repository can cause that: the previous release's workspace
+writers during the rolling upgrade, and raw or migration writers. Migrations
+that write workspace overrides should take
+`pg_advisory_xact_lock_shared(hashtextextended('subscription-settings-locks:'
+|| account_id::text, 0))` for each organization before locking its rows.
+
+No release before this one writes `locked_settings` (a workspace row cannot
+hold locks, and no API wrote the organization's), so the guard refuses
+nothing an older binary does. It needs no drain or window. Apply it before
+rolling out this release's API, whose organization and workspace
+model-account settings routes rely on it.
+
+**Pre-check.** Validation fails (and the migration rolls back, changing
+nothing) if a stored row already breaks either CHECK. Run this read-only
+query as a superuser or another `BYPASSRLS` role; it must return no rows:
+
+```sql
+SELECT id, account_id, workspace_id, locked_settings, fallback_order
+FROM subscription_settings
+WHERE NOT (locked_settings <@ ARRAY['rotation', 'providers', 'crossProviderFailover',
+    'fallbackOrder', 'personalConnectionsAllowed', 'personalFallbackAllowed']::text[])
+  OR (fallback_order IS NOT NULL AND (
+    jsonb_path_exists(fallback_order, 'strict $.* ? (@.type() != "array")', '{}', true)
+    OR jsonb_path_exists(fallback_order, 'strict $.*[*] ? (@.type() != "string")', '{}', true)));
+```
+
+**Rollback.** Older binaries never write locks and run unchanged on 0724, so
+rolling the application back needs nothing. Locks set after the rollout stay
+enforced. To remove enforcement, ship a forward migration dropping the three
+triggers, the policy `subscription_settings_lock_guard_read`, the four
+routines and the two CHECKs; the stored locks stay and the resolver keeps
+ignoring locked workspace overrides.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

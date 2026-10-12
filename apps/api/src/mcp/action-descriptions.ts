@@ -120,6 +120,36 @@ const RULES: Rule[] = [
   },
   {
     method: "GET",
+    pattern: /\/organizations\/:organizationId\/model-account-settings$/,
+    text: () =>
+      "Read the organization's subscription account settings for every workspace: rotation, cross-provider failover and its fallback order, whether personal accounts are allowed, and personal fallback, plus which ones are locked so workspaces cannot change them.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/organizations\/:organizationId\/model-account-settings$/,
+    text: () =>
+      "Change the organization's subscription account settings or lock them. Locking a setting removes every workspace's own value for it. Applies to new work; running work keeps going.",
+  },
+  {
+    method: "GET",
+    pattern: /\/model-account-settings\/overview$/,
+    text: () =>
+      "List every workspace's effective subscription account settings and where each comes from: the organization, the workspace's own value, or locked by the organization.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/model-account-settings$/,
+    text: () =>
+      "Read a workspace's effective subscription account settings, where each comes from, which ones the organization locked, and whether the viewer may change them.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/workspaces\/:workspaceId\/model-account-settings$/,
+    text: () =>
+      "Give a workspace its own value for a subscription account setting the organization has not locked, or set it back to follow the organization (null). Workspace and organization admins.",
+  },
+  {
+    method: "GET",
     pattern: /\/model-providers\/:providerKind$/,
     text: ({ scope }) =>
       `Read the API-key model provider connection ${scope} (for example OpenAI, Anthropic API, OpenRouter, AI gateway), without the key itself.`,
@@ -248,7 +278,7 @@ const RULES: Rule[] = [
 
 /** Actions that must carry a description (subscription and model settings). */
 export const DESCRIBED_ACTION_PATH =
-  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\//;
+  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\/|\/model-account-settings(\/|$)/;
 
 function scopeOf(path: string): string {
   return path.startsWith("/v1/organizations/") ? "for the organization" : "in a workspace";
