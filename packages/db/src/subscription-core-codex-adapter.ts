@@ -198,6 +198,8 @@ export function subscriptionCoreCodexAdapter(
         ? null
         : codexUsageQuotaObservation(usage, refreshGeneration, observedAt);
     },
+    // /wham/usage reports every Codex limit window (today's merge replaces them).
+    usageReadingsComplete: true,
   };
 }
 

@@ -181,15 +181,25 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   /** Capabilities of the provider's renewable credential format. */
   readonly capabilities: ProviderCapabilities;
   /**
-   * Capabilities of one stored credential format (the `credential_format`
-   * column, which `credential.format` derives from a decoded secret). The core
-   * never calls `refresh` for a format whose `autoRenews` is false.
+   * Capabilities of one credential format, as `credential.format` derives it
+   * from a decoded secret. The stored `credential_format` column is not that
+   * format (the shared writers record the encryption envelope version there),
+   * so callers derive it from the secret. The core never calls `refresh` for
+   * a format whose `autoRenews` is false.
    */
   capabilitiesFor(credentialFormat: string): ProviderCapabilities;
   readonly credentialKind: CredentialKind;
   readonly quotaKind: QuotaKind;
   /** Provider identity used by workspace model policy for this provider's models. */
   readonly modelPolicyProviderId: string;
+  /**
+   * Every workspace model policy provider identity one model must be allowed
+   * under, for a provider whose models carry more than one (absent, null or
+   * empty: `modelPolicyProviderId` alone). A model is allowed only when the
+   * policy allows each identity, so a second identity can only narrow access.
+   * Read through `subscriptionCoreModelPolicyProviderIds`.
+   */
+  readonly modelPolicyProviderIdsFor?: (modelId: ModelId) => readonly string[] | null;
   /**
    * The prompt-cache lifetime placement keeps a session's account for
    * (SUB-STICK-04): an exact TTL Opengeni sends, or a documented idle cut-off.
@@ -245,11 +255,18 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    * Decode a `fetchUsage` response into the shared quota model, fenced on
    * the refresh generation of the bearer that read it. Null when the
    * response carries no quota (an error payload or no windows).
+   *
+   * `modelIds`, when the caller passes it, lists the product models the
+   * connection can serve when the response is decoded (the caller's
+   * catalog), for providers whose usage reports limits of model groups
+   * that become per-model cooldowns. Absent: no catalog is known, and only
+   * models the response itself names can be cooled down.
    */
   decodeQuota?(input: {
     response: unknown;
     observedAt: number;
     refreshGeneration: number;
+    modelIds?: readonly ModelId[];
   }): SubscriptionQuota | null;
   /**
    * The provider's usage endpoint is authoritative for its quota: a
@@ -259,6 +276,15 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    * it passes (design 2.2).
    */
   usageReadEndsQuotaExhaustion?: boolean;
+  /**
+   * The provider's usage-endpoint readings are complete: each reports every
+   * window that limits the connection, so a stored exhausted window that a
+   * newer reading omits has ended and is dropped. Absent or false: a
+   * reading may omit a window that still runs, and the shared quota merge
+   * keeps an omitted exhausted window until its own reset (fail closed,
+   * design 2.2). Response headers and refusals are always partial.
+   */
+  usageReadingsComplete?: boolean;
   /**
    * Optional live model catalog of one connection (provider model ids),
    * read with its bearer through `input.fetch`. Throws when the provider
@@ -321,6 +347,18 @@ export function subscriptionCoreCredentialRefresher<Credential>(
   return adapter.capabilitiesFor(adapter.credential.format(credential)).autoRenews
     ? adapter.refresh
     : null;
+}
+
+/**
+ * The workspace model policy provider identities one of the adapter's models
+ * must all be allowed under (never empty).
+ */
+export function subscriptionCoreModelPolicyProviderIds(
+  adapter: Pick<SubscriptionCoreAdapter, "modelPolicyProviderId" | "modelPolicyProviderIdsFor">,
+  modelId: ModelId,
+): readonly string[] {
+  const ids = adapter.modelPolicyProviderIdsFor?.(modelId);
+  return ids && ids.length > 0 ? ids : [adapter.modelPolicyProviderId];
 }
 
 /**

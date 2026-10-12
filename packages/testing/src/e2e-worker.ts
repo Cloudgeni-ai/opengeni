@@ -6,7 +6,7 @@ import { createProductionAgentRuntime } from "@opengeni/runtime";
 import {
   createOpenGeniWorker,
   createWorkerWorkflowSignaler,
-  registerSessionWorkflowWakeDispatcherSchedule,
+  startInternalMaintenanceCadences,
 } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import {
@@ -30,11 +30,16 @@ const observability = createObservability(settings, { component: `e2e-worker-${r
 const workflowSignaler = await createWorkerWorkflowSignaler(settings, dbClient.db);
 // The browser acceptance must include the same durable wake-repair owner as a
 // production control worker. Starting only the raw Temporal pollers makes a
-// committed Pause/Resume look successful while its outbox trigger targets a
-// schedule that does not exist, stranding the resumed queue forever.
+// committed Pause/Resume look successful while a lost immediate trigger is
+// never repaired, stranding the resumed queue forever.
 const wakeSchedule =
   role === "control"
-    ? await registerSessionWorkflowWakeDispatcherSchedule(settings, observability)
+    ? await startInternalMaintenanceCadences({
+        settings,
+        observability,
+        db: dbClient.db,
+        jobs: ["session-workflow-wake-dispatcher"],
+      })
     : null;
 const { worker, connection } = await createOpenGeniWorker({
   role,

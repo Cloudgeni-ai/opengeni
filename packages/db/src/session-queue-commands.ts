@@ -58,7 +58,7 @@ import {
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
-import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -808,10 +808,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
           ),
         );
     }
-    // The shared subscription core's Codex waiter exists only while its turn
-    // waits; the Steer ends that wait, so the row goes with it (its pending
-    // wake deliveries cascade).
-    await deleteSubscriptionCoreCodexWaitersForTurns(db, {
+    // The shared subscription core's waiter (of whichever provider) exists
+    // only while its turn waits; the Steer ends that wait, so the row goes
+    // with it (its pending wake deliveries cascade).
+    await deleteSubscriptionCoreWaitersForTurns(db, null, {
       workspaceId: input.workspaceId,
       turnIds: [current.id],
     });
@@ -1837,6 +1837,14 @@ export async function submitHumanPromptInTransaction(
       tx: Database,
       authority: {
         claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+        /**
+         * The accepted source the snapshot was copied from (an edit's source
+         * turn, or the receiving session of agent-submitted work); absent
+         * when the prompt resolved the current source.
+         */
+        claudeAcceptedSource?:
+          | { kind: "session_turn"; turnId: string }
+          | { kind: "receiving_session"; sessionId: string };
       },
     ) => Promise<void>;
     /** Backend-only authority capture, atomic with the newly accepted turn. */
@@ -2231,7 +2239,19 @@ export async function submitHumanPromptInTransaction(
           acceptingSubjectId:
             input.actor.type === "human" ? acceptedInitiatingHumanSubjectId : null,
         });
-  await input.beforeFreshPromptCommit?.(db, { claudeProviderAccountAuthoritySnapshot });
+  await input.beforeFreshPromptCommit?.(db, {
+    claudeProviderAccountAuthoritySnapshot,
+    ...(editedSourceTurn
+      ? { claudeAcceptedSource: { kind: "session_turn" as const, turnId: editedSourceTurn.id } }
+      : input.actor.type === "agent_attempt"
+        ? {
+            claudeAcceptedSource: {
+              kind: "receiving_session" as const,
+              sessionId: input.sessionId,
+            },
+          }
+        : {}),
+  });
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;

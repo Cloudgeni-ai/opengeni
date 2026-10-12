@@ -2079,7 +2079,7 @@ export async function postUserMessageTurn(
                 ? {
                     beforeFreshPromptCommit: async (
                       tx: Database,
-                      { claudeProviderAccountAuthoritySnapshot },
+                      { claudeProviderAccountAuthoritySnapshot, claudeAcceptedSource },
                     ): Promise<void> => {
                       const reference = workspaceCustomModelReference(
                         settings,
@@ -2094,6 +2094,7 @@ export async function postUserMessageTurn(
                         reference,
                         claudeAuthority: {
                           authoritySnapshot: claudeProviderAccountAuthoritySnapshot,
+                          ...(claudeAcceptedSource ? { acceptedSource: claudeAcceptedSource } : {}),
                         },
                       });
                       if (!active) {

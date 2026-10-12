@@ -141,6 +141,10 @@ organization-wide Skill registry or Skill inheritance for this boundary. See
 Keep these boundaries explicit:
 
 - Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; scoped Variable Sets are selected through that boundary but may be organization-, workspace-, or organization-user-owned.
+- Session authorization classifies model-account writes neutrally inside core,
+  but existing host ports receive the legacy operation name until explicitly
+  opting in after migrating policy keys. Never retry host denials under aliases;
+  inspect `SessionAuthorizationPort` and `docs/embedding.md` before changing it.
 - External product backends use an **organization API key**. Organization key
   administration uses `/v1/organizations/:organizationId/api-keys`; the key is
   server-held and cannot reach Personal workspaces through organization

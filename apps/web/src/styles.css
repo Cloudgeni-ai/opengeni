@@ -416,8 +416,10 @@ body {
   overflow-x: auto;
 }
 
+/* Shrink to fit, then wrap cells within the (possibly widened) table wrapper
+   instead of forcing one-line rows and horizontal scrolling. */
 .markdown-stream table {
-  width: max-content;
+  width: auto;
   min-width: min(100%, 32rem);
 }
 

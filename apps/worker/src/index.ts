@@ -77,11 +77,9 @@ import {
 } from "./observability-metrics";
 import {
   resolveCatalogSettings,
-  SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
-  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
-  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
   TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS,
 } from "@opengeni/core";
+import { startInternalMaintenanceCadences } from "./internal-maintenance";
 import {
   CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
@@ -129,21 +127,20 @@ export {
   type HostUsageExportBatch,
   type HostUsageSink,
 } from "./host-export";
+export {
+  INTERNAL_MAINTENANCE_JOBS,
+  KNOWLEDGE_INDEXING_PERIOD_MS,
+  KNOWLEDGE_INDEXING_SCHEDULE_ID,
+  SITE_AUTH_MAINTENANCE_PERIOD_MS,
+  SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+  startInternalMaintenanceCadences,
+  type InternalMaintenanceJob,
+} from "./internal-maintenance";
 
-// The deterministic id of the ONE global reaper Schedule. A single id means
-// create() is idempotent across every worker in the pool: the first worker to
-// boot creates it, all others collide on this id (ScheduleAlreadyRunning) and
-// no-op — so the Schedule is registered EXACTLY ONCE per deployment regardless
-// of replica count.
-const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
-export const KNOWLEDGE_INDEXING_SCHEDULE_ID = "opengeni-knowledge-indexing";
-export const KNOWLEDGE_INDEXING_PERIOD_MS = 15_000;
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
 export const SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID = "opengeni-session-storage-maintenance";
 export const SESSION_STORAGE_MAINTENANCE_PERIOD_MS = 5 * 60 * 1_000;
-export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance";
-export const SITE_AUTH_MAINTENANCE_PERIOD_MS = 60 * 1_000;
 export type OpenGeniWorkerRole = "control" | "turn";
 
 export type WorkerOptions = {
@@ -604,138 +601,6 @@ export async function createWorkerWorkflowSignaler(
 }
 
 /**
- * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
- * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
- * sandbox ownership off the activity performs bounded DB outbox repair and
- * read-only observability projections; it never mutates or terminates sandbox leases.
- *
- * The Schedule permanently fires sandboxReaperWorkflow on the legacy/base queue
- * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
- * `reaperPeriod < viewerHolderTTL` and `reaperPeriod + idleGrace < providerLifetime`
- * validates in packages/config — wiring the schedule period to it). SKIP overlap means a slow
- * sweep never overlaps itself. Idempotent: a duplicate scheduleId across the
- * worker pool collides on ScheduleAlreadyRunning and reconciles the same
- * definition. New workers route onto the versioned lifecycle queue; old workers
- * can still run the legacy action during rollout or a full binary rollback.
- *
- * Returns a `close()` for the dedicated client connection (separate from the
- * worker's NativeConnection — the Schedule client is a @temporalio/client).
- */
-export async function registerSandboxReaperSchedule(
-  settings: Settings,
-  observability: Observability,
-): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  assertSandboxReaperActivityTimeout(settings);
-  const connection = await Connection.connect(temporalConnectionOptions(settings));
-  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
-  const spec = { intervals: [{ every: settings.sandboxLeaseReaperPeriodMs }] };
-  const action = {
-    type: "startWorkflow" as const,
-    workflowType: "sandboxReaperWorkflow",
-    taskQueue: settings.temporalTaskQueue,
-    args: [] as [],
-  };
-  const policies = {
-    overlap: ScheduleOverlapPolicy.SKIP,
-    catchupWindow: "1m",
-    pauseOnFailure: false,
-  } as const;
-  try {
-    await temporal.schedule.create({
-      scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
-      // @every-style interval: fire once per reaper period. The boot invariant
-      // guarantees reaperPeriod < viewerHolderTTL and
-      // reaperPeriod + idleGrace < providerLifetime.
-      spec,
-      action,
-      // The base workflow is a short router on new binaries; legacy binaries
-      // still execute the pre-refactor composite under this same overlap fence.
-      policies,
-    });
-    observability.info("Registered the global sandbox-lease reaper Schedule", {
-      scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
-      reaperPeriodMs: settings.sandboxLeaseReaperPeriodMs,
-    });
-    return {
-      registered: true,
-      close: async () => {
-        await connection.close();
-      },
-    };
-  } catch (error) {
-    if (error instanceof ScheduleAlreadyRunning) {
-      // Never move this action off the base queue: doing so would leave a full
-      // rollback with no worker polling the only reaper Schedule. The workflow
-      // implementation itself owns the forward-compatible queue handoff.
-      await temporal.schedule.getHandle(SANDBOX_REAPER_SCHEDULE_ID).update((previous) => ({
-        spec,
-        action,
-        policies,
-        state: {
-          paused: previous.state.paused,
-          ...(previous.state.note ? { note: previous.state.note } : {}),
-          ...(previous.state.remainingActions !== undefined
-            ? { remainingActions: previous.state.remainingActions }
-            : {}),
-        },
-      }));
-      observability.info("Reconciled the global sandbox-lease reaper Schedule", {
-        scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
-        temporalTaskQueue: action.taskQueue,
-      });
-      return {
-        registered: false,
-        close: async () => {
-          await connection.close();
-        },
-      };
-    }
-    await connection.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-/** Register the deployment-wide worker for rebuildable Knowledge search projections. */
-export async function registerKnowledgeIndexingSchedule(
-  settings: Settings,
-  observability: Observability,
-): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect(temporalConnectionOptions(settings));
-  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
-  try {
-    await temporal.schedule.create({
-      scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
-      spec: { intervals: [{ every: KNOWLEDGE_INDEXING_PERIOD_MS }] },
-      action: {
-        type: "startWorkflow",
-        workflowType: "knowledgeIndexingWorkflow",
-        taskQueue: settings.temporalTaskQueue,
-        args: [],
-      },
-      policies: {
-        overlap: ScheduleOverlapPolicy.SKIP,
-        catchupWindow: "1m",
-        pauseOnFailure: false,
-      },
-    });
-    observability.info("Registered the global Knowledge indexer Schedule", {
-      scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
-      indexingPeriodMs: KNOWLEDGE_INDEXING_PERIOD_MS,
-    });
-    return { registered: true, close: async () => connection.close() };
-  } catch (error) {
-    if (error instanceof ScheduleAlreadyRunning) {
-      observability.info("Global Knowledge indexer Schedule already registered", {
-        scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
-      });
-      return { registered: false, close: async () => connection.close() };
-    }
-    await connection.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-/**
  * Register the one provider-neutral expired direct-upload cleanup Schedule.
  * Unlike sandbox GC this is always registered: file uploads can be enabled in
  * deployments where sandbox ownership is disabled. The activity is a cheap
@@ -816,92 +681,6 @@ export async function registerSessionStorageMaintenanceSchedule(
     if (error instanceof ScheduleAlreadyRunning) {
       observability.info("Session storage maintenance Schedule already registered", {
         scheduleId: SESSION_STORAGE_MAINTENANCE_SCHEDULE_ID,
-      });
-      return { registered: false, close: async () => connection.close() };
-    }
-    await connection.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-/** Register the deployment-wide maintained-auth dispatcher. Its one-minute
- * cadence matches the minimum public policy interval; DB claims own overlap,
- * crash recovery, and exact session idempotency. */
-export async function registerSiteAuthMaintenanceSchedule(
-  settings: Settings,
-  observability: Observability,
-): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect(temporalConnectionOptions(settings));
-  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
-  try {
-    await temporal.schedule.create({
-      scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
-      spec: { intervals: [{ every: SITE_AUTH_MAINTENANCE_PERIOD_MS }] },
-      action: {
-        type: "startWorkflow",
-        workflowType: "siteAuthMaintenanceWorkflow",
-        taskQueue: settings.temporalTaskQueue,
-        args: [],
-      },
-      policies: {
-        overlap: ScheduleOverlapPolicy.SKIP,
-        catchupWindow: "1m",
-        pauseOnFailure: false,
-      },
-    });
-    observability.info("Registered the global site-auth maintenance Schedule", {
-      scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
-      maintenancePeriodMs: SITE_AUTH_MAINTENANCE_PERIOD_MS,
-    });
-    return { registered: true, close: async () => connection.close() };
-  } catch (error) {
-    if (error instanceof ScheduleAlreadyRunning) {
-      observability.info("Global site-auth maintenance Schedule already registered", {
-        scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
-      });
-      return { registered: false, close: async () => connection.close() };
-    }
-    await connection.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-/**
- * Register the one repair cadence for committed workflow-wake revisions. The
- * activity only reads the transactional outbox and sends revision-scoped
- * signals; it is independent of sandbox ownership and child-agent features.
- */
-export async function registerSessionWorkflowWakeDispatcherSchedule(
-  settings: Settings,
-  observability: Observability,
-): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect(temporalConnectionOptions(settings));
-  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
-  try {
-    await temporal.schedule.create({
-      scheduleId: SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
-      spec: { intervals: [{ every: SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS }] },
-      action: {
-        type: "startWorkflow",
-        workflowType: SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
-        taskQueue: settings.temporalTaskQueue,
-        args: [],
-      },
-      policies: {
-        overlap: ScheduleOverlapPolicy.SKIP,
-        catchupWindow: "1m",
-        pauseOnFailure: false,
-      },
-    });
-    observability.info("Registered the session-workflow wake dispatcher Schedule", {
-      scheduleId: SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
-      periodMs: SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
-    });
-    return { registered: true, close: async () => connection.close() };
-  } catch (error) {
-    if (error instanceof ScheduleAlreadyRunning) {
-      observability.info("Session-workflow wake dispatcher Schedule already registered", {
-        scheduleId: SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
       });
       return { registered: false, close: async () => connection.close() };
     }
@@ -1085,20 +864,6 @@ export async function createOpenGeniWorkerService(
     if (workerOwnsInternalSchedules(options.role, options.internalSchedules)) {
       schedules.push(
         await retryStartupDependency(
-          "Temporal schedule (sandbox reaper)",
-          () => registerSandboxReaperSchedule(settings, observability),
-          { ...retryOptions, onRetry },
-        ),
-      );
-      schedules.push(
-        await retryStartupDependency(
-          "Temporal schedule (Knowledge indexing)",
-          () => registerKnowledgeIndexingSchedule(settings, observability),
-          { ...retryOptions, onRetry },
-        ),
-      );
-      schedules.push(
-        await retryStartupDependency(
           "Temporal schedule (file upload reaper)",
           () => registerFileUploadReaperSchedule(settings, observability),
           { ...retryOptions, onRetry },
@@ -1113,15 +878,16 @@ export async function createOpenGeniWorkerService(
       );
       schedules.push(
         await retryStartupDependency(
-          "Temporal schedule (site auth maintenance)",
-          () => registerSiteAuthMaintenanceSchedule(settings, observability),
-          { ...retryOptions, onRetry },
-        ),
-      );
-      schedules.push(
-        await retryStartupDependency(
-          "Temporal schedule (session-workflow wake dispatcher)",
-          () => registerSessionWorkflowWakeDispatcherSchedule(settings, observability),
+          "work-checked maintenance cadences",
+          () =>
+            startInternalMaintenanceCadences({
+              settings,
+              observability,
+              db: options.activityDependencies.db,
+              ...(options.activityDependencies.documentServices
+                ? { documentServices: options.activityDependencies.documentServices }
+                : {}),
+            }),
           { ...retryOptions, onRetry },
         ),
       );

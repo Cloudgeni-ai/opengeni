@@ -27,7 +27,7 @@ function fixture() {
   Object.defineProperty(scroller, "clientWidth", { value: 1440 });
   scroller.getBoundingClientRect = () => new DOMRect(0, 0, 1440, 800);
   body.getBoundingClientRect = () => new DOMRect(336, 0, 768, 100);
-  let preferred = 1100;
+  let preferred = 1000;
   HTMLTableElement.prototype.getBoundingClientRect = () => new DOMRect(0, 0, preferred, 100);
   return {
     scroller,
@@ -133,12 +133,12 @@ describe("lazy markdown table observer", () => {
       const f = fixture();
       f.table.style.width = "100%";
       const cleanup = observeMarkdownTableLayout(f.wrapper, f.table);
-      expect(f.wrapper.style.width).toBe("1100px");
+      expect(f.wrapper.style.width).toBe("1000px");
       expect(f.table.style.width).toBe("100%");
       expect(observed).toEqual([f.scroller, f.body, f.table]);
       f.resize(1900);
       notify();
-      expect(f.wrapper.style.width).toBe("1392px");
+      expect(f.wrapper.style.width).toBe("1024px");
       f.resize(400);
       notify();
       expect(f.wrapper.style.width).toBe("768px");
@@ -237,10 +237,10 @@ describe("lazy markdown table observer", () => {
     try {
       const f = fixture();
       const cleanup = observeMarkdownTableLayout(f.wrapper, f.table);
-      expect(f.wrapper.style.width).toBe("1100px");
+      expect(f.wrapper.style.width).toBe("1000px");
       f.resize(1900);
       cleanup?.measure();
-      expect(f.wrapper.style.width).toBe("1392px");
+      expect(f.wrapper.style.width).toBe("1024px");
       f.resize(400);
       cleanup?.measure();
       expect(f.wrapper.style.width).toBe("768px");

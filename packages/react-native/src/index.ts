@@ -3,6 +3,7 @@ export type {
   NativeCryptoAdapter,
   NativeFileAdapter,
   NativeLifecycleAdapter,
+  NativeLinkAdapter,
   NativeLifecycleState,
   NativePersistenceAdapter,
   NativePickedFile,
@@ -13,6 +14,7 @@ export {
   installOpenGeniReactNativeEnvironment,
   OpenGeniReactNativeProvider,
   useOpenGeniReactNativeEnvironment,
+  useOpenNativeLink,
   type NativeEnvironmentContextValue,
   type OpenGeniReactNativeProviderProps,
 } from "./environment";

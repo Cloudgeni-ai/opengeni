@@ -55,6 +55,7 @@ import {
   type McpTransportRequestFailureDiagnostic,
 } from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
+import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
 import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
@@ -1453,13 +1454,40 @@ export type XaiCredentialFailure = {
  * another credential. A marked HTTP 401/403/429, or an HTTP 200 SSE terminal
  * that is a rate-limit/capacity diagnostic, proves inference was refused
  * without an accepted model response; refresh relogin is equally definitive.
+ * The legacy SuperGrok path's view of `classifyXaiProviderError`.
  */
 export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
+  const outcome = classifyXaiProviderError(error);
+  switch (outcome?.kind) {
+    case "unauthorized":
+      return { kind: "auth", cooldownMs: null };
+    case "forbidden":
+      return { kind: "forbidden", cooldownMs: null };
+    case "rate_limited":
+      return {
+        kind: "rate_limit",
+        cooldownMs: outcome.retryAfterMs ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * SuperGrok's classification of a failed model request as a shared provider
+ * outcome (the adapter's `classifyError`, SuperGrok track X1b): a refresh
+ * relogin or a marked 401 is `unauthorized`, a marked 403 `forbidden`, and a
+ * marked 429 or HTTP 200 SSE capacity terminal `rate_limited` with the
+ * provider's retry time (null when it gave none: the adapter's fallback
+ * applies). Anything else, a provider safety refusal included, is null: not
+ * a refusal of the account.
+ */
+export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
-      return { kind: "auth", cooldownMs: null };
+      return { kind: "unauthorized" };
     }
     relogin = (relogin as Record<string, unknown>).cause;
   }
@@ -1474,10 +1502,10 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
     const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
     const code = String(value.code ?? body?.code ?? "").toLowerCase();
     if (status === 401 || code === "unauthorized" || code === "invalid_token") {
-      return { kind: "auth", cooldownMs: null };
+      return { kind: "unauthorized" };
     }
     if (status === 403) {
-      return { kind: "forbidden", cooldownMs: null };
+      return { kind: "forbidden" };
     }
     const message = String(value.message ?? body?.message ?? "");
     if (
@@ -1487,10 +1515,7 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
         status: Number.isInteger(status) ? status : null,
       })
     ) {
-      return {
-        kind: "rate_limit",
-        cooldownMs: providerRetryAfterMs(error) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-      };
+      return { kind: "rate_limited", retryAfterMs: providerRetryAfterMs(error) };
     }
     current = value.cause;
   }
@@ -2356,6 +2381,45 @@ export function classifyClaudeCredentialFailure(
         cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
         ...(current.request_id ? { requestId: current.request_id } : {}),
       };
+    current = current.cause;
+  }
+  return null;
+}
+
+/**
+ * Claude's classification of a failed model request as a shared provider
+ * outcome (the adapter's `classifyError`, Claude track C1b), for a request
+ * of the Claude subscription transport only: a reconnect-required refresh or
+ * HTTP 401 is `unauthorized` (the transport already ran the turn's one
+ * forced refresh); 429 is `rate_limited` for the turn's model `modelId`, with
+ * the provider's retry time (null: the adapter's fallback applies); 529 or
+ * `overloaded_error` is `overloaded`, which never moves the turn to another
+ * account; 403 is `fatal`, which never rotates or quarantines the account.
+ * Anything else, a provider safety refusal included, is null: not a refusal
+ * of the account.
+ */
+export function classifyClaudeProviderError(
+  error: unknown,
+  modelId?: string,
+): ProviderErrorOutcome | null {
+  if (isProviderSafetyRefusal(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof ClaudeSubscriptionReconnectRequired) return { kind: "unauthorized" };
+    if (current instanceof AnthropicRequestError) {
+      if (!current.subscription) return null;
+      if (current.status === 401) return { kind: "unauthorized" };
+      if (current.status === 429)
+        return {
+          kind: "rate_limited",
+          retryAfterMs: providerRetryAfterMs(current),
+          ...(modelId === undefined ? {} : { modelId }),
+        };
+      if (current.status === 529 || current.errorType === "overloaded_error")
+        return { kind: "overloaded" };
+      if (current.status === 403) return { kind: "fatal" };
+      return null;
+    }
     current = current.cause;
   }
   return null;

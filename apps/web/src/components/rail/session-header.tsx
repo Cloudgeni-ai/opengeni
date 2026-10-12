@@ -34,6 +34,7 @@ import {
   SearchIcon,
   ShieldCheckIcon,
   ShieldOffIcon,
+  SmartphoneIcon,
 } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
@@ -56,6 +57,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { requestConversationFind } from "@/lib/conversation-find-event";
+import { currentPhoneAppPlatform, openInAppUrl } from "@/lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "@/lib/session-rail";
 import { useSessionStartup } from "@/lib/session-startup";
 import { isCodexProductModel } from "@/lib/session-model";
@@ -415,6 +417,16 @@ export function SessionHeader({
               <PinIcon className={session.pinned ? "fill-current" : undefined} />
               {session.pinned ? "Unpin" : "Pin"}
             </DropdownMenuItem>
+            {currentPhoneAppPlatform() ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  window.location.href = openInAppUrl(window.location.href);
+                }}
+              >
+                <SmartphoneIcon />
+                Open in app
+              </DropdownMenuItem>
+            ) : null}
             {sandboxSlot ? (
               <div className="flex min-h-9 items-center px-2 empty:hidden lg:hidden">
                 {sandboxSlot}

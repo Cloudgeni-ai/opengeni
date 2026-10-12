@@ -15,6 +15,7 @@ const declaration = parsed.program.body
 if (declaration?.type !== "FunctionDeclaration") throw new Error("Missing production loader");
 
 const dependencies = [
+  "loadCoreRoutedClaudeCatalogReadiness",
   "connectionRestrictionsAndXaiReadiness",
   "loadWorkspaceClaudeSubscriptionReadiness",
   "getWorkspaceModelPolicy",
@@ -67,6 +68,8 @@ function fixture(
     claudeAuthoritySnapshot: { frozen: "claude" },
   };
   const values: Record<string, unknown> = {
+    // Claude's provider route, read once for both Claude readers (null: legacy).
+    "claude-core": null,
     restrictions: { restrictions: { "supergrok/": ["allowed"] }, xaiSubscriptionActive: true },
     claude: { workspace: true, organization: false },
     policy: { allowedProviders: ["anthropic"], allowedModels: null },
@@ -101,6 +104,7 @@ function fixture(
   };
   const ports = {
     CLAUDE_CONNECTION_KINDS,
+    loadCoreRoutedClaudeCatalogReadiness: (...args: unknown[]) => read("claude-core", args),
     connectionRestrictionsAndXaiReadiness: (...args: unknown[]) => read("restrictions", args),
     loadWorkspaceClaudeSubscriptionReadiness: (...args: unknown[]) => read("claude", args),
     getWorkspaceModelPolicy: (...args: unknown[]) => read("policy", args),
@@ -221,7 +225,10 @@ test("subscription activation waits for the same exact fresh/frozen-subject read
     await flush();
     expect(f.settled()).toBe(false);
     const read = f.calls.filter((call) => call.name === "claude");
-    expect(read).toEqual([{ name: "claude", args: [f.db, f.settings, f.context] }]);
+    expect(read).toEqual([{ name: "claude", args: [f.db, f.settings, f.context, null] }]);
+    expect(f.calls.filter((call) => call.name === "claude-core")).toEqual([
+      { name: "claude-core", args: [f.db, f.settings, f.context] },
+    ]);
     f.holds.claude!.resolve({ workspace: false, organization: true });
     const result = await f.running;
     expect(result.claudeConnections.claude_subscription.active).toBe(true);
@@ -255,7 +262,8 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
         else if (name === "connections")
           expect(args.slice(1)).toEqual([f.context.workspaceId, null]);
         else if (name === "restrictions" || name === "claude")
-          expect(args.slice(1)).toEqual([f.settings, f.context]);
+          expect(args.slice(1)).toEqual([f.settings, f.context, null]);
+        else if (name === "claude-core") expect(args.slice(1)).toEqual([f.settings, f.context]);
         else if (name === "codex")
           expect(args.slice(1)).toEqual([
             f.settings,

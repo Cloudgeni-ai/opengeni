@@ -42,6 +42,73 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+/** Read-only maintenance work checks (migrations 0730 and 0732) and the claim
+ * each one previews, which fixes its owner and runtime grant. */
+export const MAINTENANCE_WORK_PROBE_ROUTINES = [
+  ["session_workflow_wakes_due_v1()", "claim_session_workflow_wakes(integer)", "private"],
+  [
+    "automatic_session_title_fanout_due_v1()",
+    "claim_automatic_session_title_fanout_v1(integer)",
+    "private",
+  ],
+  [
+    "knowledge_index_due_v1(text, integer)",
+    "knowledge_index_claim(text, integer, integer)",
+    "target",
+  ],
+  [
+    "site_auth_maintenance_due_v1(bigint)",
+    "claim_site_auth_maintenance(bigint, integer)",
+    "private",
+  ],
+  [
+    "sandbox_lease_reaper_due_v1()",
+    "reap_sandbox_leases(bigint, bigint, bigint, bigint)",
+    "private",
+  ],
+  [
+    "sandbox_idle_checkpoint_due_v1(bigint)",
+    "list_idle_checkpoint_candidates(integer, bigint)",
+    "private",
+  ],
+  ["browser_deadline_checkpoint_due_v1()", "list_browser_deadline_checkpoints(integer)", "private"],
+  [
+    "session_system_update_outbox_due_v1()",
+    "claim_session_system_update_outbox_v2(integer)",
+    "private",
+  ],
+  [
+    "session_list_snapshots_expired_v1()",
+    "reap_expired_session_list_snapshots(integer)",
+    "private",
+  ],
+  [
+    "connected_command_reconciliation_due_v1()",
+    "claim_connected_machine_background_commands(uuid, integer, bigint, timestamp with time zone)",
+    "private",
+  ],
+  [
+    "connected_command_output_release_due_v1()",
+    "claim_connected_command_output_releases(uuid, integer, bigint, timestamp with time zone)",
+    "private",
+  ],
+  [
+    "terminal_retained_processes_due_v1()",
+    "claim_terminal_retained_processes(uuid, integer, bigint)",
+    "private",
+  ],
+  [
+    "sandbox_ended_epoch_blockers_due_v1()",
+    "list_sandbox_ended_epoch_blockers(integer)",
+    "private",
+  ],
+  [
+    "sandbox_checkpoint_artifact_gc_due_v1(bigint)",
+    "claim_sandbox_checkpoint_artifacts(uuid, integer, bigint)",
+    "private",
+  ],
+] as const;
+
 const MODEL_FACT_CAPABILITY_ROUTINES = [
   [
     "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
@@ -776,6 +843,8 @@ export const SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES = [
   "set_subscription_core_reach_allocator(text, uuid, uuid, boolean)",
   // Migration 0728: the personal connect writer with the credential's format.
   "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
+  // Migration 0730: the owner's personal connections with their row version.
+  "subscription_core_personal_connection_versions(text, uuid, uuid, text)",
 ] as const;
 
 /** Migration 0707: the neutral writers' owner-only internals. */
@@ -4883,6 +4952,28 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
   ];
+  // Read-only maintenance work checks hold exactly the authority of the claim
+  // each previews. Once that claim exists, its check must too, so a cadence
+  // never silently loses the ability to see work.
+  for (const [name, claimName, claimSchema] of MAINTENANCE_WORK_PROBE_ROUTINES) {
+    const claim = (
+      claimSchema === "target" ? posture.targetRoutines : posture.privateRoutines
+    ).find((entry) => entry.name === claimName);
+    if (!claim) continue;
+    const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+    const routine = matches[0];
+    if (
+      matches.length !== 1 ||
+      !routine ||
+      routine.owner !== claim.owner ||
+      !routine.securityDefiner ||
+      routine.publicExecute ||
+      !routine.execute ||
+      !routine.configuration?.includes("search_path=pg_catalog")
+    ) {
+      violations.push(`maintenance work check ${name} is missing or has unsafe posture`);
+    }
+  }
   if (tableByName.has("organization_credential_providers")) {
     for (const [name] of integrationRoutine) {
       if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {

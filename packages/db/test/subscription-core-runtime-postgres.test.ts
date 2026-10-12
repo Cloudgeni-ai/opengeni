@@ -1877,6 +1877,7 @@ describe("provider-neutral subscription runtime persistence", () => {
               await readSubscriptionSessionBinding(db, {
                 workspaceId: state.workspaceId,
                 sessionId: state.sessionId,
+                provider: "codex",
               }),
             ).toMatchObject({ modelId: "codex/b", version: 2 });
           },

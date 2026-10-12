@@ -188,6 +188,7 @@ import type {
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
+import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
 
 export type TurnStreamAttemptDeps = {
@@ -421,7 +422,7 @@ export async function runTurnStreamAttempt(
       // A cancelled title may have received a complete provider response before
       // its result was discarded. Checkpoint only that positive observation;
       // pending or unknown requests keep their replay fence.
-      await providerTurn.codexSubscriptionCore?.titleRequests?.checkpoint();
+      await subscriptionCoreTurnOf(providerTurn)?.titleRequests?.checkpoint();
       return;
     }
 
@@ -1245,6 +1246,12 @@ export async function runTurnStreamAttempt(
                     provider: streamProvider,
                     dispatchId,
                   }),
+                  // A core-placed turn reports real work for the shared
+                  // capacity breaker (providers with their own request events
+                  // set it there).
+                  ...(subscriptionCoreTurnOf(providerTurn)
+                    ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(next.value) }
+                    : {}),
                 },
               },
             ]);

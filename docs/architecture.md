@@ -2019,6 +2019,12 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
+The migration ledger keys receipts by full SQL filename, not ordinal. Published
+SQL names and bytes remain immutable, including historical duplicate ordinals.
+The source guard permits a duplicate group already present together on one
+protected base (`origin/main` or `origin/production`, not a custom comparison
+base); independent cross-branch allocations and new collisions still
+fail. See [migration delivery rules](../AGENTS.md#deployment-work-notes).
 Managed PostgreSQL may preinstall pgvector for restricted migrators. The
 explicit initial-migration opt-in verifies its public extension-owned type;
 see [deployment](deployment.md#database-identities-and-runtime-posture).

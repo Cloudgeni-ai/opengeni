@@ -189,6 +189,8 @@ function workspaceCustomModelCommitGuard(input: {
   workspaceId: string;
   modelId: string;
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
+  /** The task an update re-admits (Claude's core route reads its accepted authority). */
+  scheduledTaskId?: string;
 }): ((tx: Database) => Promise<void>) | undefined {
   const reference = workspaceCustomModelReference(input.settings, input.modelId);
   if (!reference) return undefined;
@@ -198,7 +200,12 @@ function workspaceCustomModelCommitGuard(input: {
       workspaceId: input.workspaceId,
       reference,
       ...(input.claudeAuthoritySnapshot
-        ? { claudeAuthority: { authoritySnapshot: input.claudeAuthoritySnapshot } }
+        ? {
+            claudeAuthority: {
+              authoritySnapshot: input.claudeAuthoritySnapshot,
+              ...(input.scheduledTaskId ? { scheduledTaskId: input.scheduledTaskId } : {}),
+            },
+          }
         : {}),
     });
     if (!active) {
@@ -1861,6 +1868,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
         input.existing.workspaceId,
         input.existing.id,
       ),
+      scheduledTaskId: input.existing.id,
     });
     if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
   }

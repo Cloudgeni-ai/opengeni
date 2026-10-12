@@ -140,6 +140,9 @@ export function createKnowledgeIndexingActivities(
         policyActivatedAt = await activationTime;
       }
       const { embedder } = await resolveDocumentServices();
+      // A claim would only record a failure and push the job's retry out; an
+      // embedder that cannot make any request leaves the queue untouched.
+      if (embedder.available === false) return result;
       const { knowledgeIndexChunks } = await import("@opengeni/documents");
       const claims = await claimKnowledgeIndexJobs(db, {
         model: embedder.model,
