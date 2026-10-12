@@ -664,9 +664,10 @@ describe("useSharedQuery — loader binding", () => {
     await flush();
     expect(hook.result.current.data).toBe("A-rows-1");
 
-    // Commit the switch to B through layout effects only: the A subscription
-    // is still registered (passive cleanup hasn't run) when A is re-read, as
-    // with a poll, an event refresh or a trailing read landing right then.
+    // Commit the switch to B through layout effects only and re-read A before
+    // passive effects run (its store listener is still attached), as with a
+    // poll, an event refresh or a trailing read landing right then: A's entry
+    // must never be filled by B's loader.
     await hook.rerenderThroughLayout({ k: "B" });
     void invalidateSharedQueries(scope, ["q", "A"]);
     await flush();
@@ -750,6 +751,64 @@ describe("useSharedQuery — polling", () => {
       await actRun(async () => setVisibility("visible"));
       await hook.unmount();
     }
+  });
+});
+
+describe("useSharedQuery — Suspense hiding a reader", () => {
+  const never = new Promise<never>(() => undefined);
+  function Suspends({ suspend }: { suspend: boolean }) {
+    if (suspend) throw never;
+    return null;
+  }
+  function Probe({ scope, load }: { scope: object; load: () => Promise<string> }) {
+    const { data, loading } = useSharedQuery(scope, ["accounts"], load);
+    return <span>{data ?? (loading ? "loading" : "none")}</span>;
+  }
+  // Content that re-suspends in an ordinary (non-transition) update is hidden:
+  // the reader's layout effects are cleaned up (it unregisters) but its store
+  // subscription stays.
+  function view(scope: object, load: () => Promise<string>, suspend: boolean) {
+    return (
+      <Suspense fallback={<i>fallback</i>}>
+        <Probe scope={scope} load={load} />
+        <Suspends suspend={suspend} />
+      </Suspense>
+    );
+  }
+
+  test("without retention, a reader shown again after its entry was released reads and renders", async () => {
+    const scope = {};
+    const { state, load } = counter<string>((): string => `rows-${state.reads}`);
+    const tree = await renderTree(view(scope, load, false));
+    await flush();
+    expect(tree.container.textContent).toBe("rows-1");
+    await tree.rerender(view(scope, load, true));
+    // The hidden reader let go: its entry is released after one task.
+    await flush(5);
+    expect(peekSharedQuery(scope, ["accounts"])).toBeNull();
+    await tree.rerender(view(scope, load, false));
+    await flush();
+    expect(state.reads).toBe(2);
+    expect(tree.container.textContent).toBe("rows-2");
+    await tree.unmount();
+  });
+
+  test("with retention, an invalidation while hidden is read and rendered when shown again", async () => {
+    const { scope, release } = retainedScope();
+    const { state, load } = counter<string>((): string => `rows-${state.reads}`);
+    const tree = await renderTree(view(scope, load, false));
+    await flush();
+    expect(tree.container.textContent).toBe("rows-1");
+    await tree.rerender(view(scope, load, true));
+    await actRun(() => invalidateSharedQueries(scope, ["accounts"]));
+    // Unregistered while hidden: the invalidation evicted the entry.
+    expect(peekSharedQuery(scope, ["accounts"])).toBeNull();
+    await tree.rerender(view(scope, load, false));
+    await flush();
+    expect(state.reads).toBe(2);
+    expect(tree.container.textContent).toBe("rows-2");
+    await tree.unmount();
+    release();
   });
 });
 

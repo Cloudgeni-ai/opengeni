@@ -100,7 +100,8 @@ type Entry = {
   key: string;
   parts: SharedQueryKey;
   snapshot: SharedQuerySnapshot<unknown>;
-  listeners: Set<() => void>;
+  /** The scope that holds this entry; its store listeners are notified per key. */
+  home: Scope;
   subscribers: Set<Subscriber>;
   inFlight: Promise<void> | null;
   trailing: Promise<void> | null;
@@ -120,6 +121,12 @@ type Entry = {
 
 type Scope = {
   entries: Map<string, Entry>;
+  /**
+   * Store (useSyncExternalStore) listeners per key, not per entry: a reader
+   * hidden by Suspense keeps its store subscription while it is unregistered,
+   * and must still hear about the entry that replaces an evicted one.
+   */
+  listeners: Map<string, Set<() => void>>;
   /** Bumped by every clear; writers from an earlier epoch are refused. */
   epoch: number;
   /** Active retentions; unmounted entries are kept only while positive. */
@@ -154,15 +161,44 @@ export function isSharedQueryAccessRefusal(cause: unknown): boolean {
 function scopeState(scope: object): Scope {
   let state = scopes.get(scope);
   if (!state) {
-    state = { entries: new Map(), epoch: 0, retainers: 0, releaseTimer: null };
+    state = {
+      entries: new Map(),
+      listeners: new Map(),
+      epoch: 0,
+      retainers: 0,
+      releaseTimer: null,
+    };
     scopes.set(scope, state);
   }
   return state;
 }
 
+function notify(state: Scope, key: string): void {
+  const listeners = state.listeners.get(key);
+  if (!listeners) return;
+  for (const listener of [...listeners]) listener();
+}
+
 function setSnapshot(entry: Entry, next: SharedQuerySnapshot<unknown>): void {
   entry.snapshot = next;
-  for (const listener of entry.listeners) listener();
+  notify(entry.home, entry.key);
+}
+
+/** A store listener for a client's key, whichever entry currently holds it. */
+function listen(scope: object, key: string, listener: () => void): () => void {
+  const state = scopeState(scope);
+  let listeners = state.listeners.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    state.listeners.set(key, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    const current = state.listeners.get(key);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) state.listeners.delete(key);
+  };
 }
 
 /** Readers that may read: enabled and bound to this key (visible or not). */
@@ -173,9 +209,9 @@ function readers(entry: Entry): Subscriber[] {
 }
 
 /**
- * Registered readers keep an entry. Store listeners don't: React removes them
- * in the passive phase, after the layout-phase unsubscribe has already
- * decided the entry's release.
+ * Registered readers keep an entry. Store listeners don't: they belong to the
+ * client and key (see `Scope.listeners`), React removes them in the passive
+ * phase, and a reader hidden by Suspense keeps one while it is unregistered.
  */
 function mounted(entry: Entry): boolean {
   return entry.subscribers.size > 0;
@@ -209,7 +245,10 @@ function evict(state: Scope, entry: Entry): void {
   supersedeReads(entry);
   stopTimer(entry);
   stopRetainTimer(entry);
-  if (state.entries.get(entry.key) === entry) state.entries.delete(entry.key);
+  if (state.entries.get(entry.key) !== entry) return;
+  state.entries.delete(entry.key);
+  // Store subscriptions that outlive the entry (Suspense) now read nothing.
+  notify(state, entry.key);
 }
 
 /** Poll at the shortest interval among readers on a visible page; keep a timer already armed for it. */
@@ -351,7 +390,7 @@ function getOrCreate(scope: object, key: string, loading: boolean): Entry {
     key,
     parts: JSON.parse(key) as SharedQueryKey,
     snapshot: idle(loading),
-    listeners: new Set(),
+    home: state,
     subscribers: new Set(),
     inFlight: null,
     trailing: null,
@@ -566,10 +605,9 @@ export function useSharedQuery<T>(
   const pageLive = usePageLiveActivity();
   const key = serialize(parts);
   // The loader is bound to its key only when the render that supplied both
-  // commits. A render React discards (a transition) or the interval between a
-  // key change's layout and passive effects must never let another key's
-  // loader fill this entry: subscribers whose binding names another key are
-  // ignored by every read.
+  // commits: a render React discards (a transition) never rebinds it, and a
+  // subscriber whose binding names another key is ignored by every read, so
+  // one key's loader never fills another key's entry.
   const binding = useRef<LoaderBinding>({ key, load: load as Loader<unknown> });
   useLayoutEffect(() => {
     binding.current = { key, load: load as Loader<unknown> };
@@ -579,15 +617,7 @@ export function useSharedQuery<T>(
   const pollIntervalMs = options.pollIntervalMs;
 
   const subscribe = useCallback(
-    (listener: () => void) => {
-      const entry = getOrCreate(scope, key, enabled);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
-    // `key` identifies the entry; `enabled` only seeds a brand-new one.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    (listener: () => void) => listen(scope, key, listener),
     [scope, key],
   );
   // The entry this instance is registered on (set in the layout phase).
@@ -653,13 +683,7 @@ export function useSharedQueryValue<T>(
 ): SharedQuerySnapshot<T> {
   const key = serialize(parts);
   const subscribe = useCallback(
-    (listener: () => void) => {
-      const entry = getOrCreate(scope, key, false);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
+    (listener: () => void) => listen(scope, key, listener),
     [scope, key],
   );
   const registered = useRef<Entry | null>(null);
