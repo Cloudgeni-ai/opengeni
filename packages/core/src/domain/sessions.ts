@@ -94,6 +94,7 @@ import {
   type FirstPartyMcpToolName,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
+  type ConnectionAccountIntent,
   type McpConnectionAccountSelection,
   type Permission,
   type PersonalResourceAttachmentIntent,
@@ -1018,6 +1019,8 @@ export async function createAndStartSessionWithOutcome(input: {
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+  /** The creator's account intent, carried by work that continues the first turn. */
+  connectionAccountIntent?: ConnectionAccountIntent | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
@@ -1264,6 +1267,7 @@ export async function createAndStartSessionWithOutcome(input: {
           mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
           personalConnectionDelegations: input.personalConnectionDelegations ?? [],
           mcpAccountBindings: input.mcpAccountBindings ?? null,
+          connectionAccountIntent: input.connectionAccountIntent ?? null,
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
           ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1376,6 +1380,7 @@ export async function createAndStartSessionWithOutcome(input: {
         mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
         personalConnectionDelegations: input.personalConnectionDelegations ?? [],
         mcpAccountBindings: input.mcpAccountBindings ?? null,
+        connectionAccountIntent: input.connectionAccountIntent ?? null,
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
         ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1875,6 +1880,8 @@ type PostUserMessageTurnInput = {
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+  /** The sender's account intent, carried by work that continues this turn. */
+  connectionAccountIntent?: ConnectionAccountIntent | null;
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -2087,6 +2094,7 @@ export async function postUserMessageTurn(
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               mcpAccountBindings: input.mcpAccountBindings ?? null,
+              connectionAccountIntent: input.connectionAccountIntent ?? null,
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
@@ -3436,10 +3444,8 @@ async function createSessionForRequestInFileScope(
       workspace.settings,
     ),
   });
-  const { personalConnectionDelegations, mcpAccountBindings } = await measureSessionStartPhase(
-    unresolvedDeps.observability,
-    "connection_freeze",
-    () =>
+  const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
+    await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
       freezeConnectionAccounts({
         db,
         accountId: grant.accountId,
@@ -3452,7 +3458,7 @@ async function createSessionForRequestInFileScope(
         googleDrivePublicationEnabled,
         atlassianEnabled,
       }),
-  );
+    );
   if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
@@ -3940,6 +3946,7 @@ async function createSessionForRequestInFileScope(
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
       mcpAccountBindings,
+      connectionAccountIntent,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
@@ -4430,27 +4437,28 @@ async function acceptSessionUserMessageInFileScope(
       existingSession,
       connectionWorkspace.settings,
     );
-    const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
-      db,
-      accountId: grant.accountId,
-      workspaceId,
-      settings: runtimeSettings,
-      tools: connectionAccountTools,
-      resources: [...existingSession.resources, ...requestedResources],
-      source: connectionDelegationSource,
-      targetSessionId: sessionId,
-      googleDrivePublicationEnabled:
-        existingEffectiveFirstPartyTools.includes("editable_artifact_export") &&
-        existingEffectiveFirstPartyTools.includes("editable_artifact_export_status") &&
-        (!existingSession.firstPartyMcpPermissions?.length ||
-          (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
-            existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
-      atlassianEnabled:
-        existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-        (!existingSession.firstPartyMcpPermissions?.length ||
-          existingSession.firstPartyMcpPermissions.includes("connections:read")),
-      ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
-    });
+    const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
+      await freezeConnectionAccounts({
+        db,
+        accountId: grant.accountId,
+        workspaceId,
+        settings: runtimeSettings,
+        tools: connectionAccountTools,
+        resources: [...existingSession.resources, ...requestedResources],
+        source: connectionDelegationSource,
+        targetSessionId: sessionId,
+        googleDrivePublicationEnabled:
+          existingEffectiveFirstPartyTools.includes("editable_artifact_export") &&
+          existingEffectiveFirstPartyTools.includes("editable_artifact_export_status") &&
+          (!existingSession.firstPartyMcpPermissions?.length ||
+            (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
+              existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
+        atlassianEnabled:
+          existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
+          (!existingSession.firstPartyMcpPermissions?.length ||
+            existingSession.firstPartyMcpPermissions.includes("connections:read")),
+        ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
+      });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const surface = resolveTurnSurface({
@@ -4480,6 +4488,7 @@ async function acceptSessionUserMessageInFileScope(
         mcpCredentialUpdates,
         personalConnectionDelegations,
         mcpAccountBindings,
+        connectionAccountIntent,
 
         captureTurnAuthority: async (tx: Database, turnId: string) => {
           await captureLinkedAuthority?.(tx, sessionId, turnId);

@@ -750,6 +750,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const {
         personalConnectionDelegations: taskPersonalConnectionDelegations,
         mcpAccountBindings: taskMcpAccountBindings,
+        connectionAccountIntent: taskConnectionAccountIntent,
       } = taskConnections;
       const taskConnectionAuthoritySubjectId =
         taskPersonalConnectionDelegations.length > 0 ? taskAuthoritySubjectId : null;
@@ -1282,6 +1283,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           claudeAuthoritySubjectId,
           connectionAuthoritySubjectId: taskConnectionAuthoritySubjectId,
           ...(degradedAccounts.length > 0 ? { degradedAccounts } : {}),
+          connectionAccountIntent: taskConnectionAccountIntent,
           triggerInitiator: input.initiator ?? { kind: "service", subjectId: "scheduler" },
           agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey ?? null,
           incidentPreflightRequired,

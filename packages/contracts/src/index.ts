@@ -5186,6 +5186,31 @@ export const McpConnectionAccountSelections = z
     }
   });
 
+/**
+ * What a person decided about connector accounts for a turn, as opposed to the
+ * accounts that turn was bound to. Autonomous work that continues the turn
+ * (goal continuations, wait wake-ups, command results, child results) carries
+ * this intent and resolves it again for the same person at each turn, so it
+ * uses that person's current accounts instead of a copy of earlier ones.
+ *
+ * `principal` is whose personal accounts may be used: the person whose
+ * authenticated request accepted the turn, or `none` when that request could
+ * not use personal accounts (service work, delegated bearers). `selections`
+ * are the accounts the person explicitly picked; every other connector uses
+ * the principal's default accounts.
+ */
+export const ConnectionAccountIntent = z
+  .object({
+    version: z.literal(1),
+    principal: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("subject"), subjectId: z.string().min(1).max(512) }).strict(),
+      z.object({ kind: z.literal("none") }).strict(),
+    ]),
+    selections: McpConnectionAccountSelections,
+  })
+  .strict();
+export type ConnectionAccountIntent = z.infer<typeof ConnectionAccountIntent>;
+
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -10973,6 +10998,12 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     connectionAuthoritySubjectId: z.string().min(1).nullable(),
     /** Pinned accounts this occurrence could not use; it runs without those connectors. */
     degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
+    /**
+     * The occurrence's account intent: the owner (or none for a schedule
+     * without one) and the pinned accounts it used. Work that continues the
+     * occurrence resolves this intent again instead of copying its accounts.
+     */
+    connectionAccountIntent: ConnectionAccountIntent.nullable().optional(),
     triggerInitiator: TurnInitiator,
     agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
     incidentPreflightRequired: z.boolean(),

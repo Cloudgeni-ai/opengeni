@@ -11,8 +11,7 @@ profiles retain their exact scope pins. An expired connection without a refresh
 token needs a new interactive OAuth grant; refresh cannot manufacture one.
 
 SDK transport teardown warnings use `mcp_cleanup_failed`, separately from
-`mcp_transport_failed`. A server that rejects session DELETE (for example, HTTP
-405) may still initialize, list tools, and execute tools successfully. Verify
+`mcp_transport_failed`. A server that rejects session DELETE (for example, HTTP 405) may still initialize, list tools, and execute tools successfully. Verify
 those phases before classifying a cleanup warning as connector unavailability.
 
 ## Agent-prepared API-key connections
@@ -162,7 +161,25 @@ Historical leases remain unmodified; new connections do not widen an existing
 call's authority. Physical provider use still checks live membership and
 connection revocation.
 
-The accepted binding set follows queued work, continuations, child work and
+Each accepted turn also records its account intent: whose personal accounts it
+may use (the person who sent it, or nobody for work without a person behind it)
+and which accounts that person explicitly picked. Work that continues a turn,
+such as a goal continuation, a wait wake-up, a command or child result, or
+informational input delivered into it, carries the same intent and resolves it
+again when it is claimed, exactly as that person's next message with the same
+picks would be resolved now. A reconnected or newly connected account is
+therefore used, and a revoked one is not. A picked account that can no longer
+be used is never replaced by another account: that connector is left out of the
+continued turn and recorded in the turn's internal `connectionAccountGaps`
+metadata. A carried intent that names someone other than the continued turn's
+person resolves shared accounts only. A child session carries its parent turn's
+intent, so its own continuations resolve for the parent's person. Messages and
+Steers from another agent still act with the sender's accepted accounts, and a
+scheduled occurrence keeps the accounts it was accepted with. Turns accepted
+before account intent existed have none, and work continuing them keeps copying
+their exact accounts.
+
+The accepted binding set is still frozen per turn and follows queued work and
 scheduled occurrences. New empty sets mean no authenticated account routes;
 historical absent/null sets retain the legacy execution path. Scheduled tasks
 never save resolved accounts: each fresh occurrence resolves the execution
