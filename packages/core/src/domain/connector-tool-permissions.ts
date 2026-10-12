@@ -1,7 +1,6 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
-import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -43,6 +42,7 @@ import {
   gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   isOfficialSlackMcpConfig,
+  sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime";
 import { hasPermission } from "../access";
 import {
@@ -124,7 +124,7 @@ async function resolveTarget(input: Input) {
     ).filter((integration) => integration.capabilityId === input.capabilityId);
     const accountId = (integration: (typeof integrations)[number]) =>
       integration.connectionRef?.connectionId ??
-      `session-mcp:${integration.serverId}:${createHash("sha256").update(integration.baseUrl, "utf8").digest("hex")}`;
+      sessionMcpApprovalConnectionId(integration.serverId, integration.baseUrl);
     const integration = integrations.find(
       (candidate) =>
         (!input.instanceKey || candidate.instanceKey === input.instanceKey) &&
@@ -238,10 +238,7 @@ async function resolveTarget(input: Input) {
     throw new HTTPException(403, {
       message: "Only the authenticated connection owner may manage personal tool permissions",
     });
-  // Same secret-free target identity used by runtime sessionMcpApprovalConnectionId.
-  const connectionId =
-    connection?.id ??
-    `session-mcp:${server.id}:${createHash("sha256").update(server.url, "utf8").digest("hex")}`;
+  const connectionId = connection?.id ?? sessionMcpApprovalConnectionId(server.id, server.url);
   if (input.connectionId && input.connectionId !== connectionId)
     throw new HTTPException(409, {
       message: "Connector account unavailable. Reload its permissions.",
@@ -499,9 +496,12 @@ export async function updateConnectorToolPermissions(
   }
 }
 
-/** Same secret-free identity the runtime derives for a credential-free session MCP server. */
+/**
+ * Same secret-free identity the runtime derives for a credential-free session MCP server.
+ * Keyed to the exact URL: a different URL string gets different rules.
+ */
 export function sessionMcpToolPermissionConnectionId(serverId: string, url: string): string {
-  return `session-mcp:${serverId}:${createHash("sha256").update(url, "utf8").digest("hex")}`;
+  return sessionMcpApprovalConnectionId(serverId, url);
 }
 
 type SessionMcpInput = {

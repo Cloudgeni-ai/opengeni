@@ -3350,8 +3350,13 @@ function mcpToolRequiresApproval(
   return policy === true || (policy !== false && policy.has(unprefixedName));
 }
 
-/** Stable, secret-free execution identity for an MCP server without a connection row. */
-function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
+/**
+ * Stable, secret-free execution identity for an MCP server without a connection row.
+ * Tool permission rules are keyed by this value, so it depends on the exact URL string:
+ * changing a server's URL orphans the rules saved for the old one. Every caller that reads
+ * or writes those rules must derive the identity through this function.
+ */
+export function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
   const targetHash = createHash("sha256").update(url, "utf8").digest("hex");
   return `session-mcp:${serverId}:${targetHash}`;
 }

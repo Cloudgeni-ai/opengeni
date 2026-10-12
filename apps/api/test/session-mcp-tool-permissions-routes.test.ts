@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -11,6 +10,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { updateSessionMcpToolPermissions, type ApiRouteDeps } from "@opengeni/core";
+import { sessionMcpApprovalConnectionId } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -24,8 +24,8 @@ const DELEGATION_SECRET = "session-mcp-tool-permissions-secret";
 const settings = testSettings({ delegationSecret: DELEGATION_SECRET });
 const serverId = "cloudgeni-capability";
 const url = "https://host.example.test/embedded/capability-mcp/mcp";
-// The runtime's credential-free session MCP identity (sessionMcpApprovalConnectionId).
-const runtimeConnectionId = `session-mcp:${serverId}:${createHash("sha256").update(url, "utf8").digest("hex")}`;
+// The identity the runtime enforces for a credential-free session MCP server.
+const runtimeConnectionId = sessionMcpApprovalConnectionId(serverId, url);
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -33,6 +33,8 @@ let app: Hono | null = null;
 let workspaceId = "";
 let accountId = "";
 let subjectId = "";
+let accountExternalId = "";
+let otherWorkspaceId = "";
 let available = true;
 
 beforeAll(async () => {
@@ -43,9 +45,10 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   subjectId = `user:session-mcp-permissions-${crypto.randomUUID()}`;
+  accountExternalId = `session-mcp-permissions-account-${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
-    accountExternalId: `session-mcp-permissions-account-${crypto.randomUUID()}`,
+    accountExternalId,
     accountName: "Session MCP permissions account",
     workspaceExternalSource: "test",
     workspaceExternalId: `session-mcp-permissions-workspace-${crypto.randomUUID()}`,
@@ -64,16 +67,22 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  if (client && otherWorkspaceId)
+    await deleteWorkspace(client.db, otherWorkspaceId).catch(() => undefined);
   if (client && workspaceId) await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
   await client?.close();
   await shared?.release();
 }, 60_000);
 
-async function headers(permissions: string[]) {
+async function headers(
+  permissions: string[],
+  targetWorkspaceId = workspaceId,
+  targetSubjectId = subjectId,
+) {
   const bearer = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId,
-    workspaceId,
-    subjectId,
+    workspaceId: targetWorkspaceId,
+    subjectId: targetSubjectId,
     principalKind: "human_session",
     permissions: permissions as never,
     exp: Math.floor(Date.now() / 1_000) + 3_600,
@@ -81,8 +90,8 @@ async function headers(permissions: string[]) {
   return { authorization: `Bearer ${bearer}`, "content-type": "application/json" };
 }
 
-function path(query?: Record<string, string>) {
-  const base = `http://x/v1/workspaces/${workspaceId}/session-mcp-tool-permissions`;
+function path(query?: Record<string, string>, targetWorkspaceId = workspaceId) {
+  const base = `http://x/v1/workspaces/${targetWorkspaceId}/session-mcp-tool-permissions`;
   return query ? `${base}?${new URLSearchParams(query)}` : base;
 }
 
@@ -274,5 +283,91 @@ describe("host session MCP tool permissions", () => {
       expect(refused).toBeInstanceOf(HTTPException);
       expect((refused as HTTPException).status).toBe(403);
     }
+  });
+
+  test("rules for the same server and URL are isolated per workspace", async () => {
+    if (!available || !client || !shared) return;
+    // A second workspace in the same account, managed by someone who is not a member of A.
+    const subjectB = `user:session-mcp-permissions-b-${crypto.randomUUID()}`;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId,
+      accountName: "Session MCP permissions account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `session-mcp-permissions-workspace-b-${crypto.randomUUID()}`,
+      workspaceName: "Session MCP permissions workspace B",
+      subjectId: subjectB,
+    });
+    const grantB = access.workspaceGrants.find((grant) => grant.workspaceId !== workspaceId);
+    expect(grantB).toBeDefined();
+    otherWorkspaceId = grantB!.workspaceId;
+    expect(grantB!.accountId).toBe(accountId);
+    await shared.admin`
+      update workspace_memberships
+      set permissions = '["workspace:read", "workspace:admin", "capabilities:manage"]'::jsonb
+      where workspace_id = ${otherWorkspaceId} and subject_id = ${subjectB}`;
+    const adminA = await headers(["workspace:read", "capabilities:manage"]);
+    const adminB = await headers(
+      ["workspace:read", "capabilities:manage"],
+      otherWorkspaceId,
+      subjectB,
+    );
+
+    expect(
+      (
+        await app!.request(path(), {
+          method: "PATCH",
+          headers: adminA,
+          body: JSON.stringify({
+            serverId,
+            url,
+            target: "tools",
+            toolNames: ["cloudgeni_isolation_probe"],
+            permission: "block",
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    const inA = await (await app!.request(path({ serverId, url }), { headers: adminA })).json();
+    expect(inA.tools).toContainEqual({
+      toolName: "cloudgeni_isolation_probe",
+      permission: "block",
+    });
+
+    // Same server id and exact URL, so the same connection identity, but another workspace.
+    const inB = await (
+      await app!.request(path({ serverId, url }, otherWorkspaceId), { headers: adminB })
+    ).json();
+    expect(inB.connectionId).toBe(runtimeConnectionId);
+    expect(inB.tools).toEqual([]);
+    expect(inB.defaultPermission).toBeNull();
+    const policiesB = await listConnectorToolPermissionPolicies(client.db, {
+      accountId,
+      workspaceId: otherWorkspaceId,
+      connectionId: runtimeConnectionId,
+    });
+    expect(decide(policiesB, "cloudgeni_isolation_probe", "allow")).toBe("allow");
+
+    // B's credential cannot read or change A's rules through A's path.
+    const crossRead = await app!.request(path({ serverId, url }), { headers: adminB });
+    expect([401, 403, 404]).toContain(crossRead.status);
+    const crossWrite = await app!.request(path(), {
+      method: "PATCH",
+      headers: adminB,
+      body: JSON.stringify({
+        serverId,
+        url,
+        target: "tools",
+        toolNames: ["cloudgeni_isolation_probe"],
+        permission: "allow",
+      }),
+    });
+    expect([401, 403, 404]).toContain(crossWrite.status);
+    const stillA = await listConnectorToolPermissionPolicies(client.db, {
+      accountId,
+      workspaceId,
+      connectionId: runtimeConnectionId,
+    });
+    expect(decide(stillA, "cloudgeni_isolation_probe", "allow")).toBe("block");
   });
 });

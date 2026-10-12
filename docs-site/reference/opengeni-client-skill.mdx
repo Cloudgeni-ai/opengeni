@@ -695,7 +695,9 @@ await og.asUser(admin.id).updateSessionMcpToolPermissions(workspaceId, {
 ```
 
 Writes need `capabilities:manage`. Agents cannot change their own
-permissions. A change applies from each chat's next run.
+permissions. A change applies from each chat's next run. Choices are keyed to
+the exact URL string, so changing it (even a trailing slash or query) starts
+from no saved choices; re-save them under the new URL when you move the server.
 
 ### Local development
 

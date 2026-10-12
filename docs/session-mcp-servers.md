@@ -341,7 +341,11 @@ through `GET /v1/workspaces/:workspaceId/session-mcp-tool-permissions?serverId=&
 and `PATCH` on the same route (`OpenGeniClient.getSessionMcpToolPermissions` and
 `updateSessionMcpToolPermissions`). The host names the server id and the exact
 URL it attaches; Opengeni derives the `session-mcp:` identity above, so a
-different URL is a different server. The response lists only saved choices:
+different URL is a different server. The identity hashes the exact URL string
+without normalizing it, so changing the attached URL (including a trailing
+slash or query) orphans the saved rules; the host must re-save them under the
+new URL. Every reader and writer derives the identity through the runtime's
+`sessionMcpApprovalConnectionId`. The response lists only saved choices:
 `defaultPermission` (the `*` rule) and whole-tool rules, plus `revision` for
 `expectedRevision`. Tools without a choice follow the default, then the
 session's `requireApproval` recommendation, then Allow. The host owns its tool
