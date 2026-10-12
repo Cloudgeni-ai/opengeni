@@ -39,7 +39,8 @@ const CLAUDE = subscriptionCoreClaudeProvider({
 for (const [specifier, factory] of testSubscriptionCoreProviderModules(CLAUDE))
   mock.module(specifier, factory);
 
-const { createDb, bootstrapWorkspace } = await import("@opengeni/db");
+const { createDb, bootstrapWorkspace, createManagedOrganization, createOrganizationWorkspace } =
+  await import("@opengeni/db");
 const { stampDelegatedHumanAuthorization } = await import("@opengeni/core");
 const { createApp } = await import("../src/app");
 type DbClient = Awaited<ReturnType<typeof createDb>>;
@@ -402,5 +403,156 @@ describe("Claude usage routes on the core route", () => {
       );
       expect(refused.status).toBe(403);
     }
+  });
+});
+
+describe("the owner's personal connection on the core route", () => {
+  const origin = "http://opengeni.test";
+  /** The app with real browser sign-in (Better Auth on the test database). */
+  function managedApp() {
+    return createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        delegationSecret: DELEGATION_SECRET,
+        environmentsEncryptionKey: key.toString("base64"),
+        claudeSubscriptionEnabled: true,
+        sandboxBackend: "none",
+        betterAuthSecret: "claude-core-usage-routes-secret-32-bytes",
+        publicBaseUrl: origin,
+      }),
+      db: client.db,
+      bus: { publish: async () => undefined } as never,
+      workflowClient: {
+        wakeSessionWorkflow: async () => undefined,
+        requestSessionWorkflowWakeDispatch: async () => undefined,
+      } as never,
+      claudeFetch: scriptedUsage,
+    } as never);
+  }
+
+  /** A person signed in through the browser, owning a new organization. */
+  async function signedInOwner(api: ReturnType<typeof managedApp>) {
+    const email = `claude-usage-${crypto.randomUUID()}@example.test`;
+    const password = "password1234";
+    await api.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Claude Owner", email, password }),
+    });
+    await shared.admin`update auth_users set email_verified = true where email = ${email}`;
+    const signedIn = await api.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password, rememberMe: true }),
+    });
+    const cookie = signedIn.headers
+      .getSetCookie()
+      .find((value) => value.includes("better-auth.session_token="))!
+      .split(";", 1)[0]!;
+    const [user] = await shared.admin<{ id: string }[]>`
+      select id from auth_users where email = ${email}`;
+    const subjectId = `user:${user!.id}`;
+    const created = await createManagedOrganization(client.db, {
+      subjectId,
+      subjectLabel: email,
+      name: "Claude usage organization",
+      operationId: crypto.randomUUID(),
+    });
+    // A shared workspace of the organization, created by its owner.
+    const sharedWorkspace = await createOrganizationWorkspace(client.db, {
+      organizationId: created.organization.id,
+      actorSubjectId: subjectId,
+      name: "Claude usage shared workspace",
+      operationId: crypto.randomUUID(),
+    });
+    const access = (await (await api.request("/v1/access/me", { headers: { cookie } })).json()) as {
+      accountGrants: Array<{ accountId: string }>;
+      workspaceGrants: Array<{ workspaceId: string }>;
+    };
+    const accountId = access.accountGrants[0]!.accountId;
+    const [membership] = await shared.admin<
+      { id: string; personal_workspace_id: string | null }[]
+    >`select id::text as id, personal_workspace_id::text as personal_workspace_id
+      from organization_memberships
+      where account_id = ${accountId}::uuid and subject_id = ${subjectId}`;
+    expect(access.workspaceGrants.map((grant) => grant.workspaceId)).toContain(sharedWorkspace.id);
+    await shared.admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${accountId}::uuid, 'claude', true)
+      on conflict (account_id, provider) do update set enabled = excluded.enabled`;
+    const org: Org = {
+      accountId,
+      workspaceId: sharedWorkspace.id,
+      personalWorkspaceId: membership!.personal_workspace_id!,
+      ownerSubjectId: subjectId,
+      ownerMembershipId: membership!.id,
+      memberSubjectId: `user:claude-usage-member-${crypto.randomUUID()}`,
+    };
+    return { org, cookie };
+  }
+
+  test("the owner reads it and gets its stored projection on refresh only in their own Personal workspace", async () => {
+    usageCalls.length = 0;
+    const api = managedApp();
+    const { org, cookie } = await signedInOwner(api);
+    expect(org.personalWorkspaceId).toBeTruthy();
+    const personal = await personalConnection(org, "owner-personal");
+    const browser = {
+      cookie,
+      origin,
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    };
+    const usagePath = (workspaceId: string) =>
+      `/v1/workspaces/${workspaceId}/claude/accounts/${personal}/usage`;
+
+    // In a shared workspace it is not there, for its owner either.
+    for (const method of ["GET", "POST"] as const) {
+      const response = await api.request(
+        `${usagePath(org.workspaceId)}${method === "POST" ? "/refresh" : ""}`,
+        method === "POST" ? { method, headers: browser, body: "{}" } : { headers: browser },
+      );
+      expect(response.status).toBe(404);
+    }
+    // Another organization's signed-in owner cannot reach it.
+    const stranger = await signedInOwner(api);
+    for (const method of ["GET", "POST"] as const) {
+      const response = await api.request(
+        `${usagePath(org.personalWorkspaceId)}${method === "POST" ? "/refresh" : ""}`,
+        method === "POST"
+          ? { method, headers: { ...browser, cookie: stranger.cookie }, body: "{}" }
+          : { headers: { ...browser, cookie: stranger.cookie } },
+      );
+      expect(response.status).toBeGreaterThanOrEqual(403);
+      expect(response.status).toBeLessThan(500);
+    }
+
+    // The owner, in their own Personal workspace: GET projects the stored
+    // connection (no 409 from the legacy ordinary-workspace rule).
+    const read = await api.request(usagePath(org.personalWorkspaceId), { headers: browser });
+    expect(read.status).toBe(200);
+    expect(read.headers.get("cache-control")).toBe("private, no-store");
+    const stored = (await read.json()) as { connected: boolean; credentialVersion: number };
+    expect(stored.connected).toBe(true);
+    expect(stored.credentialVersion).toBe(await connectionVersion(personal));
+    // POST answers the stored projection as `unavailable` until the owner-only
+    // live read lands (C2c); nothing is read live.
+    const refreshed = await api.request(`${usagePath(org.personalWorkspaceId)}/refresh`, {
+      method: "POST",
+      headers: browser,
+      body: "{}",
+    });
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.headers.get("cache-control")).toBe("private, no-store");
+    const body = (await refreshed.json()) as {
+      refreshStatus: string;
+      refreshCheckedAt: string | null;
+      credentialVersion: number;
+    };
+    expect(body.refreshStatus).toBe("unavailable");
+    expect(body.refreshCheckedAt).toBeNull();
+    expect(body.credentialVersion).toBe(await connectionVersion(personal));
+    expect(usageCalls).toEqual([]);
   });
 });

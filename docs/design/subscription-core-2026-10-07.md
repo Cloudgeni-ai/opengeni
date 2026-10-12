@@ -4879,7 +4879,10 @@ core read before C3 fails closed in the registry.
   the pool source, so today's private-human and scope-mutation checks apply
   unchanged, including the 409 for an organization-pool connection on the
   workspace path), or the caller's own personal connection only in the
-  caller's own Personal workspace through the owner-only reader. The
+  caller's own Personal workspace through the owner-only reader; its
+  verified owner is checked there (X2b's `personal_workspace` place of the
+  private-subscription check, D-03), not by the legacy ordinary-workspace
+  membership rule, which no Personal workspace passes. The
   organization route reads the organization pool for an organization
   administrator only. Anything else is the legacy 404; a malformed id never
   reaches SQL.

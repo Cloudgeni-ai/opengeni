@@ -102,11 +102,22 @@ export async function coreClaudeUsage(
     accountIdParam: caller.accountIdParam,
   });
   if (!target) throw new HTTPException(404, { message: "Claude account not found" });
-  // The legacy authority checks, by the scope the connection maps to.
+  // The legacy authority checks, by the scope the connection maps to. A
+  // personal connection lives only in its owner's own Personal workspace on
+  // the core (D-03), so its verified owner is checked there, never through
+  // the legacy ordinary-workspace membership rule (which no Personal
+  // workspace passes).
   if (target.scope === "user")
-    await requirePrivateSubscriptionHuman(c, deps, workspaceId, "Claude");
+    await requirePrivateSubscriptionHuman(c, deps, workspaceId, "Claude", "personal_workspace");
   if (!mutation) return projectSubscriptionCoreClaudeUsage(target.row);
-  await requireSubscriptionScopeMutation(c, deps, workspaceId, target.scope, "Claude");
+  await requireSubscriptionScopeMutation(
+    c,
+    deps,
+    workspaceId,
+    target.scope,
+    "Claude",
+    "personal_workspace",
+  );
   if (target.scope === "user") return unreadableUsage(target.row);
   const { usage, recovered } = await refreshSubscriptionCoreClaudeWorkspaceUsage(
     deps.db,
