@@ -108,6 +108,11 @@ import {
   sessionGroupWindowNodes,
   type SessionGroupFillCandidate,
 } from "@/lib/session-group-window";
+import {
+  readSessionGroupWindows,
+  sessionGroupWindowMemoryId,
+  writeSessionGroupWindows,
+} from "@/lib/session-group-window-memory";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { analyticsAction } from "@/lib/analytics-actions";
 import { countNeedsYou, filterNeedsYou } from "@/lib/needs-you";
@@ -501,10 +506,30 @@ export function SessionList() {
     paginationKey,
   );
   const pageGeneration = paginationIdentity.current.generation;
+  // Manual Show more windows survive leaving the rail (for example Settings)
+  // in this tab. Each person/workspace remembers the current view only.
+  const groupWindowMemoryId = sessionGroupWindowMemoryId(
+    context.accessContext.subjectId,
+    rail.workspaceId,
+  );
+  const restoredGroupWindows = useMemo(
+    () => readSessionGroupWindows(groupWindowMemoryId, paginationKey),
+    [groupWindowMemoryId, paginationKey],
+  );
   const [groupWindows, setGroupWindows] = useState<{
     generation: number;
+    memoryId: string;
     counts: ReadonlyMap<string, number>;
-  }>(() => ({ generation: pageGeneration, counts: new Map() }));
+  }>(() => ({ generation: -1, memoryId: "", counts: new Map() }));
+  const activeGroupWindows =
+    groupWindows.generation === pageGeneration && groupWindows.memoryId === groupWindowMemoryId
+      ? groupWindows.counts
+      : restoredGroupWindows;
+  useEffect(() => {
+    if (groupWindows.generation !== pageGeneration) return;
+    if (groupWindows.memoryId !== groupWindowMemoryId) return;
+    writeSessionGroupWindows(groupWindowMemoryId, paginationKey, groupWindows.counts);
+  }, [groupWindowMemoryId, groupWindows, pageGeneration, paginationKey]);
   // Extra rows that use spare rail height, planned from measured layout.
   // Manual disclosure (groupWindows) stacks on top of this fill.
   const [groupFill, setGroupFill] = useState<{
@@ -517,10 +542,8 @@ export function SessionList() {
     [groupFill, pageGeneration],
   );
   const baseCountForGroup = useCallback(
-    (key: string) =>
-      (groupWindows.generation === pageGeneration ? groupWindows.counts.get(key) : undefined) ??
-      SESSION_GROUP_VISIBLE_STEP,
-    [groupWindows, pageGeneration],
+    (key: string) => activeGroupWindows.get(key) ?? SESSION_GROUP_VISIBLE_STEP,
+    [activeGroupWindows],
   );
   const visibleCountForGroup = useCallback(
     (key: string) => baseCountForGroup(key) + fillCountForGroup(key),
@@ -2686,10 +2709,12 @@ export function SessionList() {
         // Manual disclosure stacks on the automatic fill shown when clicked.
         setGroupWindows((current) => ({
           generation: pageGeneration,
-          counts: new Map(current.generation === pageGeneration ? current.counts : []).set(
-            group.key,
-            Math.max(SESSION_GROUP_VISIBLE_STEP, nextCount - fillCount),
-          ),
+          memoryId: groupWindowMemoryId,
+          counts: new Map(
+            current.generation === pageGeneration && current.memoryId === groupWindowMemoryId
+              ? current.counts
+              : restoredGroupWindows,
+          ).set(group.key, Math.max(SESSION_GROUP_VISIBLE_STEP, nextCount - fillCount)),
         }));
         setAnnouncement(`Showing up to ${nextCount} sessions in ${group.label}.`);
         return result.exhausted && nodes.length + result.added <= nextCount;
@@ -2906,7 +2931,9 @@ export function SessionList() {
     for (const target of fillTargetsRef.current) {
       const fill = fillCountForGroup(target.key);
       const visible = target.base + fill;
-      if (!target.group || !target.hasMore || target.loading || fill === 0) continue;
+      // Restored manual windows load too, after the rail returns from Settings.
+      const restored = target.base > SESSION_GROUP_VISIBLE_STEP;
+      if (!target.group || !target.hasMore || target.loading || (fill === 0 && !restored)) continue;
       if (visible <= target.loaded) continue;
       const request = `${pageGeneration}:${target.loaded}:${visible}`;
       if (fillRequests.current.get(target.key) === request) continue;

@@ -134,6 +134,12 @@ describe("session group fill", () => {
     expect(plan([group("a", 6, true)], { a: 12 }, 13)).toEqual({ a: 15 });
   });
 
+  test("counts a restored manual window that is still loading", () => {
+    // Show more was at 12 before Settings; only the first 4 rows are back yet.
+    expect(plan([group("a", 4, true, 12)], {}, 8)).toEqual({});
+    expect(plan([group("a", 4, true, 12)], {}, 11)).toEqual({ a: 3 });
+  });
+
   test("keeps visible rows when content grows without the viewport shrinking", () => {
     expect(plan([group("a", 40, true), group("b", 40, true, 12)], { a: 6 }, -8)).toEqual({ a: 6 });
   });

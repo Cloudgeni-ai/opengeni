@@ -18,8 +18,8 @@ export type SessionGroupFillCandidate = {
  * Plan the extra rows each group shows to use spare rail height.
  *
  * Spare rows go top-down to groups that still hide rows. Rows already planned
- * but not loaded yet count against the spare space, so slow pages never cause
- * over-allocation. Rows are taken back bottom-up only when `shrink` is set
+ * or restored but not loaded yet count against the spare space, so slow pages
+ * never cause over-allocation. Rows are taken back bottom-up only when `shrink` is set
  * (the rail viewport itself got shorter); content growth from manual
  * disclosure or new sessions never retracts rows the reader can already see.
  * Groups absent from `candidates` (collapsed or no longer rendered) drop
@@ -40,7 +40,8 @@ export function planSessionGroupFill(
     shown.set(candidate.key, rendered);
     // An exhausted group can never render rows it does not have.
     next.set(candidate.key, candidate.hasMore ? fill : rendered);
-    if (candidate.hasMore) pending += fill - rendered;
+    // Unloaded rows of the manual window will appear without new fill.
+    if (candidate.hasMore) pending += Math.max(0, candidate.base + fill - candidate.loaded);
   }
   if (freeRows >= pending) {
     let available = freeRows - pending;
