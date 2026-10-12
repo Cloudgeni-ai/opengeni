@@ -491,8 +491,15 @@ describe("migration 0303 session tenancy product activation", () => {
     `;
     // Admin grants are organization authority, not conversation content. Their
     // resolver reads the grant before establishing session visibility. All other
-    // session references still require the restrictive visibility policy.
-    expect(Array.from(missing)).toEqual([{ tableName: "session_admin_access" }]);
+    // session references still require the restrictive visibility policy,
+    // except published Site versions and events (0731): those belong to the
+    // workspace, and their source chat is only provenance, which the API
+    // redacts for anyone who cannot read that chat.
+    expect(Array.from(missing)).toEqual([
+      { tableName: "session_admin_access" },
+      { tableName: "workspace_artifact_events" },
+      { tableName: "workspace_artifact_versions" },
+    ]);
     const adminPolicies = await shared.admin<
       Array<{
         forced: boolean;
