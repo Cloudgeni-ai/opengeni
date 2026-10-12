@@ -33,7 +33,7 @@ export function OpenInAppBanner() {
       action={
         <a
           href={openInAppUrl(window.location.href)}
-          className="inline-flex h-8 items-center rounded-md px-2 text-xs font-medium text-brand underline-offset-2 hover:underline pointer-coarse:h-11"
+          className="inline-flex h-8 items-center rounded-md px-2 text-xs font-medium og-link pointer-coarse:h-11"
         >
           Open in app
         </a>

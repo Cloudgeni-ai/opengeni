@@ -855,7 +855,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             0 ? (
             <p className="px-2.5 text-xs leading-4.5 text-fg-muted">
               Mounted repositories cannot be removed or retargeted.{" "}
-              <a href={props.newChatUrl} className="text-brand hover:underline">
+              <a href={props.newChatUrl} className="og-link">
                 Start a new chat
               </a>{" "}
               to change them.

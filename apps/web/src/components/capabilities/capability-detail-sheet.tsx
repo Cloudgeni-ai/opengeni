@@ -1004,7 +1004,7 @@ export function FikenConnectorControls({
   const tokenFallbackToggle = (
     <button
       type="button"
-      className="mx-auto block text-xs font-medium text-brand hover:underline"
+      className="mx-auto block text-xs font-medium og-link"
       onClick={() => setUsingToken(true)}
     >
       Use an API token instead
@@ -1227,7 +1227,7 @@ export function CredentialForm({
           href={keyPageUrl}
           target="_blank"
           rel="noreferrer noopener"
-          className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+          className="inline-flex items-center gap-1 text-xs font-medium og-link"
         >
           {compact
             ? `Where do I find my ${fields[0]?.label ?? "credentials"}?`
@@ -1327,7 +1327,7 @@ function ExternalMetaLink({ href }: { href: string }) {
       href={href}
       target="_blank"
       rel="noreferrer noopener"
-      className="inline-flex min-w-0 items-center gap-1 truncate font-medium text-brand hover:underline"
+      className="inline-flex min-w-0 items-center gap-1 truncate font-medium og-link"
     >
       <span className="truncate">{label}</span>
       <ExternalLinkIcon className="size-3 shrink-0" />

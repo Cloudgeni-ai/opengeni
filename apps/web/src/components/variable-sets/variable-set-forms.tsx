@@ -360,7 +360,7 @@ export function AddVariableRow({
         <button
           type="button"
           onClick={onPaste}
-          className="inline-flex items-center gap-1 rounded-sm font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:min-h-11"
+          className="inline-flex items-center gap-1 rounded-sm font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:min-h-11"
         >
           <FileTextIcon aria-hidden="true" className="size-3.5" />
           Paste .env
