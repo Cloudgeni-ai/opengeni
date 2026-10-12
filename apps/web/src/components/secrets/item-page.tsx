@@ -288,7 +288,7 @@ function FieldHistory({
   const versions = history.versions ?? [];
   return (
     <Disclosure
-      variant="inline"
+      variant="row"
       title={`${fieldLabel(field.name)} history`}
       summary={field.currentVersion ? `Version ${field.currentVersion}` : undefined}
       open={open}

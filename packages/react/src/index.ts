@@ -240,6 +240,7 @@ export {
   useVaultItem,
   useVaultFieldVersions,
   useSessionSecrets,
+  VAULT_ITEM_PAGE_LIMIT,
 } from "./hooks/use-vaults";
 export type { UseVaultQueryOptions } from "./hooks/use-vaults";
 export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults";

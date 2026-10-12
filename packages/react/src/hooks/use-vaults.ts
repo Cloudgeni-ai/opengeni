@@ -59,11 +59,12 @@ export function useVault(
   return { vault: data, loading, error, refresh, api };
 }
 
-const ITEM_PAGE_LIMIT = 500;
+/** The contract's maximum page size (`ListVaultItemsQuery.limit`). */
+export const VAULT_ITEM_PAGE_LIMIT = 200;
 
 /**
  * A vault's items (metadata only). Follows cursors so a dense vault renders
- * as one virtualized list; `q`/`type` filter server-side.
+ * as one list; `q`/`type` filter server-side.
  */
 export function useVaultItems(
   vaultId: string,
@@ -79,7 +80,7 @@ export function useVaultItems(
       for (let page = 0; page < 40; page += 1) {
         const result = await api.listItems(
           vaultId,
-          { q, type, includeArchived, cursor, limit: ITEM_PAGE_LIMIT },
+          { q, type, includeArchived, cursor, limit: VAULT_ITEM_PAGE_LIMIT },
           signal,
         );
         items.push(...result.items);
