@@ -322,7 +322,6 @@ export {
   readSubscriptionCoreProviderRouteForWorkspace,
   type SubscriptionCoreProviderRoute,
 } from "./subscription-core/provider-route";
-import { readSubscriptionCoreProviderRouteForWorkspace as readProviderRouteForWorkspace } from "./subscription-core/provider-route";
 export {
   readSubscriptionCoreRouteFunding,
   readSubscriptionCoreRouteReadiness,

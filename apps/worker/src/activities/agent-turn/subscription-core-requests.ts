@@ -231,13 +231,13 @@ export async function settleCoreResponse(
 
 type CoreLanes = {
   requests?: Pick<CoreSubscriptionRequests, "hasUnknownOutcome" | "canRecover" | "checkpoint">;
-  titleRequests?: Pick<CoreSubscriptionRequests, "hasUnknownOutcome" | "canRecover">;
 };
 
 /**
  * The terminal unknown-outcome failure of a core turn, or null: an earlier or
  * own request whose outcome is unknown (the error chain carries the core's
- * code, or either lane observed one) is never replayed automatically.
+ * code, or the main lane observed one) is never replayed automatically.
+ * Tool-less title requests never enter history and do not fence main recovery.
  */
 export function coreRequestOutcomeUnknownFailure(
   error: unknown,
@@ -252,12 +252,11 @@ export function coreRequestOutcomeUnknownFailure(
       current.code === "subscription_core_request_outcome_unknown";
     current = current.cause;
   }
-  if (!unknown && !core.requests?.hasUnknownOutcome() && !core.titleRequests?.hasUnknownOutcome())
-    return null;
+  if (!unknown && !core.requests?.hasUnknownOutcome()) return null;
   return outcomeUnknown() as Error & { code: string };
 }
 
-/** After the history commit, settle completed responses; true when no request is unresolved. */
+/** After the history commit, settle main responses; titles do not fence recovery. */
 export async function coreLanesRecoverAfterCheckpoint(
   core: CoreLanes,
   commitHistory: () => Promise<void>,
@@ -265,10 +264,7 @@ export async function coreLanesRecoverAfterCheckpoint(
   try {
     await commitHistory();
     await core.requests?.checkpoint();
-    return (
-      (!core.requests || core.requests.canRecover()) &&
-      (!core.titleRequests || core.titleRequests.canRecover())
-    );
+    return !core.requests || core.requests.canRecover();
   } catch {
     return false;
   }

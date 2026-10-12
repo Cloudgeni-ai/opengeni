@@ -823,7 +823,8 @@ test("model admission uses the exact frozen Claude account and keeps exhausted m
     input.subjectId,
     [],
     undefined,
-    null,
+    undefined,
+    { "workspace-claude-subscription/": [], "organization-claude-subscription/": [] },
   );
   expect(onCore["workspace-claude-subscription/"]).toEqual([]);
   expect(onCore["organization-claude-subscription/"]).toEqual([]);
@@ -833,9 +834,7 @@ test("model admission uses the exact frozen Claude account and keeps exhausted m
     input.subjectId,
     [],
     undefined,
-    {
-      authoritySnapshot,
-    },
+    authoritySnapshot,
   );
   expect(legacy["workspace-claude-subscription/"]).toEqual([sonnet]);
   const {

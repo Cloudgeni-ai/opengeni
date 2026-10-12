@@ -233,7 +233,7 @@ describe("Claude failure settlement on the core", () => {
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
     const { deps, order } = failureDeps(
       new Error("lease lost"),
-      core({ requests: lane(), titleRequests: lane({ unknown: true }) }),
+      core({ requests: lane({ unknown: true }), titleRequests: lane() }),
       true,
     );
     const recover = recovery(order);
@@ -261,6 +261,24 @@ describe("Claude failure settlement on the core", () => {
       expect.objectContaining({ reason: "claude_lease_lost" }),
     );
   });
+
+  for (const titleState of [{ unknown: true }, { unresolved: true }]) {
+    test(`a tool-less title does not fence main recovery (${Object.keys(titleState)[0]})`, async () => {
+      const { deps, order } = failureDeps(
+        new Error("lease lost"),
+        core({ requests: lane(), titleRequests: lane(titleState) }),
+        true,
+      );
+      const recover = recovery(order);
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recover).toHaveBeenCalledWith(
+        expect.anything(),
+        "workspace-1",
+        expect.objectContaining({ reason: "claude_lease_lost" }),
+      );
+      expect(order.indexOf("history")).toBeLessThan(order.indexOf("recovery"));
+    });
+  }
 
   test("a lost core lease before the turn start was published neither checkpoints nor recovers", async () => {
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);

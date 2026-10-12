@@ -5001,20 +5001,19 @@ unregistered until then.
   Session titles use their own lane under
   the same fence; only an admitted main-lane request moves the generation
   the refusal settlement fences on (`core.credentialVersion`), so a title
-  request renewed after a 401 never does. The legacy usage observer, its receipts and its usage
+  request renewed after a 401 never does. As with the title-independent
+  recovery in #4179, tool-less title requests never enter history and do not
+  block main-request recovery or failover; unknown or unresolved main requests
+  still fail closed. The legacy usage observer, its receipts and its usage
   rows are not used on a core turn; header usage becomes quota
   observations in C1b.
-- Readiness and `list_models`. On the core route the catalog answers from
-  the core projection (`readSubscriptionCoreRouteReadiness`); every Claude
-  connection there belongs to the organization, so new selections offer the
-  organization's Claude models (the union of the serving connections'
-  allowlists) and no workspace-scoped Claude model, while an accepted turn
-  that already names a workspace-scoped id still runs. A frozen legacy
-  authority snapshot no longer selects the pool, and the connection
-  restriction loader reads Claude's route and skips the legacy Claude pool
-  (authority, accounts, rotation) unless it is `legacy`, so a retired
-  legacy pool can never fail the catalog. The legacy route costs one
-  receipt read in the catalog loader and one in the restriction loader.
+- Readiness and `list_models` use the merged C2a implementation below, not a
+  second C1a reader. `readSubscriptionCoreClaudeCatalogReadiness` projects
+  workspace and organization readiness and allowlists separately, and one
+  projection is shared with the restriction loader. A frozen legacy authority
+  snapshot no longer selects the core pool. Legacy Claude pools are never read
+  on the core route; maintenance closes both prefixes. Workspace and eligible
+  Personal-workspace pools retain their workspace-prefixed catalog models.
 - Funding and attribution: admission funding on the core is opt-in per
   provider (`CORE_ROUTED_FUNDING`, from X1b); C1a adds the `claude` entry, so
   a Claude admission reads its provider route only while Claude

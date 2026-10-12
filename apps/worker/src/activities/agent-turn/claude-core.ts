@@ -395,7 +395,7 @@ export function claudeCoreRequestPreparer(input: {
  */
 export function claudeCoreRequestOutcomeUnknown(
   error: unknown,
-  core: Pick<SubscriptionCoreTurn, "requests" | "titleRequests">,
+  core: Pick<SubscriptionCoreTurn, "requests">,
 ): (Error & { code: string }) | null {
   return coreRequestOutcomeUnknownFailure(error, core, () => CLAUDE.errors.requestOutcomeUnknown());
 }
