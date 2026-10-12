@@ -82,8 +82,7 @@ const MARKERS: Record<string, RegExp> = {
   repositories: /repos\/<host>|pull request|git reset|dirty worktree|gh, glab/u,
   attachments: /\.opengeni\/files|Attached files/u,
   machines: /Connected Machine|\/home\/u\/proj|C:\/repo/u,
-  admin:
-    /variable_set_list|capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get|Variable Set/u,
+  admin: /capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get/u,
   skills: /# Using skills|Skill index/u,
   media: /# Images and video|generate_image|generate_video|image_generation/u,
   sandbox: /apply_patch|exec_command|rg --files|mktemp|sandbox:\/workspace/u,

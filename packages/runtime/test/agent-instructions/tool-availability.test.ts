@@ -37,7 +37,6 @@ const PROMPT_NAMED_TOOLS = [
   "knowledge_retain_file",
   "instruction_policy_get",
   "instruction_policy_save",
-  "variable_set_list",
   "capability_catalog_search",
   "capability_authorization_request",
   "custom_mcp_setup_request",

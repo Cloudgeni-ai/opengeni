@@ -58,7 +58,7 @@ export const subagentsModule: AgentPromptModule = {
   id: "subagents",
   applies: (context) => context.capabilities.subagents,
   render: (context) => {
-    const { goals, workspaceAdmin } = context.capabilities;
+    const { goals } = context.capabilities;
     const sessionEvents = toolAvailable(context, "session_events");
     const waitForInput = toolAvailable(context, "wait_for_input");
     const pollingTools = toolsAvailable(context, ["session_wait", "session_get"]);
@@ -82,9 +82,6 @@ export const subagentsModule: AgentPromptModule = {
         "Before spawning, decide what output you need and keep the parent's concurrent work disjoint.",
         "Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable.",
         "If no useful independent work remains and no such delegation is requested, continue in this session.",
-        workspaceAdmin &&
-          toolsAvailable(context, ["variable_set_list", "session_create"]) &&
-          "A session cannot gain a Variable Set while it works, so when even a short step needs one from `variable_set_list` that this session lacks and the request calls for it, run that step in a child created with those `variableSetIds` instead of asking the user to attach it.",
         "Do not repurpose or direct an unrelated existing session unless the user explicitly asks.",
         "If no matching session tool is available on this turn, handle what you can in this session and report any required delegation that is unavailable instead of inventing an API.",
       ),

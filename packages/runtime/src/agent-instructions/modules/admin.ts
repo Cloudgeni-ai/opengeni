@@ -1,27 +1,20 @@
 import { blocks, sentences, toolAvailable, type AgentPromptModule } from "../types";
 
 /**
- * Integration setup and Variable Set discovery (workspace admin tools). A
+ * Integration setup (workspace admin tools). A
  * sentence naming a setup tool renders unless the attempt proved it absent.
  */
 export const adminModule: AgentPromptModule = {
   id: "admin",
   applies: (context) => context.capabilities.workspaceAdmin,
   render: (context) => {
-    const variableSets = toolAvailable(context, "variable_set_list");
     const catalog = toolAvailable(context, "capability_catalog_search");
     const authorization = toolAvailable(context, "capability_authorization_request");
     const customMcp = toolAvailable(context, "custom_mcp_setup_request");
     const setupCards = authorization || customMcp;
-    const seeSessions = context.capabilities.subagents ? " (see Session coordination)" : "";
-    const discovery =
-      variableSets && catalog
-        ? `If access is missing, check \`variable_set_list\`${seeSessions}, then search \`capability_catalog_search\`.`
-        : variableSets
-          ? `If access is missing, check \`variable_set_list\`${seeSessions}.`
-          : catalog
-            ? "If access is missing, search `capability_catalog_search`."
-            : undefined;
+    const discovery = catalog
+      ? "If access is missing, search `capability_catalog_search`."
+      : undefined;
     return blocks(
       "# Integration setup",
       sentences(

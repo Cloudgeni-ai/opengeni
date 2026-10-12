@@ -983,6 +983,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "secret_search",
+  "secret_save",
+  "secret_get",
+  "secret_move",
+  "secret_delete",
   "variable_set_list",
   "environment_list",
   "variable_set_get_variable",
@@ -1126,6 +1131,27 @@ export const RETIRED_AGENT_LEARNING_TOOL_NAMES = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredLearningTools = new Set<FirstPartyMcpToolName>(RETIRED_AGENT_LEARNING_TOOL_NAMES);
 
+/**
+ * Variable-set tools replaced by the `secret_*` tools (vaults). Stored tool
+ * selections naming them still parse and select their successor; the remote
+ * server never registers them.
+ */
+export const RETIRED_SECRET_TOOL_NAMES = [
+  "variable_set_list",
+  "environment_list",
+  "variable_set_get_variable",
+  "variable_set_set_variable",
+  "environment_set_variable",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredSecretTools = new Set<FirstPartyMcpToolName>(RETIRED_SECRET_TOOL_NAMES);
+const RETIRED_SECRET_TOOL_SUCCESSORS = {
+  variable_set_list: "secret_search",
+  environment_list: "secret_search",
+  variable_set_get_variable: "secret_get",
+  variable_set_set_variable: "secret_save",
+  environment_set_variable: "secret_save",
+} as const satisfies Record<(typeof RETIRED_SECRET_TOOL_NAMES)[number], FirstPartyMcpToolName>;
+
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
   names: readonly FirstPartyMcpToolName[],
@@ -1148,10 +1174,15 @@ export function currentAgentLearningToolSelection(
     selected.add("instruction_policy_save");
     selected.add("instruction_policy_get");
   }
+  for (const [retired, successor] of Object.entries(RETIRED_SECRET_TOOL_SUCCESSORS)) {
+    if (selected.has(retired as FirstPartyMcpToolName)) selected.add(successor);
+  }
   // Only already-selected legacy confirmations survive for paused turn recovery.
   // New defaults never advertise this tool and it cannot create proposals.
   return [...selected].filter(
-    (name) => name === "remember_confirm" || !retiredLearningTools.has(name),
+    (name) =>
+      name === "remember_confirm" ||
+      (!retiredLearningTools.has(name) && !retiredSecretTools.has(name)),
   );
 }
 
@@ -1162,6 +1193,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "atlassian_search",
   "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
+  ...RETIRED_SECRET_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1226,6 +1258,7 @@ export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<s
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     !retiredLearningTools.has(name) &&
+    !retiredSecretTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&

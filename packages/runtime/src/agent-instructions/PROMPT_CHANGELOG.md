@@ -202,6 +202,18 @@ result.
 + Do not resend pending work or mistake acceptance for completion.
 ```
 
+Variable sets retired. Secrets now live in vaults and are used by reference
+from any session, so there is nothing to attach and no `variable_set_list`
+tool. Integration setup discovery starts at the capability catalog, and the
+child-session Variable Set workaround is gone. The legacy prompt is locked and
+keeps its text.
+
+```diff
+- If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.
+- A session cannot gain a Variable Set while it works, so when even a short step needs one from `variable_set_list` that this session lacks and the request calls for it, run that step in a child created with those `variableSetIds` instead of asking the user to attach it.
++ If access is missing, search `capability_catalog_search`.
+```
+
 ## Conditional variants (capability or resource absent)
 
 These sentences replace or drop a legacy sentence only when the named
@@ -218,8 +230,8 @@ unchanged.
   sentence and the goal document-deliverable bullet are omitted.
 - `subagents` off: in-flight examples read "(a command or a timed recheck)";
   Integration setup drops "(see Session coordination)".
-- `workspaceAdmin` off: the child Variable Set sentence and the rig
-  `rig_propose_change`/`rig_get` sentences are omitted.
+- `workspaceAdmin` off: the rig `rig_propose_change`/`rig_get` sentences are
+  omitted.
 - Managed sandbox only: "Use the active workspace path exactly as exposed to
   you. Managed sandboxes normally use `/workspace`."
 - Connected Machine only: "… A Connected Machine uses its host-native workspace
@@ -269,12 +281,11 @@ When a named tool is proven absent, only the clauses naming it change:
   or `instruction_policy_save` is narrowed or dropped; the "Before saving"
   paragraph and "Save a separate finding" need `knowledge_save`. Storage
   purpose, grounding, pending-entry, learning-mode, and authority rules stay.
-- Integration setup: the `variable_set_list`/`capability_catalog_search`
-  discovery sentence names what remains; the two setup-card sentences and the
+- Integration setup: the `capability_catalog_search` discovery sentence
+  needs its tool; the two setup-card sentences and the
   card follow-ups need their tools.
 - Session coordination: the `session_events` paragraph, the
-  `session_send_message` follow-up clause, the child Variable Set sentence
-  (`variable_set_list`, `session_create`), the `wait_for_input` long-wait and
+  `session_send_message` follow-up clause, the `wait_for_input` long-wait and
   `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
   and the `session_get` contrasts each need their tools.
 - Runtime mechanics and base behavior: without `wait_for_input` the in-flight

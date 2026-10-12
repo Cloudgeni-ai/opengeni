@@ -29,8 +29,10 @@ destination or a separate-agent mode.
   details. A list summary is not its complete configuration.
 - If the work needs a repository, use `github_repositories_list` to find the
   authorized repository and select the required resources.
-- If a separate agent needs sandbox credentials, use `variable_set_list` to find the suitable
-  Variable Set. Attach its identifier; do not copy secret values into prompts.
+- If the scheduled agent needs credentials, use `secret_search` to find the saved
+  item and write its reference (for example `{{secret:GitHub/token}}`) in the
+  prompt. Save it to the workspace with `secret_save` or `secret_move` when the
+  schedule runs without you; never copy secret values into prompts.
 - If it needs an integration such as Slack or Sentry, use
   `capability_catalog_search` and the available tool discovery to find the
   capability and exact operations. Follow returned connection/setup and approval
