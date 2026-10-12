@@ -4998,6 +4998,33 @@ triggers, the policy `subscription_settings_lock_guard_read`, the four
 routines and the two CHECKs; the stored locks stay and the resolver keeps
 ignoring locked workspace overrides.
 
+### Shared-chat explicit personal choice (0736, provisional ordinal)
+
+This is a **maintenance**, one-way runtime protocol upgrade. Stop all API,
+control-worker and turn-worker processes using this database, including old
+and candidate versions; supply their exact login names through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`).
+The migration checks the inventory and refuses live sessions before and after
+locking the accepted-work tables. It installs strict readers before enabling
+the acceptance writer. Start only the matching runtime after commit; its
+transaction-local protocol receipt prevents an incompatible writer from
+emitting restricted authority and incompatible readers from spending it.
+This receipt is not a feature flag or delegated permission.
+
+New explicit shared-chat consent is restricted to the exact session and
+connection owned by the accepting human, who need not be the chat creator.
+Existing v2 entries, compatibility records, waiting turns, background launch
+receipts and replay histories are not rewritten or reauthorized. Live owner,
+membership, resource-generation and effective-policy checks still apply.
+Other senders and automatic placement do not inherit the choice.
+
+After any restricted entry exists, do not restart a pre-upgrade image: its
+strict readers cannot parse that entry. Recovery is forward-only with readers
+that preserve the exact restriction; removing the field or regenerating old
+pools is not rollback. No provider cutover, data move or deployment is performed
+by this source change. The provisional ordinal must be reconciled against the
+published ledger during batch integration without renaming published SQL.
+
 ### Personal Codex acceptance under row security (0726)
 
 Migration `0726_subscription_personal_acceptance_reads.sql` is **rolling**

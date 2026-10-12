@@ -458,13 +458,13 @@ describe.skipIf(!realDb)("shared personal choice with a FORCE-RLS-bound schema o
     }
   });
 
-  test("reader-only restricted authority admits the account owner, never a sibling or another session", async () => {
+  test("restricted authority admits the account owner, never a sibling or another session", async () => {
     const f = await fixture();
     const own = await connect(f, f.participant);
     const sibling = await connect(f, f.participant);
     const turn = await send(f, f.participant);
-    // Simulate a future accepted value as the schema owner. No runtime writer
-    // emits it in the reader-first stage, and the app cannot rewrite it.
+    // Seed an exact accepted value as the schema owner to test readers
+    // independently of the acceptance writer. The app cannot rewrite it.
     const owner = createDb(database!.ownerUrl, { max: 1 });
     try {
       await withRlsContext(owner.db, f, async (tx) => {
@@ -505,6 +505,24 @@ describe.skipIf(!realDb)("shared personal choice with a FORCE-RLS-bound schema o
           'codex', ${f.accountId}::uuid, ${f.workspaceId}::uuid, ${f.participant.subjectId})`,
       );
       expect(versions).toEqual([]);
+      for (const routine of [
+        "read_subscription_core_owned_connection_credential",
+        "begin_subscription_core_owned_connection_refresh",
+      ] as const) {
+        const administered = await rawRows(
+          tx,
+          sql`select * from ${sql.raw(`opengeni_private.${routine}`)}(
+          'codex', ${f.accountId}::uuid, ${f.workspaceId}::uuid, ${f.participant.subjectId}, ${own}::uuid)`,
+        );
+        expect(administered).toEqual([]);
+      }
+      const [quota] = await rawRows<{ recorded: boolean }>(
+        tx,
+        sql`select opengeni_private.record_subscription_core_owned_connection_quota(
+          'codex', ${f.accountId}::uuid, ${f.workspaceId}::uuid, ${f.participant.subjectId}, ${own}::uuid,
+          1::bigint, 0::bigint, '{}'::jsonb, now()) as recorded`,
+      );
+      expect(quota!.recorded).toBe(false);
       for (const actor of [
         f.creator.subjectId,
         `api_key:${crypto.randomUUID()}`,

@@ -382,7 +382,11 @@ and compatibility `connectionIds` keep their original interpretation.
 
 Readers must support the restricted shape before any writer emits it. This
 is not a rolling-writer-compatible extension: old strict readers reject the
-extra field. Activation must fence incompatible readers; no backfill,
+extra field. Activation uses the established drained-maintenance upgrade and
+transaction-local runtime protocol receipt, not a parallel feature gate.
+The migration rejects live configured runtime database sessions; restricted
+acceptance rejects a missing receipt and restricted spending fails closed.
+Pre-upgrade binaries may not restart after activation. No backfill,
 generation rotation or rewriting of already accepted work is permitted.
 SQL access and placement consume the stored exact restriction, never a live
 binding as a substitute for consent. Live account-owner membership, workspace
