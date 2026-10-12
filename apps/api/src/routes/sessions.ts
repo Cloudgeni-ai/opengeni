@@ -168,6 +168,7 @@ import {
   listSessionGoalRevisions,
   rejectSessionGoalRevisionWithEvent,
   listSessionIdsInGroup,
+  countAllSessionsInGroup,
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
   listSessionsForSubject,
@@ -4170,13 +4171,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // Resolve the shared-exposure disclosure for a session's group: `shared` when
   // the group has >1 session (addendum E.1), and the OTHER sessions' ids ONLY
   // (never their conversation/metadata; the query selects only id — stress g).
+  // `shared` counts every member, including Only-me sessions the caller cannot
+  // read, because sharing is a property of the box; the ids stay actor-scoped.
   async function resolveSharedExposure(
     workspaceId: string,
     session: { id: string; sandboxGroupId: string },
   ): Promise<{ shared: boolean; sharedSessionIds: string[] }> {
-    const ids = await listSessionIdsInGroup(db, workspaceId, session.sandboxGroupId);
+    const [ids, memberCount] = await Promise.all([
+      listSessionIdsInGroup(db, workspaceId, session.sandboxGroupId),
+      countAllSessionsInGroup(db, workspaceId, session.sandboxGroupId),
+    ]);
     const others = ids.filter((id) => id !== session.id);
-    return { shared: others.length > 0, sharedSessionIds: others };
+    return { shared: memberCount > 1 || others.length > 0, sharedSessionIds: others };
   }
 
   // GET .../stream-capabilities — the capability-negotiation read. Returns the
