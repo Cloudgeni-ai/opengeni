@@ -35,6 +35,7 @@ import {
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   recoverInteractionReceipt,
+  secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
   type InteractionOperationJournalRecord,
@@ -44,6 +45,7 @@ export {
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
+  secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
 };
@@ -100,6 +102,7 @@ export class BrowserInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "browser",
         parseCommand: (value) => BrowserActionCommand.parse(value),
@@ -544,6 +547,7 @@ export class ComputerInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "computer",
         parseCommand: (value) => ComputerOperationCommand.parse(value),

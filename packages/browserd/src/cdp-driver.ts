@@ -10,6 +10,9 @@ import {
   BrowserDiagnosticBatch,
   BrowserDiagnosticEntry,
   BrowserDialog,
+  InteractionSecretValueError,
+  materializeBrowserActionSecrets,
+  redactInteractionSecretValues,
   BrowserDomReadResponse,
   BrowserTargetState,
   BrowserExternalAuthCommand,
@@ -1089,7 +1092,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     commandInput: BrowserActionCommandValue,
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null> {
-    const command = BrowserActionCommand.parse(commandInput);
+    const parsed = BrowserActionCommand.parse(commandInput);
+    const secretValues = parsed.secretValues;
+    const command = materializeCommandSecrets(parsed);
     const observation = await this.withTarget(command.targetId, async (state, info) => {
       if (!state.dialog) await this.refreshFrame(state);
       this.assertExpectedGenerations(command, state);
@@ -1224,7 +1229,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       throw error;
     });
     this.refreshSubscribedFrame(command.targetId);
-    return observation;
+    return redactInteractionSecretValues(observation, secretValues);
   }
 
   readClipboard(): BrowserClipboardValue {
@@ -2911,6 +2916,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "invalid_action",
             "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
           );
+        }
+        if (action.text && action.mode === "keys") {
+          // One key press per character for split one-time-code boxes and
+          // pages that listen for keydown and move focus themselves.
+          for (const character of action.text) {
+            await this.pressKey(state, characterKey(character));
+          }
+          return;
         }
         if (action.text)
           await this.sendActionTarget(state, "Input.insertText", {
@@ -4879,6 +4892,51 @@ type ParsedKey = {
   modifiers: number;
   text: string;
 };
+
+/** A literal character as one key press (typed with `type.mode: "keys"`). */
+function characterKey(character: string): ParsedKey {
+  if (character === "\n" || character === "\r") {
+    return { key: "Enter", code: "Enter", keyCode: 13, modifiers: 0, text: "\r" };
+  }
+  if (character === " ") return { key: " ", code: "Space", keyCode: 32, modifiers: 0, text: " " };
+  if (/^[0-9]$/u.test(character)) {
+    return {
+      key: character,
+      code: `Digit${character}`,
+      keyCode: character.charCodeAt(0),
+      modifiers: 0,
+      text: character,
+    };
+  }
+  if (/^[a-z]$/iu.test(character)) {
+    const upper = character.toUpperCase();
+    return {
+      key: character,
+      code: `Key${upper}`,
+      keyCode: upper.charCodeAt(0),
+      modifiers: 0,
+      text: character,
+    };
+  }
+  return { key: character, code: "", keyCode: 0, modifiers: 0, text: character };
+}
+
+/** Replace `{{secret:…}}` references with the controller-private values right
+ * before dispatch. The returned command no longer carries the side map, so
+ * nothing downstream can echo it. */
+function materializeCommandSecrets(command: BrowserActionCommandValue): BrowserActionCommandValue {
+  if (command.secretValues === undefined) return command;
+  try {
+    const action = materializeBrowserActionSecrets(command);
+    const { secretValues: _consumed, ...rest } = command;
+    return { ...rest, action };
+  } catch (error) {
+    if (error instanceof InteractionSecretValueError) {
+      throw new InteractionDefiniteDriverError("invalid_action", error.message);
+    }
+    throw error;
+  }
+}
 
 function parseKey(input: string, mac: boolean): ParsedKey {
   const parts = input.split("+");

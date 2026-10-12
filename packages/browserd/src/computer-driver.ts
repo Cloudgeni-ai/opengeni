@@ -6,6 +6,10 @@ import {
   ComputerClipboard,
   ComputerObservation,
   ComputerTarget,
+  InteractionSecretValueError,
+  materializeComputerActionSecrets,
+  materializeComputerNativeSecrets,
+  redactInteractionSecretValues,
   type ComputerActionCommand,
   type ComputerClipboard as ComputerClipboardValue,
   type ComputerObservation as ComputerObservationValue,
@@ -163,24 +167,32 @@ export class ComputerDriver implements ComputerInteractionDriver {
 
   async dispatchNative(command: ComputerNativeCommand): Promise<ComputerNativeResult> {
     this.assertOpen();
+    const secretValues = command.secretValues;
+    const materialized = materializeNativeCommandSecrets(command);
     try {
       const client = await this.activeClient();
       if (!client.callNative)
         throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
-      return ComputerNativeResult.parse({
-        target: null,
-        computerSessionId: this.computerSessionId,
-        controllerGeneration: this.controllerGeneration,
-        tool: command.tool,
-        ...(await client.callNative(command)),
-      });
+      return ComputerNativeResult.parse(
+        redactInteractionSecretValues(
+          {
+            target: null,
+            computerSessionId: this.computerSessionId,
+            controllerGeneration: this.controllerGeneration,
+            tool: command.tool,
+            ...(await client.callNative(materialized)),
+          },
+          secretValues,
+        ),
+      );
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
+        const message = redactInteractionSecretValues(error.message, secretValues);
         if (!error.dispatched) {
-          throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
+          throw new InteractionDefiniteDriverError(code, message, error.retryable);
         }
-        throw new InteractionOutcomeUnknownDriverError(code, error.message, false);
+        throw new InteractionOutcomeUnknownDriverError(code, message, false);
       }
       throw error;
     }
@@ -199,18 +211,23 @@ export class ComputerDriver implements ComputerInteractionDriver {
 
   async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue | null> {
     this.assertOpen();
+    const secretValues = command.secretValues;
+    const materialized = materializeActionCommandSecrets(command);
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
-      const observation = await client.dispatch(nativeCommand(command));
-      return observation === null ? null : this.projectObservation(observation);
+      const observation = await client.dispatch(nativeCommand(materialized));
+      return observation === null
+        ? null
+        : redactInteractionSecretValues(this.projectObservation(observation), secretValues);
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
+        const message = redactInteractionSecretValues(error.message, secretValues);
         if (!error.dispatched) {
-          throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
+          throw new InteractionDefiniteDriverError(code, message, error.retryable);
         }
-        throw new InteractionOutcomeUnknownDriverError(code, error.message, false);
+        throw new InteractionOutcomeUnknownDriverError(code, message, false);
       }
       throw error;
     }
@@ -672,6 +689,35 @@ function nativeCommand(command: ComputerActionCommand): ComputerBackendActionCom
     expectedFrameId: command.expectedFrameId,
     action: command.action,
   };
+}
+
+function secretValueDriverError(error: unknown): unknown {
+  return error instanceof InteractionSecretValueError
+    ? new InteractionDefiniteDriverError("invalid_action", error.message)
+    : error;
+}
+
+/** References replaced right before dispatch; the side map is dropped. */
+function materializeActionCommandSecrets(command: ComputerActionCommand): ComputerActionCommand {
+  if (command.secretValues === undefined) return command;
+  try {
+    const action = materializeComputerActionSecrets(command);
+    const { secretValues: _consumed, ...rest } = command;
+    return { ...rest, action };
+  } catch (error) {
+    throw secretValueDriverError(error);
+  }
+}
+
+function materializeNativeCommandSecrets(command: ComputerNativeCommand): ComputerNativeCommand {
+  if (command.secretValues === undefined) return command;
+  try {
+    const args = materializeComputerNativeSecrets(command);
+    const { secretValues: _consumed, ...rest } = command;
+    return { ...rest, arguments: args };
+  } catch (error) {
+    throw secretValueDriverError(error);
+  }
 }
 
 function predispatchError(error: unknown): Error {
