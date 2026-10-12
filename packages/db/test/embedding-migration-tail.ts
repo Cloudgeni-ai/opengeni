@@ -226,4 +226,7 @@ export const embeddingMigrationTail = [
   "0732_sandbox_maintenance_work_probes.sql",
   // Owner-only routines over the shared connection table from withheld 0642.
   "0735_subscription_core_owned_connection_usage.sql",
+  // Rewrites the visibility transition and fork routines from withheld 0501
+  // (and 0502/0513) by exact text; replay after them.
+  "0738_private_sessions_share_sandboxes.sql",
 ];
