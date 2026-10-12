@@ -58,7 +58,7 @@ const subscriptionCoreMigrations = [
   "0715_subscription_core_api_key_connections.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
   "0716_subscription_authority_compat.sql",
-  // Requires 0727's routines; it follows 0727.
+  // Requires 0716's routines; it follows 0716.
   "0717_subscription_authority_fences.sql",
   // Adds a trigger on the session bindings table from withheld 0642.
   "0723_subscription_binding_cache_clock.sql",
