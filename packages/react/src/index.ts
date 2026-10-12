@@ -430,6 +430,7 @@ export {
   TurnSummary,
   BUILT_IN_TURN_SUMMARY_FACET_IDS,
   useLightbox,
+  useLightboxGalleryItem,
   useLightboxOptional,
 } from "./timeline";
 export type {
@@ -446,6 +447,8 @@ export type {
   TurnSummaryProps,
   TurnSummaryStatus,
   LightboxControlLabels,
+  LightboxGalleryEntry,
+  LightboxGalleryImage,
 } from "./timeline";
 
 // Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)

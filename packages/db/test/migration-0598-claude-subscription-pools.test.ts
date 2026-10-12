@@ -80,6 +80,8 @@ const subscriptionCoreMigrations = [
   "0736_subscription_shared_personal_choice.sql",
   // Previews the system-update claim rewritten by withheld core migrations.
   "0732_sandbox_maintenance_work_probes.sql",
+  // Owner-only routines over the shared connection table from withheld 0642.
+  "0735_subscription_core_owned_connection_usage.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

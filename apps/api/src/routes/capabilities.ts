@@ -5,6 +5,9 @@ import {
   EnableCapabilityRequest,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsQuery,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
 } from "@opengeni/contracts";
 import type { Hono } from "hono";
 import {
@@ -12,6 +15,8 @@ import {
   requireAccessGrantAuthorization,
   getConnectorToolPermissions,
   updateConnectorToolPermissions,
+  getSessionMcpToolPermissions,
+  updateSessionMcpToolPermissions,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -168,6 +173,49 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json({ saved: true });
     },
   );
+
+  // Host-attached session MCP servers: the host names the server id and exact
+  // URL it attaches; rules apply to that server in every workspace session.
+  app.get("/v1/workspaces/:workspaceId/session-mcp-tool-permissions", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const query = SessionMcpToolPermissionsQuery.safeParse({
+      serverId: c.req.query("serverId"),
+      url: c.req.query("url"),
+    });
+    if (!query.success) return c.json({ error: "Invalid session MCP server" }, 400);
+    return c.json(
+      SessionMcpToolPermissionsResponse.parse(
+        await getSessionMcpToolPermissions({
+          db,
+          workspaceId,
+          grant: access.grant,
+          query: query.data,
+        }),
+      ),
+    );
+  });
+
+  app.patch("/v1/workspaces/:workspaceId/session-mcp-tool-permissions", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const payload = UpdateSessionMcpToolPermissionsRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!payload.success) return c.json({ error: "Invalid session MCP permission target" }, 400);
+    await updateSessionMcpToolPermissions({
+      db,
+      workspaceId,
+      grant: access.grant,
+      payload: payload.data,
+    });
+    return c.json({ saved: true });
+  });
 
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");

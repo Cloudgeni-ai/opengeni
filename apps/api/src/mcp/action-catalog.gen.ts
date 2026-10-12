@@ -2915,6 +2915,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionMcpToolPermissions",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/session-mcp-tool-permissions",
+    "request": [],
+    "response": [
+      "SessionMcpToolPermissionsResponse"
+    ]
+  },
+  {
     "id": "getSessionMessagePreview",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
@@ -7140,6 +7149,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UpdateSessionMcpApprovalPolicyResponse"
     ]
+  },
+  {
+    "id": "updateSessionMcpToolPermissions",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/session-mcp-tool-permissions",
+    "request": [
+      "UpdateSessionMcpToolPermissionsRequest"
+    ],
+    "response": []
   },
   {
     "id": "updateSessionPin",

@@ -35,6 +35,7 @@ export function FailedSessionBanner({
   actions,
   sandboxRecovery,
   analyticsKey,
+  shownInTimeline = false,
 }: {
   failure: SessionFailureSummary;
   /** Stable identity of this failure for the consent-gated recovery journey. */
@@ -59,17 +60,19 @@ export function FailedSessionBanner({
     SandboxRecoveryActionsProps,
     "structuralFailure" | "children" | "retryActions"
   >;
+  /**
+   * The timeline above already shows this exact failure with its Details
+   * (see `timelineShowsFailure`). A compaction failure then keeps only its
+   * recovery actions here instead of a second headline and Details.
+   */
+  shownInTimeline?: boolean;
 }) {
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
   const chooseModel = canChooseModel && !structuralFailure;
-  const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit } = failedSessionCopy(
-    failure,
-    billingFailure,
-    modelChanged,
-    chooseModel,
-  );
+  const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit, compaction } =
+    failedSessionCopy(failure, billingFailure, modelChanged, chooseModel);
   // The free model's daily allowance is deployment-wide: name it and offer the
   // ways to keep going. Every other model keeps the generic daily-limit copy.
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
@@ -100,6 +103,27 @@ export function FailedSessionBanner({
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
       <FailedSessionActions {...trackedActions} />
     ) : null;
+  if (shownInTimeline && compaction && !structuralFailure) {
+    const recovery = sandboxRecovery ? (
+      <SandboxRecoveryActions
+        {...sandboxRecovery}
+        structuralFailure={false}
+        retryActions={retryActions}
+      >
+        {retryActions}
+      </SandboxRecoveryActions>
+    ) : (
+      retryActions
+    );
+    return recovery ? (
+      <div
+        data-testid="failed-session-recovery"
+        className="mx-auto mb-2 flex w-full max-w-3xl flex-wrap justify-center gap-2 px-4 text-sm text-fg-muted sm:px-6"
+      >
+        {recovery}
+      </div>
+    ) : null;
+  }
   return (
     <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
       <div

@@ -333,6 +333,26 @@ and Codemode enforce the same frozen connector policies before provider calls.
 Codemode Ask returns its typed approval-required error and must be invoked via
 the normal model tool path to request human approval.
 
+### Host-attached server permissions
+
+A host that attaches its own credential-free or header-authenticated MCP server
+has no catalog capability to open, so it manages the same workspace policies
+through `GET /v1/workspaces/:workspaceId/session-mcp-tool-permissions?serverId=&url=`
+and `PATCH` on the same route (`OpenGeniClient.getSessionMcpToolPermissions` and
+`updateSessionMcpToolPermissions`). The host names the server id and the exact
+URL it attaches; Opengeni derives the `session-mcp:` identity above, so a
+different URL is a different server. The identity hashes the exact URL string
+without normalizing it, so changing the attached URL (including a trailing
+slash or query) orphans the saved rules; the host must re-save them under the
+new URL. Every reader and writer derives the identity through the runtime's
+`sessionMcpApprovalConnectionId`. The response lists only saved choices:
+`defaultPermission` (the `*` rule) and whole-tool rules, plus `revision` for
+`expectedRevision`. Tools without a choice follow the default, then the
+session's `requireApproval` recommendation, then Allow. The host owns its tool
+catalog and never asks Opengeni to discover it. Writes use the same
+`capabilities:manage` rule as connector settings, so agent attempts and service
+principals cannot change the permissions that bound them.
+
 ## Connector action policy enforcement
 
 Connection-backed MCP tools can additionally be governed by workspace
