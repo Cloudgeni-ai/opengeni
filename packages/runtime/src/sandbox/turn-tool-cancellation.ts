@@ -42,7 +42,7 @@ const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
 /**
- * Cut polling (OPE-550; settings.experimentCutPolling, on by default, kill
+ * Cut polling (settings.experimentCutPolling, on by default, kill
  * switch `OPENGENI_EXPERIMENT_CUT_POLLING=false`): honor the model's requested
  * foreground wait up to this ceiling instead of the 30-second cap.
  * Models request 60-300 s for builds and test suites; the silent 30-second cap
