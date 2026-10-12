@@ -3007,7 +3007,7 @@ repository's complex-change review policy.
 | X3. SuperGrok drained cutover | Codec stage, data move, compatibility records, parity report, receipt, switch rows enabled; role provisioning and the posture contract stop granting legacy writes; runbook section. | maintenance |
 | X4. SuperGrok legacy deletion | Removes the xAI selector arm, factory repository use, v1 xAI readers and writers, xAI use of `ScopedSubscriptionTurnLease`, the video envelope code and the shadow; extends the guard below to xAI. Merges only with the `compat:dependent_sources_without_record` copy-path test green. | rolling |
 | C1a, C1b, C2a, C2b, C3, C4. Claude | The same steps. C1b reads core turn-failure receipts in place of `claudeAuthRecovery`; C2a covers the usage routes; C2b covers the OAuth and setup-token writers; C3 converts live `claudeAuthRecovery` values and includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. | as X1a..X4 |
-| C4. Claude legacy deletion | Removes the Claude selector arm (any route but `core` fails closed), the `claudeAuthRecovery` reader, the legacy Claude settlement, refresh recovery, rotation and waiter arms, the legacy Claude model-call, readiness and custom-model admission paths, the connection-based usage code and the legacy readers in the db package; moves the pure OAuth helpers the core uses into a core-owned module; moves the legacy pool repository into a test-only fixture for historical migration tests; registers the `claude.ts` guard entry, which reports nothing. The API account routes, OAuth and setup-token writers, access policy and usage routes authenticate and then fail closed (503) until C2a and C2b serve them on the core. Merges only with the `compat:dependent_sources_without_record` copy-path tests green. | rolling |
+| C4. Claude legacy deletion | Removes the Claude selector arm (any route but `core` fails closed), the `claudeAuthRecovery` reader, the legacy Claude settlement, refresh recovery, rotation and waiter arms, the legacy Claude model-call, readiness and custom-model admission paths, the connection-based usage code and the legacy readers in the db package; moves the pure OAuth helpers the core uses into a core-owned module; moves the legacy pool repository into a test-only fixture for historical migration tests; registers the `claude.ts` guard entry, which reports nothing. Organization and workspace Claude custom models are admitted through the core's serving answer. The API account routes, OAuth and setup-token writers, access policy and usage routes keep their permission checks and then fail closed (503) until C2a and C2b serve them on the core; a single Claude model call fails closed unconditionally until then. Merges only after C2b, with the `compat:dependent_sources_without_record` copy-path tests green (a gate test stays red until that suite is in the tree). | rolling |
 | F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table, provider row or route; one migration (0715) makes the neutral routines read the connection kind from the provider registry. Lands after PR 0. See "API-key connectors on the shared core" below. | rolling (the connector is test only) |
 | W. Workspace-managed connections as organization accounts | [§5.4](#54-workspace-managed-connections-as-organization-accounts): 0714 lets the provider-keyed reach setters accept a connection managed by a shared workspace, makes the reach reader report the reach row's switch and list, and adds `set_subscription_core_reach_allocator` (organization administrators only); the organization access editor reads and saves its reach (people scope only for unmanaged accounts); the Accounts page change ships separately after owner approval. Applies to SuperGrok and Claude through X3 and C3, which map workspace credentials into the same shape. | rolling (no row changes) |
 | R. Retirement | A forward migration drops the retired SQL routines, triggers and policies listed below; `subscriptionPoolWorkerSubject` and its users are removed; posture inventories are updated. Historical migrations, legacy tables and columns, v1 CHECK validators and column-immutability triggers stay until M6. | maintenance (exact posture contract) |
@@ -4813,22 +4813,41 @@ rows.
   v1 columns are still written and copied verbatim, and nothing reads them
   to decide. The pure OAuth helpers the core adapter uses (secret shape,
   token refresh request) move into `subscription-core-claude-oauth.ts`.
+- **Custom-model admission on the core.** Organization and workspace
+  Claude custom models no longer consult the legacy pool at the
+  fresh-admission fence: the definition must be active and the shared core
+  must serve the exact product model in the workspace
+  (`subscriptionCoreClaudeAdmitsCustomModel`: the provider route is `core`
+  and a serving shared Claude connection allows the model; shared capacity
+  only, no acting subject). Without the receipt (`legacy`), under an
+  operator hold (`maintenance`) or without a serving connection, admission
+  fails closed. The frozen v1 authority parameters of the admission fences
+  are removed.
 - **Fail closed until C2a and C2b.** A single Claude model call (API
   model-calls) has no core operation path yet and fails with capacity
-  unavailable. Claude readiness without a core answer is not ready, and
-  organization or workspace Claude custom-model admission no longer consults
-  the legacy pool; after 0720 the core answers readiness, so this only
-  changes a database that has not run the cutover. The API Claude account
+  unavailable unconditionally, before and after the cutover. Claude
+  readiness without a core answer is not ready. The API Claude account
   pool routes (list, activate, settings, allocator, rename, disconnect),
   usage and usage refresh, OAuth start and complete, setup-token connect and
-  the Claude access policy (both scopes) keep their authentication and
-  feature gate, then answer a typed 503 ("served only by the shared
-  subscription core") without reading or writing the legacy pool; the
-  account pool routes use the shared `deletedLegacyRepository` (X4). The db
-  access-policy relation refuses `claude_subscription`. C2a and C2b replace
-  these with core-backed routes.
-- **Test fixture.** The legacy pool repository (accounts, usage and token
-  modules) moves to `packages/db/test/fixtures/legacy-claude/`, so the
+  the Claude access policy (both scopes) keep their feature gate and their
+  pre-deletion permission checks, then answer a typed 503 ("served only by
+  the shared subscription core") without reading or writing the legacy
+  pool. Where a check depended on the account's legacy scope (workspace or
+  private), which can no longer be read, the strictest applies: a
+  same-origin browser request and `workspace:admin`. Setup-token still
+  always requires a same-origin browser request, and OAuth start still
+  checks the requested scope's mutation authority. The account pool routes
+  use the shared `deletedLegacyRepository` (X4). The db access-policy
+  relation refuses `claude_subscription`. C2a and C2b replace these with
+  core-backed routes.
+- **Merge gate.** C4 merges only after C2b: Claude's compat
+  `dependent_sources_without_record` copy-path suite
+  (`subscription-core-claude-copy-paths-postgres`) must be in the tree and
+  green. `subscription-core-claude-copy-paths-gate.test.ts` stays red until
+  that suite is present.
+- **Test fixture.** The legacy pool repository's accounts module moves to
+  `packages/db/test/fixtures/legacy-claude/accounts.ts` (marked test only;
+  the usage and token modules are deleted outright), so the
   historical migration tests (0598, 0602, the 0720 cutover integration and
   authority fences) can still seed pre-cutover rows. The guard's
   `testFixtures` rejects any runtime import of it, and the shared lease

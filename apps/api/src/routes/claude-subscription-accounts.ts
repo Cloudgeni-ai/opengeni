@@ -1,10 +1,16 @@
+import { ClaudeSubscriptionSetupTokenRequest } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import type { XaiSubscriptionAccountMetadata } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import { requireOrganizationCodexHuman } from "./codex";
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
-import { requireSameOriginBrowserMutation } from "./subscription-pool-access";
+import {
+  requireDeletedSubscriptionPoolMutation,
+  requireSameOriginBrowserMutation,
+  requireSubscriptionScopeMutation,
+} from "./subscription-pool-access";
 
 function accountJson(account: XaiSubscriptionAccountMetadata, activeId: string | null) {
   return {
@@ -39,16 +45,47 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     enabled: () => deps.settings.claudeSubscriptionEnabled,
     accountJson,
   });
+  const deleted = () =>
+    new HTTPException(503, {
+      message: "Claude subscriptions are served only by the shared subscription core",
+    });
+  // Each route keeps its pre-deletion permission checks ahead of the 503, so a
+  // caller refused before the deletion still gets the same refusal.
   async function deletedLegacyRoute(c: Context, organization: boolean, mutation: boolean) {
     c.header("cache-control", "private, no-store");
     if (!deps.settings.claudeSubscriptionEnabled)
       throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+    if (!z.string().uuid().safeParse(c.req.param("accountId")).success)
+      throw new HTTPException(400, { message: "Invalid Claude account ID" });
     if (mutation && !c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     if (organization) await requireOrganizationCodexHuman(c, deps, c.req.param("organizationId")!);
-    else await requireAccessGrant(c, deps, c.req.param("workspaceId")!, "workspace:read");
-    throw new HTTPException(503, {
-      message: "Claude subscriptions are served only by the shared subscription core",
-    });
+    else {
+      const workspaceId = c.req.param("workspaceId")!;
+      await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+      if (mutation) await requireDeletedSubscriptionPoolMutation(c, deps, workspaceId);
+    }
+    throw deleted();
+  }
+  async function deletedSetupToken(c: Context, organization: boolean) {
+    c.header("cache-control", "private, no-store");
+    if (!deps.settings.claudeSubscriptionEnabled)
+      throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+    requireSameOriginBrowserMutation(c, deps);
+    const parsed = ClaudeSubscriptionSetupTokenRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success || (organization && parsed.data.scope !== "workspace"))
+      throw new HTTPException(422, { message: "Enter the Claude setup token." });
+    if (organization) await requireOrganizationCodexHuman(c, deps, c.req.param("organizationId")!);
+    else
+      await requireSubscriptionScopeMutation(
+        c,
+        deps,
+        c.req.param("workspaceId")!,
+        parsed.data.scope,
+        "Claude",
+      );
+    throw deleted();
   }
   for (const organization of [false, true]) {
     const scope = organization
@@ -56,6 +93,6 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       : "/v1/workspaces/:workspaceId/claude/accounts";
     app.get(`${scope}/:accountId/usage`, (c) => deletedLegacyRoute(c, organization, false));
     app.post(`${scope}/:accountId/usage/refresh`, (c) => deletedLegacyRoute(c, organization, true));
-    app.post(`${scope}/setup-token`, (c) => deletedLegacyRoute(c, organization, true));
+    app.post(`${scope}/setup-token`, (c) => deletedSetupToken(c, organization));
   }
 }

@@ -36,8 +36,8 @@ import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
 // The legacy Claude runtime is deleted (design 5.3, C4). The pre-cutover world
-// is staged with the retired account writers (kept only for the API until
-// C2b), the frozen legacy waiter and the exact historical peek activity body.
+// is staged with the retired account writers (now only a test fixture), the
+// frozen legacy waiter and the exact historical peek activity body.
 import {
   createClaudeSubscriptionAccount,
   wakeClaudeCapacityWaiters,

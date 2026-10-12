@@ -5,6 +5,7 @@ import { unionAll } from "drizzle-orm/pg-core";
 
 import { withRlsContext, type Database } from "./database";
 import * as schema from "./schema";
+import { subscriptionCoreClaudeAdmitsCustomModel } from "./subscription-core-claude-custom-models";
 
 export type DeploymentModelCatalogRow = {
   document: unknown;
@@ -429,7 +430,20 @@ export async function lockActiveWorkspaceProviderCustomModelForAdmission(
         ),
       )
       .limit(1);
-    return row ? mapCustomModel(row) : null;
+    if (!row) return null;
+    // A Claude subscription model is live only while the shared core serves
+    // it here, as at organization scope (the legacy pool is deleted, C4).
+    if (
+      input.providerKind === "claude_subscription" &&
+      !(await subscriptionCoreClaudeAdmitsCustomModel(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        scope: "workspace",
+        upstreamModelId: input.upstreamModelId,
+      }))
+    )
+      return null;
+    return mapCustomModel(row);
   });
 }
 

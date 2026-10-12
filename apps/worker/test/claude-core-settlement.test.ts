@@ -233,11 +233,31 @@ function coreRuntime(options: {
   spy(db, "subscriptionCoreRequests").mockReturnValue({
     isSubscriptionCoreSourceDisconnected: async () => options.disconnected ?? false,
   } as never);
-  // The legacy Claude settlement is deleted (C4); the legacy token reader the
-  // API still uses until C2a must never run for a core turn.
-  const legacy = [spy(db, "resolveClaudeAccountCredential")];
-  return { apply, count, touch, settlementProviders, legacy };
+  return { apply, count, touch, settlementProviders };
 }
+
+/**
+ * The legacy Claude settlement is deleted (M4 C4): a core refusal never
+ * records turn-local `claudeAuthRecovery` state (C1b's core receipts replace
+ * it), and the db package no longer exports a legacy Claude credential reader
+ * or capacity waiter the settlement could reach.
+ */
+function expectNoLegacyClaudeSettlement(recovery: { mock: { calls: unknown[][] } }) {
+  for (const call of recovery.mock.calls)
+    expect(Object.keys((call[2] ?? {}) as object)).not.toContain("claudeAuthRecovery");
+}
+
+test("the db package exports no legacy Claude settlement producers", () => {
+  for (const name of [
+    "resolveClaudeAccountCredential",
+    "recordClaudeAccountUsage",
+    "armClaudeCapacityWait",
+    "reconcileClaudeCapacityWait",
+    "claudeCapacityRepository",
+    "heartbeatClaudeCredentialLeaseUntil",
+  ])
+    expect(name in db, name).toBe(false);
+});
 
 function recoveringRecovery() {
   spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
@@ -294,7 +314,7 @@ describe("Claude refusal settlement on the core", () => {
       name: "opengeni_subscription_core_failover_settlements_total",
       labels: { provider: "claude", outcome: "core_failover" },
     });
-    for (const legacy of runtime.legacy) expect(legacy).not.toHaveBeenCalled();
+    expectNoLegacyClaudeSettlement(recovery);
   });
 
   test("a 401 the transport could not renew is a sign-in quarantine and re-places the turn", async () => {
@@ -313,7 +333,7 @@ describe("Claude refusal settlement on the core", () => {
       reason: "claude_credential_failover",
       detail: { failureKind: "unauthorized" },
     });
-    for (const legacy of runtime.legacy) expect(legacy).not.toHaveBeenCalled();
+    expectNoLegacyClaudeSettlement(recovery);
   });
 
   test("a 529 stays in the overload lane: nothing recorded, no account change", async () => {
@@ -336,7 +356,7 @@ describe("Claude refusal settlement on the core", () => {
       expect.anything(),
       expect.objectContaining({ reason: "claude_credential_failover" }),
     );
-    for (const legacy of runtime.legacy) expect(legacy).not.toHaveBeenCalled();
+    expectNoLegacyClaudeSettlement(recovery);
   });
 
   test("a 403 is fatal: nothing recorded, no rotation, no quarantine", async () => {
@@ -354,7 +374,7 @@ describe("Claude refusal settlement on the core", () => {
     };
     expect(settled.turnStatus).toBe("failed");
     expect(settled.events[0]).toMatchObject({ type: "turn.failed", payload: { retryable: false } });
-    for (const legacy of runtime.legacy) expect(legacy).not.toHaveBeenCalled();
+    expectNoLegacyClaudeSettlement(recovery);
   });
 
   test("the refusal that reaches the shared bound fails the turn with Claude copy", async () => {

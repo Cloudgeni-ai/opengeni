@@ -26,6 +26,7 @@ import {
 import { requireOrganizationCodexHuman } from "./codex";
 import {
   requirePrivateSubscriptionHuman,
+  requireDeletedSubscriptionPoolMutation,
   requireSameOriginBrowserMutation,
   requireSubscriptionScopeMutation,
 } from "./subscription-pool-access";
@@ -161,6 +162,7 @@ export function registerSubscriptionAccountPoolRoutes(
     credentialId: string,
   ) => {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    if (!options.repository) await requireDeletedSubscriptionPoolMutation(c, deps, workspaceId);
     const snapshot = await getSubscriptionAccountAuthoritySnapshot(db, {
       workspaceId,
       subjectId: grant.subjectId,
@@ -333,6 +335,10 @@ export function registerSubscriptionAccountPoolRoutes(
     const workspaceId = c.req.param("workspaceId")!;
     const parsed = settingsBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "rotationEnabled is required" });
+    if (!options.repository) {
+      await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+      await requireDeletedSubscriptionPoolMutation(c, deps, workspaceId);
+    }
     const readAuthority = await resolveReadAuthority(c, deps, workspaceId);
     const authority = await requireSubscriptionScopeMutation(
       c,

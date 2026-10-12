@@ -156,12 +156,15 @@ test.each(["released", "lost", "different_turn"] as const)(
   },
 );
 
-test("Claude participates in the shared serving lease with its exact scoped holder fence", async () => {
+test("Claude participates in the shared serving lease only through its core lease", async () => {
   const db = await import("@opengeni/db");
   const { createTurnCredentialLeases } =
     await import("../src/activities/agent-turn/credential-leases");
-  const heartbeat = spyOn(db, "heartbeatClaudeCredentialLeaseUntil").mockResolvedValue(
+  const renew = spyOn(db, "renewSubscriptionTurnLease").mockResolvedValue(
     new Date(Date.now() + 300_000),
+  );
+  const rls = spyOn(db, "withRlsContext").mockImplementation(
+    async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
   );
   const xai = spyOn(db, "heartbeatXaiCredentialLeaseUntil");
   try {
@@ -175,28 +178,47 @@ test("Claude participates in the shared serving lease with its exact scoped hold
       workspaceId: crypto.randomUUID(),
       codexWorkspaceKey: "fixture",
       getTurnId: () => "fixture-turn",
+      getSessionId: () => "fixture-session",
     };
-    const leases = createTurnCredentialLeases(dependencies);
-    Object.assign(leases.claude, {
+    // Without core placement there is no Claude lease to renew (the legacy
+    // Claude lease is deleted, M4 C4): a held holder is lost, never renewed
+    // through another table.
+    const unplaced = createTurnCredentialLeases(dependencies);
+    Object.assign(unplaced.claude, {
       held: true,
-      subjectId: "user:fixture",
       holderId: "fixture-holder",
       generation: 3,
       confirmedUntilMs: performance.now() + 10_000,
     });
-    await leases.renewServing("model_usage");
-    expect(heartbeat).toHaveBeenCalledTimes(1);
-    expect(heartbeat.mock.calls[0]?.[1]).toEqual({
-      workspaceId: dependencies.workspaceId,
-      subjectId: "user:fixture",
-      turnId: "fixture-turn",
+    await unplaced.renewServing("model_usage");
+    expect(renew).not.toHaveBeenCalled();
+    expect(xai).not.toHaveBeenCalled();
+    expect(unplaced.servingLost()).toBe(true);
+
+    const leases = createTurnCredentialLeases(dependencies);
+    Object.assign(leases.claude, {
+      held: true,
       holderId: "fixture-holder",
       generation: 3,
-      leaseTtlMs: db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+      confirmedUntilMs: performance.now() + 10_000,
+    });
+    leases.claude.useSubscriptionCoreLease("fixture-connection");
+    await leases.renewServing("model_usage");
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(renew.mock.calls[0]?.[1]).toEqual({
+      accountId: dependencies.accountId,
+      workspaceId: dependencies.workspaceId,
+      sessionId: "fixture-session",
+      turnId: "fixture-turn",
+      provider: "claude",
+      connectionId: "fixture-connection",
+      holderId: "fixture-holder",
+      generation: 3,
+      ttlMs: db.SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
     });
     expect(xai).not.toHaveBeenCalled();
     expect(leases.servingLost()).toBe(false);
-    heartbeat.mockResolvedValue(null);
+    renew.mockResolvedValue(null);
     leases.claude.confirmedUntilMs = performance.now() + 10_000;
     await leases.renewServing("runtime_event");
     expect(leases.servingLost()).toBe(true);
@@ -204,7 +226,8 @@ test("Claude participates in the shared serving lease with its exact scoped hold
       "Claude credential lease is not usable for provider dispatch",
     );
   } finally {
-    heartbeat.mockRestore();
+    renew.mockRestore();
+    rls.mockRestore();
     xai.mockRestore();
   }
 });

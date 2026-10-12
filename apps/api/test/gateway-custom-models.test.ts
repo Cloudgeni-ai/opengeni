@@ -340,8 +340,10 @@ describe("workspace Gateway custom model API", () => {
         },
         publicApp,
       );
-      // Claude admission comes only from the shared core (C2a); without a
-      // core connection the model is not selectable.
+      // Claude admission comes only from the shared core; this organization
+      // has no cutover row and no serving core connection, so the model is
+      // not selectable (core admission is covered in
+      // packages/db/test/organization-claude-model-admission.test.ts).
       const admissible = providerKind === "anthropic";
       expect(session.status).toBe(admissible ? 202 : 422);
       if (admissible) expect((await session.json()).model).toBe(productId);
@@ -540,10 +542,10 @@ describe("workspace Gateway custom model API", () => {
   });
 
   for (const providerKind of ["anthropic", "claude_subscription"] as const) {
-    test(`admits an organization ${providerKind} model through the public session boundary`, async () => {
+    test(`organization ${providerKind} model admission at the public session boundary`, async () => {
       if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
-      // Organization Claude admission comes only from the shared core (C2a),
-      // never from the retired organization credential row or legacy pool.
+      // Organization Claude admission comes only from the shared core, never
+      // from the retired organization credential row or legacy pool.
       if (providerKind === "anthropic")
         await upsertOrganizationModelProviderConnection(client.db, {
           organizationId: grant.accountId,
@@ -577,8 +579,9 @@ describe("workspace Gateway custom model API", () => {
       );
       const body = await response.json();
       if (providerKind === "claude_subscription") {
-        // Without a shared core connection, Claude is not admissible: fail
-        // closed until the core answers Claude admission (C2a).
+        // Without a serving shared core connection Claude is not admissible
+        // (fail closed); the core-route admission itself is covered in
+        // packages/db/test/organization-claude-model-admission.test.ts.
         expect({ status: response.status, body }).toEqual({
           status: 422,
           body: {

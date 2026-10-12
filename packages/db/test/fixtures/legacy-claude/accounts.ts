@@ -1,3 +1,9 @@
+/**
+ * TEST ONLY: the retired legacy Claude pool repository (deleted from the
+ * runtime in M4 C4), kept so historical migration tests (0598, 0602, the 0720
+ * cutover) can seed pre-cutover rows. Never import from production; the
+ * no-legacy guard rejects runtime imports of `legacy-claude`.
+ */
 import {
   ClaudeSubscriptionCredential,
   claudeSubscriptionCapacity,

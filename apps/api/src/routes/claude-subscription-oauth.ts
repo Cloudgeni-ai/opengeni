@@ -1,3 +1,7 @@
+import {
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthStartRequest,
+} from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import { type Context, type Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -9,6 +13,12 @@ import {
   requireOrganizationCodexHuman,
   requireSameOriginBrowserMutation,
 } from "./codex";
+import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
+
+const deleted = () =>
+  new HTTPException(503, {
+    message: "Claude subscriptions are served only by the shared subscription core",
+  });
 
 export function registerClaudeSubscriptionOAuthRoutes(app: Hono, deps: ApiRouteDeps) {
   async function scope(c: Context, organization: boolean) {
@@ -75,12 +85,33 @@ export function registerClaudeSubscriptionOAuthRoutes(app: Hono, deps: ApiRouteD
     const path = organization
       ? "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth"
       : "/v1/workspaces/:workspaceId/model-providers/claude_subscription/oauth";
-    for (const step of ["start", "complete"] as const)
-      app.post(`${path}/${step}`, async (c) => {
-        await scope(c, organization);
-        throw new HTTPException(503, {
-          message: "Claude subscriptions are served only by the shared subscription core",
-        });
-      });
+    // Each step keeps its pre-deletion checks (sign-in, payload, scope
+    // mutation authority) ahead of the 503.
+    app.post(`${path}/start`, async (c) => {
+      const inputScope = await scope(c, organization);
+      const payload = ClaudeSubscriptionOAuthStartRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!payload.success || (organization && payload.data.scope !== "workspace"))
+        throw new HTTPException(422, { message: "Choose where to connect this Claude account." });
+      if (!organization)
+        await requireSubscriptionScopeMutation(
+          c,
+          deps,
+          inputScope.workspaceId!,
+          payload.data.scope,
+          "Claude",
+        );
+      throw deleted();
+    });
+    app.post(`${path}/complete`, async (c) => {
+      await scope(c, organization);
+      const payload = ClaudeSubscriptionOAuthCompleteRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!payload.success)
+        throw new HTTPException(422, { message: "Enter the authorization code from Claude." });
+      throw deleted();
+    });
   }
 }

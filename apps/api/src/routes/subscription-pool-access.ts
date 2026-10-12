@@ -124,3 +124,20 @@ export async function requireSubscriptionScopeMutation(
   const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
   return { accountId: grant.accountId, subjectId: grant.subjectId };
 }
+
+/**
+ * The mutation gate of a pool whose legacy repository is deleted (Claude,
+ * C4). The account's scope can no longer be read, so the strictest gate of
+ * `requireSubscriptionScopeMutation` applies to every caller (a browser
+ * request must be same-origin, and the caller needs `workspace:admin`) before
+ * the route fails closed: a caller refused before the deletion is still
+ * refused with the same 403.
+ */
+export async function requireDeletedSubscriptionPoolMutation(
+  c: Context,
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<void> {
+  if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
+  await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+}

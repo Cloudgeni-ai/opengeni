@@ -899,7 +899,9 @@ function subscriptionWaiterBindings(): Map<string, string[]> {
     visit(sourceFile.program);
   }
   for (const [factory, tables] of factories) {
-    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters", "xai_capacity_waiters"]);
+    // The Claude legacy waiters are deleted (M4 C4); only SuperGrok's legacy
+    // waiter table is bound until X4.
+    expect(tables.sort(), factory).toEqual(["xai_capacity_waiters"]);
   }
   return factories;
 }
@@ -1170,10 +1172,7 @@ describe("session_events writer inventory", () => {
     const violations: string[] = [];
     const aliasedWriters: Record<string, string[]> = {};
     const bindings = new Map([
-      [
-        "createScopedSubscriptionCapacityWaiters",
-        ["claude_capacity_waiters", "xai_capacity_waiters"],
-      ],
+      ["createScopedSubscriptionCapacityWaiters", ["xai_capacity_waiters"]],
     ]);
     const visit = (node: t.Node): void => {
       if (isCallExpression(node) && insertsSessionEvents(node)) {
@@ -1191,8 +1190,8 @@ describe("session_events writer inventory", () => {
     visit(sourceFile.program);
     expect(violations).toEqual(["unprotectedWriter"]);
     expect(aliasedWriters).toEqual({
-      protectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
-      unprotectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+      protectedWriter: ["xai_capacity_waiters"],
+      unprotectedWriter: ["xai_capacity_waiters"],
     });
     expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
     const factory = sourceFile.program.body[0]!;
@@ -1290,9 +1289,13 @@ describe("session_events writer inventory", () => {
       };
       visit(sourceFile.program);
     }
-    // The legacy Codex waiter table stays fenced in the database, but the
-    // retired runtime no longer writes it from TypeScript.
-    const retiredTables = new Set<string>([tenancyQuiescenceTables.codexCapacityWaiters]);
+    // The legacy Codex and Claude waiter tables stay fenced in the database,
+    // but their retired runtimes (M3 PR4, M4 C4) no longer write them from
+    // TypeScript.
+    const retiredTables = new Set<string>([
+      tenancyQuiescenceTables.codexCapacityWaiters,
+      tenancyQuiescenceTables.claudeCapacityWaiters,
+    ]);
     expect([...discovered].sort()).toEqual(
       Object.values(tenancyQuiescenceTables)
         .filter((table) => !retiredTables.has(table))

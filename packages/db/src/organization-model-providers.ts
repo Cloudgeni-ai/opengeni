@@ -4,12 +4,12 @@ import {
   environmentsEncryptionKeyBytes,
   type Settings,
 } from "@opengeni/config";
-import type { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { defaultModelRequestHash } from "./model-catalog";
+import { subscriptionCoreClaudeAdmitsCustomModel } from "./subscription-core-claude-custom-models";
 import * as schema from "./schema";
 
 export type OrganizationModelProviderKind =
@@ -36,11 +36,6 @@ export type OrganizationModelProviderCustomModel = {
   createdAt: Date;
   updatedAt: Date;
 };
-
-/** Exact accepted source; never resolve the caller's current pool at this fence. */
-export type OrganizationClaudeModelAdmissionAuthority =
-  | { sessionId: string }
-  | { authoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 };
 
 export class OrganizationModelProviderConflictError extends Error {}
 export class OrganizationModelProviderLimitError extends Error {}
@@ -491,14 +486,35 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
     workspaceId: string;
     providerKind: OrganizationModelProviderKind;
     upstreamModelId: string;
-    claudeAuthority?: OrganizationClaudeModelAdmissionAuthority;
   },
 ): Promise<OrganizationModelProviderCustomModel | null> {
   return await withOrganizationModelProviderCustomModelReadLock(db, input, async (scopedDb) => {
-    // The legacy Claude pool admission was deleted (design 5.3, C4). The
-    // core admission arrives with C2a; until then no Claude subscription
-    // custom model is admitted (fail closed).
-    if (input.providerKind === "claude_subscription") return null;
+    if (input.providerKind === "claude_subscription") {
+      // Claude subscriptions have no organization provider connection row:
+      // the shared core answers liveness (the legacy pool admission is
+      // deleted, design 5.3, C4).
+      const [row] = await scopedDb
+        .select()
+        .from(schema.organizationModelProviderCustomModels)
+        .where(
+          and(
+            eq(schema.organizationModelProviderCustomModels.accountId, input.accountId),
+            eq(schema.organizationModelProviderCustomModels.providerKind, input.providerKind),
+            eq(schema.organizationModelProviderCustomModels.upstreamModelId, input.upstreamModelId),
+            isNull(schema.organizationModelProviderCustomModels.retiredAt),
+          ),
+        )
+        .limit(1);
+      return row &&
+        (await subscriptionCoreClaudeAdmitsCustomModel(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          scope: "organization",
+          upstreamModelId: input.upstreamModelId,
+        }))
+        ? mapModel(row)
+        : null;
+    }
     const [row] = await scopedDb
       .select()
       .from(schema.organizationModelProviderCustomModels)

@@ -55,7 +55,6 @@ import {
   getOrganizationModelProviderCustomModelForExecution,
   getOrganizationModelProviderCatalogForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
-  type OrganizationClaudeModelAdmissionAuthority,
   type Database,
   type WorkspaceCustomModelProviderKind,
   type WorkspaceGatewayCustomModel,
@@ -179,7 +178,6 @@ export async function lockActiveCustomModelForAdmission(
     accountId: string;
     workspaceId: string;
     reference: WorkspaceCustomModelReference;
-    claudeAuthority?: OrganizationClaudeModelAdmissionAuthority;
   },
 ): Promise<boolean> {
   if (input.reference.scope === "organization") {
@@ -189,7 +187,6 @@ export async function lockActiveCustomModelForAdmission(
         workspaceId: input.workspaceId,
         providerKind: input.reference.providerKind,
         upstreamModelId: input.reference.upstreamModelId,
-        ...(input.claudeAuthority ? { claudeAuthority: input.claudeAuthority } : {}),
       }),
     );
   }

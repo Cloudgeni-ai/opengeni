@@ -41,6 +41,7 @@ import {
   requireSameOriginBrowserMutation,
 } from "./codex";
 import { codexRouteDisposition } from "./codex-core";
+import { requireDeletedSubscriptionPoolMutation } from "./subscription-pool-access";
 import { requireScopeMutation } from "./supergrok";
 
 const Kind = z.enum([
@@ -126,6 +127,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         }
         if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
       } else if (kind === "claude_subscription") {
+        // The pre-deletion mutation gates stay ahead of the 503 (the account's
+        // scope is unreadable, so the strictest applies).
+        if (mutate) await requireDeletedSubscriptionPoolMutation(c, deps, scopeId);
         throw claudeLegacyDeleted();
       } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
       if (
