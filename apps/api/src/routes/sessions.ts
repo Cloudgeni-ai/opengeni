@@ -5388,6 +5388,13 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/codex-account" && verb === "POST") {
     return "session.codex_account.write";
   }
+  // The provider-neutral account choice (any provider) shares the session's
+  // account-choice operation, which is named for its first provider.
+  if (suffix === "/model-account") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT") return "session.codex_account.write";
+    return null;
+  }
   if (suffix === "/realtime/webrtc" && verb === "POST") {
     return "session.realtime.start";
   }

@@ -366,6 +366,22 @@ import {
   wakeSubscriptionCoreCapacityWaiters,
   type SubscriptionCoreWakeScope,
 } from "./subscription-core/waiters";
+export {
+  chooseSubscriptionCoreSessionAccount,
+  readSubscriptionCoreSessionAccountChoice,
+  readSubscriptionPersonPreferences,
+  writeSubscriptionPersonPreferences,
+  SUBSCRIPTION_CORE_ACCOUNT_CHOICE_EVENT,
+  type SubscriptionCoreAccountChoiceRefusal,
+  type SubscriptionCoreChoosableConnection,
+  type SubscriptionCoreChoiceProviders,
+  type SubscriptionCoreProviderWake,
+  type SubscriptionCoreSessionAccountChoice,
+  type SubscriptionCoreSessionChoiceOutcome,
+  type SubscriptionCoreSessionChoiceResult,
+  type SubscriptionPersonPreferences,
+} from "./subscription-core/session-choice";
+import type { SubscriptionCoreProviderWake } from "./subscription-core/session-choice";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import {
   codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
@@ -29094,6 +29110,39 @@ export async function deliverSubscriptionCoreCodexWake(
         (error as { cause?: { code?: unknown } } | null)?.cause?.code ??
         null,
     });
+  }
+}
+
+/**
+ * Deliver the provider wakes of a committed session account choice (any
+ * registered provider). A failed wake never fails the committed change:
+ * every core waiter also has its own bounded recheck.
+ */
+export async function deliverSubscriptionCoreProviderWakes(
+  db: Database,
+  wakes: readonly SubscriptionCoreProviderWake[],
+): Promise<void> {
+  for (const wake of wakes) {
+    try {
+      await wakeSubscriptionCoreCapacityWaiters(
+        db,
+        wake.provider,
+        {
+          accountId: wake.accountId,
+          reason: wake.reason,
+          ...(wake.workspaceIds ? { workspaceIds: wake.workspaceIds } : {}),
+          ...(wake.sessionIds ? { sessionIds: wake.sessionIds } : {}),
+        },
+        enqueueSessionWorkflowWakeInTransaction,
+      );
+    } catch (error) {
+      console.warn("core wake delivery failed; waiters recheck on their own timer", {
+        provider: wake.provider,
+        accountId: wake.accountId,
+        reason: wake.reason,
+        error: error instanceof Error ? error.name : typeof error,
+      });
+    }
   }
 }
 

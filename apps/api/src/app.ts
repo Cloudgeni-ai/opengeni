@@ -274,6 +274,7 @@ import {
   registerModelAccountSettingsRoutes,
   subscriptionSettingsLockedHttpError,
 } from "./routes/model-account-settings";
+import { registerModelAccountChoiceRoutes } from "./routes/model-account-choice";
 import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
@@ -2197,6 +2198,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
   registerModelAccountSettingsRoutes(app, routeDeps);
+  registerModelAccountChoiceRoutes(app, routeDeps);
   registerSessionAdminAccessRoutes(app, routeDeps);
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);

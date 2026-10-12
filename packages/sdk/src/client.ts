@@ -277,6 +277,11 @@ import type {
   UpdateOrganizationModelAccountSettingsRequest,
   UpdateWorkspaceModelAccountSettingsRequest,
   WorkspaceModelAccountSettings,
+  ModelAccountPreferences,
+  SessionModelAccountChoice,
+  SetSessionModelAccountChoiceRequest,
+  SetSessionModelAccountChoiceResult,
+  UpdateModelAccountPreferencesRequest,
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
   OrganizationPrivacySettings,
@@ -5572,6 +5577,50 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelAccountSettings>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/model-account-settings`,
+      request,
+    );
+  }
+
+  /** The session's model account, the accounts it may switch to, and the personal settings. */
+  async getSessionModelAccount(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionModelAccountChoice> {
+    return await this.requestJson<SessionModelAccountChoice>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
+    );
+  }
+
+  /** Choose the session's model account, or `connectionId: null` for automatic selection. */
+  async setSessionModelAccount(
+    workspaceId: string,
+    sessionId: string,
+    request: SetSessionModelAccountChoiceRequest,
+  ): Promise<SetSessionModelAccountChoiceResult> {
+    return await this.requestJson<SetSessionModelAccountChoiceResult>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-account`,
+      request,
+    );
+  }
+
+  /** Your own model-account preferences in an organization. */
+  async getModelAccountPreferences(organizationId: string): Promise<ModelAccountPreferences> {
+    return await this.requestJson<ModelAccountPreferences>(
+      "GET",
+      `/v1/organizations/${organizationId}/me/model-account-preferences`,
+    );
+  }
+
+  /** Change your own personal-fallback opt-in in an organization. */
+  async updateModelAccountPreferences(
+    organizationId: string,
+    request: UpdateModelAccountPreferencesRequest,
+  ): Promise<ModelAccountPreferences> {
+    return await this.requestJson<ModelAccountPreferences>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/me/model-account-preferences`,
       request,
     );
   }

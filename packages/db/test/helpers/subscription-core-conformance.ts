@@ -54,6 +54,12 @@ import {
   type DbClient,
 } from "../../src";
 import {
+  chooseSubscriptionCoreSessionAccount,
+  readSubscriptionCoreSessionAccountChoice,
+  readSubscriptionPersonPreferences,
+  writeSubscriptionPersonPreferences,
+} from "../../src/subscription-core/session-choice";
+import {
   rawRows,
   setSubjectRlsContext,
   withWorkspaceSubjectSessionActivityRls,
@@ -4256,6 +4262,411 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(await placeChecked(served, new Date(), m0.upstreamModelId)).toMatchObject({
         kind: "run",
         connectionId: broad,
+      });
+    });
+
+    describe("explicit account choice and personal preferences", () => {
+      const providers = [provider];
+      const sessionOf = (turn: Turn) => ({
+        accountId: turn.identity.accountId,
+        workspaceId: turn.identity.workspaceId,
+        sessionId: turn.identity.sessionId,
+      });
+      const choose = (turn: Turn, subjectId: string, connectionId: string | null) =>
+        chooseSubscriptionCoreSessionAccount(
+          db(),
+          { ...sessionOf(turn), subjectId, connectionId },
+          providers,
+        );
+      const picker = (turn: Turn, subjectId: string) =>
+        readSubscriptionCoreSessionAccountChoice(
+          db(),
+          { ...sessionOf(turn), subjectId },
+          providers,
+        );
+      const offered = async (turn: Turn, subjectId: string) =>
+        Object.fromEntries(
+          ((await picker(turn, subjectId))?.connections ?? []).map((connection) => [
+            connection.connectionId,
+            connection.choosable ? "choosable" : connection.refusal,
+          ]),
+        );
+      const disablePersonal = (org: Org) => admin()`
+        update subscription_settings set personal_connections_allowed = false
+        where account_id = ${org.accountId}::uuid and workspace_id is null`;
+      /** A member's own private session in the shared workspace. */
+      const memberPrivateSession = async (org: Org, subjectId: string): Promise<string> => {
+        const session = await withSessionRlsActorContext({ subjectId }, () =>
+          createSession(db(), {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            initialMessage: "conformance",
+            resources: [],
+            metadata: {},
+            model: m0.productModelId,
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+            visibility: "user_private",
+            subjectId,
+            createdBy: { kind: "subject" as const, subjectId },
+            createdByContext: {},
+          }),
+        );
+        return session.id;
+      };
+
+      test("SUB-SEL-02, SUB-ELIG-05: the picker offers the pool and only the caller's own personal accounts", async () => {
+        const org = await organization();
+        const shared = await sharedConnection(org, `pick-shared-${crypto.randomUUID()}`);
+        const personal = await personalConnection(org, `pick-personal-${crypto.randomUUID()}`);
+        const foreignPersonal = await foreignPersonalConnection(org);
+        const member = await workspaceMember(org);
+        const privateTurn = await runningTurn(org, { visibility: "user_private" });
+        const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
+        // The owner's private session may use the pool and their own account.
+        expect(await offered(privateTurn, org.ownerSubjectId)).toEqual({
+          [shared]: "choosable",
+          [personal]: "choosable",
+        });
+        // In a shared session the personal account is listed for its owner but
+        // cannot be chosen; another person never sees it.
+        expect(await offered(sharedTurn, org.ownerSubjectId)).toEqual({
+          [shared]: "choosable",
+          [personal]: "personal_not_owner_work",
+        });
+        expect(await offered(sharedTurn, member)).toEqual({ [shared]: "choosable" });
+        // Another person cannot read the owner's private session at all.
+        expect(await picker(privateTurn, member)).toBeNull();
+        // The foreign provider's and the other kind's rows are never offered.
+        const listed = Object.keys(await offered(privateTurn, org.ownerSubjectId));
+        for (const id of [
+          org.foreign.healthy,
+          org.foreign.quarantined,
+          foreignPersonal,
+          org.otherKind.identified,
+          org.otherKind.unidentified,
+        ])
+          expect(listed).not.toContain(id);
+        // The organization turns personal accounts off.
+        await disablePersonal(org);
+        const off = await picker(privateTurn, org.ownerSubjectId);
+        expect(off!.personal).toMatchObject({ connectionsAllowed: false });
+        expect(await offered(privateTurn, org.ownerSubjectId)).toEqual({
+          [shared]: "choosable",
+          [personal]: "personal_not_allowed",
+        });
+      });
+
+      test("SUB-SEL-04, D-28: the owner chooses their personal account for their private session; the database refuses it anywhere else", async () => {
+        const org = await organization();
+        const shared = await sharedConnection(org, `choose-shared-${crypto.randomUUID()}`);
+        const personal = await personalConnection(org, `choose-personal-${crypto.randomUUID()}`);
+        const member = await workspaceMember(org);
+        // Without fallback consent, automatic placement prefers the pool.
+        await admin()`update subscription_person_preferences set personal_fallback_opt_in = false
+          where account_id = ${org.accountId}::uuid
+            and organization_membership_id = ${org.ownerMembershipId}::uuid`;
+        const first = await runningTurn(org, {
+          visibility: "user_private",
+          personalAuthority: true,
+        });
+        expect(await placeChecked(first)).toMatchObject({ kind: "run", connectionId: shared });
+        const chosen = await choose(first, org.ownerSubjectId, personal);
+        expect(chosen).toMatchObject({
+          outcome: "changed",
+          provider: providerId,
+          connectionId: personal,
+        });
+        expect(chosen.events.map((event) => [event.type, event.payload])).toEqual([
+          [
+            "model_account.selection.changed",
+            expect.objectContaining({
+              provider: providerId,
+              connectionId: personal,
+              choice: "explicit",
+              subjectId: org.ownerSubjectId,
+            }),
+          ],
+        ]);
+        expect(chosen.wakes.map((wake) => wake.provider)).toEqual([providerId]);
+        expect(await bindingOf(first)).toMatchObject({
+          connectionId: personal,
+          choice: "explicit",
+        });
+        expect((await picker(first, org.ownerSubjectId))!.binding).toEqual({
+          provider: providerId,
+          connectionId: personal,
+          choice: "explicit",
+        });
+        // The same choice again changes nothing.
+        expect((await choose(first, org.ownerSubjectId, personal)).outcome).toBe("unchanged");
+        // The next turn runs on the chosen personal account.
+        const second = await nextTurn(org, first, { personalAuthority: true });
+        expect(await placeChecked(second)).toMatchObject({
+          kind: "run",
+          connectionId: personal,
+          explicit: true,
+        });
+        // Back to automatic; again is a no-op.
+        expect(await choose(second, org.ownerSubjectId, null)).toMatchObject({
+          outcome: "changed",
+          connectionId: null,
+        });
+        expect(await bindingOf(second)).toMatchObject({ choice: "automatic" });
+        expect((await choose(second, org.ownerSubjectId, null)).outcome).toBe("unchanged");
+
+        // A shared session of the owner: the binding guard refuses the
+        // personal account (the picker listed it as not choosable).
+        const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
+        expect((await choose(sharedTurn, org.ownerSubjectId, personal)).outcome).toBe("refused");
+        // Any member may choose a pool account for a shared session.
+        expect(await choose(sharedTurn, member, shared)).toMatchObject({
+          outcome: "changed",
+          connectionId: shared,
+        });
+        // Another person's personal account is never found, in their own
+        // private session or the owner's shared one.
+        const memberSession = await memberPrivateSession(org, member);
+        expect(
+          (
+            await chooseSubscriptionCoreSessionAccount(
+              db(),
+              {
+                accountId: org.accountId,
+                workspaceId: org.sharedWorkspaceId,
+                sessionId: memberSession,
+                subjectId: member,
+                connectionId: personal,
+              },
+              providers,
+            )
+          ).outcome,
+        ).toBe("not_found");
+        expect((await choose(sharedTurn, member, personal)).outcome).toBe("not_found");
+        // The database itself refuses the member's direct write of the
+        // owner's account into the member's own private session.
+        await expect(
+          withWorkspaceSubjectSessionActivityRls(
+            db(),
+            org.sharedWorkspaceId,
+            member,
+            async (tx) => {
+              await tx.execute(
+                sql`select set_config('opengeni.initiating_human_subject_id', ${member}, true)`,
+              );
+              await tx.execute(sql`insert into subscription_session_bindings (
+                account_id, workspace_id, session_id, provider, connection_id, model_id,
+                choice, only_this_model, version
+              ) values (
+                ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${memberSession}::uuid,
+                ${providerId}, ${personal}::uuid, ${m0.productModelId}, 'explicit', false, 1
+              )`);
+            },
+          ),
+        ).rejects.toMatchObject({ cause: { code: "42501" } });
+        // Connections of the foreign provider are not found.
+        expect((await choose(first, org.ownerSubjectId, org.foreign.healthy)).outcome).toBe(
+          "not_found",
+        );
+        // Personal accounts turned off: the database refuses the choice.
+        await disablePersonal(org);
+        const third = await nextTurn(org, second, { personalAuthority: true });
+        expect((await choose(third, org.ownerSubjectId, personal)).outcome).toBe("refused");
+        expect(await bindingOf(third)).not.toMatchObject({
+          connectionId: personal,
+          choice: "explicit",
+        });
+      });
+
+      test("SUB-OWN-05, D-24, D-27: turning personal accounts off makes an explicit personal choice wait as ineligible", async () => {
+        const org = await organization();
+        await sharedConnection(org, `off-shared-${crypto.randomUUID()}`);
+        const personal = await personalConnection(org, `off-personal-${crypto.randomUUID()}`);
+        const first = await runningTurn(org, {
+          visibility: "user_private",
+          personalAuthority: true,
+        });
+        await placeChecked(first);
+        expect((await choose(first, org.ownerSubjectId, personal)).outcome).toBe("changed");
+        await disablePersonal(org);
+        const second = await nextTurn(org, first, { personalAuthority: true });
+        expect(await placeChecked(second)).toMatchObject({
+          kind: "wait",
+          reason: "pinned_account_ineligible",
+        });
+        // Returning to automatic lets the pool serve it again.
+        expect((await choose(second, org.ownerSubjectId, null)).outcome).toBe("changed");
+        expect(await placeChecked(second)).toMatchObject({ kind: "run", personal: false });
+      });
+
+      test("SUB-SEL-02: a person reads and changes only their own fallback opt-in, and placement honours it", async () => {
+        const org = await organization();
+        const member = await workspaceMember(org);
+        const owner = { accountId: org.accountId, subjectId: org.ownerSubjectId };
+        // The fixture saved the owner's opt-in once.
+        expect(await readSubscriptionPersonPreferences(db(), owner)).toEqual({
+          personalFallbackOptIn: true,
+          version: 1,
+        });
+        expect(
+          await writeSubscriptionPersonPreferences(db(), {
+            ...owner,
+            personalFallbackOptIn: false,
+            expectedVersion: 1,
+          }),
+        ).toEqual({
+          outcome: "written",
+          preferences: { personalFallbackOptIn: false, version: 2 },
+        });
+        expect(
+          await writeSubscriptionPersonPreferences(db(), {
+            ...owner,
+            personalFallbackOptIn: true,
+            expectedVersion: 1,
+          }),
+        ).toEqual({
+          outcome: "conflict",
+          preferences: { personalFallbackOptIn: false, version: 2 },
+        });
+        // A member without a saved preference starts at version 0.
+        const memberScope = { accountId: org.accountId, subjectId: member };
+        expect(await readSubscriptionPersonPreferences(db(), memberScope)).toEqual({
+          personalFallbackOptIn: false,
+          version: 0,
+        });
+        expect(
+          await writeSubscriptionPersonPreferences(db(), {
+            ...memberScope,
+            personalFallbackOptIn: true,
+            expectedVersion: 0,
+          }),
+        ).toEqual({ outcome: "written", preferences: { personalFallbackOptIn: true, version: 1 } });
+        expect(
+          (
+            await writeSubscriptionPersonPreferences(db(), {
+              ...memberScope,
+              personalFallbackOptIn: false,
+              expectedVersion: 0,
+            })
+          ).outcome,
+        ).toBe("conflict");
+        // The member sees and changes nothing of the owner's, as the app role.
+        await withRlsContext(db(), { accountId: org.accountId, workspaceId: null }, async (tx) => {
+          await setSubjectRlsContext(tx, member);
+          const visible = await rawRows<{ id: string }>(
+            tx,
+            sql`select organization_membership_id::text as id from subscription_person_preferences
+              where account_id = ${org.accountId}::uuid`,
+          );
+          expect(visible.map((row) => row.id)).not.toContain(org.ownerMembershipId);
+          const updated = await rawRows<{ version: number }>(
+            tx,
+            sql`update subscription_person_preferences set personal_fallback_opt_in = true
+              where account_id = ${org.accountId}::uuid
+                and organization_membership_id = ${org.ownerMembershipId}::uuid
+              returning version`,
+          );
+          expect(updated).toEqual([]);
+        });
+        await expect(
+          withRlsContext(db(), { accountId: org.accountId, workspaceId: null }, async (tx) => {
+            await setSubjectRlsContext(tx, member);
+            await tx.execute(sql`insert into subscription_person_preferences
+                (account_id, organization_membership_id, personal_fallback_opt_in)
+              values (${org.accountId}::uuid, ${crypto.randomUUID()}::uuid, true)`);
+          }),
+        ).rejects.toMatchObject({ cause: { code: "42501" } });
+        // Agents, services and people who left have no preferences here.
+        expect(
+          await readSubscriptionPersonPreferences(db(), {
+            accountId: org.accountId,
+            subjectId: "service:subscription-core",
+          }),
+        ).toBeNull();
+        await admin()`update organization_memberships set status = 'revoked', revoked_at = now()
+          where account_id = ${org.accountId}::uuid and subject_id = ${member}`;
+        expect(await readSubscriptionPersonPreferences(db(), memberScope)).toBeNull();
+        expect(
+          (
+            await writeSubscriptionPersonPreferences(db(), {
+              ...memberScope,
+              personalFallbackOptIn: false,
+            })
+          ).outcome,
+        ).toBe("not_member");
+
+        // Placement: with only a personal account, the owner's private turn
+        // waits while they have not opted in, and runs on it once they have.
+        const fallback = await organization();
+        const personal = await personalConnection(fallback, `opt-in-${crypto.randomUUID()}`);
+        const fallbackOwner = { accountId: fallback.accountId, subjectId: fallback.ownerSubjectId };
+        await writeSubscriptionPersonPreferences(db(), {
+          ...fallbackOwner,
+          personalFallbackOptIn: false,
+        });
+        const waiting = await runningTurn(fallback, {
+          visibility: "user_private",
+          personalAuthority: true,
+        });
+        expect(await placeChecked(waiting)).toMatchObject({ kind: "wait" });
+        await writeSubscriptionPersonPreferences(db(), {
+          ...fallbackOwner,
+          personalFallbackOptIn: true,
+        });
+        expect(await placeChecked(waiting)).toMatchObject({
+          kind: "run",
+          connectionId: personal,
+          personal: true,
+        });
+        // The picker reports the opt-in and the effective settings.
+        expect((await picker(waiting, fallback.ownerSubjectId))!.personal).toEqual({
+          connectionsAllowed: true,
+          fallbackAllowed: true,
+          fallbackOptIn: true,
+        });
+      });
+
+      test("concurrent choices and placements serialize on the binding and never lose a choice", async () => {
+        const org = await organization();
+        const a = await sharedConnection(org, `race-a-${crypto.randomUUID()}`);
+        const b = await sharedConnection(org, `race-b-${crypto.randomUUID()}`);
+        const personal = await personalConnection(org, `race-personal-${crypto.randomUUID()}`);
+        // A fresh session without a binding: the choice and the first
+        // placement race to create it.
+        for (let round = 0; round < 4; round += 1) {
+          const turn = await runningTurn(org, {
+            visibility: "user_private",
+            personalAuthority: true,
+          });
+          const [chosen] = await Promise.all([
+            choose(turn, org.ownerSubjectId, personal),
+            place(turn),
+          ]);
+          expect(chosen.outcome).toBe("changed");
+          expect(await bindingOf(turn)).toMatchObject({
+            connectionId: personal,
+            choice: "explicit",
+          });
+        }
+        // Two people choose different pool accounts for one shared session at
+        // once: both commit in some order, each recorded once.
+        const member = await workspaceMember(org);
+        const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
+        await placeChecked(sharedTurn);
+        const before = (await bindingOf(sharedTurn))!.version;
+        const results = await Promise.all([
+          choose(sharedTurn, org.ownerSubjectId, a),
+          choose(sharedTurn, member, b),
+        ]);
+        const changed = results.filter((result) => result.outcome === "changed");
+        expect(changed.length + results.filter((r) => r.outcome === "unchanged").length).toBe(2);
+        const final = (await bindingOf(sharedTurn))!;
+        expect(final.choice).toBe("explicit");
+        expect([a, b]).toContain(final.connectionId as string);
+        expect(final.version).toBe(before + changed.length);
+        const sequences = changed.flatMap((result) => result.events.map((event) => event.sequence));
+        expect(new Set(sequences).size).toBe(changed.length);
       });
     });
   });

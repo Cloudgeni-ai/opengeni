@@ -2322,6 +2322,9 @@ export const SESSION_EVENT_TYPES = [
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "codex.account.selection.changed",
+  // A person chose the session's account (any provider) or returned it to
+  // automatic placement.
+  "model_account.selection.changed",
   // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
   // Bounded, identity-free deterministic shadow/replay decision.
@@ -4181,6 +4184,67 @@ export type ModelAccountSettingsOverview = {
   organization: OrganizationModelAccountSettings;
   workspaces: (ModelAccountSettingsView & { workspaceId: string; name: string })[];
   nextCursor: string | null;
+};
+
+/** Why a listed model account cannot be chosen for this session. */
+export type ModelAccountChoiceRefusal =
+  | "inactive"
+  | "personal_not_allowed"
+  | "personal_not_owner_work";
+
+/**
+ * One account the model picker may list for a session: a shared account of
+ * the workspace's pool or the caller's own personal account.
+ */
+export type ModelAccountChoiceOption = {
+  provider: string;
+  connectionId: string;
+  label: string | null;
+  accountEmail: string | null;
+  planType: string | null;
+  status: string;
+  personal: boolean;
+  source: "workspace" | "organization" | "personal";
+  allowedModelIds: string[] | null;
+  choosable: boolean;
+  refusal: ModelAccountChoiceRefusal | null;
+};
+
+/** A session's current account, what it may switch to, and the effective personal settings. */
+export type SessionModelAccountChoice = {
+  binding: {
+    provider: string;
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+  } | null;
+  accounts: ModelAccountChoiceOption[];
+  personal: {
+    connectionsAllowed: boolean;
+    fallbackAllowed: boolean;
+    fallbackOptIn: boolean;
+  };
+};
+
+/** `connectionId: null` returns the session to automatic account selection. */
+export type SetSessionModelAccountChoiceRequest = { connectionId: string | null };
+
+export type SetSessionModelAccountChoiceResult = {
+  changed: boolean;
+  appliedTo: "waiting_turn" | "next_turn";
+  provider: string | null;
+  connectionId: string | null;
+  choice: "explicit" | "automatic";
+};
+
+/** The caller's own model-account preferences in an organization. */
+export type ModelAccountPreferences = {
+  personalFallbackOptIn: boolean;
+  version: number;
+};
+
+export type UpdateModelAccountPreferencesRequest = {
+  personalFallbackOptIn: boolean;
+  expectedVersion?: number;
 };
 
 /**

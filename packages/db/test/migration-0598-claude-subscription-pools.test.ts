@@ -66,6 +66,8 @@ const subscriptionCoreMigrations = [
   "0724_subscription_settings_locks.sql",
   // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
   "0726_subscription_personal_acceptance_reads.sql",
+  // Adds owner policies on the person preferences table from withheld 0642.
+  "0727_subscription_person_preferences_owner.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {
