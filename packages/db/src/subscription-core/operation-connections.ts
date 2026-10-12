@@ -183,8 +183,11 @@ export const subscriptionCoreOperationConnections = memoByProvider(
         );
         let explicitId: string | null = null;
         if (scope.kind === "session") {
-          const binding = await readSubscriptionSessionBinding(tx, scope).catch(() => null);
-          if (binding?.provider === providerId && binding.choice === "explicit") {
+          const binding = await readSubscriptionSessionBinding(tx, {
+            ...scope,
+            provider: providerId,
+          }).catch(() => null);
+          if (binding?.choice === "explicit") {
             explicitId = binding.connectionId;
           }
         }

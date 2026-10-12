@@ -217,7 +217,11 @@ export const embeddingMigrationTail = [
   "0729_subscription_person_preferences_owner.sql",
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   "0730_subscription_core_personal_connection_versions.sql",
+  // Rekeys the session bindings table from withheld 0642.
+  "0733_subscription_session_bindings_per_provider.sql",
   // Reads the Knowledge claim installed by withheld 0461 (and the title/site
   // claims in historical lifecycle fixtures); preserve its full-name identity.
   "0730_maintenance_work_probes.sql",
+  // Reads browser/outbox claim routines withheld by historical lifecycle fixtures.
+  "0732_sandbox_maintenance_work_probes.sql",
 ];

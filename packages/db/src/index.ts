@@ -441,6 +441,7 @@ import {
 import {
   readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
   readSubscriptionSessionBinding as readCoreSessionBinding,
+  isSubscriptionSessionBindingRollingConflict,
   resolveSubscriptionConnectionId as resolveCoreConnectionId,
   writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
@@ -29189,11 +29190,11 @@ export async function getSubscriptionCoreSessionCodexAccounts(
         .limit(1);
       if (!session) return null;
       const projection = await projectSubscriptionCoreCodexWorkspace(tx, input);
-      const binding = await readCoreSessionBinding(tx, {
+      const codexBinding = await readCoreSessionBinding(tx, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        provider: "codex",
       });
-      const codexBinding = binding?.provider === "codex" ? binding : null;
       const [turn] = session.activeTurnId
         ? await rawRows<{ id: string; status: string; connection_id: string | null }>(
             tx,
@@ -29397,7 +29398,9 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         wake: null,
       };
       if (!session || session.accountId !== input.accountId) return unchanged;
-      // Lock the binding: a running turn's placement
+      // Lock the session's Codex binding (a session keeps one binding per
+      // provider, D-32; another provider's is never read or written here):
+      // a running turn's placement
       // (`writeSubscriptionSessionBinding`) advances its version, and an
       // unlocked read would lose the version compare-and-swap below to it and
       // report the choice as not found. Cache-clock advances do not bump it.
@@ -29405,6 +29408,7 @@ export async function pinSubscriptionCoreSessionCodexAccount(
         tx,
         sql`select choice, version from subscription_session_bindings
           where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
+            and provider = 'codex'
           for update`,
       );
       const binding = lockedBinding
@@ -29434,7 +29438,8 @@ export async function pinSubscriptionCoreSessionCodexAccount(
               sql`update subscription_session_bindings
                 set choice = 'automatic', version = version + 1
                 where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
+                  and version = ${binding.version}
                 returning version`,
             );
             return rows.length > 0;
@@ -29443,11 +29448,12 @@ export async function pinSubscriptionCoreSessionCodexAccount(
             const rows = await rawRows<{ version: number | string }>(
               scoped,
               sql`update subscription_session_bindings
-                set provider = 'codex', connection_id = ${connectionId}::uuid,
+                set connection_id = ${connectionId}::uuid,
                     choice = 'explicit', last_switch_reason = 'explicit_choice',
                     version = version + 1
                 where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and version = ${binding.version}
+                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
+                  and version = ${binding.version}
                 returning version`,
             );
             return rows.length > 0;
@@ -29473,6 +29479,9 @@ export async function pinSubscriptionCoreSessionCodexAccount(
           (error as { cause?: { code?: unknown } } | null)?.cause?.code;
         // The guard refuses a connection this session may not use.
         if (code === "42501") return unchanged;
+        // A racing first binding of the session met 0733's rolling index (a
+        // lost compare-and-swap); the savepoint rolled it back.
+        if (isSubscriptionSessionBindingRollingConflict(error)) return unchanged;
         throw error;
       }
       const appliedTo: "waiting_turn" | "next_turn" =

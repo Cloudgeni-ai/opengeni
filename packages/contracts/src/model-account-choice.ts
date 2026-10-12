@@ -66,19 +66,24 @@ export const ModelAccountChoiceOption = z.object({
 });
 export type ModelAccountChoiceOption = z.infer<typeof ModelAccountChoiceOption>;
 
+/** A session's binding for one provider: its explicit choice or its automatic placement. */
+const SessionModelAccountBinding = z.object({
+  provider: ProviderId,
+  connectionId: z.string().uuid().nullable(),
+  choice: z.enum(["explicit", "automatic"]),
+});
+
 export const SessionModelAccountChoiceResponse = z.object({
   /**
-   * The session's current account: `explicit` after a person's choice, else
-   * the account automatic placement last used. `connectionId` is null when
-   * the caller may not see that account.
+   * The session's current account when it has bindings for one provider
+   * only: `explicit` after a person's choice, else the account automatic
+   * placement last used. Null when it has none, or bindings for several
+   * providers (see `bindings`). `connectionId` is null when the caller may
+   * not see that account.
    */
-  binding: z
-    .object({
-      provider: ProviderId,
-      connectionId: z.string().uuid().nullable(),
-      choice: z.enum(["explicit", "automatic"]),
-    })
-    .nullable(),
+  binding: SessionModelAccountBinding.nullable(),
+  /** One binding per provider: a session keeps each provider's choice separately. */
+  bindings: z.array(SessionModelAccountBinding),
   accounts: z.array(ModelAccountChoiceOption),
   personal: z.object({
     /** Personal accounts are allowed in this workspace (effective setting). */
@@ -91,9 +96,14 @@ export const SessionModelAccountChoiceResponse = z.object({
 });
 export type SessionModelAccountChoiceResponse = z.infer<typeof SessionModelAccountChoiceResponse>;
 
-/** `connectionId: null` returns the session to automatic account selection. */
+/**
+ * A connection makes it the session's choice for that connection's provider;
+ * other providers' choices stay. `connectionId: null` returns the session to
+ * automatic account selection: only `provider`'s choice when given, else
+ * every provider's.
+ */
 export const SetSessionModelAccountChoiceRequest = z
-  .object({ connectionId: z.string().uuid().nullable() })
+  .object({ connectionId: z.string().uuid().nullable(), provider: ProviderId.optional() })
   .strict();
 export type SetSessionModelAccountChoiceRequest = z.infer<
   typeof SetSessionModelAccountChoiceRequest
