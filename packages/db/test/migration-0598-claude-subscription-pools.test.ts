@@ -68,6 +68,8 @@ const subscriptionCoreMigrations = [
   "0726_subscription_personal_acceptance_reads.sql",
   // Patches the operation-lease guard withheld 0671 and 0711 define.
   "0727_subscription_core_ownerless_video_operations.sql",
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  "0728_subscription_core_personal_connect_format.sql",
 ] as const;
 const key = Buffer.alloc(32, 67);
 const ids = {

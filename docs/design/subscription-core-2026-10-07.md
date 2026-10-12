@@ -3174,8 +3174,9 @@ the plan left room, for reviewers:
 - **Credential format.** 0707's neutral refresh writers stored the encryption
   envelope version in `credential_format`; they no longer touch it, so an
   adapter format such as a setup token's survives refresh. Codex stores
-  `v1` either way. The neutral connect writer still writes `v1`; a provider
-  with another format passes it when its writer lands (X2b, C2b).
+  `v1` either way. The neutral connect writers take the format from X2b on
+  (`credentialFormat`, and 0728's personal writer overload); `v1` when
+  omitted, as Codex does.
 - **Adapter.** `SubscriptionCoreAdapter.capabilitiesFor(format)` and
   `credential.format(credential)` let `autoRenews` depend on the credential
   format; the resolver and both refresh paths choose the refresher through
@@ -4382,6 +4383,126 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   reservation, a bearer that cannot be mapped to the xAI client's, a refused
   renewal after a 401) is a rejection. The session binding is never
   read or written; a legacy-placed turn keeps the legacy image path.
+
+##### X2b: routes and writers
+
+Dormant until the SuperGrok cutover receipt: each SuperGrok route, the
+SuperGrok access policy and every acceptance path first ask whether the
+`xai` receipt exists (one read); without it they run today's code
+unchanged. With it, `readSubscriptionCoreProviderRoute` decides: `core`
+serves the route from the shared core, `maintenance` (switch row missing or
+disabled) answers the typed 503 `subscription_core_cutover_disabled`.
+
+- **Routes (EP-S09, EP-S10, EP-S14, EP-S16).** The pool routes take an
+  optional core hook (`apps/api/src/routes/subscription-pool-core.ts`,
+  provider-neutral; Claude passes none yet and is unchanged). Paths, verbs,
+  bodies and response shapes stay; accounts are core connections projected
+  into the legacy SuperGrok account shape (`subscription-core-xai-compat.ts`;
+  the one quota window is the legacy percentage and reset), so the legacy
+  `accountJson` renders both. Route ids resolve through the cutover aliases
+  on both route families, as the caller (`resolveSubscriptionCoreRouteConnectionId`):
+  an organization administrator sees every alias of the organization, any
+  other workspace administrator the aliases of connections the workspace
+  reaches, and a personal connection's alias resolves only for its owner in
+  their own Personal workspace (inside the owner-only routine); the caller's
+  projection or writer still decides whether the connection is theirs.
+  Activate answers with the canonical id the listing shows.
+  Activate sets the effective primary at the scope the caller administers;
+  rotation maps to `spread` / `primary_first`; rename, allocator and
+  disconnect use the neutral writers, behind the legacy browser and scope
+  checks. Connect start fails closed in maintenance.
+- **Workspace settings over an inherited pool.** As legacy, while an
+  available organization pool serves the workspace, rotation and activate
+  on a workspace route are refused (409, "manage this subscription in
+  organization settings") before anything is written; the organization's
+  settings change only on the organization routes. Otherwise they write
+  that workspace's own setting, and whether a workspace may hold it is the
+  organization's settings lock, enforced by the neutral settings writers.
+  The one exception is the owner's own Personal workspace once they have a
+  private account there (the listing's source is `user`): legacy changed
+  their private pool's rotation, and on the core that pool is their
+  Personal workspace's, which the organization pool may also serve. The
+  owner's rotation, and activating their private account, write their
+  Personal workspace's own override; the override takes the organization's
+  current primary as its inherited primary, so the organization accounts
+  serving that workspace follow the owner's order there and no longer
+  follow later organization primary changes. Nobody else's work runs in that
+  workspace, and the owner cannot make an organization account its
+  primary. Without a private account the organization pool's 409 applies,
+  as legacy; the 409 for activate applies to shared accounts.
+- **Organization settings locks bind these writes.** The rotation and
+  activate routes write through the neutral settings writers, so an
+  organization lock on `rotation` (0724) refuses them with the 409
+  `setting_locked` and writes nothing, as for Codex; this includes the owner's
+  Personal workspace override above.
+- **Private accounts live in the Personal workspace.** On the core, every
+  route that manages a private (`user`) account (connect start and poll,
+  listing personal rows, rename, allocator, activate, disconnect, rotation)
+  requires the caller's own current Personal workspace with a live
+  organization membership, where the core keeps personal connections; the
+  legacy rule (an ordinary workspace membership) still applies before the
+  receipt. `scope: "user"` outside the Personal workspace is refused at
+  connect start, before the xAI sign-in. Rotation is authorized by the
+  workspace (organization pool, own Personal workspace, else the workspace
+  administrator), not by the listing's display `source`.
+- **Organization activate** refuses, as legacy did (409), an account that
+  is not active or that the allocator may not use; an unknown id is 404.
+- **Connect admission.** Whether a workspace administrator may save the
+  signed-in account (a reconnect of an account their workspace manages) is
+  known only after the sign-in, so the neutral writer decides at poll time;
+  connect start checks the scope and fails closed in maintenance.
+- **Connect.** Organization and workspace connects create shared
+  connections through the neutral writer with `credential_format =
+  'xai_oauth_v1'`; the token identity subject is both the upstream account
+  and the person. `scope: "user"` creates a personal connection only in the
+  person's own Personal workspace and is refused elsewhere, never turned
+  into a shared one (the strictest reading of "personal connections only in
+  the owner's private session or Personal workspace"). Migration 0728 adds
+  the personal writer overload that takes the format; Codex keeps the 0707
+  writer and `v1`. The format is the adapter codec's
+  (`credential.format`); a malformed one is a caller defect, thrown by the
+  neutral writer before any write on every path (never a refusal or the
+  maintenance 503). A test compares the two live overloads after 0728's
+  four substitutions, so a later fix to one that misses the other fails.
+  A shared workspace's connect is step W's shape
+  ([§5.4](#54-workspace-managed-connections-as-organization-accounts)): an
+  organization account that workspace manages, which the organization
+  access editor shares. As for Codex on the core, a first connect leaves
+  the primary unset (`isActive` false until an administrator activates
+  one); with no primary the pool fails over across every eligible account
+  (D-13).
+- **Workspace listing.** `source` is `user` when the viewer's own personal
+  connections are listed (their Personal workspace, owner-only), else the
+  effective shared source. Listing personal rows requires the private
+  browser human, as legacy.
+- **Acceptance (EP-S18..S24).** The v2 writers merge every registered
+  provider's entry (the `core*V2` writers); with only Codex registered the
+  value is exactly Codex's. After each carrier insert on every path of
+  "Accepted authority across the cutover",
+  `copySubscriptionAuthorityCompatInTransaction` copies the record of each
+  provider whose own cutover holds records: one read while none does. A
+  carrier an upsert did not insert is skipped, and so is a task revision an
+  earlier transaction inserted (a replayed or detached reusable-session
+  materialization returns the existing head): the application role cannot
+  read revisions, so 0728's owner-run
+  `subscription_authority_carrier_inserted_now` answers for them.
+- **v1 after the receipt.** The SuperGrok v1 resolvers return the column
+  default once the `xai` receipt exists; derived rows already copy v1
+  verbatim. The resolvers are provider-parameterized, so Claude's follow the
+  same rule from Claude's own receipt (C3); before it they are unchanged.
+- **Status (EP-S15) and media** stay with X2a; SDK, React and event names
+  and shapes (EP-S26..S31) are unchanged.
+
+Generalizations (old name, new name; the old names remain as aliases):
+`receiverCodexSubscriptionAuthorityV2InTransaction` to
+`receiverSubscriptionAuthorityV2InTransaction`; the
+`codexSubscriptionAuthorityV2*` call sites to the merged
+`coreSubscriptionAuthorityV2*` writers; the Codex workspace projection's
+personal join to `readSubscriptionCoreWorkspaceView`;
+`deliverSubscriptionCoreCodexWake` to `deliverSubscriptionCoreWake`;
+`read/get/updateSubscriptionCoreCodexModelConnectionAccess` to
+`read/get/updateSubscriptionCoreProviderModelConnectionAccess`; the neutral
+connect writer gains `credentialFormat` and `personal`.
 
 #### Verification plan
 
