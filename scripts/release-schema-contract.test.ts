@@ -249,6 +249,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers native broker stdin and operation replies as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0742_native_command_broker_input_replies.sql",
+      ),
+    ).toMatchObject({
+      path: "0742_native_command_broker_input_replies.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("installs the workspace activity initializer before its conflict-safe backfill", async () => {
     const migration = await readFile(
       join(import.meta.dir, "../packages/db/drizzle/0214_session_activity_commit_gate.sql"),
@@ -2744,6 +2756,7 @@ describe("release schema contract", () => {
       "0740_native_command_qualification.sql",
       "0738_native_command_broker_transport.sql",
       "0741_native_command_broker_control_replies.sql",
+      "0742_native_command_broker_input_replies.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

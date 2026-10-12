@@ -40,7 +40,14 @@ const bindingSchema = z
   })
   .strict();
 export type NativeBrokerTransportBinding = z.infer<typeof bindingSchema>;
-export type NativeBrokerEntryKind = "request" | "frame" | "page" | "eof" | "control_reply";
+export type NativeBrokerEntryKind =
+  | "request"
+  | "frame"
+  | "page"
+  | "eof"
+  | "control_reply"
+  | "request_reply"
+  | "stdin_reservation";
 export type NativeBrokerStoredEntry = {
   kind: NativeBrokerEntryKind;
   key: string;
@@ -68,6 +75,7 @@ export type NativeBrokerTransportStore = {
     input: NativeBrokerRetainedInput,
     operation: (
       tx: NativeBrokerTransportTransaction & {
+        inputOffset: number;
         reserveInput(byteLength: number): Promise<number>;
       },
     ) => Promise<T>,
@@ -222,6 +230,7 @@ export function nativeBrokerTransportStore(
   const transaction = async <T>(
     operation: (
       tx: NativeBrokerTransportTransaction & {
+        inputOffset: number;
         reserveInput(byteLength: number): Promise<number>;
       },
     ) => Promise<T>,
@@ -230,9 +239,12 @@ export function nativeBrokerTransportStore(
     withRlsContext(db, binding, async (dbtx) => {
       // Retained input follows settlement's process -> admission -> lease
       // order. Ordinary journal transactions never acquire process locks.
-      const reserveInput = retainedInput
+      const retained = retainedInput
         ? await lockRetainedInput(dbtx, binding, retainedInput)
-        : async (_byteLength: number): Promise<number> => fenced();
+        : {
+            inputOffset: -1,
+            reserveInput: async (_byteLength: number): Promise<number> => fenced(),
+          };
       // Consistent order: scoped workspace fence -> lease -> broker. Late output
       // remains capturable after physical replacement, but no input is allowed.
       const lease = await lockLease(dbtx, binding);
@@ -264,9 +276,10 @@ export function nativeBrokerTransportStore(
         lease.instance_id === binding.sandboxId &&
         ["warming", "warm", "draining"].includes(lease.liveness);
       const tx: NativeBrokerTransportTransaction & {
+        inputOffset: number;
         reserveInput(byteLength: number): Promise<number>;
       } = {
-        reserveInput,
+        ...retained,
         state,
         writer: { ...writer },
         currentInstance,
@@ -417,7 +430,7 @@ async function lockRetainedInput(
   db: Database,
   binding: NativeBrokerTransportBinding,
   scope: NativeBrokerRetainedInput,
-): Promise<(byteLength: number) => Promise<number>> {
+): Promise<{ inputOffset: number; reserveInput(byteLength: number): Promise<number> }> {
   const rows = await rawRows(
     db,
     sql`SELECT provider_command, provider_command_input_index,
@@ -449,32 +462,35 @@ async function lockRetainedInput(
     AND provider_instance_id = ${binding.sandboxId} AND operation = 'writeStdin' FOR UPDATE`,
   );
   if (admissions.length !== 1) fenced();
+  const offset = Number(row.provider_command_input_index);
+  if (!Number.isSafeInteger(offset) || offset < 0) fenced();
   let used = false;
-  return async (byteLength) => {
-    if (
-      used ||
-      row.state !== "active" ||
-      row.cancellation_requested_at ||
-      row.supervision_receipt ||
-      admissions[0]!.settled_at ||
-      !Number.isSafeInteger(byteLength) ||
-      byteLength <= 0
-    )
-      fenced();
-    const offset = Number(row.provider_command_input_index);
-    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(offset + byteLength))
-      fenced();
-    used = true;
-    const updated = await rawRows(
-      db,
-      sql`UPDATE sandbox_retained_processes
+  return {
+    inputOffset: offset,
+    reserveInput: async (byteLength) => {
+      if (
+        used ||
+        row.state !== "active" ||
+        row.cancellation_requested_at ||
+        row.supervision_receipt ||
+        admissions[0]!.settled_at ||
+        !Number.isSafeInteger(byteLength) ||
+        byteLength <= 0
+      )
+        fenced();
+      if (!Number.isSafeInteger(offset + byteLength)) fenced();
+      used = true;
+      const updated = await rawRows(
+        db,
+        sql`UPDATE sandbox_retained_processes
       SET provider_command_input_index = ${offset + byteLength}
       WHERE id = ${scope.processId}::uuid AND ${scoped(binding)}
       AND session_id = ${scope.sessionId}::uuid AND provider_command_input_index = ${offset}
       RETURNING id`,
-    );
-    if (updated.length !== 1) fenced();
-    return offset;
+      );
+      if (updated.length !== 1) fenced();
+      return offset;
+    },
   };
 }
 
@@ -485,16 +501,44 @@ function validateEntryIdentity(
   write: boolean,
 ) {
   if (
-    !["request", "frame", "page", "eof", "control_reply"].includes(kind) ||
+    ![
+      "request",
+      "frame",
+      "page",
+      "eof",
+      "control_reply",
+      "request_reply",
+      "stdin_reservation",
+    ].includes(kind) ||
     typeof key !== "string" ||
     Buffer.byteLength(key) < 1 ||
     Buffer.byteLength(key) > 200
   )
     fenced();
-  if ((kind === "request" || kind === "control_reply") && !uuid.safeParse(key).success) fenced();
+  if (
+    (kind === "request" || kind === "control_reply" || kind === "request_reply") &&
+    !uuid.safeParse(key).success
+  )
+    fenced();
+  if (kind === "stdin_reservation") {
+    const parts = key.split(":");
+    if (
+      parts.length !== 2 ||
+      !uuid.safeParse(parts[0]).success ||
+      !/^[1-9][0-9]*$/.test(parts[1]!) ||
+      !Number.isSafeInteger(Number(parts[1]))
+    )
+      fenced();
+  }
   if (kind === "frame" && !/^[1-9][0-9]*$/.test(key)) fenced();
   if (!write) return;
-  if (kind === "request" || kind === "frame" || kind === "control_reply") {
+  if (
+    kind === "request" ||
+    kind === "frame" ||
+    kind === "control_reply" ||
+    kind === "request_reply" ||
+    kind === "stdin_reservation"
+  ) {
     if (
       sequence === null ||
       !Number.isSafeInteger(sequence) ||

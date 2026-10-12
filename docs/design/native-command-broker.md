@@ -398,7 +398,27 @@ erasing an already committed operation. This permits reconciliation of its
 original outcome, not a new stdin authorization. The path currently accepts one
 native-frame-bounded payload per admission; a future application adapter must
 not silently split larger input into fresh admissions or truncate it. Shared
-channel scheduling and application input routing remain unimplemented gates.
+channel scheduling and the provider command-session adapter remain unimplemented gates.
+
+Rolling migration `0742` adds immutable `request_reply` and
+`stdin_reservation` indexes. Native status/error replies commit with their
+original accepted request, exact frame and output cursor. For stdin, the
+reservation index binds the command's reserved end offset to that original
+request. A subsequent admission cannot allocate bytes until the prior native
+`stdinWritten` response confirms the complete reserved end offset. Provider
+acknowledgement or broker acceptance alone is insufficient: the command's pipe
+may still be blocked. Partial writes, closed stdin, missing replies and
+conflicting receipts stay fenced without moving the offset or inventing a
+successful write. Control and output observation remain independently usable.
+
+For an already retained broker locator, `RoutingSandboxSession` now carries the
+exact server-created stdin admission through the private
+`withProviderCommandInputAdmission` context. Command arguments cannot supply it;
+the route checks process/physical identity and the DB independently verifies
+the existing admission. Private setup and control reads clear that context.
+Broker output must use the atomic capture adapter, and broker cancellation uses
+native control rather than marker/PID helper execution. This routing support
+does not construct a broker session adapter or enable a new command launch.
 
 The opt-in local static-ELF/real-PostgreSQL test in
 `packages/core/test/native-command-broker-transport.integration.test.ts` runs

@@ -38,6 +38,7 @@ import {
 import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
+  withProviderCommandInputAdmission,
   admittedProviderCommandHandle,
   withoutProviderCommandHandle,
   withCommandSupervisionReady,
@@ -55,6 +56,7 @@ import {
   type ProviderCommandPersistence,
   type ProviderCommandSession,
   type ProviderCommandOutput,
+  type ProviderCommandInputAdmission,
 } from "../provider-command-session";
 import type { SandboxProviderCommand, CommandSupervisionProtocol } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
@@ -1477,9 +1479,43 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (!write) throw new RoutingUnsupportedError(op, record.backend.kind);
     let result: string;
     try {
-      result = await this.invokeProviderOperation(op, record.backend, () =>
-        write.call(record.backend.session, args),
-      );
+      result = await this.invokeProviderOperation(op, record.backend, () => {
+        let input: ProviderCommandInputAdmission | undefined;
+        if (record.process.providerCommand?.kind === "modal-broker-v1") {
+          const value = admission as
+            | {
+                id?: unknown;
+                sessionId?: unknown;
+                actorKind?: unknown;
+                actorId?: unknown;
+                providerBackend?: unknown;
+                providerInstanceId?: unknown;
+                leaseEpoch?: unknown;
+              }
+            | null
+            | undefined;
+          if (
+            !value ||
+            typeof value.id !== "string" ||
+            typeof value.sessionId !== "string" ||
+            value.actorKind !== "process" ||
+            value.actorId !== record.process.id ||
+            value.providerBackend !== "modal" ||
+            value.providerInstanceId !== record.process.providerCommand.sandboxId ||
+            value.leaseEpoch !== record.backend.leaseEpoch
+          )
+            throw new Error("Broker stdin requires its exact retained-process admission");
+          input = {
+            admissionId: value.id,
+            sessionId: value.sessionId,
+            processId: record.process.id,
+            commandId: record.process.providerCommand.execId,
+          };
+        }
+        return withProviderCommandInputAdmission(input, () =>
+          write.call(record.backend.session, args),
+        );
+      });
     } catch (error) {
       let inputUnknown = false;
       try {
@@ -1643,7 +1679,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       args &&
       typeof args === "object" &&
       (args as { chars?: unknown }).chars === "\u0003" &&
-      record.process.providerCommand?.kind === "modal-router-v1" &&
+      (record.process.providerCommand?.kind === "modal-router-v1" ||
+        record.process.providerCommand?.kind === "modal-broker-v1") &&
       record.process.providerCommand.supervision
     ) {
       await this.ensureParentPromotion(record);
@@ -1673,7 +1710,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const write = record.backend.session.writeStdin;
     if (!write) throw new RoutingUnsupportedError("writeStdin", record.backend.kind);
     const result = await this.invokeProviderOperation("writeStdin", record.backend, () =>
-      write.call(record.backend.session, args),
+      withProviderCommandInputAdmission(undefined, () => write.call(record.backend.session, args)),
     );
     onPage(
       result,
@@ -1695,15 +1732,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     result?: unknown,
   ): Promise<void> {
     if (!this.deps.captureProcessOutput) return;
-    // Router byte-offset pages atomically append output and advance the exact
+    // Router/broker byte-offset pages atomically append output and advance the exact
     // expected cursor. Never send these through the legacy append-then-ack path.
     const atomicReceipt =
       record.pendingProviderReceipt ?? (typeof result === "string" ? result : undefined);
+    const atomicKind = atomicReceipt
+      ? record.backend.session.getProviderCommandOutput?.(atomicReceipt)?.command.kind
+      : undefined;
+    if (atomicKind === "modal-broker-v1" && !record.backend.session.captureCommandOutput)
+      throw new Error("Broker output requires its atomic retention adapter");
     if (
       atomicReceipt &&
       record.backend.session.captureCommandOutput &&
-      record.backend.session.getProviderCommandOutput?.(atomicReceipt)?.command.kind ===
-        "modal-router-v1"
+      (atomicKind === "modal-router-v1" || atomicKind === "modal-broker-v1")
     ) {
       record.pendingProviderReceipt = atomicReceipt;
       try {
@@ -1711,6 +1752,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           delete record.pendingProviderReceipt;
           return;
         }
+        if (atomicKind === "modal-broker-v1")
+          throw new Error("Broker output cannot use non-atomic capture");
       } catch (error) {
         throw new RoutingMutationOutcomeUnknownError(
           "captureProcessOutput",
@@ -2898,7 +2941,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * the process backend and may prove terminal state, but never advance the
    * workspace generation. */
   async writeStdinForProcessControl(args: unknown): Promise<string> {
-    return await this.dispatchProcessControl(args);
+    return await withProviderCommandInputAdmission(undefined, () =>
+      this.dispatchProcessControl(args),
+    );
   }
 
   async cancelSupervisedCommand(
@@ -2908,14 +2953,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const record = this.retainedProcesses.get(providerSessionId);
     if (
       !record ||
-      record.process.providerCommand?.kind !== "modal-router-v1" ||
+      (record.process.providerCommand?.kind !== "modal-router-v1" &&
+        record.process.providerCommand?.kind !== "modal-broker-v1") ||
       !record.process.providerCommand.supervision
     )
       return false;
     await this.ensureParentPromotion(record);
     if (!record.backend.session.cancelSupervisedCommand)
       throw new Error("Supervised command control is unavailable");
-    return await record.backend.session.cancelSupervisedCommand(providerSessionId, reason);
+    return await withProviderCommandInputAdmission(undefined, () =>
+      record.backend.session.cancelSupervisedCommand!(providerSessionId, reason),
+    );
   }
 
   /** Empty-input eager reads belong to the model's foreground wait, while
@@ -2937,7 +2985,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (exactProviderSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(exactProviderSessionId);
     if (
-      record.process.providerCommand?.kind === "modal-router-v1" &&
+      (record.process.providerCommand?.kind === "modal-router-v1" ||
+        record.process.providerCommand?.kind === "modal-broker-v1") &&
       record.process.providerCommand.supervision
     )
       throw new Error(

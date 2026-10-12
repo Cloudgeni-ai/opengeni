@@ -20,7 +20,14 @@ import {
 } from "./native-command-broker-output";
 import { NativeBrokerFrameDecoder, type NativeBrokerFrame } from "./native-command-broker-wire";
 
-type EntryKind = "request" | "frame" | "page" | "eof" | "control_reply";
+type EntryKind =
+  | "request"
+  | "frame"
+  | "page"
+  | "eof"
+  | "control_reply"
+  | "request_reply"
+  | "stdin_reservation";
 type Entry = {
   kind: EntryKind;
   key: string;
@@ -57,6 +64,7 @@ export type NativeBrokerTransportPort = {
     input: NativeBrokerRetainedInput,
     operation: (
       tx: NativeBrokerTransportTransaction & {
+        inputOffset: number;
         reserveInput(byteLength: number): Promise<number>;
       },
     ) => Promise<T>,
@@ -100,6 +108,18 @@ function requestFromWire(value: string, identity: Identity) {
   if (frames.length !== 1 || frames[0]?.direction !== "request") invalid();
   return frames[0];
 }
+function launchStreamEof(frame: NativeBrokerFrame): boolean {
+  if (frame.kind !== "status") return false;
+  try {
+    return z
+      .object({ stream: z.enum(["stdout", "stderr"]), eof: z.literal(true) })
+      .strict()
+      .safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.payload)))
+      .success;
+  } catch {
+    return false;
+  }
+}
 export function initialNativeBrokerTransportState(identity: Identity): NativeBrokerTransportState {
   return {
     version: 1,
@@ -118,6 +138,43 @@ export function initialNativeBrokerTransportState(identity: Identity): NativeBro
  * Only `dispatchIntent` returns provider bytes, after the DB commit resolves.
  */
 export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, identity: Identity) {
+  const reply = async (
+    tx: NativeBrokerTransportTransaction,
+    requestId: string,
+    kind: "control_reply" | "request_reply",
+  ) => {
+    const state = validate(tx.state, identity);
+    const entry = await tx.read(kind, requestId);
+    if (!entry) return null;
+    const request = await tx.read("request", requestId);
+    if (!request) invalid();
+    const original = requestFromWire(request.value, identity);
+    const decoder = new NativeBrokerFrameDecoder(identity.brokerId);
+    const frames = decoder.push(Buffer.from(entry.value));
+    decoder.finish();
+    const frame = frames[0];
+    if (
+      frames.length !== 1 ||
+      !frame ||
+      frame.direction !== "response" ||
+      !["status", "error"].includes(frame.kind) ||
+      frame.requestId !== requestId ||
+      original.requestId !== requestId ||
+      original.sequence !== request.sequence ||
+      original.commandId === null ||
+      original.commandId !== frame.commandId ||
+      original.ownerEpoch !== frame.ownerEpoch ||
+      original.sequence > state.input.lastAcceptedInputIndex ||
+      entry.sequence !== frame.sequence ||
+      frame.sequence > state.output.lastSequence ||
+      (kind === "control_reply" && (original.kind !== "control" || frame.offset !== 0))
+    )
+      invalid();
+    const canonical = await tx.read("frame", String(frame.sequence));
+    if (!canonical || canonical.value !== entry.value || canonical.sha256 !== entry.sha256)
+      invalid();
+    return frame;
+  };
   const reserve = async (
     tx: NativeBrokerTransportTransaction,
     writerId: string,
@@ -214,6 +271,41 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
       const bytes = Buffer.from(payload);
       return store.retainedInputTransaction(input, async (tx) => {
         const old = await tx.read("request", input.admissionId);
+        if (!old && tx.inputOffset > 0) {
+          // Provider/broker acceptance does not prove stdin was delivered. A
+          // second process writer must see the exact prior native write reply
+          // before allocating its byte range, even after another input index
+          // is available on the shared channel.
+          const prior = await tx.read("stdin_reservation", `${input.commandId}:${tx.inputOffset}`);
+          if (!prior) invalid();
+          const previous = requestFromWire(prior.value, identity);
+          const canonical = await tx.read("request", previous.requestId);
+          if (
+            !canonical ||
+            canonical.value !== prior.value ||
+            canonical.sha256 !== prior.sha256 ||
+            canonical.sequence !== prior.sequence ||
+            previous.sequence !== prior.sequence ||
+            previous.kind !== "stdin" ||
+            previous.commandId !== input.commandId ||
+            previous.offset + previous.payload.length !== tx.inputOffset
+          )
+            invalid();
+          const completed = await reply(tx, previous.requestId, "request_reply");
+          if (!completed || completed.kind !== "status" || completed.offset !== tx.inputOffset)
+            invalid();
+          let body: unknown;
+          try {
+            body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(completed.payload));
+          } catch {
+            invalid();
+          }
+          const result = z
+            .object({ stdinWritten: z.literal(true) })
+            .strict()
+            .safeParse(body);
+          if (!result.success) invalid();
+        }
         const offset = old
           ? requestFromWire(old.value, identity).offset
           : await tx.reserveInput(bytes.length);
@@ -224,6 +316,16 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
           offset,
           payload: bytes,
         });
+        if (!old) {
+          const saved = await tx.read("request", input.admissionId);
+          if (!saved) invalid();
+          await tx.insert({
+            kind: "stdin_reservation",
+            key: `${input.commandId}:${offset + bytes.length}`,
+            sequence: reserved.index,
+            value: saved.value,
+          });
+        }
         return { ...reserved, offset };
       });
     },
@@ -285,14 +387,26 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
             const request = await tx.read("request", entry.frame.requestId);
             if (request) {
               const original = requestFromWire(request.value, identity);
-              if (original.kind === "control") {
+              if (original.commandId !== null) {
                 if (
                   original.sequence > state.input.lastAcceptedInputIndex ||
                   original.commandId !== entry.frame.commandId ||
-                  original.ownerEpoch !== entry.frame.ownerEpoch ||
-                  entry.frame.offset !== 0
+                  original.ownerEpoch !== entry.frame.ownerEpoch
                 )
                   invalid();
+                // Launch owns later stream EOF facts as well as its one
+                // operation reply. EOFs stay in the canonical frame journal;
+                // they must not replace/conflict with the startup response.
+                if (original.kind !== "launch" || !launchStreamEof(entry.frame))
+                  await tx.insert({
+                    kind: "request_reply",
+                    key: original.requestId,
+                    sequence: entry.frame.sequence,
+                    value: saved.value,
+                  });
+              }
+              if (original.kind === "control") {
+                if (entry.frame.offset !== 0) invalid();
                 await tx.insert({
                   kind: "control_reply",
                   key: original.requestId,
@@ -396,37 +510,10 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
       });
     },
     async controlReply(requestId: string) {
-      return store.transaction(async (tx) => {
-        const state = validate(tx.state, identity);
-        const entry = await tx.read("control_reply", requestId);
-        if (!entry) return null;
-        const request = await tx.read("request", requestId);
-        if (!request) invalid();
-        const original = requestFromWire(request.value, identity);
-        const decoder = new NativeBrokerFrameDecoder(identity.brokerId);
-        const frames = decoder.push(Buffer.from(entry.value));
-        decoder.finish();
-        const frame = frames[0];
-        if (
-          frames.length !== 1 ||
-          !frame ||
-          frame.direction !== "response" ||
-          !["status", "error"].includes(frame.kind) ||
-          frame.requestId !== requestId ||
-          original.kind !== "control" ||
-          original.commandId !== frame.commandId ||
-          original.ownerEpoch !== frame.ownerEpoch ||
-          original.sequence > state.input.lastAcceptedInputIndex ||
-          frame.offset !== 0 ||
-          entry.sequence !== frame.sequence ||
-          frame.sequence > state.output.lastSequence
-        )
-          invalid();
-        const canonical = await tx.read("frame", String(frame.sequence));
-        if (!canonical || canonical.value !== entry.value || canonical.sha256 !== entry.sha256)
-          invalid();
-        return frame;
-      });
+      return store.transaction((tx) => reply(tx, requestId, "control_reply"));
+    },
+    async requestReply(requestId: string) {
+      return store.transaction((tx) => reply(tx, requestId, "request_reply"));
     },
   };
 }

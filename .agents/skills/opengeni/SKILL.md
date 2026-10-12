@@ -106,6 +106,10 @@ Then open the smallest source files that answer the question:
   Broker stdin uses the transport's retained-input transaction to commit its
   exact existing child admission's byte reservation and encrypted request
   together; never call the legacy standalone input-index allocator for it.
+  Its reservation/reply indexes gate the next byte range on complete native
+  stdin delivery, not provider acknowledgement or broker acceptance.
+  The retained route carries that admission in private runtime context, not
+  command arguments, and requires atomic output and native cancellation.
   Journal capture/dispatch and a passing native fixture do not imply canonical
   application admission or old-group enrollment. Follow the remaining gates in
   `docs/design/native-command-broker.md` before enabling that path.

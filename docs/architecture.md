@@ -71,6 +71,10 @@ distinguishes positive pre-dispatch rejection from unknown control outcomes.
 The retained-input transaction locks an existing stdin admission and commits
 its command byte offset with the encrypted request. Standalone offset allocation
 and generic broker dispatch refuse this path; recovery retains the exact bytes.
+An immutable per-command reservation/reply index requires complete native stdin
+delivery before another byte range is reserved, independently of provider ACK.
+Already-retained broker routes carry server-created stdin admission in private
+runtime context, require atomic capture and reject legacy PID/marker controls.
 This bridge does not yet select a protocol or admit application commands.
 The native supervisor's distinct `broker` mode multiplexes initial-process
 input/output and launches sealed per-command supervisors through its private

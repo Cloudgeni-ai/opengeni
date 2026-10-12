@@ -294,10 +294,76 @@ test("retained stdin commits one byte reservation and one immutable request unde
     .service()
     .captureOutput("1-0", page(f, Buffer.from(accepted(f, write.input, 2)).toString(), "2-0"));
   const second = await custody.inputAdmission();
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, second, Buffer.from("next")),
+  ).rejects.toThrow();
+  expect(await counter()).toBe(bytes.length);
+  expect(await f.service().request(second.admissionId)).toBeNull();
+  await f
+    .service()
+    .captureOutput(
+      "2-0",
+      page(
+        f,
+        Buffer.from(
+          nativeReply(f, write.input, 3, "status", { stdinWritten: true }, bytes.length),
+        ).toString(),
+        "3-0",
+      ),
+    );
+  expect((await f.service().requestReply(input.admissionId))?.offset).toBe(bytes.length);
   expect(
     await f.service().reserveRetainedStdin(active.writerId, 1, second, Buffer.from("next")),
   ).toMatchObject({ index: 3, offset: bytes.length });
   expect(await counter()).toBe(bytes.length + 4);
+});
+
+test("missing, partial and invalid native stdin outcomes never authorize a later byte range", async () => {
+  for (const [kind, body, offset] of [
+    ["status", { stdinWritten: true }, 2],
+    ["error", { error: "stdin_closed" }, 2],
+    ["status", { accepted: true }, 4],
+    ["status", { stdinWritten: true, extra: "not native" }, 4],
+  ] as const) {
+    const { f, active, input, counter, custody } = await stdinFixture();
+    await f.service().reserveRetainedStdin(active.writerId, 1, input, Buffer.from("once"));
+    const write = (await f.service().dispatchRetainedStdinIntent(active.writerId, 1, input))!;
+    await f
+      .service()
+      .captureOutput(
+        "1-0",
+        page(
+          f,
+          Buffer.concat([
+            accepted(f, write.input, 2),
+            nativeReply(f, write.input, 3, kind, body, offset),
+          ]).toString(),
+          "2-0",
+        ),
+      );
+    expect((await f.service().requestReply(input.admissionId))?.kind).toBe(kind);
+    const next = await custody.inputAdmission();
+    await expect(
+      f.service().reserveRetainedStdin(active.writerId, 1, next, Buffer.from("new")),
+    ).rejects.toThrow();
+    expect(await counter()).toBe(4);
+    expect(await f.service().request(next.admissionId)).toBeNull();
+    await expect(
+      f
+        .service()
+        .captureOutput(
+          "2-0",
+          page(
+            f,
+            Buffer.from(
+              nativeReply(f, write.input, 4, "status", { stdinWritten: true }, 4),
+            ).toString(),
+            "3-0",
+          ),
+        ),
+    ).rejects.toThrow();
+    expect((await f.service().read()).output.lastSequence).toBe(3);
+  }
 });
 
 test("busy channel, invalid writer and oversized stdin roll back the canonical byte offset", async () => {
@@ -408,6 +474,52 @@ test("stdin driver never silently repeats an unknown write and requires exact re
   expect(writes[1]).toEqual(writes[0]);
   expect(await counter()).toBe(4);
 });
+
+test("launch reply indexing preserves later stream EOF facts without rewriting the operation reply", async () => {
+  const f = await fixture();
+  const active = await start(f);
+  await f
+    .service()
+    .captureOutput("0-0", page(f, Buffer.from(accepted(f, active.write.input)).toString()));
+  const request = { ...fence(), kind: "launch" as const, commandId: crypto.randomUUID() };
+  await f.service().reserve(active.writerId, 1, request);
+  const write = (await f.service().dispatchIntent(active.writerId, 1, request.requestId))!;
+  const startup = { state: "supervisor_started", released: false };
+  await f
+    .service()
+    .captureOutput(
+      "1-0",
+      page(
+        f,
+        Buffer.concat([
+          accepted(f, write.input, 2),
+          nativeReply(f, write.input, 3, "status", startup),
+          nativeReply(f, write.input, 4, "status", { stream: "stdout", eof: true }, 10),
+          nativeReply(f, write.input, 5, "status", { stream: "stderr", eof: true }),
+        ]).toString(),
+        "2-0",
+      ),
+    );
+  expect(
+    JSON.parse(
+      Buffer.from((await f.service().requestReply(request.requestId))!.payload).toString(),
+    ),
+  ).toEqual(startup);
+  expect((await f.service().read()).output.lastSequence).toBe(5);
+  await expect(
+    f
+      .service()
+      .captureOutput(
+        "2-0",
+        page(
+          f,
+          Buffer.from(nativeReply(f, write.input, 6, "error", { error: "changed" })).toString(),
+          "3-0",
+        ),
+      ),
+  ).rejects.toThrow();
+  expect((await f.service().read()).output.lastSequence).toBe(5);
+});
 function fence() {
   return {
     requestId: crypto.randomUUID(),
@@ -438,6 +550,26 @@ function accepted(f: Fixture, bytes: Uint8Array, sequence = 1) {
     sequence,
     offset: request.sequence,
     payload: new Uint8Array(),
+  });
+}
+function nativeReply(
+  f: Fixture,
+  bytes: Uint8Array,
+  sequence: number,
+  kind: "status" | "error",
+  body: unknown,
+  offset = 0,
+) {
+  const decoder = new NativeBrokerFrameDecoder(f.binding.brokerId);
+  const request = decoder.push(bytes)[0]!;
+  decoder.finish();
+  return encodeNativeBrokerFrame({
+    ...request,
+    direction: "response",
+    kind,
+    sequence,
+    offset,
+    payload: Buffer.from(JSON.stringify(body)),
   });
 }
 async function start(f: Fixture) {
@@ -1198,6 +1330,12 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       await observeUntil(
         async () => (await f.service().request(stdinAdmission.admissionId))?.accepted === true,
       );
+      await observeUntil(
+        async () => (await f.service().requestReply(stdinAdmission.admissionId)) !== null,
+      );
+      const written = (await f.service().requestReply(stdinAdmission.admissionId))!;
+      expect(written).toMatchObject({ kind: "status", offset: binary.length });
+      expect(JSON.parse(Buffer.from(written.payload).toString())).toEqual({ stdinWritten: true });
       await database.admin`update sandbox_workspace_mutation_admissions set settled_at=now(), provider_outcome='resolved' where id=${stdinAdmission.admissionId}`;
       await request("eof", id, new Uint8Array(), binary.length);
       let receipt:

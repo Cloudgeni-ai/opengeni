@@ -145,6 +145,32 @@ export type ProviderCommandSession = {
 };
 
 const admission = new AsyncLocalStorage<number | undefined>();
+export type ProviderCommandInputAdmission = Readonly<{
+  sessionId: string;
+  processId: string;
+  admissionId: string;
+  commandId: string;
+}>;
+const inputAdmission = new AsyncLocalStorage<ProviderCommandInputAdmission | undefined>();
+/** Internal route context, not an authorization from command arguments. The DB
+ * adapter still checks the exact existing admission and retained process. */
+export function withProviderCommandInputAdmission<T>(
+  input: ProviderCommandInputAdmission | undefined,
+  fn: () => T,
+): T {
+  const canonical = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  if (
+    input &&
+    [input.sessionId, input.processId, input.admissionId, input.commandId].some(
+      (id) => !canonical.test(id),
+    )
+  )
+    throw new Error("Invalid retained command input admission");
+  return inputAdmission.run(input ? Object.freeze({ ...input }) : undefined, fn);
+}
+export function admittedProviderCommandInput(): ProviderCommandInputAdmission | undefined {
+  return inputAdmission.getStore();
+}
 export type PendingCommandSupervision = {
   managed: boolean;
   preparing?: boolean;
@@ -270,8 +296,10 @@ export function admittedProviderCommandHandle(): number | undefined {
  * mutation. Do not lend them its one-shot retained invocation alias. */
 export function withoutProviderCommandHandle<T>(fn: () => T): T {
   return admission.run(undefined, () =>
-    withTurnCommandSupervision(undefined, () =>
-      withRequiredCommandSupervision(undefined, () => withCommandSupervisionReady(false, fn)),
+    withProviderCommandInputAdmission(undefined, () =>
+      withTurnCommandSupervision(undefined, () =>
+        withRequiredCommandSupervision(undefined, () => withCommandSupervisionReady(false, fn)),
+      ),
     ),
   );
 }
