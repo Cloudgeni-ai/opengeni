@@ -392,7 +392,9 @@ describe("Claude refusal settlement on the core", () => {
       const history = spy(deps.historySink, "reconcileConversationTruth");
       expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
       expect(recovery.mock.calls[0]![2]).toMatchObject({ reason: "provider_overloaded" });
-      expect(history).not.toHaveBeenCalled();
+      // Generic recovery commits history once. The title must not trigger a
+      // second pre-recovery checkpoint of the already-safe main lane.
+      expect(history).toHaveBeenCalledTimes(1);
       expect(runtime.apply).not.toHaveBeenCalled();
       expect(releaseCurrent).not.toHaveBeenCalled();
     });
