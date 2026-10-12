@@ -149,6 +149,7 @@ import {
   sandboxCommandStillRunning,
   SelfhostedControlError,
   subjectFor,
+  modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   terminateManagedSandboxSession,
   terminateModalSandboxById,
@@ -1254,6 +1255,8 @@ export async function resumeIdleCheckpointSessionAtProvider(
 
 const CHECKPOINT_GC_LIMIT = 50;
 const CHECKPOINT_GC_CLAIM_TTL_MS = 10 * 60_000;
+/** The checkpoint artifact GC claim TTL, which the reaper's work check previews. */
+export const SANDBOX_CHECKPOINT_GC_CLAIM_TTL_MS = CHECKPOINT_GC_CLAIM_TTL_MS;
 const CHECKPOINT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const CHECKPOINT_TOMBSTONE_PRUNE_LIMIT = 500;
 const SANDBOX_MAINTENANCE_ITEM_CONCURRENCY = 8;
@@ -3114,6 +3117,54 @@ async function accrueWarmTick(
   return { accrued, workspaceIds };
 }
 
+/**
+ * The reaper maintenance pass's read-only projections, for a reaper tick that
+ * started no workflow because there was no work. Same gauges, same process:
+ * the control worker both runs the cadence and polls the lifecycle queue.
+ */
+export async function refreshIdleSandboxReaperProjections(input: {
+  db: ActivityServices["db"];
+  settings: ActivityServices["settings"];
+  observability: ActivityServices["observability"];
+  inspectOpenSandboxInventory?: InspectOpenSandboxKubernetesInventoryFn;
+}): Promise<void> {
+  await refreshQueueLeaseAndCreditGauges(
+    input.db,
+    input.settings,
+    input.observability,
+    input.inspectOpenSandboxInventory ?? inspectOpenSandboxKubernetesInventory,
+  );
+}
+
+/**
+ * Whether the Modal orphan sweep could act: the deployment uses Modal and its
+ * app has an unfinished sandbox. Called only once the database checks found no
+ * warm lease, so an empty listing is the sweep's complete, empty inventory and
+ * is projected exactly as the sweep would project it.
+ */
+export async function modalOrphanSweepMayHaveWork(input: {
+  settings: ActivityServices["settings"];
+  observability: ActivityServices["observability"];
+  hasRunningSandboxes?: (settings: ActivityServices["settings"]) => Promise<boolean>;
+}): Promise<boolean> {
+  const { settings, observability } = input;
+  if (!modalOrphanSweepConfigured(settings)) return false;
+  if (await (input.hasRunningSandboxes ?? modalAppHasRunningSandboxes)(settings)) return true;
+  recordModalSandboxInventoryGauges(observability, {
+    running: 0,
+    unleased: 0,
+    liveLeaseInstancesMissing: 0,
+  });
+  recordSandboxInventoryProjectionSuccess(observability, "modal_provider");
+  return false;
+}
+
+function modalOrphanSweepConfigured(settings: ActivityServices["settings"]): boolean {
+  return (
+    settings.sandboxBackend === "modal" || !!settings.modalTokenId || !!settings.modalTokenSecret
+  );
+}
+
 async function refreshQueueLeaseAndCreditGauges(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
@@ -3437,7 +3488,7 @@ async function sweepModalOrphansForConfiguredBackend(
   // Keep the provider-side sweep tightly scoped to deployments that have a Modal
   // app path configured. Local/docker-only workers should not attempt Modal API
   // calls just because modalAppName has a default.
-  if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret) {
+  if (!modalOrphanSweepConfigured(settings)) {
     return 0;
   }
   let liveLeases: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>;

@@ -2263,7 +2263,7 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
       EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
     END IF;
-    -- Read-only maintenance work checks (0730) carry exactly the authority of
+    -- Read-only maintenance work checks (0730, 0732) carry exactly the authority of
     -- the claim each one previews: same owner, no PUBLIC, runtime EXECUTE.
     DECLARE
       work_probe record;
@@ -2277,7 +2277,27 @@ BEGIN
           ('opengeni_private.knowledge_index_due_v1(text,integer)',
             format('%I.knowledge_index_claim(text,integer,integer)', ${literal(schema)})),
           ('opengeni_private.site_auth_maintenance_due_v1(bigint)',
-            'opengeni_private.claim_site_auth_maintenance(bigint,integer)')
+            'opengeni_private.claim_site_auth_maintenance(bigint,integer)'),
+          ('opengeni_private.sandbox_lease_reaper_due_v1()',
+            'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'),
+          ('opengeni_private.sandbox_idle_checkpoint_due_v1(bigint)',
+            'opengeni_private.list_idle_checkpoint_candidates(integer,bigint)'),
+          ('opengeni_private.browser_deadline_checkpoint_due_v1()',
+            'opengeni_private.list_browser_deadline_checkpoints(integer)'),
+          ('opengeni_private.session_system_update_outbox_due_v1()',
+            'opengeni_private.claim_session_system_update_outbox_v2(integer)'),
+          ('opengeni_private.session_list_snapshots_expired_v1()',
+            'opengeni_private.reap_expired_session_list_snapshots(integer)'),
+          ('opengeni_private.connected_command_reconciliation_due_v1()',
+            'opengeni_private.claim_connected_machine_background_commands(uuid,integer,bigint,timestamp with time zone)'),
+          ('opengeni_private.connected_command_output_release_due_v1()',
+            'opengeni_private.claim_connected_command_output_releases(uuid,integer,bigint,timestamp with time zone)'),
+          ('opengeni_private.terminal_retained_processes_due_v1()',
+            'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)'),
+          ('opengeni_private.sandbox_ended_epoch_blockers_due_v1()',
+            'opengeni_private.list_sandbox_ended_epoch_blockers(integer)'),
+          ('opengeni_private.sandbox_checkpoint_artifact_gc_due_v1(bigint)',
+            'opengeni_private.claim_sandbox_checkpoint_artifacts(uuid,integer,bigint)')
         ) AS probes(signature, claim)
       LOOP
         IF to_regprocedure(work_probe.signature) IS NOT NULL
