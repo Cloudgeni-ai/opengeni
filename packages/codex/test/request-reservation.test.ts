@@ -35,6 +35,99 @@ const dispatch = (ctx: CodexRequestContext, base: FetchLike, init: RequestInit =
   );
 
 describe("one-shot Codex physical request admission", () => {
+  test.each([false, true])(
+    "stream failure waits for durable custody before rejecting the reader (output=%s)",
+    async (withOutput) => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let settled = false;
+      let rejected = false;
+      const prefix = withOutput
+        ? 'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"effect","call_id":"call","arguments":"{}"}}\n\n'
+        : "";
+      const response = await dispatch(
+        context({
+          beforeProviderDispatch: () => undefined,
+          onProviderRequestSettled: async (value) => {
+            expect(value.outcome).toBe(withOutput ? "unknown" : "refused");
+            entered.resolve();
+            await release.promise;
+            settled = true;
+          },
+          onModelRequestEvent: (event) => {
+            if (event.phase === "failed") throw new Error("audit unavailable");
+          },
+        }),
+        async () =>
+          new Response(
+            prefix +
+              'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}\n\n',
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      );
+      const reading = response.text().catch((error: unknown) => {
+        rejected = true;
+        return error;
+      });
+      await entered.promise;
+      try {
+        await Bun.sleep(0);
+        expect(rejected).toBe(false);
+      } finally {
+        release.resolve();
+      }
+      expect(await reading).toMatchObject({
+        name: "CodexStreamingTerminalError",
+        message: "Our servers are currently overloaded. Please try again later.",
+      });
+      expect(settled).toBe(true);
+    },
+  );
+
+  test("a concurrent abort retains unknown custody and joins its pending terminal settlement", async () => {
+    const controller = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const outcomes: string[] = [];
+    let rejected = false;
+    const response = await dispatch(
+      context({
+        beforeProviderDispatch: () => undefined,
+        onProviderRequestSettled: async (value) => {
+          outcomes.push(value.outcome);
+          entered.resolve();
+          await release.promise;
+        },
+        onModelRequestEvent: (event) => {
+          if (event.phase === "first_byte") controller.abort(new Error("cancelled"));
+        },
+      }),
+      async () =>
+        new Response(
+          'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      { ...request, signal: controller.signal },
+    );
+    const reading = response.text().catch((error: unknown) => {
+      rejected = true;
+      return error;
+    });
+    await entered.promise;
+    try {
+      await Bun.sleep(0);
+      expect(rejected).toBe(false);
+      expect(outcomes).toEqual(["unknown"]);
+    } finally {
+      release.resolve();
+    }
+    expect(await reading).toMatchObject({
+      name: "CodexStreamingTerminalError",
+      message: "Our servers are currently overloaded. Please try again later.",
+    });
+    expect(outcomes).toEqual(["unknown"]);
+  });
+
   test("wire prechecks run before reservation and denied reservations never fetch", async () => {
     let reservations = 0;
     let fetches = 0;

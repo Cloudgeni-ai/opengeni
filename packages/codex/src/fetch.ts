@@ -409,6 +409,9 @@ async function emitRequestEvent(
   const terminalOutcome = terminalOutcomeForPhase(event.phase);
   if (terminalOutcome !== null) {
     if (audit.terminalOutcome !== null) {
+      // Another terminal path may own a still-pending custody write. Its
+      // audit is deduplicated, but every consumer must join that same write.
+      await audit.settlement;
       return false;
     }
     // Fence before invoking either observer. The durable observer may reject,
@@ -1573,9 +1576,19 @@ function validateCodexStream(
     }
   };
   const transform = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      emitCompleteBlocks(controller, false);
+    async transform(chunk, controller) {
+      try {
+        buffer += decoder.decode(chunk, { stream: true });
+        emitCompleteBlocks(controller, false);
+      } catch (error) {
+        // Parsing a provider failure throws before pipeThrough cancels its
+        // source. Join request custody here: the worker must not classify
+        // recovery while the refusal/unknown receipt is still being written.
+        // Audit or settlement failure must preserve the provider diagnostic;
+        // an unsuccessful custody write keeps the request's replay fence.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
+      }
     },
     async flush(controller) {
       try {

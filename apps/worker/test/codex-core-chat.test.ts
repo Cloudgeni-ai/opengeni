@@ -7,6 +7,8 @@ import {
   CodexReloginRequired,
   CodexResponseTimeoutError,
   CodexStreamingTerminalError,
+  codexRequestStorage,
+  codexSubscriptionFetch,
 } from "@opengeni/codex";
 import * as parentWake from "../src/activities/parent-wake";
 import * as turnErrors from "../src/activities/agent-turn/errors";
@@ -1072,6 +1074,86 @@ describe("core Codex failure settlement", () => {
     placedRefreshGeneration: 5,
     personal: false,
   };
+
+  test.each([false, true])(
+    "streamed overload recovers after delayed request settlement (settlementFails=%s)",
+    async (settlementFails) => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const requests = createCoreCodexRequests({
+        reserve: async () => ({ operationId: "overload-request" }),
+        settle: async () => {
+          entered.resolve();
+          await release.promise;
+          if (settlementFails) throw new Error("settlement unavailable");
+        },
+      });
+      const response = await codexRequestStorage.run(
+        {
+          clientVersion: "fixture",
+          getToken: async () => ({
+            accessToken: "fixture",
+            chatgptAccountId: null,
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "fixture",
+            chatgptAccountId: null,
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+          nextRequestId: () => "overload-request",
+          beforeProviderDispatch: (request) => requests.reserve(request!),
+          onProviderRequestSettled: requests.observe,
+        },
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(
+                'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}\n\n',
+                { headers: { "content-type": "text/event-stream" } },
+              ),
+          )("https://fixture.invalid/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "fixture", input: [], stream: true }),
+          }),
+      );
+      const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      let failure: ReturnType<typeof failureDeps> | undefined;
+      const result = response.text().catch(async (error: unknown) => {
+        failure = failureDeps(error, { ...core, requests });
+        return settleTurnFailure(failure.deps as never);
+      });
+      await entered.promise;
+      await Bun.sleep(0);
+      release.resolve();
+      expect(await result).toMatchObject({ status: settlementFails ? "failed" : "recovering" });
+      expect(failure).toBeDefined();
+      if (settlementFails) {
+        expect(recovery).not.toHaveBeenCalled();
+        expect(requests.canRecover()).toBe(false);
+        expect(failure!.settle).toHaveBeenCalledTimes(1);
+      } else {
+        expect(recovery).toHaveBeenCalledWith(
+          {},
+          "workspace-1",
+          expect.objectContaining({
+            sessionId: "session-1",
+            turnId: "turn-1",
+            attemptId: "attempt-1",
+            providerRecoveryCount: 1,
+            detail: expect.objectContaining({ retryable: true, providerCondition: "overloaded" }),
+          }),
+        );
+        expect(failure!.settle).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   test("a placement outcome fails the turn with typed copy and idles the session", async () => {
     const error = subscriptionCoreCapacityFailure("no_eligible_capacity", null);
