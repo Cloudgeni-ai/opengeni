@@ -270,9 +270,13 @@ headedE2e(
   90_000,
 );
 
-headedE2e.each([false, true])(
-  "streams a mobile headed tab continuously while managed input stays in the background (headed=%j)",
-  async (headed) => {
+headedE2e.each([
+  { headed: false, passkeys: false },
+  { headed: true, passkeys: false },
+  { headed: true, passkeys: true },
+])(
+  "streams a mobile headed tab continuously while managed input stays in the background unless passkeys need the front (%j)",
+  async ({ headed, passkeys }) => {
     const directory = await mkdtemp("/tmp/ogb-background-input-");
     const socketDirectory = await mkdtemp("/tmp/ogb-bg-sockets-");
     const reference = {
@@ -282,7 +286,12 @@ headedE2e.each([false, true])(
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
       socketRootDirectory: socketDirectory,
+      // A passkey placement brings the acted-on tab to the front (Chromium
+      // refuses WebAuthn in a background tab); without passkeys managed
+      // input never switches the real tab.
+      passkeys,
     });
+    const actedFront = passkeys ? "hidden" : "visible";
     let cdp: CdpConnection | null = null;
     let frames: import("../src").BrowserFrameSubscription | null = null;
     let detachedDriver: AgentBrowserDriver | null = null;
@@ -355,7 +364,7 @@ headedE2e.each([false, true])(
         expect(result.state).toBe("completed");
         expect(result.observation).not.toBeNull();
         observed = result.observation!;
-        expect(await frontVisibility()).toBe("visible");
+        expect(await frontVisibility()).toBe(actedFront);
       };
       await act({ type: "viewport", width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
       const locator = { kind: "role", role: "textbox", name: "Name" } as const;
@@ -391,7 +400,7 @@ headedE2e.each([false, true])(
         { sessionId: attached.sessionId },
       );
       expect(state.result.value).toEqual({ visibility: "visible", value: "Background æøå 🦊" });
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       // Disconnecting one controller restores its override without closing
       // the shared owned browser or touching another controller's tab.
       detachedDriver = new AgentBrowserDriver({
@@ -428,7 +437,7 @@ headedE2e.each([false, true])(
         await Bun.sleep(25);
       }
       expect(await cleanupVisibility()).toBe("hidden");
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       await cdp.send("Target.closeTarget", { targetId: cleanup.target.id });
       frames = await supervisor.subscribeFrames(reference, background.target.id, {
         format: "jpeg",
@@ -439,7 +448,7 @@ headedE2e.each([false, true])(
       expect([...screenshot.data.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
       const next = await frameAfter(iterator, first.sequence, 3_000);
       expect([next.width, next.height]).toEqual([390, 844]);
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       // Explicit activation remains available for a human choosing direct control.
       const activated = await supervisor.action(command(observed, { type: "activate" }));
       expect(activated.state).toBe("completed");

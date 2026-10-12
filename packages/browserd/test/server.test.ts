@@ -291,6 +291,56 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("passkey sync is control-only, bound to the session path and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/passkeys/sync`;
+      const body = {
+        protocolVersion: 1,
+        ...reference,
+        credentials: null,
+        acknowledgeEventIds: [],
+      };
+      for (const token of [undefined, viewToken]) {
+        expect(
+          (await request(server, path, { method: "POST", ...(token ? { token } : {}), body }))
+            .status,
+        ).toBe(401);
+      }
+      expect((await request(server, path, { token: controlToken })).status).toBe(405);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, credentials: "all" },
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, browserSessionId: randomUUID() },
+          })
+        ).status,
+      ).toBe(409);
+      const synced = await request(server, path, { method: "POST", token: controlToken, body });
+      expect(synced.status).toBe(200);
+      // The fake driver hosts no page authenticators; the manager still answers.
+      expect((await json(synced)).data).toEqual({ ...reference, authenticators: 0, events: [] });
+    });
+  });
+
   test("metadata-only opening never replays a mutation whose completion is unknown", async () => {
     let attempts = 0;
     await withServer(

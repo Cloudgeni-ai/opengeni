@@ -18,6 +18,8 @@ import type {
   BrowserDownload,
   BrowserExternalAuthCommand,
   BrowserObservation,
+  BrowserPasskeySyncRequest,
+  BrowserPasskeySyncResponse,
   BrowserRevisionMaterialization,
   BrowserTarget,
   BrowserTargetState,
@@ -50,6 +52,7 @@ import type { ResolvedAgentBrowserBinary } from "./binary";
 import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
 import { LightpandaRunner } from "./lightpanda-runner";
 import { ExternalProviderCdpRunner } from "./external-provider-runner";
+import { BrowserPasskeyManager } from "./passkeys";
 import {
   type BrowserFrameStreamOptions,
   type BrowserFrameSubscription,
@@ -253,6 +256,9 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
   networkRoute?: BrowserSupervisorNetworkRoute;
+  /** One per browser session; outlives driver restarts so loaded credentials
+   * and undelivered passkey events survive browser recovery. */
+  passkeys?: BrowserPasskeyManager;
   resolveWorkspaceFiles: (
     operationId: string,
     workspaceFileIds: readonly string[],
@@ -266,6 +272,12 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
 
 export type BrowserSupervisorOptions = {
   ephemeralContextPoolEnabled?: boolean;
+  /** Host a virtual WebAuthn authenticator in every page target (default true
+   * where the transport supports it). Passkey placements bring the acted-on
+   * tab to the front before each action, because Chromium refuses WebAuthn
+   * ceremonies in a background tab; disabling passkeys keeps managed input in
+   * the background. */
+  passkeys?: boolean;
   rootDirectory: string;
   socketRootDirectory?: string;
   maxSessions?: number;
@@ -331,6 +343,7 @@ export class BrowserSupervisor {
   readonly socketRootDirectory: string;
   private readonly maxSessions: number;
   private readonly ephemeralContextPoolEnabled: boolean;
+  private readonly passkeysEnabled: boolean;
   private readonly contextPools = new Map<string, EphemeralChromiumContextPool>();
   private readonly createDriver: (
     context: BrowserSupervisorDriverContext,
@@ -363,6 +376,7 @@ export class BrowserSupervisor {
       });
     }
     this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
+    this.passkeysEnabled = options.passkeys !== false;
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
@@ -455,6 +469,7 @@ export class BrowserSupervisor {
       resolveWorkspaceFiles: context.resolveWorkspaceFiles,
       downloadDirectory: context.downloadDirectory,
       ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+      ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     });
   }
 
@@ -717,6 +732,22 @@ export class BrowserSupervisor {
     request: BrowserWorkspaceFileStageRequest,
   ): Promise<BrowserWorkspaceFileStageResponse> {
     return await this.requireActive(reference).workspaceFileStager.stage(request);
+  }
+
+  /** Controller-private: load the session's passkeys and drain its events. */
+  async passkeySync(request: BrowserPasskeySyncRequest): Promise<BrowserPasskeySyncResponse> {
+    const runtime = this.requireActive({
+      browserSessionId: request.browserSessionId,
+      controllerGeneration: request.controllerGeneration,
+    });
+    const passkeys = runtime.driverContext.passkeys;
+    if (!passkeys) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "this browser placement does not support passkeys",
+      );
+    }
+    return await passkeys.sync(request);
   }
 
   externalAuth(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue> {
@@ -1173,6 +1204,14 @@ export class BrowserSupervisor {
       ...(options.linkedComputer ? { linkedComputer: options.linkedComputer } : {}),
       ...(options.launchEnvironment ? { launchEnvironment: options.launchEnvironment } : {}),
       ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
+      ...(this.passkeysEnabled && supportsPasskeys(options.transport)
+        ? {
+            passkeys: new BrowserPasskeyManager({
+              browserSessionId: options.browserSessionId,
+              controllerGeneration: options.controllerGeneration,
+            }),
+          }
+        : {}),
     };
     let driver: BrowserSupervisorDriver | null = null;
     let workingJournal: SqliteBrowserWorkingRuntimeJournal | null = null;
@@ -2023,6 +2062,7 @@ async function createBrowserDriver(
       connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
       targetLifecycle: "cdp",
       focusEmulation: true,
+      ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     });
   }
   const route = context.networkRoute;
@@ -2111,6 +2151,7 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+    ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     ...(route
       ? {
           emulation: {
@@ -2128,6 +2169,14 @@ function binding(runtime: Runtime): BrowserSessionReference {
     browserSessionId: runtime.options.browserSessionId,
     controllerGeneration: runtime.options.controllerGeneration,
   };
+}
+
+/** Virtual WebAuthn needs the CDP WebAuthn domain and browser-level target
+ * auto-attach: managed Chromium and remote Chromium providers have both. The
+ * attached user Chrome (extension debugger) and Lightpanda do not. */
+function supportsPasskeys(transport: BrowserSupervisorTransport): boolean {
+  if (transport.kind === "attached_chrome") return false;
+  return !(transport.kind === "managed" && transport.engine === "lightpanda");
 }
 
 function validateSessionOptions(
