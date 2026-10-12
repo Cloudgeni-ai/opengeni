@@ -203,6 +203,8 @@ function targetAuthorization(subject = subjectId) {
 }
 function targetOptions(extra: TargetGatewayOptions = {}): TargetGatewayOptions {
   return {
+    // The route's fresh human grant (a person's live caller part).
+    reauthorize: async () => undefined,
     prepare: async (deps, authorization, options = {}) =>
       await prepareWorkspaceToolGateway(deps, authorization, options),
     begin: async () => true,

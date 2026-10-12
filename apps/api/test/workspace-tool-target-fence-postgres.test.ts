@@ -26,6 +26,7 @@ import {
   createManagedOrganization,
   createOrganizationApiKey,
   createOrganizationWorkspace,
+  createWorkspaceArtifact,
   enableCapabilityInstallation,
   encryptEnvironmentValue,
   installApiIntegration,
@@ -49,10 +50,12 @@ import {
 } from "@opengeni/testing";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../../../packages/db/src/lossless-json";
 import { createApp } from "../src/app";
+import { prepareWorkspaceToolGateway } from "../src/workspace-tool-gateway";
 import { TargetAuthorityFence } from "../src/workspace-tool-target-fence";
 import {
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
+  resolveWorkspaceToolManifest,
   type TargetGatewayOptions,
 } from "../src/workspace-tool-target";
 
@@ -140,7 +143,51 @@ function startProvider() {
 }
 type Provider = ReturnType<typeof startProvider>;
 
-function providerSettings(provider: Provider, extra: Record<string, unknown> = {}) {
+/**
+ * The same provider behind a proxy that issues an MCP session on initialize
+ * and answers its DELETE itself, recording every physical request.
+ */
+function startSessionProxy(provider: Provider) {
+  const arrivals: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const method =
+        request.method === "POST"
+          ? ((
+              (await request
+                .clone()
+                .json()
+                .catch(() => ({}))) as { method?: string }
+            ).method ?? "-")
+          : "-";
+      arrivals.push(`${request.method} ${method}`);
+      if (request.method === "DELETE") return new Response(null, { status: 200 });
+      const headers = new Headers(request.headers);
+      headers.delete("mcp-session-id");
+      const upstream = await fetch(provider.server.url, {
+        method: request.method,
+        headers,
+        ...(request.method === "POST" ? { body: await request.arrayBuffer() } : {}),
+      });
+      const answer = new Headers(upstream.headers);
+      if (method === "initialize") answer.set("mcp-session-id", "target-fence-session");
+      return new Response(upstream.body, { status: upstream.status, headers: answer });
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}/mcp`,
+    arrivals,
+    close: () => server.stop(true),
+  };
+}
+
+function providerSettings(
+  provider: Provider,
+  extra: Record<string, unknown> = {},
+  url = provider.server.url,
+) {
   return testSettings({
     productAccessMode: "configured",
     environmentsEncryptionKey: encryptionKey,
@@ -148,7 +195,7 @@ function providerSettings(provider: Provider, extra: Record<string, unknown> = {
     mcpServers: [
       {
         id: "grafana",
-        url: provider.server.url,
+        url,
         cacheToolsList: false,
         allowedTools: ["search_documents"],
         connectionRef: {
@@ -285,33 +332,38 @@ async function organizationCaller(
       workflowClient: {} as never,
       objectStorage: null,
     });
-  const send = (replica: ReturnType<typeof app>, operation: "resolve" | "invoke") =>
+  const post = (replica: ReturnType<typeof app>, operation: string, body: unknown) =>
     replica.request(`http://localhost/v1/workspaces/${grant.workspaceId}/tools/${operation}`, {
       method: "POST",
       headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-      body: JSON.stringify(
-        operation === "resolve"
-          ? { target: { identity } }
-          : {
-              target: { identity },
-              operationId: crypto.randomUUID(),
-              arguments: { query: "vector(1)" },
-            },
-      ),
+      body: JSON.stringify(body),
     });
+  const send = (replica: ReturnType<typeof app>, operation: "resolve" | "invoke") =>
+    post(
+      replica,
+      operation,
+      operation === "resolve"
+        ? { target: { identity } }
+        : {
+            target: { identity },
+            operationId: crypto.randomUUID(),
+            arguments: { query: "vector(1)" },
+          },
+    );
   return {
     keyId: key.id,
     app,
     resolve: (replica: ReturnType<typeof app>) => send(replica, "resolve"),
     invoke: (replica: ReturnType<typeof app>) => send(replica, "invoke"),
+    manifest: (replica: ReturnType<typeof app>, body: unknown) => post(replica, "manifest", body),
   };
 }
 
 /** A shared workspace, its Grafana-like account, and an organization key. */
-async function serviceFixture(provider: Provider, unrelated = 0) {
+async function serviceFixture(provider: Provider, unrelated = 0, url = provider.server.url) {
   const access = await sharedWorkspace();
   const grant = access.workspaceGrants[0]!;
-  const settings = providerSettings(provider);
+  const settings = providerSettings(provider, {}, url);
   const connection = await createConnection(seed!.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -342,6 +394,43 @@ async function serviceFixture(provider: Provider, unrelated = 0) {
   };
   const caller = await organizationCaller(grant, settings, identity);
   return { access, grant, settings, connection, identity, ...caller };
+}
+
+/** A Site version pinning the fixture's target and `fillers` more of its tools. */
+async function siteFixture(fixture: Awaited<ReturnType<typeof serviceFixture>>, fillers: number) {
+  const artifactId = crypto.randomUUID();
+  const identities = [
+    fixture.identity,
+    ...Array.from({ length: fillers }, (_, index) => ({
+      serverId: fixture.identity.serverId,
+      toolName: `pinned_tool_${index}`,
+    })),
+  ];
+  const created = await createWorkspaceArtifact(seed!.db, {
+    accountId: fixture.grant.accountId,
+    workspaceId: fixture.grant.workspaceId,
+    artifactId,
+    slug: `target-fence-site-${artifactId.slice(0, 8)}`,
+    title: "Target fence Site",
+    description: null,
+    contentKey: `workspace-artifacts/${fixture.grant.workspaceId}/${artifactId}/index.html`,
+    contentSha256: "d".repeat(64),
+    sizeBytes: 64,
+    sourceKey: null,
+    sourceSha256: null,
+    sourceSizeBytes: null,
+    requestedTools: identities,
+    operationKey: `target-fence-site-${artifactId}`,
+    actorSubjectId: fixture.grant.subjectId,
+    sourceSessionId: null,
+    sourceTurnId: null,
+    sourceAttemptId: null,
+    sourceExecutionGeneration: null,
+    sourceToolName: null,
+    persistContent: async () => undefined,
+    discardContent: async () => undefined,
+  });
+  return { siteArtifactId: created.artifact.id, siteVersionId: created.version.id, identities };
 }
 
 /**
@@ -668,6 +757,7 @@ describe("targeted tool fence on PostgreSQL", () => {
         when: "before" | "after",
         change: () => Promise<void>,
       ): TargetGatewayOptions => ({
+        reauthorize: async () => undefined,
         onFence: (fence) => {
           const check = fence.check.bind(fence);
           let seen = 0;
@@ -742,6 +832,7 @@ describe("targeted tool fence on PostgreSQL", () => {
       const deps = { db, settings: fixture.settings } as ApiRouteDeps;
       let fence: TargetAuthorityFence | undefined;
       const observe: TargetGatewayOptions = {
+        reauthorize: async () => undefined,
         onFence: (created) => {
           fence = created;
         },
@@ -789,7 +880,7 @@ describe("targeted tool fence on PostgreSQL", () => {
     });
     expect(performance.now() - started).toBeLessThan(3_000);
     expect(await stalled.failure()).toMatchObject({ status: 503 });
-    // The server cancelled the statement too: nothing keeps running after the deadline.
+    // Its statement timeout cancelled the stalled read on the server as well.
     await Bun.sleep(300);
     const [running] = await shared.admin<{ count: number }[]>`
       select count(*)::int as count from pg_stat_activity
@@ -820,6 +911,202 @@ describe("targeted tool fence on PostgreSQL", () => {
     await expect(closed.full()).rejects.toThrow("target request scope has ended");
     expect(await closed.failure()).toBeUndefined();
   }, 60_000);
+
+  test("at the deadline no later part or read starts, also after waiting for a pooled connection", async () => {
+    if (!shared) return;
+    const marker = `target_fence_deadline_${crypto.randomUUID().replaceAll("-", "")}`;
+    const starts: { part: string; at: number }[] = [];
+    const read = (part: string) => async (tx: Database) => {
+      starts.push({ part, at: performance.now() });
+      await tx.execute(sql.raw(`select pg_sleep(0.2) /* ${marker} */`));
+    };
+    const fence = new TargetAuthorityFence({
+      db,
+      targeted: true,
+      caller: { scoped: read("caller") },
+      deadlineMs: 300,
+    });
+    fence.setSite(read("site"));
+    fence.setRoute(read("route"));
+    fence.setPolicy(read("policy"));
+    const started = performance.now();
+    let answeredAt = Number.POSITIVE_INFINITY;
+    await expect(
+      fence.check({ retryable: true }).finally(() => {
+        answeredAt = performance.now();
+      }),
+    ).rejects.toMatchObject({ status: 503, details: { code: "tool_authority_unavailable" } });
+    expect(answeredAt - started).toBeLessThan(1_000);
+    // The read in flight at the deadline ends; nothing starts after the answer
+    // and the transaction rolls back.
+    await Bun.sleep(600);
+    expect(starts.filter((start) => start.at >= answeredAt)).toEqual([]);
+    expect(starts.map((start) => start.part)).not.toContain("policy");
+    expect(starts.map((start) => start.part)).not.toContain("caller");
+    const [running] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from pg_stat_activity
+      where state <> 'idle' and query like ${`%${marker}%`} and pid <> pg_backend_pid()`;
+    expect(running!.count).toBe(0);
+
+    // Its pool's only connection is busy past the deadline: the evaluation is
+    // answered at the deadline and, once a connection frees, reads nothing.
+    const lone = postgres(shared.appUrl, {
+      max: 1,
+      prepare: false,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    try {
+      const single = drizzle(lone, { schema }) as unknown as Database;
+      let holding!: () => void;
+      const held = new Promise<void>((resolve) => (holding = resolve));
+      const busy = single.transaction(async (tx) => {
+        holding();
+        await tx.execute(sql`select pg_sleep(0.8)`);
+      });
+      await held;
+      let routeRead = false;
+      const queued = new TargetAuthorityFence({
+        db: single,
+        targeted: true,
+        caller: {},
+        deadlineMs: 250,
+      });
+      queued.setRoute(async () => {
+        routeRead = true;
+      });
+      const queuedAt = performance.now();
+      await expect(queued.check({ retryable: true })).rejects.toMatchObject({ status: 503 });
+      expect(performance.now() - queuedAt).toBeLessThan(700);
+      await busy;
+      await Bun.sleep(200);
+      expect(routeRead).toBe(false);
+      expect(queued.stats.outcomes).toEqual({ unavailable: 1 });
+    } finally {
+      await lone.end();
+    }
+  }, 60_000);
+
+  test("a Site manifest reads its pinned version once per evaluation, however many tools it pins", async () => {
+    if (!shared) return;
+    const provider = startProvider();
+    try {
+      const fixture = await serviceFixture(provider);
+      const replica = fixture.app();
+      const one = await siteFixture(fixture, 0);
+      const full = await siteFixture(fixture, 127);
+      expect(full.identities).toHaveLength(128);
+      // A warm replica; then the same request pinning 1 and 128 tools.
+      expect((await fixture.manifest(replica, one)).status).toBe(200);
+      const profiles: Awaited<ReturnType<typeof measure>>[] = [];
+      for (const site of [one, full]) {
+        const result = await measure(provider, () => fixture.manifest(replica, site));
+        expect(result.status).toBe(200);
+        const listed = JSON.parse(result.body) as { tools: { entry: { identity: unknown } }[] };
+        // Pinned tools the provider does not offer are simply absent.
+        expect(listed.tools.map((tool) => tool.entry.identity)).toEqual([fixture.identity]);
+        profiles.push(result);
+      }
+      const [single, pinned] = profiles as [
+        Awaited<ReturnType<typeof measure>>,
+        Awaited<ReturnType<typeof measure>>,
+      ];
+      expect(pinned.physicalRequests).toEqual(single.physicalRequests);
+      expect(pinned.fenceEvaluations).toBe(single.fenceEvaluations);
+      expect(pinned.transactions).toBe(single.transactions);
+      expect(pinned.statements.length).toBe(single.statements.length);
+    } finally {
+      provider.server.close();
+    }
+  }, 120_000);
+
+  test("a manifest missing a requested tool because authority could not be read is a 503, never a partial list", async () => {
+    if (!shared) return;
+    const provider = startProvider();
+    try {
+      const fixture = await serviceFixture(provider);
+      const authorization = accessGrantAuthorizationFromContext(fixture.access, fixture.grant);
+      authorization.canonicalManagedHumanSession = true;
+      const deps = { db, settings: fixture.settings } as ApiRouteDeps;
+      const request = {
+        identities: [fixture.identity],
+        siteArtifactId: crypto.randomUUID(),
+        siteVersionId: crypto.randomUUID(),
+      };
+      let unreadable = false;
+      const readable: TargetGatewayOptions = {
+        reauthorize: async () => undefined,
+        authorizeSite: async () => {
+          if (unreadable) throw new Error("site version read failed");
+        },
+      };
+      // The pinned Site cannot be read while the connector is prepared, so
+      // its boundaries refuse and the connector is dropped; it reads again
+      // before disclosure.
+      const stalled: TargetGatewayOptions = {
+        ...readable,
+        prepare: async (...args) => {
+          unreadable = true;
+          try {
+            return await prepareWorkspaceToolGateway(...args);
+          } finally {
+            unreadable = false;
+          }
+        },
+      };
+      await expect(
+        resolveWorkspaceToolManifest(deps, authorization, request, stalled),
+      ).rejects.toMatchObject({
+        status: 503,
+        retryable: true,
+        outcomeUnknown: false,
+        details: { code: "tool_authority_unavailable" },
+      });
+      const listed = await resolveWorkspaceToolManifest(deps, authorization, request, readable);
+      expect(listed.tools.map((tool) => tool.entry.identity)).toEqual([fixture.identity]);
+    } finally {
+      provider.server.close();
+    }
+  }, 120_000);
+
+  test("the session DELETE is fenced and sent before the response; a revoked caller sends none", async () => {
+    if (!shared) return;
+    const provider = startProvider();
+    const proxy = startSessionProxy(provider);
+    try {
+      const fixture = await serviceFixture(provider, 0, proxy.url);
+      const replica = fixture.app();
+      provider.reset();
+      proxy.arrivals.length = 0;
+      const response = await fixture.invoke(replica);
+      expect(response.status).toBe(200);
+      // Cleanup is awaited before the response, through the same fence:
+      // one caller check and one full evaluation per physical request.
+      expect(proxy.arrivals.at(-1)).toBe("DELETE -");
+      const timing = response.headers.get("server-timing") ?? "";
+      const evaluations = Number(/gw-fence;dur=[\d.]+;desc="(\d+)"/.exec(timing)?.[1]);
+      expect(evaluations).toBe(2 * proxy.arrivals.length + 3);
+
+      // Revoked while the provider runs tools/call: the dispatched call's
+      // result stands, and no later physical request (the DELETE) is sent.
+      const revoked = await serviceFixture(provider, 0, proxy.url);
+      provider.reset();
+      proxy.arrivals.length = 0;
+      provider.at(
+        "tools/call",
+        async () =>
+          await shared!
+            .admin`update api_keys set revoked_at = now() where id = ${revoked.keyId}::uuid`,
+      );
+      const executed = await revoked.invoke(revoked.app());
+      expect(executed.status).toBe(200);
+      expect(provider.server.calls).toHaveLength(1);
+      expect(proxy.arrivals).not.toContain("DELETE -");
+      expect(proxy.arrivals.at(-1)).toBe("POST tools/call");
+    } finally {
+      proxy.close();
+      provider.server.close();
+    }
+  }, 120_000);
 
   test("narrowed route reads equal the complete projection for every selected server", async () => {
     if (!shared) return;

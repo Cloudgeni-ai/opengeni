@@ -22,8 +22,19 @@ import { ApiHttpError } from "./http/api-error";
  */
 export const TARGET_FENCE_DEADLINE_MS = 2_500;
 
-/** A part of the live fence. `db` is the evaluation's bounded transaction. */
-export type TargetFenceCheck = (db: Database) => Promise<void>;
+/**
+ * A part of the live fence. `db` is the evaluation's bounded transaction;
+ * `stop` aborts once the evaluation's deadline passes or its request ends, and
+ * a part with several reads checks it between them.
+ */
+export type TargetFenceCheck = (db: Database, stop: AbortSignal) => Promise<void>;
+
+export type TargetFenceCaller = {
+  /** Read inside the evaluation's bounded transaction. */
+  scoped?: TargetFenceCheck;
+  /** Runs beside it: its own bounded transaction, or the route's fresh grant. */
+  standalone?: (stop: AbortSignal) => Promise<void>;
+};
 
 type Outcome = "denied" | "approval_required" | "unavailable" | "aborted" | "closed";
 
@@ -68,21 +79,26 @@ export function targetAuthorityUnavailable(retryable: boolean): ApiHttpError {
  * Live caller authority for one targeted request. A verified organization key
  * is read without a lock or write (admission already recorded its use); an
  * external continuation keeps its complete commit authorizer; a person keeps
- * the route's fresh grant (`reauthorize`), unchanged.
+ * the route's fresh grant (`reauthorize`), unchanged. That grant runs outside
+ * the evaluation's transaction: the deadline answers the request without
+ * cancelling it.
  */
 export function targetFenceCaller(
   deps: Pick<ApiRouteDeps, "db">,
   authorization: AccessGrantAuthorization,
   reauthorize: (() => Promise<void>) | undefined,
-): { scoped?: TargetFenceCheck; standalone?: () => Promise<void> } {
+): TargetFenceCaller {
   const grant = authorization.grant;
   const external = externalContinuationCommitAuthorizer(authorization);
   if (external)
     return {
-      standalone: async () =>
-        await withDatabaseStatementTimeout(deps.db, TARGET_FENCE_DEADLINE_MS, (bounded) =>
-          withAccountRls(bounded, grant.accountId, async (tx) => await external(tx)),
-        ),
+      standalone: async (stop) =>
+        await withDatabaseStatementTimeout(deps.db, TARGET_FENCE_DEADLINE_MS, async (bounded) => {
+          stop.throwIfAborted();
+          await withAccountRls(bounded, grant.accountId, async (tx) => await external(tx));
+          // A stopped evaluation rolls back instead of committing a late decision.
+          stop.throwIfAborted();
+        }),
     };
   if (isVerifiedOrganizationServiceAuthorization(authorization)) {
     const keyId = grant.subjectId.slice("api_key:".length);
@@ -105,7 +121,9 @@ export function targetFenceCaller(
       },
     };
   }
-  return reauthorize ? { standalone: reauthorize } : {};
+  // Never a fence without a live caller.
+  if (!reauthorize) throw new Error("a person's targeted request requires the route's fresh grant");
+  return { standalone: async () => await reauthorize() };
 }
 
 /**
@@ -115,7 +133,12 @@ export function targetFenceCaller(
  * Every evaluation reads current state; nothing is cached, shared between
  * physical requests, or reused across requests. `full()` runs once for each
  * installed physical-request boundary, after that request's last credential
- * step, and its DB parts share one transaction bounded by `statement_timeout`.
+ * step. Its Site, route, policy and organization-key reads share one
+ * transaction bounded by `statement_timeout`; an external actor's authorizer
+ * runs in a second bounded transaction and a person's fresh grant beside them.
+ * At the deadline the evaluation is answered as unavailable authority and no
+ * further part or read starts; a read already running ends at its statement
+ * timeout and the transaction rolls back.
  * Boundaries swallow hook failures, so the fence records each outcome itself;
  * `settle()` reports a recorded denial or unavailable authority instead of an
  * opaque missing connector. After `close()` (strictly after the awaited
@@ -138,7 +161,7 @@ export class TargetAuthorityFence {
       db: Database;
       /** A targeted request must install its route before any full evaluation. */
       targeted: boolean;
-      caller: { scoped?: TargetFenceCheck; standalone?: () => Promise<void> };
+      caller: TargetFenceCaller;
       signal?: AbortSignal | undefined;
       deadlineMs?: number;
     },
@@ -148,7 +171,9 @@ export class TargetAuthorityFence {
     return this.input.deadlineMs ?? TARGET_FENCE_DEADLINE_MS;
   }
 
+  /** Each part is installed once; a later install never replaces it. */
   setSite(check: TargetFenceCheck): void {
+    if (this.#site) throw new Error("target Site fence is already installed");
     this.#site = check;
   }
 
@@ -160,6 +185,7 @@ export class TargetAuthorityFence {
 
   /** Installed when the selected call's action policy is decided. */
   setPolicy(check: TargetFenceCheck): void {
+    if (this.#policy) throw new Error("target action policy fence is already installed");
     this.#policy = check;
   }
 
@@ -294,21 +320,29 @@ export class TargetAuthorityFence {
     this.assertOpen();
     if (full && this.input.targeted && !this.#route)
       throw new HTTPException(403, { message: "tool_access_changed" });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new TargetFenceDeadlineError()), this.#deadlineMs);
+    // The deadline (or the request's end) answers at once and stops the work:
+    // no later part or read starts, and its transaction rolls back.
+    const expiry = new AbortController();
+    const timer = setTimeout(() => expiry.abort(new TargetFenceDeadlineError()), this.#deadlineMs);
+    const stop = this.input.signal
+      ? AbortSignal.any([expiry.signal, this.input.signal])
+      : expiry.signal;
+    const stopped = new Promise<never>((_, reject) => {
+      if (stop.aborted) reject(stop.reason);
+      else stop.addEventListener("abort", () => reject(stop.reason), { once: true });
     });
-    const work = this.#parts(full);
+    stopped.catch(() => undefined);
+    const work = this.#parts(full, stop);
     work.catch(() => undefined);
     try {
-      await Promise.race([work, deadline]);
+      await Promise.race([work, stopped]);
     } finally {
       clearTimeout(timer);
     }
     this.assertOpen();
   }
 
-  async #parts(full: boolean): Promise<void> {
+  async #parts(full: boolean, stop: AbortSignal): Promise<void> {
     // Site, route and policy first; a service caller reads its key last, so the
     // caller fact is the freshest at dispatch.
     const scoped = [
@@ -318,10 +352,16 @@ export class TargetAuthorityFence {
     const results = await Promise.allSettled([
       scoped.length > 0
         ? withDatabaseStatementTimeout(this.input.db, this.#deadlineMs, async (bounded) => {
-            for (const check of scoped) await check(bounded);
+            // Also when the transaction starts: it may have waited for a
+            // pooled connection past the deadline.
+            stop.throwIfAborted();
+            for (const check of scoped) {
+              await check(bounded, stop);
+              stop.throwIfAborted();
+            }
           })
         : undefined,
-      this.input.caller.standalone?.(),
+      this.input.caller.standalone?.(stop),
     ]);
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason as unknown] : [],

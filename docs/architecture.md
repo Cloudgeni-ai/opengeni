@@ -1523,7 +1523,8 @@ approval display field, and share the permanent operation tombstone namespace
 with v1. One per-request live fence (`workspace-tool-target-fence.ts`) covers
 the caller, exact pinned Site, selected route and live action policy; each
 physical provider request evaluates it once after awaited native credential
-authorization, reading only the selected rows in one bounded transaction.
+authorization, reading only the selected rows (a pinned Site version once) in
+bounded transactions that start no read after the evaluation's deadline.
 Legacy HTTP calls may rebuild only the
 target identity's connector when their complete catalog digest has a
 content-free per-process attestation for the same caller scope and the live

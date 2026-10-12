@@ -535,11 +535,12 @@ export function withWorkspaceConnectionAuthorization(
  * checked. The returned hook runs immediately before one physical provider
  * request: the native hook, then (targeted) a non-refreshing native preflight
  * that must still name the same connection version, then one full fence
- * evaluation. Nothing is awaited after that evaluation.
+ * evaluation, the hook's last step. A hook retained past the request scope
+ * reads nothing.
  */
 export function withTargetFenceConnectionAuthorization(
   resolve: ReturnType<typeof buildConnectionTokenResolver>,
-  fence: Pick<TargetAuthorityFence, "caller" | "allows">,
+  fence: Pick<TargetAuthorityFence, "caller" | "allows" | "assertOpen">,
   options: { preflight: boolean },
 ): ReturnType<typeof buildConnectionTokenResolver> {
   return async (input) => {
@@ -550,6 +551,7 @@ export function withTargetFenceConnectionAuthorization(
       ...result,
       authorizeProviderRequest: async () => {
         try {
+          fence.assertOpen();
           if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest()))
             return false;
           if (options.preflight) {
@@ -590,7 +592,7 @@ function workspaceToolGatewayTargetRouteCheck(input: {
   capabilityServers: readonly EnabledMcpCapabilityServer[];
   accountBindings: Awaited<ReturnType<typeof availableMcpAccountBindings>>;
   bindingSource: Parameters<typeof availableMcpAccountBindings>[0]["source"];
-}): (db: Database) => Promise<void> {
+}): (db: Database, stop: AbortSignal) => Promise<void> {
   const { grant, gatewaySettings, bindingSource } = input;
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
   const selectedBindings = input.accountBindings.filter((binding) =>
@@ -633,7 +635,7 @@ function workspaceToolGatewayTargetRouteCheck(input: {
     integrationRoutes(input.integrations, input.accountBindings),
   );
   const changed = () => new HTTPException(403, { message: "tool_access_changed" });
-  return async (db) => {
+  return async (db, stop) => {
     let currentIntegrations: readonly ApiIntegrationRuntime[] = [];
     const currentSettings = await settingsWithEnabledCapabilityMcpServersForTargets(
       db,
@@ -647,8 +649,10 @@ function workspaceToolGatewayTargetRouteCheck(input: {
         onResolvedApiIntegrations: (items) => {
           currentIntegrations = items;
         },
+        signal: stop,
       },
     );
+    stop.throwIfAborted();
     const connections = await visibleMcpAccountConnectionsByIds(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -656,6 +660,7 @@ function workspaceToolGatewayTargetRouteCheck(input: {
       workspaceConnectionIds: connectionIds("workspace"),
       personalConnectionIds: connectionIds("subject"),
     });
+    // Reads nothing more: the selected connections are supplied.
     const currentBindings = await availableMcpAccountBindings({
       db,
       accountId: grant.accountId,

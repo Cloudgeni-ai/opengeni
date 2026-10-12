@@ -999,6 +999,8 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     serverIds: readonly string[];
     capabilityIds: readonly string[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /** Checked between reads: a stopped caller starts no further read. */
+    signal?: AbortSignal;
   },
 ): Promise<Settings> {
   const serverIds = new Set(options.serverIds);
@@ -1009,9 +1011,11 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
       serverIds: [...serverIds],
     })
   ).filter((server) => serverIds.has(server.id));
+  options.signal?.throwIfAborted();
   const apiIntegrations = await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [
     ...serverIds,
   ]);
+  options.signal?.throwIfAborted();
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
       ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })

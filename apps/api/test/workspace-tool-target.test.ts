@@ -49,6 +49,8 @@ function fixture() {
     failClose: false,
   };
   const options: TargetGatewayOptions = {
+    // The route's fresh human grant (a person's live caller part).
+    reauthorize: async () => undefined,
     prepare: async (_deps, _authorization, preparation) => {
       // No connector route exists here; a targeted fence denies until one is set.
       preparation?.fence?.setRoute(async () => undefined);

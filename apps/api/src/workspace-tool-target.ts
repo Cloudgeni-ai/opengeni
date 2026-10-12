@@ -422,19 +422,23 @@ export async function resolveWorkspaceToolManifest(
   const siteArtifactId = request.siteArtifactId;
   const siteVersionId = request.siteVersionId;
   // Every requested identity must still be on the pinned Site version; with
-  // none requested, the version itself must still be the active one.
+  // none requested, the version itself must still be the active one. Each
+  // evaluation reads the version once and checks every identity against it.
   const authorizeSite = async (db: Database) => {
     if (!siteArtifactId || !siteVersionId) return;
+    let read: ReturnType<typeof getWorkspaceArtifactContentRef> | undefined;
+    const pinned = () =>
+      (read ??= getWorkspaceArtifactContentRef(
+        db,
+        authorization.grant.workspaceId,
+        siteArtifactId,
+        siteVersionId,
+      ));
     if (identities.length === 0) {
       let status: string;
       let versionId: string;
       try {
-        const content = await getWorkspaceArtifactContentRef(
-          db,
-          authorization.grant.workspaceId,
-          siteArtifactId,
-          siteVersionId,
-        );
+        const content = await pinned();
         status = content.status;
         versionId = content.version.id;
       } catch (error) {
@@ -450,6 +454,7 @@ export async function resolveWorkspaceToolManifest(
         db,
         authorization.grant,
         { siteArtifactId, siteVersionId, identity },
+        pinned,
       );
   };
   const fence = createTargetFence(deps, authorization, options, false);
@@ -469,6 +474,15 @@ export async function resolveWorkspaceToolManifest(
       options.signal?.throwIfAborted();
       // Definitions are disclosed only while the fence still holds.
       await fence.check({ retryable: true });
+      // A requested tool dropped because a boundary denied or could not read
+      // authority reports that outcome, never a silently partial manifest.
+      const listed = new Set(
+        prepared.toolGatewayCatalog.entries.map((entry) => key(entry.identity)),
+      );
+      if (identities.some((identity) => !listed.has(key(identity)))) {
+        const failure = await fence.failure();
+        if (failure) throw failure;
+      }
     } catch (error) {
       return await fence.settle(error);
     }
