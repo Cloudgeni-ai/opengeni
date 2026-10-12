@@ -167,12 +167,17 @@ export async function internalMaintenanceCadences(input: {
     });
   }
   if (jobs.has("knowledge-indexing")) {
-    let embedding: Promise<{ model: string; dimensions: number }> | undefined;
+    let embedding: Promise<{ model: string; dimensions: number; available: boolean }> | undefined;
+    let unavailableReported = false;
     const resolveEmbedding = async () => {
       const services =
         input.documentServices ??
         (await import("@opengeni/documents")).createDocumentServices(settings);
-      return { model: services.embedder.model, dimensions: services.embedder.dimensions };
+      return {
+        model: services.embedder.model,
+        dimensions: services.embedder.dimensions,
+        available: services.embedder.available !== false,
+      };
     };
     cadences.push({
       job: "knowledge-indexing",
@@ -182,7 +187,21 @@ export async function internalMaintenanceCadences(input: {
           embedding = undefined;
           throw error;
         });
-        return await knowledgeIndexDue(db, await embedding);
+        const current = await embedding;
+        // Without an embedding credential every batch fails before reaching the
+        // provider, so queued jobs are not work this process can do. They stay
+        // queued and index once the deployment configures a credential.
+        if (!current.available) {
+          if (!unavailableReported) {
+            unavailableReported = true;
+            observability.warn(
+              "Knowledge indexing is idle: no document embedding credential is configured",
+              { job: "knowledge-indexing", model: current.model },
+            );
+          }
+          return false;
+        }
+        return await knowledgeIndexDue(db, current);
       },
       start: async () =>
         await startMaintenanceWorkflowOnce(workflow, {
