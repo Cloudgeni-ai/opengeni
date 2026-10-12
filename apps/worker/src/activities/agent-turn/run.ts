@@ -125,7 +125,16 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectClaudeTurnCapacity } from "./xai-capacity";
+import {
+  buildClaudeCoreRequestAuthorization,
+  claudeCoreSettingsCredential,
+  claudeCoreModelScope,
+  claudeCoreRequestPreparer,
+  claudeSubscriptionProviderIds,
+  claudeSubscriptionUpstreamModelIds,
+  selectClaudeTurnCapacityByRoute,
+  type ClaudeCoreRequestAuthorization,
+} from "./claude-core";
 import {
   buildXaiCoreRequestAuthorization,
   selectXaiTurnCapacityByRoute,
@@ -177,18 +186,43 @@ export function sessionTitleCodexRequestContext(
   };
 }
 
+/**
+ * The durable `agent.model.request` payload of a SuperGrok request event. It
+ * carries every transport field, including `meaningfulOutput` on `completed`,
+ * which the shared false-resumption breaker resets on.
+ */
+export function xaiModelRequestEventPayload<Event extends object>(
+  event: Event,
+  ids: {
+    turnId: string;
+    attemptId: string;
+    dispatchId: string | undefined;
+    executionGeneration: number | null | undefined;
+  },
+): Event & { provider: "supergrok-subscription" } & typeof ids {
+  return { ...event, provider: "supergrok-subscription", ...ids };
+}
+
 export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
-  /** On the shared core: the turn's dispatch fence and the title custody lane. */
-  core?: { assertDispatch: () => Promise<void>; requests: CoreSubscriptionRequests },
+  /**
+   * On the shared core: the turn's dispatch fence, the title custody lane and
+   * the title lane's bearer (which never moves the main lane's refusal fence).
+   */
+  core?: {
+    assertDispatch: () => Promise<void>;
+    requests: CoreSubscriptionRequests;
+    getToken: XaiSubscriptionRequestContext["getToken"];
+    refresh: XaiSubscriptionRequestContext["refresh"];
+  },
 ): XaiSubscriptionRequestContext {
   return {
     clientVersion: context.clientVersion,
     sessionId: context.sessionId,
     turnId: context.turnId,
-    getToken: context.getToken,
-    refresh: context.refresh,
+    getToken: core?.getToken ?? context.getToken,
+    refresh: core?.refresh ?? context.refresh,
     resolveModel: context.resolveModel,
     ...(context.streamIdleTimeoutMs !== undefined
       ? { streamIdleTimeoutMs: context.streamIdleTimeoutMs }
@@ -618,12 +652,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if ("exit" in codexCapacity) return codexCapacity.exit;
             const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
             if ("exit" in xaiCapacity) return xaiCapacity.exit;
-            const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
+            const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
             if ("exit" in claudeCapacity) return claudeCapacity.exit;
           }
 
           let selectedCapabilitySettings = capabilitySettings;
-          if (billingState.isClaudeTurn) {
+          let claudeCoreAuthorization: ClaudeCoreRequestAuthorization | null = null;
+          const claudeCore = billingState.isClaudeTurn ? providerTurn.claudeSubscriptionCore : null;
+          if (claudeCore) {
+            // On the shared core the bearer, refresh and request custody come
+            // from the core placement; the scope is the accepted model's.
+            claudeCoreAuthorization = buildClaudeCoreRequestAuthorization({
+              db,
+              settings,
+              core: claudeCore,
+              lease: leases.claude,
+              execution: {
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration!,
+              },
+              upstreamModelIds: claudeSubscriptionUpstreamModelIds(capabilitySettings),
+            });
+            const token = await claudeCoreAuthorization.getToken();
+            // The settings carry the account identity but never the live
+            // bearer: every core request gets it from its custody, so a
+            // request outside a custody wrapper fails closed upstream.
+            selectedCapabilitySettings = withClaudeConnectionCredential(
+              capabilitySettings,
+              "claude_subscription",
+              claudeCoreSettingsCredential(token, claudeCore.connectionId),
+              claudeCoreModelScope(turnExecutionPolicy.productModelId),
+              { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
+            );
+          } else if (billingState.isClaudeTurn) {
             const credentialId = providerTurn.effectiveClaudeCredentialId;
             const subjectId = leases.claude.subjectId;
             const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
@@ -1089,14 +1150,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       : []),
                     {
                       type: "agent.model.request",
-                      payload: {
-                        ...event,
-                        provider: "supergrok-subscription",
+                      payload: xaiModelRequestEventPayload(event, {
                         turnId: attempt.turnId,
                         attemptId: input.attemptId,
                         dispatchId,
                         executionGeneration: attempt.executionGeneration,
-                      },
+                      }),
                     },
                   ]);
                   // SuperGrok places bytes on the wire immediately after this
@@ -1157,7 +1216,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             providerTurn.latestClaudeUsage,
             async () => null,
           );
+          // A core-placed Claude turn: every physical request carries the core
+          // bearer and the custody of its lane (the agent's, or the session
+          // title's); the legacy observer and its receipts are not used.
+          const claudeProviderIds = claudeSubscriptionProviderIds(runSettings);
+          let claudeModelRequestSequence = 0;
+          let claudeTitleRequestSequence = 0;
+          const withClaudeCoreLane =
+            (lane: "requests" | "titleRequests") =>
+            <T>(fn: () => Promise<T>): Promise<T> => {
+              const custody = claudeCore?.[lane];
+              if (!claudeCoreAuthorization || !custody)
+                throw new Error("Claude core request custody was not initialized");
+              return withClaudeUsageObserver(
+                () => undefined,
+                fn,
+                claudeCoreRequestPreparer({
+                  authorization: claudeCoreAuthorization,
+                  lane: custody,
+                  mainLane: lane === "requests",
+                  nextRequestId: () =>
+                    lane === "requests"
+                      ? `${requestIdPrefix}:claude:${++claudeModelRequestSequence}`
+                      : `${requestIdPrefix}:claude:title:${++claudeTitleRequestSequence}`,
+                  providerIds: claudeProviderIds,
+                  observe: claudeCoreAuthorization.observeResponse,
+                }),
+              );
+            };
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            claudeCore ? withClaudeCoreLane("requests")(fn) : withLegacyClaudeUsage(fn);
+          const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            claudeCore ? withClaudeCoreLane("titleRequests")(fn) : withLegacyClaudeUsage(fn);
+          const withLegacyClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
             withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
               return claudeUsageObserver.prepareRequestWithObserver(
                 providerId,
@@ -1236,7 +1327,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsage(() =>
+            withClaudeTitleUsage(() =>
               xaiSessionTitleContext
                 ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
                 : codexSessionTitleContext
@@ -2076,6 +2167,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         bus,
         observability,
         wakeSessionWorkflow,
+        signalCodexCapacityWorkflow,
         cancellationSignal,
         sandboxRotationController,
         noteCancellationRequested,

@@ -788,6 +788,92 @@ test("deterministic embeddings still index without funds under the credits-mode 
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(0);
 });
 
+test("an embedder without a credential leaves queued jobs untouched until one is configured", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Unconfigured index')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Unconfigured workspace')`;
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "deterministic",
+    documentEmbeddingBillingMode: "usage_only",
+  } as Settings;
+  let available = false;
+  let calls = 0;
+  const embedder: DocumentServices["embedder"] = {
+    model: "unconfigured-index-test",
+    dimensions: 3,
+    get available() {
+      return available;
+    },
+    embedMany: async (inputs) => {
+      calls += 1;
+      if (!available) throw new Error("OpenAI document embeddings require an API key");
+      return inputs.map(() => [1, 0, 0]);
+    },
+    embedQuery: async () => [1, 0, 0],
+  };
+  const worker = createKnowledgeIndexingActivities(
+    async () =>
+      ({
+        db: client.db,
+        settings,
+        observability: { warn: () => undefined },
+      }) as ControlActivityServices,
+    async () => ({ embedder }) as DocumentServices,
+  );
+  await worker.indexKnowledge();
+  const saved = await saveKnowledgeEntry(
+    client.db,
+    {
+      accountId,
+      workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: "user:unconfigured-owner",
+        writeScopes: ["workspace"],
+        settingsScopes: ["workspace"],
+        review: true,
+      },
+    },
+    {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      scope: "workspace",
+      entry: { kind: "fact", title: "Queued until configured", content: "Waiting for embeddings" },
+    },
+  );
+  const job = async () =>
+    (
+      await shared.admin`
+        SELECT state, attempts, next_attempt_at, last_failure, lease_id
+        FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`
+    )[0];
+  const queued = await job();
+  for (let tick = 0; tick < 3; tick += 1) {
+    expect(await worker.indexKnowledge()).toEqual({
+      completed: 0,
+      advanced: 0,
+      deferred: 0,
+      unavailable: 0,
+    });
+  }
+  // No claim, no recorded failure and no pushed-out retry: the job is exactly
+  // as it was queued.
+  expect(await job()).toEqual(queued);
+  expect(queued).toMatchObject({ state: "pending", last_failure: null, lease_id: null });
+  expect(calls).toBe(0);
+
+  available = true;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  expect(await job()).toMatchObject({ state: "ready", last_failure: null });
+});
+
 test("shadow indexing records its frozen cost estimate without a credit debit", async () => {
   const accountId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();

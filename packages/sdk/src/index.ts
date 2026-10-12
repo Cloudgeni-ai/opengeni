@@ -811,6 +811,7 @@ export type {
   UpdateWorkspaceModelAccountSettingsRequest,
   ModelAccountChoiceRefusal,
   ModelAccountChoiceOption,
+  ModelAccountUsageSnapshot,
   SessionModelAccountChoiceResponse,
   SetSessionModelAccountChoiceRequest,
   SetSessionModelAccountChoiceResponse,

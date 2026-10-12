@@ -42,7 +42,10 @@ import {
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { coreCodexModelCallCompletedAt, finalizeCoreCodexUsage } from "./codex-core-settlement";
+import { finalizeCoreSubscriptionTurn } from "./subscription-core-settlement";
+import { XAI_CORE_REFUSAL } from "./xai-core";
 import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
+import { finalizeCoreClaudeTurn } from "./claude-core";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
 import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
@@ -497,9 +500,19 @@ async function finalizeTurnAttemptSteps(
       );
       leases.codex.held = false;
     }
-    // A core-placed SuperGrok turn releases its core lease (the legacy
-    // release below needs the legacy subject, which a core lease never has).
+    // A core-placed SuperGrok turn moves its binding's cache clock after a
+    // completed model call, then releases its core lease (the legacy release
+    // below needs the legacy subject, which a core lease never has).
     if (providerTurn.xaiSubscriptionCore && leases.xai.held && attempt.turnId) {
+      await waitForTurnFinalizerStep(
+        finalizeCoreSubscriptionTurn({
+          db,
+          provider: XAI_CORE_REFUSAL.provider,
+          core: providerTurn.xaiSubscriptionCore,
+          lease: leases.xai,
+        }).catch(() => undefined),
+        finalizerSignal,
+      );
       leases.xai.stopHeartbeat();
       await waitForTurnFinalizerStep(
         leases.xai.releaseCurrent().catch(() => false),
@@ -507,7 +520,31 @@ async function finalizeTurnAttemptSteps(
       );
       leases.xai.held = false;
     }
+    // The same for a core-placed Claude turn (its legacy usage receipts and
+    // legacy release never run: they need the legacy authority and subject).
+    if (providerTurn.claudeSubscriptionCore && leases.claude.held && attempt.turnId) {
+      // Queued quota writes still need this lease's fence. Cancellation and
+      // housekeeping timeouts may detach only the wake, never that write join.
+      // The provider_leases stage monitor contains a genuinely stuck join by
+      // requesting host drain; it must not manufacture completion/release.
+      await finalizeCoreClaudeTurn({
+        db,
+        signalCodexCapacityWorkflow,
+        core: providerTurn.claudeSubscriptionCore,
+        lease: leases.claude,
+        signal: finalizerSignal,
+      }).catch(() => undefined);
+      leases.claude.stopHeartbeat();
+      await waitForTurnFinalizerStep(
+        leases.claude.releaseCurrent().catch(() => false),
+        finalizerSignal,
+      );
+      leases.claude.held = false;
+    }
+    // The per-turn SuperGrok quota call is legacy only: on the core, quota is
+    // observed on refusal and by the out-of-turn probe.
     if (
+      !providerTurn.xaiSubscriptionCore &&
       providerTurn.effectiveXaiCredentialId &&
       leases.xai.subjectId &&
       providerTurn.xaiRequestContext &&

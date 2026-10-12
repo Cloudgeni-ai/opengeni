@@ -217,6 +217,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     resolvedOpperModelsJson: undefined,
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
+    experimentSystemPromptCacheSplit: true,
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
     supergrokResponseStreamIdleTimeoutMs: 300_000,
@@ -229,6 +230,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     // Off by default in tests so existing suites keep their exact database
     // work; the shadow's own tests enable it.
     subscriptionCoreShadowEnabled: false,
+    subscriptionCrossProviderFailoverEnabled: false,
     subscriptionCoreShadowTimeoutMs: 250,
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,
@@ -259,6 +261,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     jevRequestTimeoutMs: 10_000,
     codeSearchMode: "off",
     agentInstructionsTemplate: DEFAULT_AGENT_INSTRUCTIONS,
+    experimentKnowledgeRetrievalGuidance: false,
     azureOpenaiBaseUrl: undefined,
     azureOpenaiEndpoint: undefined,
     azureOpenaiDeployment: undefined,

@@ -50,6 +50,8 @@ const upstream = new ScriptedClaudeUpstream([
 describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   name: "Claude subscription (setup token)",
   databaseLabel: "subscription-core-claude-setup-token-conformance",
+  // The adapter's declared usage-reading completeness (asserted by the suite).
+  usageReadingsComplete: false,
   provider,
   models: [
     {
@@ -98,4 +100,14 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   renews: false,
   upstream,
   denyNetwork: installNetworkDenialGuard,
+  // The core waiter speaks the legacy Claude wait's session events, so
+  // clients and the workflow see one vocabulary across the cutover.
+  sessionWaits: {
+    provider: "claude",
+    events: {
+      waiting: "turn.capacity_waiting",
+      resumed: "turn.recovery.requested",
+      superseded: "turn.superseded",
+    },
+  },
 });

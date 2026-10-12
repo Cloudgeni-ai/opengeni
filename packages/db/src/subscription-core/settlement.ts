@@ -13,6 +13,7 @@ import {
   planSubscriptionCoreRefusal,
   subscriptionCoreCredentialRefresher,
   type ProviderErrorOutcome,
+  type SubscriptionCoreRefusalPlan,
 } from "@opengeni/subscriptions";
 
 import type { Database } from "../database";
@@ -40,6 +41,54 @@ export type SubscriptionCoreSettlement =
   | { kind: "refresh_failed"; reason: string };
 
 export const subscriptionCoreSettlement = memoByProvider((provider: SubscriptionCoreProvider) => {
+  /**
+   * Write one planned refusal: the (turn, connection) failure receipt first
+   * (it counts toward the per-turn failover bound even when the health write
+   * is fenced out), then the health state that keeps placement away.
+   */
+  async function applySubscriptionCoreRefusal(
+    db: Database,
+    identity: SubscriptionCoreTurnIdentity,
+    lease: SubscriptionCoreLeaseRef,
+    plan: Extract<SubscriptionCoreRefusalPlan, { kind: "settle" }>,
+    input: { refreshGeneration: number; now: number },
+  ): Promise<{ receipt: boolean; health: boolean }> {
+    const runtime = subscriptionCoreTurns(provider);
+    const receipt = await runtime.recordSubscriptionCoreTurnFailure(
+      db,
+      identity,
+      lease,
+      plan.receipt,
+    );
+    const health = plan.health;
+    let applied: boolean;
+    switch (health.kind) {
+      case "quota":
+        applied = await runtime.recordSubscriptionCoreQuotaObservation(
+          db,
+          identity,
+          lease,
+          health.observation,
+        );
+        break;
+      case "model_cooldown":
+        applied = await runtime.recordSubscriptionCoreModelCooldown(db, identity, lease, {
+          modelId: health.modelId,
+          until: new Date(health.until),
+          refreshGeneration: input.refreshGeneration,
+        });
+        break;
+      case "quarantine":
+        applied = await runtime.quarantineSubscriptionCoreConnection(db, identity, lease, {
+          kind: health.reason,
+          refreshGeneration: input.refreshGeneration,
+          now: new Date(input.now),
+        });
+        break;
+    }
+    return { receipt, health: applied };
+  }
+
   async function settleSubscriptionCoreOutcome(
     db: Database,
     settings: Settings,
@@ -95,44 +144,14 @@ export const subscriptionCoreSettlement = memoByProvider((provider: Subscription
         return { kind: "refresh_failed", reason: refreshed.kind };
       }
       case "settle": {
-        // The receipt first: it counts toward the per-turn failover bound
-        // even when the health write is fenced out.
-        const receipt = await runtime.recordSubscriptionCoreTurnFailure(
-          db,
-          identity,
-          lease,
-          plan.receipt,
-        );
-        const health = plan.health;
-        let applied: boolean;
-        switch (health.kind) {
-          case "quota":
-            applied = await runtime.recordSubscriptionCoreQuotaObservation(
-              db,
-              identity,
-              lease,
-              health.observation,
-            );
-            break;
-          case "model_cooldown":
-            applied = await runtime.recordSubscriptionCoreModelCooldown(db, identity, lease, {
-              modelId: health.modelId,
-              until: new Date(health.until),
-              refreshGeneration: input.refreshGeneration,
-            });
-            break;
-          case "quarantine":
-            applied = await runtime.quarantineSubscriptionCoreConnection(db, identity, lease, {
-              kind: health.reason,
-              refreshGeneration: input.refreshGeneration,
-              now: new Date(now),
-            });
-            break;
-        }
-        return { kind: "settled", receipt, health: applied };
+        const applied = await applySubscriptionCoreRefusal(db, identity, lease, plan, {
+          refreshGeneration: input.refreshGeneration,
+          now,
+        });
+        return { kind: "settled", ...applied };
       }
     }
   }
 
-  return { settleSubscriptionCoreOutcome };
+  return { applySubscriptionCoreRefusal, settleSubscriptionCoreOutcome };
 });

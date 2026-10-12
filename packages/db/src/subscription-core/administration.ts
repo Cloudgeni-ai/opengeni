@@ -82,6 +82,8 @@ export type SubscriptionCoreWake = {
   workspaceIds?: readonly string[];
   /** Only these sessions' waiters (requires exactly one workspace). */
   sessionIds?: readonly string[];
+  /** Only waiters of sessions owned by this organization membership. */
+  ownerMembershipId?: string;
 };
 
 /** The wake reason for an administration event of this provider. */
@@ -117,11 +119,17 @@ export type SubscriptionCoreConnectionRow = {
   quota_revision: number | string | null;
   quota_observed_refresh_generation: number | string | null;
   quota_updated_at: Date | string | null;
+  /**
+   * The row version (moves on every connection change except a credential
+   * refresh). Shared rows carry it; the owner reader of personal rows does
+   * not (`readSubscriptionCorePersonalConnectionVersionsInTransaction`).
+   */
+  version?: number | string;
 };
 
 const CONNECTION_COLUMNS = sql`connection.id::text as id, connection.label,
   connection.account_email, connection.plan_type, connection.provider_account_id,
-  connection.status, connection.last_error, connection.allocator_enabled,
+  connection.status, connection.last_error, connection.version, connection.allocator_enabled,
   connection.extra_credits_enabled, connection.extra_credits_version, connection.extra_credits_updated_at,
   connection.allocator_version, connection.allowed_model_ids,
   connection.connected_by_subject_id, connection.expires_at, connection.last_refresh_at,
@@ -403,6 +411,29 @@ export async function listSubscriptionCorePersonalConnectionRowsInTransaction(
         ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}
       ) personal`,
   );
+}
+
+/**
+ * The row versions of the viewing person's own personal connections of this
+ * provider, through the owner-only reader (0730), keyed by connection id.
+ * Same context and visibility as
+ * `listSubscriptionCorePersonalConnectionRowsInTransaction`.
+ */
+export async function readSubscriptionCorePersonalConnectionVersionsInTransaction(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<Map<string, number>> {
+  if (!input.subjectId.startsWith("user:")) return new Map();
+  await setSubjectRlsContext(tx, input.subjectId);
+  const rows = await rawRows<{ id: string; version: number | string }>(
+    tx,
+    sql`select personal.id::text as id, personal.version
+      from opengeni_private.subscription_core_personal_connection_versions(${subscriptionCoreProviderId(provider)},
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}
+      ) personal`,
+  );
+  return new Map(rows.map((row) => [row.id, Number(row.version)]));
 }
 
 /**

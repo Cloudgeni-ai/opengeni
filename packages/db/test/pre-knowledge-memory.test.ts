@@ -43,6 +43,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
       for (const name of allowanceMigrationTail)
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
+      // Resolves knowledge_index_claim from the withheld 0461 migration.
+      await owner`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
       // The import migration extends the withheld 0499 attachment helper.
       await owner`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
       // The session storage lifecycle extends the withheld 0560 import guards.

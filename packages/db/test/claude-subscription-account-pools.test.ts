@@ -9,8 +9,11 @@ import {
   withSessionActivityRlsContext,
   armClaudeCapacityWait,
   getClaudeCapacityWaitForSession,
+  getSubscriptionCoreCapacityWaitById,
+  getSubscriptionCoreCapacityWaitForSession,
   reconcileClaudeCapacityWait,
   peekSessionWork,
+  wakeSubscriptionCoreProviderCapacityWaiters,
   type DbClient,
 } from "../src";
 import {
@@ -812,6 +815,42 @@ test("model admission uses the exact frozen Claude account and keeps exhausted m
   );
   expect(restrictions["workspace-claude-subscription/"]).toEqual([sonnet]);
   expect(restrictions["organization-claude-subscription/"]).toEqual([]);
+  // After Claude's cutover the restriction loader never reads this legacy
+  // pool: both Claude prefixes start closed for the core's answer, and the
+  // other providers' restrictions are unchanged.
+  const { getWorkspaceConnectionModelRestrictions: resolveRestrictions } =
+    await import("../src/workspace-model-connection-access");
+  const onCore = await resolveRestrictions(
+    client.db,
+    input.workspaceId,
+    input.subjectId,
+    [],
+    undefined,
+    undefined,
+    { "workspace-claude-subscription/": [], "organization-claude-subscription/": [] },
+  );
+  expect(onCore["workspace-claude-subscription/"]).toEqual([]);
+  expect(onCore["organization-claude-subscription/"]).toEqual([]);
+  const legacy = await resolveRestrictions(
+    client.db,
+    input.workspaceId,
+    input.subjectId,
+    [],
+    undefined,
+    authoritySnapshot,
+  );
+  expect(legacy["workspace-claude-subscription/"]).toEqual([sonnet]);
+  const {
+    "workspace-claude-subscription/": _onCoreWorkspace,
+    "organization-claude-subscription/": _onCoreOrganization,
+    ...otherOnCore
+  } = onCore;
+  const {
+    "workspace-claude-subscription/": _legacyWorkspace,
+    "organization-claude-subscription/": _legacyOrganization,
+    ...otherLegacy
+  } = legacy;
+  expect(otherOnCore).toEqual(otherLegacy);
 });
 
 test("capacity deadlines respect a manual pin instead of another account's earlier reset", async () => {
@@ -1169,6 +1208,77 @@ test("Claude capacity waits preserve the accepted turn and recheck the exact mod
   expect(
     await getClaudeCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
   ).toBeNull();
+});
+
+test("before Claude's receipt a v1 Claude waiter is reached only by its v1 path: the core finds, wakes and changes nothing", async () => {
+  const input = await fixture(),
+    { a, b } = await pool(input),
+    running = await turn(input),
+    now = new Date();
+  await rejectOpus(input, a.account.id, a.account.version, now);
+  await rejectOpus(input, b.account.id, b.account.version, now);
+  const armed = await armClaudeCapacityWait(client.db, {
+    ...input,
+    ...running,
+    earliestResetAt: new Date(now.getTime() + 3600_000),
+    failurePayload: { code: "claude_capacity_unavailable" },
+    now,
+  });
+  if (armed.action !== "waiting") throw Error("Expected capacity waiter");
+  const before = await getClaudeCapacityWaitForSession(
+    client.db,
+    input.workspaceId,
+    running.sessionId,
+  );
+  // The workflow's `provider: "claude"` reference is looked up on the core
+  // by its exact id first (C1b): a v1 waiter is not a core waiter, so the
+  // lookup finds nothing and the caller falls back to the v1 reconcile.
+  expect(
+    await getSubscriptionCoreCapacityWaitById(client.db, {
+      workspaceId: input.workspaceId,
+      sessionId: running.sessionId,
+      waiterId: armed.waiter.id,
+    }),
+  ).toBeNull();
+  expect(
+    await getSubscriptionCoreCapacityWaitForSession(
+      client.db,
+      input.workspaceId,
+      running.sessionId,
+    ),
+  ).toBeNull();
+  // A core Claude capacity change never reaches the v1 waiter: before the
+  // receipt registers Claude the core wake fails closed (the worker's
+  // best-effort delivery swallows it), and the v1 waiter keeps its wake
+  // revision and workflow state.
+  await expect(
+    wakeSubscriptionCoreProviderCapacityWaiters(client.db, "claude", {
+      accountId: input.accountId,
+      reason: "quota_observed_available",
+    }),
+  ).rejects.toThrow("No subscription-core provider is registered");
+  expect(
+    await getClaudeCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
+  ).toEqual(before);
+  const [coreRows] = await shared.admin<{ count: number }[]>`
+    select count(*)::int as count from subscription_capacity_waiters
+    where session_id = ${running.sessionId}`;
+  expect(coreRows!.count).toBe(0);
+  // The session is still parked on the v1 waiter, and the v1 reconcile still
+  // owns it exactly as before.
+  expect(await peekSessionWork(client.db, input.workspaceId, running.sessionId)).toMatchObject({
+    kind: "capacity-wait",
+    ref: { provider: "claude", waiterId: armed.waiter.id },
+  });
+  expect(
+    await reconcileClaudeCapacityWait(client.db, {
+      ...input,
+      sessionId: running.sessionId,
+      waiterId: armed.waiter.id,
+      generation: armed.waiter.generation,
+      now,
+    }),
+  ).toMatchObject({ action: "waiting", waiter: { id: armed.waiter.id } });
 });
 
 test("Claude waiter keeps a manual pin binding and resumes after the explicit pin change", async () => {

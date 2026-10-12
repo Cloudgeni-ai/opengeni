@@ -21,10 +21,12 @@ import { withPoolWakeServiceScopeInTransaction } from "../subscription-session-a
  */
 export async function deleteSubscriptionCoreWaitersForTurns(
   db: Database | SessionActivityDatabase,
-  provider: ProviderId,
+  provider: ProviderId | null,
   input: { workspaceId: string; turnIds: readonly string[]; sessionId?: string },
 ): Promise<number> {
-  subscriptionCoreProvider(provider);
+  // Null: the waiter of whichever provider the turn parked on (a turn waits
+  // on at most one), including a provider that is not registered yet.
+  if (provider !== null) subscriptionCoreProvider(provider);
   if (input.turnIds.length === 0) return 0;
   const deleted = await db
     .delete(schema.subscriptionCapacityWaiters)
@@ -34,7 +36,7 @@ export async function deleteSubscriptionCoreWaitersForTurns(
         ...(input.sessionId
           ? [eq(schema.subscriptionCapacityWaiters.sessionId, input.sessionId)]
           : []),
-        eq(schema.subscriptionCapacityWaiters.provider, provider),
+        ...(provider === null ? [] : [eq(schema.subscriptionCapacityWaiters.provider, provider)]),
         inArray(schema.subscriptionCapacityWaiters.turnId, [...input.turnIds]),
       ),
     )
@@ -55,6 +57,12 @@ export type SubscriptionCoreCapacityWake = {
    * `workspaceIds`.
    */
   sessionIds?: readonly string[];
+  /**
+   * Only waiters of sessions owned by this organization membership (for
+   * example a person's own preference change, which can make only their own
+   * sessions placeable). Composes with `workspaceIds` and `sessionIds`.
+   */
+  ownerMembershipId?: string;
 };
 
 /** One workspace whose core waiters were woken; deliver its outbox after commit. */
@@ -98,6 +106,10 @@ export async function wakeSubscriptionCoreCapacityWaiters(
     throw new Error("A subscription-core wake reason must be a bounded identifier");
   if (input.sessionIds !== undefined && input.workspaceIds?.length !== 1)
     throw new Error("A session-scoped subscription-core wake names exactly one workspace");
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (input.ownerMembershipId !== undefined && !UUID.test(input.ownerMembershipId))
+    throw new Error("A subscription-core wake owner membership must be a uuid");
+  const ownerMembershipId = input.ownerMembershipId?.toLowerCase() ?? null;
   const sessionIds = input.sessionIds ? [...new Set(input.sessionIds)] : null;
   if (sessionIds !== null && sessionIds.length === 0) return [];
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) =>
@@ -137,6 +149,16 @@ export async function wakeSubscriptionCoreCapacityWaiters(
                 sessionIds.map((id) => sql`${id}::uuid`),
                 sql`, `,
               )})`;
+        // Owned sessions only: the owner is read again under the session
+        // lock below, so a session whose owner changed since is skipped.
+        const ownerFilter =
+          ownerMembershipId === null
+            ? sql``
+            : sql`and session_id in (
+                select owned.id from sessions owned
+                where owned.workspace_id = ${workspaceId}::uuid
+                  and owned.owner_organization_membership_id = ${ownerMembershipId}::uuid
+              )`;
         // Lock order: workspace, then session, then waiter. Steer, Cancel and
         // a resume lock the session before its waiter, and the generic wake's
         // archive guard locks the session too. So read the waiters without
@@ -152,6 +174,7 @@ export async function wakeSubscriptionCoreCapacityWaiters(
             where account_id = ${input.accountId}::uuid
               and workspace_id = ${workspaceId}::uuid and provider = ${provider}
               ${sessionFilter}
+              ${ownerFilter}
             order by subscription_capacity_waiters.session_id`,
         );
         if (waiting.length === 0) continue;
@@ -195,6 +218,11 @@ export async function wakeSubscriptionCoreCapacityWaiters(
               )})
               and sessions.imported_archive_import_id is null
               and sessions.content_archive_state is null
+              ${
+                ownerMembershipId === null
+                  ? sql``
+                  : sql`and sessions.owner_organization_membership_id = ${ownerMembershipId}::uuid`
+              }
             order by sessions.id
             for no key update of sessions`,
         );

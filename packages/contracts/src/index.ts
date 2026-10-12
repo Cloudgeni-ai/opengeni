@@ -1,4 +1,5 @@
 export * from "./session-target";
+export * from "./turn-serving-policy";
 import { modelLogoUrl } from "./model-display";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
@@ -7749,7 +7750,15 @@ export const SessionAuthorizationOperation = z.enum([
   "session.archive.write",
   "session.retention.write",
   "session.delete",
+  /**
+   * @deprecated Older name of `session.model_account.write`. Still a valid
+   * host-boundary value by default for rolling compatibility. Hosts opt in
+   * to the neutral name through `SessionAuthorizationPort.capabilities`
+   * after migrating their policy keys.
+   */
   "session.codex_account.write",
+  /** Choose the model account a session uses (any provider), or return it to automatic. */
+  "session.model_account.write",
   "session.realtime.start",
   "session.realtime.control",
   "session.context.write",
@@ -7771,6 +7780,28 @@ export const SessionAuthorizationOperation = z.enum([
   "session.personal_resource.grant",
 ]);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
+
+/**
+ * Older session authorization operation names and the operation each one now
+ * means. Internal classification uses the canonical name; host delivery is
+ * capability-gated. Normalizing inputs also requires migrating policy keys.
+ */
+export const SESSION_AUTHORIZATION_OPERATION_ALIASES = {
+  "session.codex_account.write": "session.model_account.write",
+} as const satisfies Partial<Record<SessionAuthorizationOperation, SessionAuthorizationOperation>>;
+
+/** The canonical name of a session authorization operation (resolves older aliases). */
+export function canonicalSessionAuthorizationOperation(
+  operation: SessionAuthorizationOperation,
+): SessionAuthorizationOperation {
+  return (
+    (
+      SESSION_AUTHORIZATION_OPERATION_ALIASES as Partial<
+        Record<SessionAuthorizationOperation, SessionAuthorizationOperation>
+      >
+    )[operation] ?? operation
+  );
+}
 
 export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
   z.object({
@@ -7923,6 +7954,14 @@ export type ResolveSessionAuthorizationListScopeInput = {
 };
 
 export type SessionAuthorizationPort = {
+  capabilities?: {
+    /**
+     * Receive `session.model_account.write` instead of the legacy
+     * `session.codex_account.write`. Enable only after migrating policy keys;
+     * omitted or false preserves legacy host allow/deny behavior on both routes.
+     */
+    modelAccountOperation?: boolean;
+  };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
   /**
    * Return the complete current scope used inside Opengeni's cursor query.

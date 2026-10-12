@@ -1,19 +1,27 @@
+/**
+ * Wide chat tables may extend past the prose column, but only to a readable
+ * line length. Beyond it, cells wrap instead of forcing horizontal scrolling.
+ */
+export const MARKDOWN_TABLE_MAX_WIDTH_REM = 64;
+
 export function markdownTableWidth({
   columnLeft,
   columnWidth,
   contentLeft,
   contentRight,
+  maxWidth = Number.POSITIVE_INFINITY,
   preferredWidth,
 }: {
   columnLeft: number;
   columnWidth: number;
   contentLeft: number;
   contentRight: number;
+  maxWidth?: number;
   preferredWidth: number;
 }): number {
   const center = columnLeft + columnWidth / 2;
   const available = 2 * Math.min(center - contentLeft, contentRight - center);
-  return Math.max(columnWidth, Math.min(preferredWidth, available));
+  return Math.max(columnWidth, Math.min(preferredWidth, available, maxWidth));
 }
 
 function measurementCopy(source: Node, document: Document): Node {
@@ -103,11 +111,14 @@ export function observeMarkdownTableLayout(wrapper: HTMLDivElement, table: HTMLT
     } finally {
       probe.remove();
     }
+    const rootFontSize =
+      parseFloat(getComputedStyle(table.ownerDocument.documentElement).fontSize) || 16;
     const next = markdownTableWidth({
       columnLeft: column.left,
       columnWidth: column.width,
       contentLeft: left,
       contentRight: right,
+      maxWidth: MARKDOWN_TABLE_MAX_WIDTH_REM * rootFontSize,
       preferredWidth: preferred,
     });
     if (width !== null && Math.abs(width - next) < 0.5) return;

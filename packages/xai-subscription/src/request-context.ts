@@ -32,6 +32,11 @@ export type XaiModelRequestEvent = {
   interEventGapMs?: number;
   silenceDurationMs?: number;
   willRetry?: boolean;
+  /**
+   * Set on `completed`: the response carried real work (assistant text, a
+   * complete tool call or an image). The shared capacity breaker resets on it.
+   */
+  meaningfulOutput?: boolean;
 };
 
 export type XaiSubscriptionRequestContext = {

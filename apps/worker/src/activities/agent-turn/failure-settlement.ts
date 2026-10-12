@@ -103,7 +103,14 @@ import type {
   TurnControlState,
 } from "./turn-context";
 import type { createCoreCodexRequests } from "./codex-core-requests";
-import { xaiCoreLanesRecoverAfterCheckpoint, xaiCoreRequestOutcomeUnknown } from "./xai-core";
+import {
+  XAI_CORE_REFUSAL,
+  xaiCoreLanesRecoverAfterCheckpoint,
+  xaiCoreRequestOutcomeUnknown,
+} from "./xai-core";
+import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
+import { claudeCoreRefusal, claudeCoreRequestOutcomeUnknown } from "./claude-core";
+import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
@@ -115,6 +122,8 @@ export type TurnFailureDeps = {
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
+  /** Typed capacity-wake signals of core waiters (a refusal's joined observations may wake them). */
+  signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"];
   cancellationSignal: AbortSignal | undefined;
   sandboxRotationController: AbortController;
   noteCancellationRequested: () => void;
@@ -632,8 +641,14 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // exact core placement and its generation fence.
   const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
   // A SuperGrok turn on the shared core: unknown request outcomes are never
-  // replayed (its refusal settlement arrives with X1b).
+  // replayed, and refusals settle through the shared core (X1b) instead of
+  // the legacy SuperGrok wait below.
   const coreXai = billingState.isXaiTurn ? (providerTurn.xaiSubscriptionCore ?? null) : null;
+  // A Claude turn on the shared core: its legacy receipts, refresh recovery
+  // and capacity wait below never run (they would see a core connection id).
+  const coreClaude = billingState.isClaudeTurn
+    ? (providerTurn.claudeSubscriptionCore ?? null)
+    : null;
   // The transport may settle an ambiguous request before the SDK throws a plain
   // HTTP error. That custody evidence must survive classification.
   //
@@ -646,6 +661,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // the durable admission fence, an unsettled request, or a deterministic
   // provider terminal stays a terminal unknown-outcome failure, as does an
   // interruption combined with a lost lease or a disconnected source.
+  //
+  // The parallel session-title request never fences replay: it is a plain,
+  // tool-less request whose text only ever becomes the session title, and it
+  // is cancelled and joined before settlement. Its custody row keeps its
+  // outcome; the replacement attempt's new generation is admitted past it.
   const coreUnknownRecoveryFailure =
     coreCodex &&
     !leases.codex.lost &&
@@ -658,12 +678,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   const coreRequestOutcomeUnknown =
     !coreUnknownRecoveryFailure &&
     (hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
-      coreCodex?.requests?.hasUnknownOutcome() ||
-      coreCodex?.titleRequests?.hasUnknownOutcome())
+      coreCodex?.requests?.hasUnknownOutcome())
       ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
       : coreXai
         ? xaiCoreRequestOutcomeUnknown(error, coreXai)
-        : null;
+        : coreClaude
+          ? claudeCoreRequestOutcomeUnknown(error, coreClaude)
+          : null;
   const coreCodexLeaseLost =
     coreCodex !== null &&
     !coreRequestOutcomeUnknown &&
@@ -679,9 +700,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
       await coreCodex.requests?.checkpoint();
-      coreCodexLeaseRecoverable =
-        (!coreCodex.requests || coreCodex.requests.canRecover()) &&
-        (!coreCodex.titleRequests || coreCodex.titleRequests.canRecover());
+      coreCodexLeaseRecoverable = !coreCodex.requests || coreCodex.requests.canRecover();
     } catch {
       coreLeaseCheckpointFailed = true;
       observability.incrementCounter({
@@ -703,14 +722,24 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           await flushRuntimeBatcher();
           await historySink.reconcileConversationTruth({ requireDurable: true });
         }))));
-  const scopedLeaseLost =
-    billingState.isClaudeTurn && leases.claude.lost
-      ? "claude"
-      : xaiLeaseRecoverable
-        ? "xai"
-        : coreCodexLeaseRecoverable
-          ? "codex"
-          : null;
+  // The same for a core Claude turn.
+  const claudeLeaseRecoverable =
+    billingState.isClaudeTurn &&
+    leases.claude.lost &&
+    (!coreClaude ||
+      (!coreRequestOutcomeUnknown &&
+        eventing.turnStartedPublished &&
+        (await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
+          await flushRuntimeBatcher();
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+        }))));
+  const scopedLeaseLost = claudeLeaseRecoverable
+    ? "claude"
+    : xaiLeaseRecoverable
+      ? "xai"
+      : coreCodexLeaseRecoverable
+        ? "codex"
+        : null;
   if (scopedLeaseLost && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     if (scopedLeaseLost !== "codex") {
       await flushRuntimeBatcher();
@@ -807,12 +836,36 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
               ? subscriptionCoreAccountRefusedFailure("entitlement")
               : null;
   }
+  // A definitive SuperGrok account refusal on a core turn: recorded against
+  // the leased connection, then the same turn re-places within the shared
+  // bound, or fails with typed copy that idles the session (settled below).
+  let coreXaiRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreXai && !coreRequestOutcomeUnknown && !leases.xai.lost) {
+    const settled = await settleCoreSubscriptionRefusal(deps, coreXai, XAI_CORE_REFUSAL);
+    if (settled.result) return settled.result;
+    coreXaiRefusal = settled.failure;
+  }
+  // The same for a Claude core turn: a sign-in refusal (after the transport's
+  // one forced refresh) or a model rate limit re-places the same turn; 529
+  // stays in the overload lane below and 403 fails the turn, neither moving
+  // it to another account. The bound counts the core's turn-failure
+  // receipts (the legacy `claudeAuthRecovery` marker is never read here).
+  let coreClaudeRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreClaude && !coreRequestOutcomeUnknown && !leases.claude.lost) {
+    const settled = await settleCoreSubscriptionRefusal(
+      deps,
+      coreClaude,
+      claudeCoreRefusal(coreClaude.productModelId),
+    );
+    if (settled.result) return settled.result;
+    coreClaudeRefusal = settled.failure;
+  }
   const xaiFailure =
-    billingState.isXaiTurn && providerTurn.effectiveXaiCredentialId
+    billingState.isXaiTurn && !coreXai && providerTurn.effectiveXaiCredentialId
       ? classifyXaiCredentialFailure(error)
       : null;
   const claudeFailure =
-    billingState.isClaudeTurn && providerTurn.effectiveClaudeCredentialId
+    billingState.isClaudeTurn && !coreClaude && providerTurn.effectiveClaudeCredentialId
       ? classifyClaudeCredentialFailure(error)
       : null;
   const scopedFailure = claudeFailure ?? xaiFailure;
@@ -1253,7 +1306,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         )
       : error instanceof SubscriptionCoreCodexTurnError
         ? error
-        : coreAccountRefusal;
+        : (coreAccountRefusal ?? coreXaiRefusal ?? coreClaudeRefusal);
   if (
     coreTurnFailure &&
     !coreTurnFailure.payload.retryable &&
@@ -1506,14 +1559,34 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   );
   const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
     !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
+  // A core Claude lane may hold answered requests that still await their
+  // history checkpoint when a retryable failure arrives (a paused search's
+  // continuation refused with a 529, or a tool or MCP failure after a
+  // complete response): commit the history durably and checkpoint first, as
+  // the lease-lost and failover paths do, so the failure can recover. Nothing
+  // is replayed: a lane without every response stays unrecoverable. Codex and
+  // SuperGrok keep their existing gate.
+  if (
+    coreClaude &&
+    attempt.turnId &&
+    !coreRequestOutcomeUnknown &&
+    failure.retryable &&
+    eventing.publish &&
+    eventing.turnStartedPublished &&
+    !coreLaneRecoverable(coreClaude.requests)
+  ) {
+    await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    });
+  }
   if (
     attempt.turnId &&
     !coreRequestOutcomeUnknown &&
     !coreLeaseCheckpointFailed &&
     coreLaneRecoverable(coreCodex?.requests) &&
-    coreLaneRecoverable(coreCodex?.titleRequests) &&
     coreLaneRecoverable(coreXai?.requests) &&
-    coreLaneRecoverable(coreXai?.titleRequests) &&
+    coreLaneRecoverable(coreClaude?.requests) &&
     (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
@@ -1772,16 +1845,13 @@ const INTERRUPTED_CODEX_RESPONSE_MESSAGE = "The Codex response was interrupted b
  */
 export function ownInterruptedCodexRequestRecovery(
   error: unknown,
-  core: Pick<CodexSubscriptionCoreTurn, "requests" | "titleRequests">,
+  core: Pick<CodexSubscriptionCoreTurn, "requests">,
   isCodexTurn: boolean,
 ): ReturnType<typeof agentRunFailurePayload> | null {
-  const lanes = [core.requests, core.titleRequests].filter(
-    (lane): lane is ReturnType<typeof createCoreCodexRequests> => !!lane,
-  );
-  const uncertain = lanes.filter((lane) => lane.hasUnknownOutcome());
-  if (uncertain.length === 0) return null;
-  if (lanes.some((lane) => lane.admissionRefused())) return null;
-  if (!uncertain.every((lane) => lane.unknownIsOwnAndSettled())) return null;
+  const lane = core.requests;
+  if (!lane?.hasUnknownOutcome()) return null;
+  if (lane.admissionRefused()) return null;
+  if (!lane.unknownIsOwnAndSettled()) return null;
   // A complete provider terminal that is incomplete (for example the output
   // token limit) would end the same way again.
   if (findInCauseChain(error, CodexStreamingTerminalError)?.code === "response_incomplete") {

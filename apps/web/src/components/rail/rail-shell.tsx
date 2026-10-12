@@ -26,6 +26,7 @@ import { toast } from "sonner";
 import { RailHeader } from "@/components/rail/rail-header";
 import { RailFooter } from "@/components/rail/rail-footer";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
+import { OpenInAppBanner } from "@/components/rail/open-in-app-banner";
 import { SessionHeader } from "@/components/rail/session-header";
 import { SessionStartupProvider } from "@/lib/session-startup";
 import {
@@ -363,6 +364,7 @@ export function RailShell({ children }: { children: ReactNode }) {
           <SessionStartupProvider session={context.session}>
             <CanvasTopStrip hamburgerRef={hamburgerRef} />
             <WorkspacePausedBanner workspaceId={rail.workspaceId} />
+            <OpenInAppBanner />
             <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
           </SessionStartupProvider>
         </div>

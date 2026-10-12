@@ -50,6 +50,10 @@ import {
 } from "../subscription-core-providers";
 import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
 import {
+  projectSubscriptionCoreAccountUsage,
+  type SubscriptionCoreAccountUsage,
+} from "./account-usage-presentation";
+import {
   listSubscriptionCorePersonalConnectionRowsInTransaction,
   readSubscriptionCoreWorkspacePool,
   subscriptionCoreWakeReason,
@@ -89,6 +93,8 @@ export type SubscriptionCoreChoosableConnection = {
   allowedModelIds: string[] | null;
   choosable: boolean;
   refusal: SubscriptionCoreAccountChoiceRefusal | null;
+  /** Cached observation for this already-visible account; never an eligibility decision. */
+  usage: SubscriptionCoreAccountUsage | null;
 };
 
 export type SubscriptionCoreSessionAccountChoice = {
@@ -226,6 +232,7 @@ async function listChoosableConnections(
         allowedModelIds: row.allowed_model_ids,
         choosable: refusal === null,
         refusal,
+        usage: projectSubscriptionCoreAccountUsage(row),
       });
     };
     // A provider switched off for the workspace offers nothing, shared or
@@ -801,16 +808,16 @@ export async function writeSubscriptionPersonPreferences(
         },
       };
     }
-    // Wake the organization's waiters of every provider on the core when the
-    // opt-in turns on. The wake is organization-wide (waiters recheck and
-    // keep waiting when nothing changed for them); the person's waiting
-    // turns are among them.
+    // Wake the person's own waiting turns of every provider on the core when
+    // the opt-in turns on. Placement offers a personal account only to
+    // sessions its owner owns, so no other session can place differently.
     const wakes: SubscriptionCoreProviderWake[] =
       row.personal_fallback_opt_in && !own.optIn
         ? (await enabledProviders(tx, input.accountId, providers)).map((binding) => ({
             provider: binding.adapter.provider,
             accountId: input.accountId,
             reason: subscriptionCoreWakeReason(binding, "person_preferences_changed"),
+            ownerMembershipId: own.membershipId,
           }))
         : [];
     return {
