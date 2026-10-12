@@ -47,12 +47,22 @@ export interface NativeFileAdapter {
   readBytes(file: NativePickedFile): Promise<Uint8Array>;
 }
 
+/**
+ * Where links a person taps go. A host app can open its own deployment's
+ * conversations in place and hand everything else to the system browser.
+ */
+export interface NativeLinkAdapter {
+  openUrl(url: string): void;
+}
+
 export interface OpenGeniReactNativeAdapters {
   lifecycle: NativeLifecycleAdapter;
   persistence: NativePersistenceAdapter;
   crypto: NativeCryptoAdapter;
   files: NativeFileAdapter;
   fetch: FetchLike;
+  /** Optional; without it tapped links open in the system browser. */
+  links?: NativeLinkAdapter;
 }
 
 /**

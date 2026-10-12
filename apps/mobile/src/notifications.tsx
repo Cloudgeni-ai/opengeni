@@ -11,6 +11,7 @@ import { router, usePathname } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Linking, Platform } from "react-native";
 import { useAccount } from "@/account";
+import { appSessionPath } from "@/app-links";
 import type { SettingsSection } from "@/settings-model";
 
 /** The rules a person can turn on, in the order Settings shows them. */
@@ -40,6 +41,10 @@ export interface PushData {
 }
 
 function sessionPath(data: PushData): string {
+  // The push names its session's workspace, so the screen does not depend on
+  // the workspace switch below having landed first.
+  if (data.sessionId && data.workspaceId)
+    return appSessionPath(data.sessionId, data.workspaceId, data.sequence ?? null);
   return data.sequence
     ? `/session/${data.sessionId}?at=${data.sequence}`
     : `/session/${data.sessionId}`;
