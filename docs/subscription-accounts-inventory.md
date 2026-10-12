@@ -17,6 +17,22 @@
 > (`packages/db/src/subscription-core-codex-adapter.ts`); the Codex-named
 > exports remain as thin bindings. Module map:
 > [design §5.1.3](design/subscription-core-2026-10-07.md#513-m4-shared-typescript-core-and-the-adapter-interface).
+>
+> M4 R: the drained migration `0721_subscription_core_legacy_retirement.sql`
+> drops the SuperGrok and Claude pool routines Part 4 lists, their trigger
+> functions, the triggers and policies that call them, and the Codex-named
+> twins of the neutral routines. Those are the `create_*`, `disconnect_*`,
+> `resolve_*`, `revalidate_*`, `*_authority_live` and `*_pool_visible`
+> routines, the `prevent_*_authority_mutation` and `opengeni_private`
+> pool-reference, runtime-update and live-disconnect trigger functions, the
+> `*_subscription_scope`, `*_subscription_pool_scope`,
+> `claude_usage_account_scope` and capability policies, and their triggers.
+> The legacy tables, snapshot columns, v1 validators, snapshot-immutability
+> triggers and receipts stay until M6. Without a permissive policy, the
+> runtime role reads no row of the legacy pool tables. The synthetic
+> `worker:*-workspace` subjects described below remain only in legacy
+> callers that the SuperGrok and Claude deletion steps remove. Design record:
+> [subscription core, R](design/subscription-core-2026-10-07.md#r-retirement-of-the-legacy-pool-routines-and-the-codex-twins).
 
 
 Baseline: `origin/main` at `0d7075e` (7 October 2026). Research and documentation only; no product code was changed.

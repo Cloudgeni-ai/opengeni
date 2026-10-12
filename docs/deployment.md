@@ -4361,7 +4361,8 @@ secret already does).
   The new routines read them through the owner-only view
   `opengeni_private.subscription_core_auto_assignments`; the table keeps its
   name, and the column its `codex` default for older binaries' reach writes,
-  until the retirement migration.
+  until the retirement migration (0721, "Subscription legacy retirement"
+  below), which renames the table to the view's name.
 - Applying reach on workspace and Personal-workspace creation, reading and
   setting reach, plan-change history and the organization workspace inventory
   take the provider as data, so a later SuperGrok or Claude cutover adds rows,
@@ -5425,6 +5426,99 @@ readiness gate. Run them in separate windows (each release carries one) or
 together as described in "With the Claude cutover" above. A release that
 carries 0720 also carries 0719, so the SuperGrok window comes first or
 shares the Claude window.
+
+### Subscription legacy retirement (0721)
+
+Migration `0721_subscription_core_legacy_retirement.sql` is a one-way
+**maintenance** migration: drained, never rolling. It retires what the
+SuperGrok (0719) and Claude (0720) cutovers left unused:
+
+- the legacy SuperGrok and Claude pool routines: account writers, pool
+  resolvers, revalidators, liveness and visibility predicates, and their
+  trigger functions;
+- the triggers and row policies that call them;
+- the 19 Codex-named twins of the provider-neutral routines and their two
+  owner-only internals;
+- 0689's unused Codex auto-assignment routine.
+
+It also gives the organization reach rows provider-free names. The table
+`opengeni_private.subscription_codex_auto_assignments` becomes
+`opengeni_private.subscription_core_auto_assignments`, replacing 0713's view
+of that name. Each row must name a connection of its own provider, and the
+`codex` column default goes.
+
+Legacy tables and columns, every cutover receipt and the `*_closed`
+restrictive policies stay. The legacy SuperGrok and Claude tables keep
+FORCE RLS without a permissive policy, so the runtime role reads no row
+from them. The migration changes no row and needs no encryption key.
+Design record:
+[subscription core, R](design/subscription-core-2026-10-07.md#r-retirement-of-the-legacy-pool-routines-and-the-codex-twins).
+
+**When.** Run it after the `xai` and `claude` cutover receipts are
+committed: in the Claude window right after 0720, or in a later window.
+Only the release that carries it, or a later one, starts on a retired
+database. Older releases refuse it because their runtime posture requires
+the dropped routines. This release refuses a database without it
+(`retired subscription <object> is present; apply the drained retirement
+migration 0721_subscription_core_legacy_retirement.sql`). Stop everything
+before migrating, and start only this release afterwards.
+
+**1. Check (before the window).** Run these queries as a superuser or
+another `BYPASSRLS` role, behind the guard from 0720 step 1. Every row of
+the first query must read `committed = true`, and the second must return no
+rows:
+
+```sql
+SELECT provider, opengeni_private.subscription_provider_cutover_committed(provider) AS committed
+FROM unnest(ARRAY['codex', 'xai', 'claude']) AS provider;
+
+SELECT auto.account_id, auto.connection_id, auto.provider, connection.provider
+FROM opengeni_private.subscription_codex_auto_assignments auto
+JOIN subscription_connections connection
+  ON connection.account_id = auto.account_id AND connection.id = auto.connection_id
+WHERE connection.provider <> auto.provider;
+```
+
+No supported path writes a reach row whose provider differs from its
+connection's provider, so investigate any such row before the window.
+Deleting it removes only that connection's reach to workspaces created
+later; an administrator can set the reach again in the access editor.
+
+**2. Stop and drain. 3. Back up.** As for 0719. Include idle pooled
+connections: the migration refuses while any application login is
+connected.
+
+**4. Migrate.** Run the TypeScript migrator as the schema owner with
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, the complete list of old
+and new runtime logins (for example `["opengeni_app"]`). Plain `psql` is
+refused, because it does not pass that list. The preflight changes nothing.
+Every refusal rolls back the whole migration, and nothing is committed:
+
+| SQLSTATE | Message | Meaning and fix |
+|---|---|---|
+| `55000` | `0721 requires explicit application database roles` or `received invalid application roles` | The role list is missing or malformed. Pass it and run again. |
+| `55000` | `0721 requires drained application sessions` | A listed login, or another non-superuser login that could execute a retired routine, is connected. Stop it and run again. |
+| `55000` | `0721 requires the provider cutover receipts (0712)` or `the committed cutover receipt of every provider; missing: <providers>` | A cutover has not committed. Complete 0719 or 0720 first. |
+| `55000` | `0721 found a retired routine missing or changed`, `an unexpected overload of a retired routine`, `a retired policy missing`, `a retired trigger missing or changed`, `the reach table, its view, its default or the connection key changed`, or `a reach routine` (or `reach trigger`, `reach policy`) `missing, changed or already renamed` | The schema differs from what 0719 and 0720 leave. Something changed it out of band, so do not edit around it: restore the step 3 backup or escalate. |
+| `2BP01` | `0721 found a kept object that depends on a retired routine`, `names a retired object` or `names a Codex-named reach object` | A routine, policy, view or default that stays still uses a retired object. Escalate; never drop it by hand. |
+| `23503` | `0721 found a reach row whose provider is not its connection's` | Fix it as in step 1 and run again. |
+| `55P03` | lock timeout | A session still holds a table. Drain it and run again. |
+
+**5. Provision roles and start.** Run `db:provision-roles`. It no longer
+names a dropped object, and it revokes the renamed reach trigger functions
+by their new names. Then start only binaries of this release.
+
+**6. Validate after start.** Runtime posture is ready on every API and
+worker; the posture checks that every retired object is absent.
+`\d opengeni_private.subscription_core_auto_assignments` shows a table with
+`subscription_core_auto_assignments_connection_provider_fkey` and no
+`provider` default. Organization connections still reach workspaces created
+later.
+
+**Forward-only.** There is no down migration, and recovery is fix-forward.
+Before the new release has written anything, restoring the step 3 backup
+and starting the previous release is the only way back. After that,
+restoring loses every write since.
 
 ### Slack API pilot activation (0597)
 

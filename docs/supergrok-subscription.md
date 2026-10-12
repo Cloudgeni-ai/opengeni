@@ -92,6 +92,15 @@ updates without causal authority) resolves the organization or workspace pool
 and never a personal pool. Already accepted work keeps its frozen
 snapshot. Private work additionally requires the exact initiating human.
 
+> Retired runtime: the next paragraph describes the legacy pool. SuperGrok
+> runs on the shared subscription core since 0719. The drained retirement
+> migration 0721 drops the legacy pool's routines, triggers and row
+> policies, and the runtime role reads no row of the legacy pool tables. The
+> synthetic pool-worker subjects and `withSubscriptionPoolSessionAccess`
+> remain only in legacy callers that the SuperGrok and Claude deletion
+> steps remove. See
+> [subscription core, R](design/subscription-core-2026-10-07.md#r-retirement-of-the-legacy-pool-routines-and-the-codex-twins).
+
 Pool authority is additive to session access, never a replacement for it.
 Shared (organization or workspace) pools are read and written under the
 synthetic pool-worker database subject (`worker:xai-workspace`, or

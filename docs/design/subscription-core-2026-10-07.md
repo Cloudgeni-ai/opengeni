@@ -2240,6 +2240,12 @@ a provider name.
   M6 if that step is merged first, in a migration that runs only once no
   binary older than 0707 can start (a readiness check on the neutral routines
   already prevents an older database from serving a newer binary).
+  R's drained migration 0721 drops the 19 twins with the owner-only writer
+  context (called by four of them) and connection target. That needs the
+  release containing the posture's twin tolerance (#4128) to be the minimum
+  running one, which a drained window gives: afterwards only the release
+  carrying 0721 starts, and every older release refuses the retired
+  database. The drop is one transaction, so a partial drop cannot remain.
 - Genuinely Codex-only, and staying so: the Codex Apps routines and the
   reset-credit authority and fence.
 - Left Codex-named by this extraction and made provider-keyed by §5.3's
@@ -3023,7 +3029,9 @@ Retired in R, for both providers unless noted:
 policies that call them (`*_subscription_scope`, `*_subscription_pool_scope`);
 the capability policies on `organization_memberships` and
 `organization_user_resource_authorities` (`*_subscription_capability_read`,
-`*_subscription_capability_insert`, `xai_subscription_membership_lock`); the
+`*_subscription_capability_insert`, `*_subscription_capability_revoke`,
+`*_subscription_membership_lock`; the catalog has all four for both
+providers); the
 `claude_usage_account_scope` policy; the triggers that call retired functions
 (`xai_lease_credential_pool_guard`, `xai_pin_credential_pool_guard`,
 `xai_rotation_credential_pool_guard`, `xai_organization_runtime_update_guard`,
@@ -3663,9 +3671,12 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   drops their Codex default; none of that can run while a rolling migration
   must stay off the workspace, membership and connection tables and keep
   the names and defaults older binaries use.
+  R (0721) does this; see "R: retirement of the legacy pool routines and the
+  Codex twins".
   `list_organization_codex_workspace_ids`
   stays while the legacy SuperGrok and Claude organization wakes call it
-  (until X4 and C4). The Codex scope-visibility helpers stay as well. Most
+  (until X4 and C4; R keeps it because the legacy organization pool wake
+  still calls it on its base). The Codex scope-visibility helpers stay as well. Most
   of their callers are legacy (the credential-table policies of 0381 and
   0423, 0492's legacy Codex source check) and are left as they are, but
   0424's access-update guard on the API-key connection tables
@@ -4872,6 +4883,139 @@ rows.
   usage and OAuth contracts and request helpers). The guard reports no
   Claude finding; its only exceptions are the schema, posture and the two
   codec stages, each by exact declaration.
+
+#### R: retirement of the legacy pool routines and the Codex twins
+
+R is the last M4 step. Its drained maintenance migration
+`0721_subscription_core_legacy_retirement.sql` runs after both provider
+cutovers (0719, 0720). It drops the legacy decision routines of the 0234 and
+0598 pool factory, the triggers and policies that call them and the
+Codex-named twins of the 0707 neutral routines, each by exact name and
+signature and never with `CASCADE`, and it finalizes the provider-keyed
+reach rows (0713 note "Kept until retirement"). The whole file is one
+transaction. Runbook:
+[deployment, subscription legacy retirement (0721)](../deployment.md#subscription-legacy-retirement-0721).
+
+- **Preflight.** It changes nothing and refuses with a content-free `55000`
+  unless: the migrator passed the application roles, and neither they nor
+  any other connected non-superuser role that could execute a retired
+  routine has a session (drained); the cutover receipt of every registered
+  provider (`codex`, `xai`, `claude`) is committed
+  (`opengeni_private.subscription_provider_cutover_committed`); every
+  retired routine exists with its exact signature and no other overload of
+  its name exists; every retired policy and trigger exists on its table, and
+  each trigger calls its listed function; the reach table, its view, its
+  default and the connections' key are as 0712 and 0713 left them; and the
+  reach routines, triggers and policies exist under their Codex names only.
+  Then it refuses with `2BP01` if anything that stays depends on a retired
+  object. It checks `pg_depend`, then searches every kept routine body
+  (PL/pgSQL `prosrc` and SQL-standard bodies), policy expression, view
+  definition and column default for a retired name or a Codex reach name.
+- **Drops, dependents first.**
+  - 21 policies: each provider's `*_subscription_scope` and four
+    `*_subscription_pool_scope`, `claude_usage_account_scope`, and the
+    capability policies. On `organization_memberships` these are
+    `*_subscription_capability_read` and `*_subscription_membership_lock`;
+    on `organization_user_resource_authorities` they are
+    `*_subscription_capability_insert`, `_read` and `_revoke`.
+  - 14 triggers. Per provider: the credentials' authority-immutable,
+    organization runtime-update and live-disconnect guards; the rotation
+    table's organization rotation and pool-reference guards; and the lease
+    and pin pool-reference guards.
+  - 42 routines:
+    - per provider, `create_*` and `disconnect_*_subscription_credential`,
+      `resolve_*_authority_pool`, `revalidate_*_subscription_authority`,
+      `*_subscription_authority_live`, `*_subscription_pool_visible`,
+      `prevent_*_authority_mutation` and the three `opengeni_private`
+      trigger functions;
+    - the 19 Codex twins;
+    - the owner-only writer context, which four of the twins call, and the
+      owner-only connection target;
+    - 0689's `apply_subscription_codex_auto_assignments`, which nothing has
+      called since 0713.
+- **Reach finalization.**
+  - 0713's owner-only view goes, and the table
+    `opengeni_private.subscription_codex_auto_assignments` takes its name,
+    `subscription_core_auto_assignments`. The neutral routines that read the
+    view need no change.
+  - A foreign key `(account_id, provider, connection_id)` to
+    `subscription_connections (account_id, provider, id)` (the key 0712
+    added) is added `NOT VALID` and validated, so a reach row can no longer
+    name another provider's connection. A mismatch refuses the migration
+    with `23503`. The column loses its `codex` default.
+  - 0689's two auto-assignment triggers, its plan-change trigger, their
+    functions, its two owner-only auto-assignment policies and their setting
+    (`opengeni.subscription_core_auto_assign`) take provider-free names.
+    `core` sorts where `codex` did, so the firing order is unchanged.
+  - The three renamed functions end owner-only. provision-roles grants
+    every `opengeni_private` function and then revokes the owner-only ones
+    by name, so the migration revokes them from PUBLIC and every other
+    grantee, and provision-roles now revokes them by their new names.
+  - The reach table's 0689 constraint and index names stay. They name no
+    routine, and nothing reads them.
+- **Kept, with reasons.**
+  - Historical migrations, and the legacy tables and columns (until M6).
+  - The v1 validators, the column-immutability functions and triggers, and
+    `reject_legacy_claude_subscription_credentials` with its triggers.
+  - Every receipt function, including
+    `opengeni_private.claude_subscription_pool_protocol_v1_active()`. It is
+    0598's protocol receipt and no longer a readiness requirement; dropping
+    it would gain nothing.
+  - The X3 and C3 `*_closed` restrictive policies.
+  - The live Codex routines: the refresh-write check, the five Apps
+    routines, the reset authority and credit fence, the owner capability and
+    membership checks, the owner capability grant and drop, and the cutover
+    receipt routines.
+  - `list_organization_codex_workspace_ids`. The legacy organization pool
+    wake still calls it on R's base; X4 and C4 remove that caller, and a
+    later migration can drop it.
+  - The two `opengeni_private.*_subscription_runtime_capabilities` tables,
+    until M6. Nothing reads or writes them once their policies and routines
+    are gone, and dropping tables is M6's job.
+  - Without a permissive policy, the factory tables keep FORCE RLS and deny
+    the runtime roles every row: the intended read-only end state until M6.
+- **Runtime posture.**
+  - `runtime-posture.ts` exports the retired routine, policy and trigger
+    lists and the renamed routine, trigger, policy and relation lists
+    (`SUBSCRIPTION_RETIRED_*`, `SUBSCRIPTION_RENAMED_*`). The guard and the
+    real-PostgreSQL tests share them.
+  - The posture requires every retired object, and the Codex name of every
+    renamed one, to be absent. This replaces #4128's twin tolerance and the
+    SuperGrok and Claude routine and grant requirements, and
+    `claude_subscription_pool_protocol_v1_active` is no longer a readiness
+    requirement.
+  - So the R release refuses a database that has not run 0721, and every
+    older release refuses one that has, because its posture requires the
+    dropped routines.
+- **provision-roles** names no dropped object. The twins' grants, the
+  writer context and connection target revokes and the apply routine's
+  revoke are gone. The renamed trigger functions are revoked by their new
+  names.
+- **Guard.** `scripts/legacy-subscription-runtime/pool.ts` (`pool`) rejects:
+  - the synthetic subjects (`subscriptionPoolWorkerSubject`,
+    `isSubscriptionPoolWorkerSubject`, and `worker:<provider>-workspace` in
+    any spelling);
+  - every retired routine name, from the shared list;
+  - the `"<legacy routine>".replace("xai" | "claude", provider)` shapes.
+
+  Its only exceptions are exact declarations: the posture inventory and the
+  historical migration tests.
+- **Synthetic subjects.** `subscriptionPoolWorkerSubject`,
+  `isSubscriptionPoolWorkerSubject` and the pool-only session-access
+  helpers stay while X4's and C4's legacy callers remain on R's base: the
+  account repository's pool calls, the scoped capacity waiters and the
+  SuperGrok capacity activity. The guard reports each such caller, and a
+  follow-up R change removes the helpers once those callers are gone. On a
+  retired database such a caller cannot act: the routines it calls no longer
+  exist, and the factory tables deny it every row.
+- **Fresh install.** A fresh database replays every migration. 0689 seeds
+  the Codex receipt, and 0719 and 0720 commit theirs on an empty database,
+  so the preflight passes unchanged; no fresh-install exception weakens the
+  upgrade check.
+- **#4128 notes.** The twins could be dropped only once the release
+  containing #4128's twin tolerance was the minimum running one. A drained
+  window guarantees that, because only the R release starts afterwards. The
+  drop is one transaction, so no partially retired database can exist.
 
 ### 5.4 Workspace-managed connections as organization accounts
 
