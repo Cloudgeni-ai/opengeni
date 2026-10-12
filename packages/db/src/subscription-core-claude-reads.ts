@@ -263,7 +263,7 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
 ): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
   const now = deps.now ?? Date.now;
   const { target } = input;
-  const stored = projectSubscriptionCoreClaudeUsage(target.row);
+  const stored = projectSubscriptionCoreClaudeUsage(target.row, undefined, { now: now() });
   const key = [
     input.accountId,
     input.workspaceId,
@@ -285,7 +285,7 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
     (storedAt === null || last.at > storedAt)
   )
     return {
-      usage: projectSubscriptionCoreClaudeUsage(target.row, last.refresh),
+      usage: projectSubscriptionCoreClaudeUsage(target.row, last.refresh, { now: now() }),
       recovered: false,
     };
   const binding = claudeBinding();
@@ -330,10 +330,11 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
   }).catch(() => null);
   return {
     usage: after
-      ? projectSubscriptionCoreClaudeUsage(after.row, refresh)
+      ? projectSubscriptionCoreClaudeUsage(after.row, refresh, { now: now() })
       : projectSubscriptionCoreClaudeUsage(
           target.row,
           refresh.status === "available" ? { status: "unavailable", checkedAt } : refresh,
+          { now: now() },
         ),
     recovered: probe.kind === "read" && probe.recovered,
   };

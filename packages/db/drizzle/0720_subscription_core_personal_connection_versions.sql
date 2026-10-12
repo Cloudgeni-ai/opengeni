@@ -7,7 +7,7 @@
 -- transaction. Personal connections are visible to their owner only through
 -- the 0707 owner reader, which does not return the version.
 --
--- Rolling: a new routine defined from the live 0707 owner reader
+-- Rolling: a new routine defined from the live owner reader (0707, as 0715 rewrote it)
 -- (drift-checked anchors, never a restated body), so it keeps the writer
 -- context check, the owner capability grant and drop, the membership rule,
 -- search path and security mode; it returns only `(id, version)` (the

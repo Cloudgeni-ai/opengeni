@@ -3060,7 +3060,7 @@ repository's complex-change review policy.
 | X2b. SuperGrok routes and writers | Routes, access policy, SDK and event projections; connect, disconnect and personal writers; EP-S18..S24 v2 entry writers and the compatibility copy routines on every path. Lands before X3 so connect and disconnect work after the cutover. | rolling |
 | X3. SuperGrok drained cutover | Codec stage, data move, compatibility records, parity report, receipt, switch rows enabled; role provisioning and the posture contract stop granting legacy writes; runbook section. | maintenance |
 | X4. SuperGrok legacy deletion | Removes the xAI selector arm, factory repository use, v1 xAI readers and writers, xAI use of `ScopedSubscriptionTurnLease`, the video envelope code and the shadow; extends the guard below to xAI. Merges only with the `compat:dependent_sources_without_record` copy-path test green. | rolling |
-| C1a, C1b, C2a, C2b, C3, C4. Claude | The same steps. C1b reads core turn-failure receipts in place of `claudeAuthRecovery`; C2a covers the usage routes; C2b covers the OAuth and setup-token writers; C3 converts live `claudeAuthRecovery` values and includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. | as X1a..X4 |
+| C1a, C1b, C2a, C2b, C3, C4. Claude | The same steps. C1b reads core turn-failure receipts in place of `claudeAuthRecovery`; C2a covers the usage routes; C2b covers the OAuth and setup-token writers; C3 converts live `claudeAuthRecovery` values and includes the combined-window ledger test; C4 deletes the Claude arm, `claude_subscription_account_usage` use and the dead connection-based usage code. C3 precondition: live usage refresh on the organization route (organization administrators) and for an owner's personal connection in their own Personal workspace has merged (C2c, #4157 and its provider-neutral split); C3 does not register `SUBSCRIPTION_CORE_CLAUDE` while either refresh still answers `unavailable`. | as X1a..X4 |
 | F. Fake API-key adapter conformance | A test-only adapter (`kind = api_key`, static credential, no quota windows, no refresh) driven through the same core placement, lease, failover and wait paths as subscriptions and compared with the reference model; scripted local upstream and a network-denial guard. No production table, provider row or route; one migration (0715) makes the neutral routines read the connection kind from the provider registry. Lands after PR 0. See "API-key connectors on the shared core" below. | rolling (the connector is test only) |
 | W. Workspace-managed connections as organization accounts | [§5.4](#54-workspace-managed-connections-as-organization-accounts): 0714 lets the provider-keyed reach setters accept a connection managed by a shared workspace, makes the reach reader report the reach row's switch and list, and adds `set_subscription_core_reach_allocator` (organization administrators only); the organization access editor reads and saves its reach (people scope only for unmanaged accounts); the Accounts page change ships separately after owner approval. Applies to SuperGrok and Claude through X3 and C3, which map workspace credentials into the same shape. | rolling (no row changes) |
 | R. Retirement | A forward migration drops the retired SQL routines, triggers and policies listed below; `subscriptionPoolWorkerSubject` and its users are removed; posture inventories are updated. Historical migrations, legacy tables and columns, v1 CHECK validators and column-immutability triggers stay until M6. | maintenance (exact posture contract) |
@@ -4861,8 +4861,14 @@ core read before C3 fails closed in the registry.
   the newest observation's time and source, including an exhausted window
   the partial merge kept from an older reading; and a GET after a header
   observation answers `not_checked` with no check time even shortly after a
-  successful refresh (legacy kept the last refresh outcome). Both are
-  display-only and fail toward showing a newer check.
+  successful refresh (legacy kept the last refresh outcome). A window the
+  usage endpoint reports at 100% is projected `rejected` (the core decoder
+  marks it exhausted), where legacy showed null for every usage-endpoint
+  window. A reconnect keeps the stored windows, now under the new
+  `credentialVersion` (the row version moves on reconnect), until the next
+  reading: a reconnect cannot change the connection's provider identity,
+  so those windows still describe the same account. All four are
+  display-only and fail toward showing a newer check or a stricter state.
 - Visibility. Account ids resolve through the cutover aliases: shared ids
   through the generic resolver, personal ids only through the owner
   routine's `resolve` action (`manage_subscription_core_personal`, called
@@ -4886,7 +4892,12 @@ core read before C3 fails closed in the registry.
   `available`. A recovery wakes the Claude core waiters
   (`usage_recovered`); a failed wake is dropped and never fails the
   committed read.
-- Live refresh gap (owned by C2a, decision pending, must close before C3).
+- Live refresh gap (owned by C2a, closed by C2c before C3). C2c (#4157,
+  split into a provider-neutral PR for the administrator-scoped and
+  owner-only reads plus the Claude wiring on top of C2a) closes it, and is
+  a precondition of C3 (see the C3 row of the Claude track); C2c turns the
+  pinned `unavailable` route tests into live-read tests, including one for
+  an owner's personal connection.
   Legacy read organization accounts and user-scope accounts live (D-01),
   and Codex's organization usage reads live through an administrator-scoped
   reader. The core connection seam cannot do either today: its target
@@ -4913,8 +4924,10 @@ core read before C3 fails closed in the registry.
   workspace, connection and row version, so a reconnect never replays an
   outcome of the old credential. Another replica may read once more within
   the interval (accepted for this release: refresh is an explicit,
-  scope-checked mutation of a read-only endpoint, bounded by the replica
-  count).
+  scope-checked mutation of a read-only endpoint). The memory is per
+  workspace, so the bound on live reads of one connection per interval is
+  the replica count times the number of workspaces sharing that
+  connection, not the replica count alone.
 - Readiness. The Claude route is read once per request
   (`loadWorkspaceModelSelectionInput` and the models catalog pass it down).
   On the core route `loadWorkspaceClaudeSubscriptionReadiness`, the

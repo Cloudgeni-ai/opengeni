@@ -282,13 +282,16 @@ function iso(value: number | null): string | null {
  *   `provider_state.oauthScopes` lacks the usage scope, `available` when the
  *   newest stored observation is a usage-endpoint reading and `not_checked`
  *   otherwise.
+ * - `options.now` (epoch milliseconds, default `Date.now()`) is the instant
+ *   window statuses are judged at; a refresh passes its own clock.
  */
 export function projectSubscriptionCoreClaudeUsage(
   row: SubscriptionCoreClaudeUsageRow,
   refresh?: SubscriptionCoreClaudeUsageRefresh,
+  options: { now?: number } = {},
 ): ClaudeSubscriptionUsage {
   const credentialVersion = subscriptionCoreClaudeUsageVersion(row);
-  const now = Date.now();
+  const now = options.now ?? Date.now();
   const quota = decodeSubscriptionQuota(row);
   const observedAt = iso(quota?.observedAt ?? null);
   const source =

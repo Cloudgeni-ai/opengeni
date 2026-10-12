@@ -388,6 +388,16 @@ describe("projectSubscriptionCoreClaudeUsage", () => {
       seven_day_sonnet: null,
       overage: null,
     });
+    // Statuses are judged at the given instant: once the Opus cooldown and
+    // window have ended, the family window is no longer rejected.
+    expect(
+      statuses(projectSubscriptionCoreClaudeUsage(headerRow({}), undefined, { now })),
+    ).toMatchObject({ seven_day_opus: "rejected" });
+    expect(
+      statuses(
+        projectSubscriptionCoreClaudeUsage(headerRow({}), undefined, { now: now + 2 * 86_400_000 }),
+      ),
+    ).toMatchObject({ seven_day_opus: null });
   });
 
   test("windows observed under an earlier credential generation stay visible", () => {
