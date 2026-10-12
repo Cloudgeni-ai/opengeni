@@ -246,12 +246,12 @@ describe("migration ordinal helpers", () => {
     for (const lagging of [[], [pair[0]!], [pair[1]!]]) {
       for (const bases of [
         [
-          { ref: "main", files: pair },
-          { ref: "production", files: lagging },
+          { ref: "origin/main", files: pair },
+          { ref: "origin/production", files: lagging },
         ],
         [
-          { ref: "production", files: lagging },
-          { ref: "main", files: pair },
+          { ref: "origin/production", files: lagging },
+          { ref: "origin/main", files: pair },
         ],
       ]) {
         expect(findProtectedOrdinalCollisions([...pair, name("0731_next.sql")], bases)).toEqual({
@@ -269,14 +269,55 @@ describe("migration ordinal helpers", () => {
     }
     // Two individually published allocations are still a cross-branch conflict.
     const split = [
-      { ref: "main", files: [pair[0]!] },
-      { ref: "production", files: [pair[1]!] },
+      { ref: "origin/main", files: [pair[0]!] },
+      { ref: "origin/production", files: [pair[1]!] },
     ];
     expect(findProtectedOrdinalCollisions(pair, split).collisions).toHaveLength(2);
-    expect(findProtectedOrdinalCollisions(pair, [{ ref: "main", files: [] }]).duplicates).toEqual([
-      pair.map((migration) => migration.file),
-    ]);
+    expect(
+      findProtectedOrdinalCollisions(pair, [{ ref: "origin/main", files: [] }]).duplicates,
+    ).toEqual([pair.map((migration) => migration.file)]);
     expect(nextFreeOrdinal(pair)).toBe("0731");
+  });
+
+  test("requires one protected witness for the complete group, never overlapping or custom bases", () => {
+    const a = name("0730_a.sql"),
+      b = name("0730_b.sql"),
+      z = name("0730_z.sql");
+    const head = [a, b, z];
+    for (const bases of [
+      [
+        { ref: "origin/main", files: [a, z] },
+        { ref: "origin/production", files: [b, z] },
+      ],
+      [
+        { ref: "origin/production", files: [b, z] },
+        { ref: "origin/main", files: [a, z] },
+      ],
+    ]) {
+      const result = findProtectedOrdinalCollisions(head, bases);
+      expect(result.collisions).toHaveLength(2);
+      expect(result.duplicates).toEqual([[a.file, b.file, z.file]]);
+    }
+    const custom = findProtectedOrdinalCollisions(
+      [a, b],
+      [
+        { ref: "HEAD", files: [a, b] },
+        { ref: "origin/main", files: [a] },
+      ],
+    );
+    expect(custom.collisions).toHaveLength(1);
+    expect(custom.duplicates).toEqual([[a.file, b.file]]);
+    // Custom refs remain comparison inputs, even though they cannot authorize
+    // a publication exemption for themselves.
+    expect(
+      findProtectedOrdinalCollisions(
+        [a],
+        [
+          { ref: "custom", files: [b] },
+          { ref: "origin/main", files: [a] },
+        ],
+      ).collisions,
+    ).toHaveLength(1);
   });
 
   test("rewrites the basename, companion slug, and bare ordinal without touching neighbours", () => {
@@ -574,6 +615,20 @@ describe("migration ordinal CLIs", () => {
     const collision = await run(root, guard);
     expect(collision.code).toBe(1);
     expect(collision.stderr).toContain("0003_unpublished.sql");
+  });
+
+  test("--base HEAD cannot grandfather unpublished local duplicate history", async () => {
+    const { root } = await fixtureRepo();
+    await git(root, "merge", "-q", "--no-edit", "origin/main");
+    const result = await run(root, [
+      "bun",
+      join(scripts, "check-migration-ordinals.ts"),
+      "--base",
+      "HEAD",
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("0003_scheduled_authority.sql");
+    expect(result.stderr).toContain("duplicate ordinal");
   });
 
   test("--to refuses to fill a gap below the ledger head unless --allow-gap", async () => {

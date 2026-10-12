@@ -742,7 +742,8 @@ Migration ordinals are taken from a shared linear ledger, so two candidates that
 Already-published duplicate ordinals are immutable history, not renumber
 candidates: `schema_migrations.name` is the full SQL filename. The ordinal
 guard accepts a duplicate group only when all its names already coexist on
-one checked protected base; it must not mistake main's published history for
+one checked protected base (`origin/main` or `origin/production`, never a custom
+`--base`); it must not mistake main's published history for
 new work against lagging production or combine independent allocations across
 bases. Retain both published `0730_maintenance_work_probes.sql` and
 `0730_subscription_core_personal_connection_versions.sql` unchanged. New

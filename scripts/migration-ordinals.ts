@@ -138,7 +138,8 @@ export function findOrdinalCollisions(
 
 /**
  * Compare all protected ledgers without treating published history on one as
- * new work on another. A duplicate group must already coexist on ONE base;
+ * new work on another. A complete duplicate group must already coexist on ONE
+ * protected base (origin/main or origin/production, never a custom --base);
  * combining independent allocations from main and production is not evidence
  * that either branch accepted that collision. SQL names are migration receipt
  * identities, so a published pair must not be "repaired" by replaying a rename.
@@ -147,23 +148,32 @@ export function findProtectedOrdinalCollisions(
   head: readonly MigrationName[],
   bases: readonly { ref: string; files: readonly MigrationName[] }[],
 ): { collisions: (OrdinalCollision & { ref: string })[]; duplicates: string[][] } {
-  const published = bases.map((base) => new Set(base.files.map((migration) => migration.file)));
+  const published = bases
+    .filter((base) => base.ref === "origin/main" || base.ref === "origin/production")
+    .map((base) => new Set(base.files.map((migration) => migration.file)));
   const coexists = (files: readonly string[]) =>
     published.some((ledger) => files.every((file) => ledger.has(file)));
+  const headGroups = new Map<string, string[]>();
+  for (const migration of head) {
+    const group = headGroups.get(migration.ordinal) ?? [];
+    group.push(migration.file);
+    headGroups.set(migration.ordinal, group);
+  }
   const collisions: (OrdinalCollision & { ref: string })[] = [];
-  const duplicates = new Map<string, string[]>();
+  const duplicates = [...headGroups.values()].filter(
+    (files) => files.length > 1 && !coexists(files),
+  );
   for (const base of bases) {
     const found = findOrdinalCollisions(head, base.files);
     for (const collision of found.collisions) {
-      if (!coexists([collision.headFile, collision.baseFile])) {
+      // Pairwise witnesses can overlap without any base having published the
+      // whole group. Include every head member and the conflicting base name.
+      if (!coexists([...headGroups.get(collision.ordinal)!, collision.baseFile])) {
         collisions.push({ ref: base.ref, ...collision });
       }
     }
-    for (const files of found.duplicates) {
-      if (!coexists(files)) duplicates.set([...files].sort().join("\n"), files);
-    }
   }
-  return { collisions, duplicates: [...duplicates.values()] };
+  return { collisions, duplicates };
 }
 
 export type RenumberRename = { from: string; to: string };

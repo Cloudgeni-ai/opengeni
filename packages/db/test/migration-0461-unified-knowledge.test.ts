@@ -81,6 +81,8 @@ const forwardMigrations = [
   "0653_session_archive_tenancy_fence.sql",
   "0657_session_archive_purge_retained_evidence.sql",
   "0660_session_archive_preference_snapshot_export.sql",
+  // Resolves the Knowledge claim installed by the withheld 0461 migration.
+  "0730_maintenance_work_probes.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
