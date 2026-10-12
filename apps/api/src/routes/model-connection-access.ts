@@ -28,7 +28,6 @@ import {
   updateSubscriptionCoreCodexModelConnectionAccess,
   getOrganizationAdministrationOverview,
   getXaiSubscriptionAccountAuthoritySnapshot,
-  getClaudeSubscriptionAccountAuthoritySnapshot,
   listOrganizationModelProviderCustomModels,
   getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
@@ -43,10 +42,6 @@ import {
 } from "./codex";
 import { codexRouteDisposition } from "./codex-core";
 import { requireScopeMutation } from "./supergrok";
-import {
-  requirePrivateSubscriptionHuman,
-  requireSubscriptionScopeMutation,
-} from "./subscription-pool-access";
 
 const Kind = z.enum([
   "codex",
@@ -80,6 +75,17 @@ async function codexAccessDisposition(
   return target.kind === "codex" ? await codexRouteDisposition(deps, target.accountId) : "legacy";
 }
 
+/**
+ * The legacy Claude pool is deleted (design 5.3, C4): Claude access policies
+ * fail closed in both scopes, after authentication, until the shared
+ * subscription core serves them (C2b).
+ */
+function claudeLegacyDeleted(): HTTPException {
+  return new HTTPException(503, {
+    message: "Claude subscriptions are served only by the shared subscription core",
+  });
+}
+
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
   for (const scope of ["organizations", "workspaces"] as const) {
     const path = `/v1/${scope}/:scopeId/model-connections/:kind/:connectionId/access`;
@@ -94,6 +100,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       if (scope === "organizations") {
         if (mutate) requireSameOriginBrowserMutation(c, deps);
         const human = await requireOrganizationCodexHuman(c, deps, scopeId);
+        if (kind === "claude_subscription") throw claudeLegacyDeleted();
         return {
           kind,
           connectionId,
@@ -119,21 +126,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         }
         if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
       } else if (kind === "claude_subscription") {
-        const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
-          workspaceId: scopeId,
-          subjectId: grant.subjectId,
-          credentialId: connectionId,
-        });
-        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
-        if (snapshot.scope === "user") {
-          const human = await requirePrivateSubscriptionHuman(c, deps, scopeId, "Claude");
-          if (human.subjectId !== grant.subjectId)
-            throw new HTTPException(403, { message: "Subscription owner required" });
-        }
-        if (mutate) {
-          if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
-          await requireSubscriptionScopeMutation(c, deps, scopeId, snapshot.scope, "Claude");
-        }
+        throw claudeLegacyDeleted();
       } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
       if (
         kind === "vercel_gateway" ||

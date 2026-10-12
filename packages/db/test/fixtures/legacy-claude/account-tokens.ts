@@ -1,19 +1,19 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { Database } from "./database";
+import type { Database } from "../../../src/database";
 import {
   loadClaudeAccountCredential,
   recordClaudeAccountUsage,
   type ClaudeAccountUsageAuthority,
-} from "./claude-subscription-account-usage";
+} from "./account-usage";
 import {
   refreshClaudeSubscriptionAccountSerialized,
   refreshOrganizationClaudeSubscriptionAccountSerialized,
-} from "./claude-subscription-accounts";
+} from "./accounts";
 import {
   claudeRefreshedCredential,
   requestClaudeTokenRefresh,
   ClaudeSubscriptionReconnectRequired,
-} from "./subscription-core-claude-oauth";
+} from "../../../src/subscription-core-claude-oauth";
 
 /** The account's credential changed under a legacy usage read; reload. */
 export class ClaudeSubscriptionConnectionChanged extends Error {

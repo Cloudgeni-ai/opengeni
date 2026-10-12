@@ -50,6 +50,35 @@ type PoolRepository = {
   wakeSubscriptionCapacityWaiters: typeof wakeXaiCapacityWaiters;
 };
 
+/**
+ * The repository of a provider whose legacy runtime was deleted after its
+ * cutover (Claude, C4): nothing reads or writes its read-only legacy pool, so
+ * every route fails closed until the shared core serves it.
+ */
+function deletedLegacyRepository(displayName: string): PoolRepository {
+  const deleted = async (): Promise<never> => {
+    throw new HTTPException(503, {
+      message: `${displayName} subscriptions are served only by the shared subscription core`,
+    });
+  };
+  return {
+    listOrganizationSubscriptions: deleted,
+    updateOrganizationSubscription: deleted,
+    updateOrganizationSubscriptionRotation: deleted,
+    listSubscriptionAccountsMetadata: deleted,
+    getSubscriptionRotationSettings: deleted,
+    ensureSubscriptionRotationSettings: deleted,
+    getSubscriptionAccountAuthoritySnapshot: deleted,
+    resolveSubscriptionProviderAccountAuthoritySnapshotForAcceptance: deleted,
+    setActiveSubscriptionCredential: deleted,
+    updateSubscriptionRotationSettings: deleted,
+    updateSubscriptionAllocatorEligibility: deleted,
+    renameSubscriptionAccount: deleted,
+    disconnectSubscriptionCredentialAndRepick: deleted,
+    wakeSubscriptionCapacityWaiters: deleted,
+  };
+}
+
 /** Account CRUD uses one authority, allocator and wake contract for every pool. */
 export function registerSubscriptionAccountPoolRoutes(
   app: Hono,
@@ -59,7 +88,11 @@ export function registerSubscriptionAccountPoolRoutes(
     route: "supergrok" | "claude";
     displayName: "SuperGrok" | "Claude";
     enabled: () => boolean;
-    repository: PoolRepository;
+    /**
+     * The legacy repository, until the provider's own cutover deletes it.
+     * Without one every route fails closed.
+     */
+    repository?: PoolRepository;
     accountJson: (
       account: XaiSubscriptionAccountMetadata,
       activeId: string | null,
@@ -87,7 +120,7 @@ export function registerSubscriptionAccountPoolRoutes(
     renameSubscriptionAccount,
     disconnectSubscriptionCredentialAndRepick,
     wakeSubscriptionCapacityWaiters,
-  } = options.repository;
+  } = options.repository ?? deletedLegacyRepository(options.displayName);
   const workspacePath = `/v1/workspaces/:workspaceId/${options.route}`;
   const organizationPath = `/v1/organizations/:organizationId/${options.route}`;
   const requireEnabled = () => {

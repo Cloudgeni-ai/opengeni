@@ -51,13 +51,21 @@ export const LEGACY_CLAUDE_RUNTIME: LegacySubscriptionRetirement = {
       message: "Retired Claude synthetic pool subject",
     },
   ],
-  // The deleted legacy producers. `claude-subscription-usage` is not listed:
-  // contracts, config and runtime keep modules of that name (the usage
-  // contract and request helpers); the deleted db module is caught by its
-  // `claudeUsageSnapshot` identifiers.
+  // The deleted legacy producers: the db pool, usage and token modules and
+  // the api usage and account-conflict modules. `claude-subscription-usage`
+  // and `claude-subscription-oauth` are not listed: contracts, config and
+  // runtime keep modules of those names (the usage and OAuth contracts and
+  // request helpers); the deleted db usage module is caught by its
+  // `claudeUsageSnapshot` identifiers. The api's
+  // `routes/claude-subscription-accounts` stays (its routes fail closed until
+  // C2a/C2b), so a `routes/` specifier is not a deleted producer.
   deletedModules: [
-    /claude-subscription-(?:accounts|account-usage|account-tokens|tokens)(?:\.[cm]?[jt]s)?$/,
+    /(?<!routes\/)claude-subscription-(?:accounts|account-usage|account-tokens|account-conflicts|tokens)(?:\.[cm]?[jt]s)?$/,
   ],
+  // The legacy pool repository moved to a test-only fixture so historical
+  // migration tests (0598, 0602, the 0720 cutover) can still seed legacy rows;
+  // no runtime may import it.
+  testFixtures: /legacy-claude/,
   exceptions: {
     "packages/db/src/schema.ts": {
       declarations: [

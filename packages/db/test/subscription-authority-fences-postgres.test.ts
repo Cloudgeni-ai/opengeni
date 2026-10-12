@@ -43,7 +43,7 @@ import {
   createClaudeSubscriptionAccount,
   disconnectClaudeSubscriptionAccount,
   setInitialActiveClaudeCredential,
-} from "../src/claude-subscription-accounts";
+} from "./fixtures/legacy-claude/accounts";
 import { rawRows } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";

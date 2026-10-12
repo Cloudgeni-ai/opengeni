@@ -15,13 +15,13 @@ import {
   setSubjectRlsContext,
   withRlsContext,
   withWorkspaceSubjectRls,
-} from "./database";
-import { decryptEnvironmentValue } from "./environment-crypto";
+} from "../../../src/database";
+import { decryptEnvironmentValue } from "../../../src/environment-crypto";
 import {
   claudeSubscriptionAccountRepository,
   withOrganizationClaudeCapacityMutation,
-} from "./claude-subscription-accounts";
-import * as schema from "./schema";
+} from "./accounts";
+import * as schema from "../../../src/schema";
 
 export type ClaudeAccountUsageAuthority = {
   accountId: string;

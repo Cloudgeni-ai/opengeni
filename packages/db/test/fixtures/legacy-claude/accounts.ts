@@ -6,13 +6,13 @@ import {
 import { ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import { and, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
-import type { Database } from "./database";
-import * as schema from "./schema";
+import type { Database } from "../../../src/database";
+import * as schema from "../../../src/schema";
 import {
   createSubscriptionAccountRepository,
   type SubscriptionAccountCapacity,
-} from "./subscription-account-repository";
-import { createOrganizationSubscriptionRepository } from "./organization-subscription-repository";
+} from "../../../src/subscription-account-repository";
+import { createOrganizationSubscriptionRepository } from "../../../src/organization-subscription-repository";
 
 export type ClaudeAccountSecret = z.infer<typeof ClaudeSubscriptionCredential>;
 type ClaudeAccountSettings = { readonly claudeSubscriptionEnabled: boolean };
@@ -98,7 +98,9 @@ export const claudeSubscriptionAccountRepository = createSubscriptionAccountRepo
   displayName: "Claude",
   isEnabled: (settings) => settings.claudeSubscriptionEnabled,
   tables: claudeSubscriptionTables,
-  leaseTable: "claude_credential_leases",
+  // Production heartbeats admit only the SuperGrok lease table: the Claude
+  // runtime is deleted (M4 C4) and this fixture seeds historical rows only.
+  leaseTable: "claude_credential_leases" as unknown as "xai_credential_leases",
   assertSecret: (secret) => {
     ClaudeSubscriptionCredential.parse(secret);
   },

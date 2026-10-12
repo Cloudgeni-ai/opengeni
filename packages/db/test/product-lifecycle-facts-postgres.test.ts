@@ -36,9 +36,9 @@ import {
   revokeConnection,
   saveSlackBotUserLink,
   upsertOrganizationModelProviderConnection,
-  upsertOrganizationClaudeSubscription,
   type DbClient,
 } from "../src";
+import { upsertOrganizationClaudeSubscription } from "./fixtures/legacy-claude/accounts";
 import postgres from "postgres";
 import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
 

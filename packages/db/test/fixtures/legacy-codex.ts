@@ -20,7 +20,7 @@ import { parentOutboxAuthorityTx } from "../../src/child-outbox-authority";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
-} from "../../src/claude-subscription-accounts";
+} from "./legacy-claude/accounts";
 
 
 

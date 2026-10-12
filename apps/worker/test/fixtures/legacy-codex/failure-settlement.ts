@@ -1,10 +1,11 @@
 /** TEST ONLY: historical Codex regression fixture, snapshot 8c43a921512078d302f671ae590d43645669f88d. Never import from production. */
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 
-import { requestSessionTurnRecovery, getSessionGoal, armXaiCapacityWait, recordClaudeAccountUsage, resolveClaudeAccountCredential, ClaudeSubscriptionConnectionChanged, reconcileXaiCapacityWait, recordUsageEvent, getActiveSessionHistoryItemsPaged, readLease, SandboxLeaseSupersededError, isSessionEventPersistenceError, SANDBOX_SETUP_RECOVERY_LIMIT, SubscriptionCoreCodexAccessLostError, SubscriptionCoreCodexLeaseLostError, type CodexLeaseAccountStatus } from "@opengeni/db";
+import { requestSessionTurnRecovery, getSessionGoal, armXaiCapacityWait, reconcileXaiCapacityWait, recordUsageEvent, getActiveSessionHistoryItemsPaged, readLease, SandboxLeaseSupersededError, isSessionEventPersistenceError, SANDBOX_SETUP_RECOVERY_LIMIT, SubscriptionCoreCodexAccessLostError, SubscriptionCoreCodexLeaseLostError, type CodexLeaseAccountStatus } from "@opengeni/db";
 import { armClaudeCapacityWait, listCodexAccountStatuses, quarantineCodexCredentialForLease, reconcileClaudeCapacityWait, recheckCodexCredentialPlan, settleCodexCredentialLeaseLoss, settleCodexCredentialFailover } from "../../../../../packages/db/test/fixtures/legacy-codex";
-// The legacy Claude runtime is deleted (M4 C4); its usage reader stays only for the API until C2a.
-import { loadClaudeAccountCredential } from "../../../../../packages/db/src/claude-subscription-account-usage";
+// The legacy Claude runtime is deleted (M4 C4); this snapshot keeps its arm through the test fixture.
+import { loadClaudeAccountCredential, recordClaudeAccountUsage } from "../../../../../packages/db/test/fixtures/legacy-claude/account-usage";
+import { ClaudeSubscriptionConnectionChanged, resolveClaudeAccountCredential } from "../../../../../packages/db/test/fixtures/legacy-claude/account-tokens";
 
 import { publishDurableSessionEvents } from "@opengeni/events";
 

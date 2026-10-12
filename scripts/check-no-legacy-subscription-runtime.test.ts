@@ -320,6 +320,7 @@ describe("M4 C4 Claude entry", () => {
       "./claude-subscription-account-usage",
       "./claude-subscription-account-tokens",
       "../../db/src/claude-subscription-tokens.ts",
+      "../claude-subscription-account-conflicts",
     ])
       expect(claude("apps/worker/src/run.ts", `import { x } from "${specifier}";`)).toHaveLength(1);
     for (const specifier of [
@@ -327,8 +328,30 @@ describe("M4 C4 Claude entry", () => {
       "@opengeni/contracts/claude-subscription-usage",
       "./subscription-core-claude-oauth",
       "./claude-subscription-core-cutover",
+      // The fail-closed api routes stay until C2a/C2b replace them.
+      "./routes/claude-subscription-accounts",
+      "./routes/claude-subscription-oauth",
     ])
       expect(claude("apps/api/src/app.ts", `import { x } from "${specifier}";`)).toEqual([]);
+  });
+  test("blocks production imports of the legacy Claude test fixture", () => {
+    for (const code of [
+      'import { x } from "../test/fixtures/legacy-claude/accounts";',
+      'export * from "@opengeni/db/test/fixtures/legacy-claude/account-usage";',
+      'const fixture = await import("../../test/fixtures/legacy-claude/account-tokens");',
+    ])
+      expect(claude("packages/db/src/index.ts", code)).toHaveLength(1);
+    expect(
+      claude("packages/db/src/index.ts", 'import { x } from "./subscription-core-claude-adapter";'),
+    ).toEqual([]);
+  });
+  test("the shared lease heartbeat admits no Claude lease table", () => {
+    expect(
+      claude(
+        "packages/db/src/subscription-credential-leases.ts",
+        'type LeaseTable = "xai_credential_leases" | "claude_credential_leases";',
+      ),
+    ).toHaveLength(1);
   });
   test("schema, posture and the 0598 and 0720 codec stages are exact exceptions", () => {
     expect(

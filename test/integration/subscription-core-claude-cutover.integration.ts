@@ -41,7 +41,7 @@ import { createCodexCapacityActivities } from "../../apps/worker/src/activities/
 import {
   createClaudeSubscriptionAccount,
   wakeClaudeCapacityWaiters,
-} from "../../packages/db/src/claude-subscription-accounts";
+} from "../../packages/db/test/fixtures/legacy-claude/accounts";
 import { armClaudeCapacityWait } from "../../packages/db/test/fixtures/legacy-codex";
 import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtures/legacy-codex/peek";
 

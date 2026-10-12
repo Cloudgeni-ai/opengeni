@@ -59,13 +59,13 @@ export function assignedConnectionDefault(
 
 function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition: SQL } {
   if (target.kind === "codex") throw new Error("Codex access policies use the shared core");
-  if (target.kind === "supergrok" || target.kind === "claude_subscription")
+  // The legacy Claude pool is deleted (design 5.3, C4): its access policy is
+  // the shared core's (C2b), never the read-only legacy table.
+  if (target.kind === "claude_subscription")
+    throw new Error("Claude access policies use the shared subscription core");
+  if (target.kind === "supergrok")
     return {
-      table: sql.identifier(
-        target.kind === "supergrok"
-          ? "xai_subscription_credentials"
-          : "claude_subscription_credentials",
-      ),
+      table: sql.identifier("xai_subscription_credentials"),
       condition: sql`id = ${target.connectionId}::uuid AND account_id = ${target.accountId}::uuid AND ${
         target.workspaceId === null
           ? sql`authority_scope = 'organization'`

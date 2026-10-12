@@ -1,35 +1,17 @@
-import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
-import {
-  ClaudeSubscriptionOAuthCompleteRequest,
-  ClaudeSubscriptionOAuthStartRequest,
-} from "@opengeni/contracts";
-import { requireAccessGrant, requireFreshAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import { type Context, type Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { hashCodexBrowserSession } from "../codex-redemption-security";
 import { isConfiguredDeploymentKeyRequest } from "../http/auth";
 import {
-  startClaudeSubscriptionOAuth,
-  completeClaudeSubscriptionOAuth,
-  type ClaudeOAuthScope,
-} from "../claude-subscription-oauth";
-import {
   managedCookieHuman,
   requireOrganizationCodexHuman,
   requireSameOriginBrowserMutation,
 } from "./codex";
 
-export function registerClaudeSubscriptionOAuthRoutes(
-  app: Hono,
-  deps: ApiRouteDeps,
-  fetchImpl: typeof fetch = globalThis.fetch,
-) {
-  async function scope(
-    c: Context,
-    organization: boolean,
-    fresh = false,
-  ): Promise<ClaudeOAuthScope> {
+export function registerClaudeSubscriptionOAuthRoutes(app: Hono, deps: ApiRouteDeps) {
+  async function scope(c: Context, organization: boolean) {
     c.header("cache-control", "private, no-store");
     if (!deps.settings.claudeSubscriptionEnabled)
       throw new HTTPException(404, {
@@ -55,12 +37,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
         browserSessionHash: human.browserSessionHash,
       };
     }
-    const grant = await (fresh ? requireFreshAccessGrant : requireAccessGrant)(
-      c,
-      deps,
-      id.data,
-      "connections:write",
-    );
+    const grant = await requireAccessGrant(c, deps, id.data, "connections:write");
     const human = await managedCookieHuman(c, deps);
     if (human && human.subjectId === grant.subjectId)
       return {
@@ -91,63 +68,19 @@ export function registerClaudeSubscriptionOAuthRoutes(
       message: "Sign in to Opengeni to connect Claude.",
     });
   }
+  // The legacy Claude pool these sign-ins wrote is deleted (design 5.3, C4):
+  // after authentication, connecting fails closed until the shared
+  // subscription core writes Claude connections (C2b).
   for (const organization of [false, true]) {
     const path = organization
       ? "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth"
       : "/v1/workspaces/:workspaceId/model-providers/claude_subscription/oauth";
-    app.post(`${path}/start`, async (c) => {
-      const inputScope = await scope(c, organization);
-      const payload = ClaudeSubscriptionOAuthStartRequest.safeParse(
-        await c.req.json().catch(() => null),
-      );
-      if (!payload.success || (organization && payload.data.scope !== "workspace"))
-        throw new HTTPException(422, { message: "Choose where to connect this Claude account." });
-      if (!organization)
-        await requireSubscriptionScopeMutation(
-          c,
-          deps,
-          inputScope.workspaceId!,
-          payload.data.scope,
-          "Claude",
-        );
-      return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data));
-    });
-    app.post(`${path}/complete`, async (c) => {
-      const inputScope = await scope(c, organization);
-      const payload = ClaudeSubscriptionOAuthCompleteRequest.safeParse(
-        await c.req.json().catch(() => null),
-      );
-      if (!payload.success)
-        throw new HTTPException(422, {
-          message: "Enter the authorization code from Claude.",
+    for (const step of ["start", "complete"] as const)
+      app.post(`${path}/${step}`, async (c) => {
+        await scope(c, organization);
+        throw new HTTPException(503, {
+          message: "Claude subscriptions are served only by the shared subscription core",
         });
-      return c.json(
-        await completeClaudeSubscriptionOAuth(
-          deps,
-          inputScope,
-          payload.data,
-          async (poolScope) => {
-            if (!organization)
-              await requireSubscriptionScopeMutation(
-                c,
-                deps,
-                inputScope.workspaceId!,
-                poolScope ?? "workspace",
-                "Claude",
-              );
-            const fresh = await scope(c, organization, true);
-            if (
-              fresh.accountId !== inputScope.accountId ||
-              fresh.actorSubjectId !== inputScope.actorSubjectId ||
-              fresh.browserSessionHash !== inputScope.browserSessionHash
-            )
-              throw new HTTPException(403, {
-                message: "Your access changed during Claude sign-in. Start again.",
-              });
-          },
-          fetchImpl,
-        ),
-      );
-    });
+      });
   }
 }

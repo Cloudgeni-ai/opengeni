@@ -186,41 +186,6 @@ export {
   getScheduledTaskSubscriptionAuthority,
   receiverCodexSubscriptionAuthorityV2InTransaction,
 } from "./accepted-subscription-authority";
-// The legacy Claude pool repository and its usage and token readers are no
-// runtime decision path (the legacy Claude runtime is deleted, C4). Only the
-// API account routes, OAuth and setup-token writers, access policy and usage
-// refresh still use them, until C2a/C2b move those consumers to the shared
-// core; nothing else is exported, so no turn, selector or lease reaches them.
-export {
-  resolveClaudeAccountCredential,
-  ClaudeSubscriptionConnectionChanged,
-} from "./claude-subscription-account-tokens";
-export {
-  disconnectClaudeSubscriptionAccountAndRepick,
-  ensureClaudeRotationSettings,
-  getClaudeRotationSettings,
-  getClaudeSubscriptionAccountAuthoritySnapshot,
-  getClaudeSubscriptionAccountMetadata,
-  listClaudeSubscriptionAccountsMetadata,
-  listOrganizationClaudeSubscriptions,
-  renameClaudeSubscriptionAccount,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
-  setActiveClaudeCredential,
-  setInitialActiveClaudeCredential,
-  updateClaudeAllocatorEligibility,
-  updateClaudeRotationSettings,
-  updateOrganizationClaudeRotation,
-  updateOrganizationClaudeSubscription,
-  upsertClaudeSubscriptionAccount,
-  upsertOrganizationClaudeSubscription,
-  wakeClaudeCapacityWaiters,
-  type ClaudeSubscriptionAccountMetadata,
-} from "./claude-subscription-accounts";
-export {
-  listClaudeAccountUsage,
-  recordClaudeAccountUsage,
-  type ClaudeAccountUsageAuthority,
-} from "./claude-subscription-account-usage";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
@@ -467,7 +432,6 @@ import {
   type ModelConnectionTarget,
 } from "./model-connection-access";
 import { withOrganizationXaiCapacityMutation } from "./organization-xai-subscriptions";
-import { withOrganizationClaudeCapacityMutation } from "./claude-subscription-accounts";
 export {
   assertModelConnectionAllowsTurn,
   modelAllowedByConnections,
@@ -27520,21 +27484,12 @@ export async function updateModelConnectionAccess(
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
-  if (
-    target.workspaceId !== null ||
-    (target.kind !== "codex" &&
-      target.kind !== "supergrok" &&
-      target.kind !== "claude_subscription")
-  ) {
+  // A Claude policy has no legacy pool to write (C4): the relation refuses it.
+  if (target.workspaceId !== null || (target.kind !== "codex" && target.kind !== "supergrok")) {
     return await updateModelConnectionAccessPolicy(db, target, policy);
   }
   const actor = { organizationId: target.accountId, actorSubjectId: target.subjectId };
   return await withOrganizationCodexAdministrator(db, actor, async (tx) => {
-    if (target.kind === "claude_subscription") {
-      return await withOrganizationClaudeCapacityMutation(tx, actor, (scopedDb) =>
-        updateModelConnectionAccessPolicy(scopedDb, target, policy),
-      );
-    }
     if (target.kind === "supergrok") {
       return await withOrganizationXaiCapacityMutation(tx, actor, (scopedDb) =>
         updateModelConnectionAccessPolicy(scopedDb, target, policy),

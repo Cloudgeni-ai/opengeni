@@ -4,14 +4,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import {
-  bootstrapWorkspace,
-  createDb,
-  decryptEnvironmentValue,
-  recordClaudeAccountUsage,
-  type DbClient,
-} from "@opengeni/db";
-import { parseClaudeUsageHeaders } from "@opengeni/config";
+import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -20,22 +13,20 @@ import {
 import { registerConnectionRoutes } from "../src/routes/connections";
 import { registerWorkspaceModelProviderRoutes } from "../src/routes/workspace-model-providers";
 import { registerClaudeSubscriptionAccountRoutes } from "../src/routes/claude-subscription-accounts";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "@opengeni/db";
+import { registerClaudeSubscriptionOAuthRoutes } from "../src/routes/claude-subscription-oauth";
+import { registerModelConnectionAccessRoutes } from "../src/routes/model-connection-access";
 
-// Characterizes the legacy Claude runtime, which runs only before the drained
-// Claude cutover: the database withholds that migration. Removed with the
-// legacy runtime.
-const LEGACY_CLAUDE_WORLD = {
-  withheldMigrations: [SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!],
-};
+// The legacy Claude pool is deleted (design 5.3, C4). Until the shared
+// subscription core serves Claude accounts, usage, setup-token connect and
+// access policies (C2a, C2b), each route authenticates and then fails closed
+// with a typed 503, writing nothing.
 
 const secret = "claude-usage-api-test-delegation";
 const key = Buffer.alloc(32, 7);
 let shared: SharedTestDatabase, client: DbClient;
 let accountId: string, workspaceId: string, subjectId: string;
-let credentialId: string;
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("claude-setup-usage-api", LEGACY_CLAUDE_WORLD);
+  const acquired = await acquireSharedTestDatabase("claude-setup-usage-api");
   if (!acquired) throw new Error("Real PostgreSQL required for Claude API verification");
   shared = acquired;
   client = createDb(shared.appUrl);
@@ -73,6 +64,8 @@ function api(enabled = true) {
   registerConnectionRoutes(app, deps);
   registerWorkspaceModelProviderRoutes(app, deps);
   registerClaudeSubscriptionAccountRoutes(app, deps);
+  registerClaudeSubscriptionOAuthRoutes(app, deps);
+  registerModelConnectionAccessRoutes(app, deps);
   return { app, settings };
 }
 async function headers(permissions: Permission[]) {
@@ -116,103 +109,64 @@ test("0598 retirement rejects legacy Claude creation and replay before effect", 
   expect(effects!.count).toBe(0);
 });
 
-test("canonical token setup preserves identity, exact-generation reconnect and secret-free usage", async () => {
+async function claudeRowCounts() {
+  const [row] = await shared.admin`
+    select
+      (select count(*)::int from claude_subscription_credentials) as legacy,
+      (select count(*)::int from subscription_connections where provider = 'claude') as core`;
+  return row;
+}
+
+test("legacy Claude account, usage, setup-token and access routes fail closed after authentication", async () => {
   const { app } = api();
-  const auth = await headers(["workspace:read", "workspace:admin"]);
-  const path = `/v1/workspaces/${workspaceId}/claude/accounts/setup-token`;
-  const response = await app.request(path, {
+  const before = await claudeRowCounts();
+  const admin = await headers(["workspace:read", "workspace:admin", "connections:write"]);
+  const reader = await headers(["workspace:read"]);
+  const connectionId = crypto.randomUUID();
+  const workspace = `/v1/workspaces/${workspaceId}`;
+  const requests: Array<[string, string, Record<string, string>, string?]> = [
+    ["GET", `${workspace}/claude/accounts`, reader],
+    ["POST", `${workspace}/claude/accounts/${connectionId}/activate`, admin],
+    ["DELETE", `${workspace}/claude/accounts/${connectionId}`, admin],
+    ["GET", `${workspace}/claude/accounts/${connectionId}/usage`, reader],
+    ["POST", `${workspace}/claude/accounts/${connectionId}/usage/refresh`, reader],
+    [
+      "POST",
+      `${workspace}/claude/accounts/setup-token`,
+      admin,
+      JSON.stringify({ token: "sk-ant-oat01-route-fixture", scope: "workspace" }),
+    ],
+    ["GET", `${workspace}/model-connections/claude_subscription/${connectionId}/access`, reader],
+    [
+      "PUT",
+      `${workspace}/model-connections/claude_subscription/${connectionId}/access`,
+      admin,
+      JSON.stringify({ allowedModelIds: [] }),
+    ],
+  ];
+  for (const [method, path, auth, body] of requests) {
+    const response = await app.request(path, { method, headers: auth, body });
+    expect({ method, path, status: response.status }).toEqual({ method, path, status: 503 });
+    const text = await response.text();
+    expect(text).toContain("served only by the shared subscription core");
+    expect(text).not.toContain("sk-ant-oat01");
+  }
+  // OAuth sign-in still needs a browser human before anything else; it never
+  // reaches a provider or a store.
+  const start = await app.request(`${workspace}/model-providers/claude_subscription/oauth/start`, {
     method: "POST",
-    headers: auth,
-    body: JSON.stringify({ token: "sk-ant-oat01-route-fixture", scope: "workspace" }),
+    headers: admin,
+    body: "{}",
   });
-  expect(response.status).toBe(200);
-  const value = await response.json();
-  credentialId = value.accountId;
-  expect(value).toEqual({
-    connected: true,
-    accountId: credentialId,
-    credentialVersion: 1,
-    scope: "workspace",
-  });
-  const [stored] =
-    await shared.admin`select credential_encrypted from claude_subscription_credentials where id = ${credentialId}`;
-  const bundle = JSON.parse(decryptEnvironmentValue(key, stored!.credential_encrypted));
-  expect(bundle.identity.accountUuid).toBe("");
-  expect(bundle.identity.deviceId).toMatch(/^[a-f0-9]{64}$/);
-  expect(JSON.stringify(value)).not.toContain("sk-ant-oat");
-  expect(JSON.stringify(value)).not.toContain(bundle.identity.deviceId);
-  await recordClaudeAccountUsage(
-    client.db,
-    {
-      accountId,
-      workspaceId,
-      subjectId,
-      credentialId,
-      authoritySnapshot: { version: 1, scope: "workspace" },
-    },
-    {
-      encryptionKey: key,
-      expectedCredentialVersion: value.credentialVersion,
-      token: bundle.token,
-      observation: parseClaudeUsageHeaders(
-        new Headers({
-          "anthropic-ratelimit-unified-5h-utilization": "1",
-          "anthropic-ratelimit-unified-7d-utilization": ".5",
-        }),
-      )!,
-    },
-  );
-  const usage = await app.request(
-    `/v1/workspaces/${workspaceId}/claude/accounts/${credentialId}/usage`,
-    { headers: await headers(["workspace:read"]) },
-  );
-  expect(usage.status).toBe(200);
-  expect(usage.headers.get("cache-control")).toBe("private, no-store");
-  expect(
-    (await usage.json()).windows.map((window: { usedPercent: number }) => window.usedPercent),
-  ).toEqual([100, 50]);
-  const replacement = {
-    token: "sk-ant-oat01-route-replacement",
-    reconnectAccountId: credentialId,
-    expectedCredentialVersion: value.credentialVersion,
-  };
-  const replaced = await app.request(path, {
-    method: "POST",
-    headers: auth,
-    body: JSON.stringify(replacement),
-  });
-  expect(replaced.status).toBe(200);
-  expect(await replaced.json()).toEqual({
-    connected: true,
-    accountId: credentialId,
-    credentialVersion: value.credentialVersion + 1,
-    scope: "workspace",
-  });
-  expect(
-    (await app.request(path, { method: "POST", headers: auth, body: JSON.stringify(replacement) }))
-      .status,
-  ).toBe(409);
-  const [after] =
-    await shared.admin`select credential_encrypted, version from claude_subscription_credentials where id = ${credentialId}`;
-  expect(JSON.parse(decryptEnvironmentValue(key, after!.credential_encrypted)).identity).toEqual(
-    bundle.identity,
-  );
-  expect(after!.version).toBe(value.credentialVersion + 1);
-  const cleared = await app.request(
-    `/v1/workspaces/${workspaceId}/claude/accounts/${credentialId}/usage`,
-    { headers: auth },
-  );
-  expect((await cleared.json()).windows).toEqual([]);
+  expect(start.status).toBe(401);
+  expect(await claudeRowCounts()).toEqual(before);
 });
-test("readers cannot refresh, unauthenticated callers cannot read, and gating leaves API-key providers independent", async () => {
-  const path = `/v1/workspaces/${workspaceId}/claude/accounts/${credentialId}/usage`;
+
+test("unauthenticated callers cannot reach the fail-closed routes, and gating leaves API-key providers independent", async () => {
+  const path = `/v1/workspaces/${workspaceId}/claude/accounts/${crypto.randomUUID()}/usage`;
   const { app } = api();
-  const response = await app.request(`${path}/refresh`, {
-    method: "POST",
-    headers: await headers(["workspace:read"]),
-  });
-  expect(response.status).toBe(403);
   expect((await app.request(path)).status).toBe(401);
+  expect((await app.request(`${path}/refresh`, { method: "POST" })).status).toBe(403);
   expect(
     (await api(false).app.request(path, { headers: await headers(["workspace:read"]) })).status,
   ).toBe(404);
