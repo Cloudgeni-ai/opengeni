@@ -2170,7 +2170,7 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission. The requested window is honored up to 4 minutes
-(10 seconds when omitted; settings.experimentCutPolling, on by default; OPE-550)
+(10 seconds when omitted; settings.experimentCutPolling, on by default)
 so a build or test run the model asked to wait for returns its terminal result
 in one tool call instead of repeated empty `write_stdin` polls. The ceiling stays
 under the 5-minute Claude prompt-cache TTL. So a dev server, watcher, tail or

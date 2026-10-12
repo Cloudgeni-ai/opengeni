@@ -2,7 +2,7 @@
  * Lean model-facing `exec_command` arguments.
  *
  * Gated by settings.experimentOutputCost (on by default; kill switch
- * `OPENGENI_EXPERIMENT_OUTPUT_COST=false` in the worker environment). OPE-550.
+ * `OPENGENI_EXPERIMENT_OUTPUT_COST=false` in the worker environment).
  *
  * The SDK shell capability declares `exec_command` through `tool()`, which
  * defaults to strict mode. Strict mode turns every optional field into a
