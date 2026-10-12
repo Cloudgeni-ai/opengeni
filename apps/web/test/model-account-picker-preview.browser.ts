@@ -24,12 +24,12 @@ try {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const theme = width === 390 ? "dark" : "light";
-    const open = async (session: "private" | "shared") => {
+    const open = async (session: "private" | "shared", extra = "") => {
       await page.goto(
-        `${base}/test/fixtures/model-account-picker-preview/?session=${session}&theme=${theme}`,
+        `${base}/test/fixtures/model-account-picker-preview/?session=${session}&theme=${theme}${extra}`,
         { waitUntil: "networkidle" },
       );
-      await page.getByRole("button", { name: /^Model account/ }).click();
+      await page.getByRole("button", { name: /^(Model account|Switch Codex account)/ }).click();
       await page.getByText("Use for next turn").waitFor();
     };
     const shot = (name: string) => page.screenshot({ path: `${output}/${name}-${width}.png` });
@@ -46,15 +46,21 @@ try {
     // A private chat: Automatic, shared accounts, then the person's own account.
     await open("private");
     await assertAccountActionsOnly();
+    await page.getByRole("menu").getByTestId("billing-class-icon-claude_subscription").waitFor();
+    await page.getByText("team-a@example.test", { exact: true }).waitFor();
+    await page.getByText("Max · Organization", { exact: true }).waitFor();
+    await page.getByText("Usage unavailable", { exact: true }).waitFor();
+    assert((await page.getByRole("progressbar").count()) === 0, "neutral quota fabricated");
     await shot("private-open");
 
-    // Choosing their own account; the header switches to the personal mark.
+    // Choosing their own account retains the provider mark and shows ownership.
     await page.getByRole("menuitem", { name: /My Claude/ }).click();
-    await page.getByText("Saved for the next turn.").waitFor();
+    await page.getByText("Selection saved for the next turn.").waitFor();
     await page
       .getByRole("button", { name: "Model account · My Claude", exact: true, includeHidden: true })
       .waitFor();
     await assertAccountActionsOnly();
+    await page.getByText("Pro · Your account", { exact: true }).waitFor();
     assert(
       JSON.stringify(await receipts()) === '[{"choose":"mine"}]',
       "unexpected personal action",
@@ -83,6 +89,41 @@ try {
     await assertAccountActionsOnly();
     assert(JSON.stringify(await receipts()) === "[]", "unexpected shared-chat action");
     await shot("shared-open");
+
+    // Status is not flattened into a generic refusal; plan and identity remain.
+    await open("private", "&state=statuses");
+    await page.getByText("Max · Organization · Needs reconnect", { exact: true }).waitFor();
+    const reconnect = page.getByRole("menuitem", { name: /Acme Claude 1/ });
+    const failed = page.getByRole("menuitem", { name: /Acme Claude 2/ });
+    assert((await reconnect.getAttribute("aria-disabled")) === "true", "reconnect account enabled");
+    assert((await failed.getAttribute("aria-disabled")) === "true", "failed account enabled");
+    await assertAccountActionsOnly();
+    assert((await page.getByRole("progressbar").count()) === 0, "neutral quota fabricated");
+    await shot("account-statuses");
+    await page.keyboard.press("Home");
+    await page.keyboard.press("ArrowDown");
+    await page.waitForFunction(() => document.activeElement?.textContent?.includes("My Claude"));
+    await page.keyboard.press("Enter");
+    await page.getByText("Pro · Your account", { exact: true }).waitFor();
+    assert(
+      JSON.stringify(await receipts()) === '[{"choose":"mine"}]',
+      "keyboard selection did not skip refused accounts",
+    );
+
+    // The actual Codex component uses the same extracted view with its real
+    // adapter's usage/freshness path (synthetic readings, not production quotas).
+    await open("private", "&provider=codex");
+    await page.getByRole("progressbar", { name: "Week remaining" }).waitFor();
+    assert((await page.getByRole("progressbar").count()) === 2, "Codex usage lost");
+    assert(
+      (await page
+        .getByRole("progressbar", { name: "Week remaining" })
+        .getAttribute("aria-valuenow")) === "38",
+      "Codex quota changed",
+    );
+    await page.getByText("relogin", { exact: true }).waitFor();
+    await assertAccountActionsOnly();
+    await shot("codex-reference");
 
     assert(errors.length === 0, `page errors: ${errors.join("; ")}`);
     await page.close();

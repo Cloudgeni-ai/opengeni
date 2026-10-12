@@ -54,7 +54,7 @@ function choiceResponse(
   };
 }
 
-async function render(client: ReturnType<typeof fakeClient>) {
+async function render(client: ReturnType<typeof fakeClient>, provider = "claude") {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -65,7 +65,7 @@ async function render(client: ReturnType<typeof fakeClient>) {
           workspaceId={WORKSPACE_ID}
           sessionId="session-1"
           organizationId={ORG}
-          provider="claude"
+          provider={provider}
           events={[]}
         />
       </OpenGeniProvider>,
@@ -174,10 +174,111 @@ test("choosing sends the account and shows where it applies; a refused account i
     )!;
     await act(async () => team.click());
     expect(calls).toEqual(["shared-1"]);
-    expect(document.body.textContent).toContain("Saved for the next turn.");
+    expect(document.body.textContent).toContain("Selection saved for the next turn.");
     expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
       "Model account · Team Claude",
     );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test.each(["claude", "supergrok", "codex"])(
+  "uses the subscription provider mark for %s",
+  async (provider) => {
+    const client = Object.assign(fakeClient({}), {
+      getSessionModelAccount: async () =>
+        choiceResponse({
+          accounts: [option("team", "Team account", { provider })],
+        }),
+    });
+    const view = await render(client, provider);
+    try {
+      expect(
+        view.container.querySelector(`[data-testid="billing-class-icon-${provider}_subscription"]`),
+      ).not.toBeNull();
+      await view.open();
+      expect(
+        document
+          .querySelector('[role="menu"]')
+          ?.querySelector(`[data-testid="billing-class-icon-${provider}_subscription"]`),
+      ).not.toBeNull();
+      expect(document.body.textContent).toContain("Usage unavailable");
+      expect(document.querySelector('[role="progressbar"]')).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  },
+);
+
+test("retains account identity, plan, source, and the reason an inactive account is refused", async () => {
+  let choices = 0;
+  const client = Object.assign(fakeClient({}), {
+    getSessionModelAccount: async () =>
+      choiceResponse({
+        binding: { provider: "claude", connectionId: "reconnect", choice: "explicit" },
+        accounts: [
+          option("reconnect", "Team Claude", {
+            accountEmail: "team@example.test",
+            planType: "Max",
+            status: "needs_relogin",
+            choosable: false,
+            refusal: "inactive",
+          }),
+          option("error", "Backup Claude", {
+            planType: "Pro",
+            status: "error",
+            choosable: false,
+            refusal: "inactive",
+          }),
+        ],
+      }),
+    setSessionModelAccount: async () => {
+      choices += 1;
+      throw new Error("Refused accounts cannot be chosen");
+    },
+  });
+  const view = await render(client);
+  try {
+    await view.open();
+    expect(document.body.textContent).toContain("team@example.test");
+    expect(document.body.textContent).toContain("Max · Organization · Needs reconnect");
+    const rows = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const reconnect = rows.find((row) => row.textContent?.includes("Team Claude"))!;
+    const error = rows.find((row) => row.textContent?.includes("Backup Claude"))!;
+    expect(reconnect.textContent).toContain("MaxNeeds reconnect");
+    expect(reconnect.title).toContain("team@example.test");
+    expect(error.textContent).toContain("ProError");
+    expect(reconnect.getAttribute("aria-disabled")).toBe("true");
+    expect(error.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => error.click());
+    expect(choices).toBe(0);
+    expect(document.querySelector('[role="progressbar"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("% remaining");
+    expect(document.body.textContent).toContain(
+      "Applies next turn. The current turn keeps its account.",
+    );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("shows a server selection error without claiming that the account was saved", async () => {
+  const client = Object.assign(fakeClient({}), {
+    getSessionModelAccount: async () => choiceResponse(),
+    setSessionModelAccount: async () => {
+      throw new Error("Account access changed");
+    },
+  });
+  const view = await render(client);
+  try {
+    await view.open();
+    const mine = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (row) => row.textContent === "My Claude",
+    )!;
+    await act(async () => mine.click());
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe("Account access changed");
+    expect(document.body.textContent).not.toContain("Selection saved");
   } finally {
     await view.cleanup();
   }

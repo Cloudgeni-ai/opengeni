@@ -4,20 +4,8 @@
 // The server decides what may be chosen.
 import { useSessionModelAccount } from "@opengeni/react";
 import type { ModelAccountChoiceOption, SessionEvent } from "@opengeni/sdk";
-import { ChevronDownIcon, KeyRoundIcon, Loader2Icon, UserRoundIcon } from "lucide-react";
-
-import {
-  DropdownMenu,
-  DropdownMenuCheck,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuMeta,
-  DropdownMenuNote,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
+import { SubscriptionAccountMenu } from "@/components/session/subscription-account-menu";
 
 function accountLabel(account: ModelAccountChoiceOption): string {
   return account.label ?? account.accountEmail ?? account.planType ?? "Account";
@@ -28,6 +16,39 @@ const REFUSAL_COPY: Record<NonNullable<ModelAccountChoiceOption["refusal"]>, str
   personal_not_allowed: "Turned off here",
   personal_not_owner_work: "Private chats only",
   session_has_no_owner: "Needs an owner",
+};
+
+const STATUS_COPY: Record<string, string> = {
+  needs_relogin: "Needs reconnect",
+  error: "Error",
+  disabled: "Disabled",
+  revoked: "Revoked",
+  expired: "Expired",
+  suspended: "Suspended",
+  paused: "Paused",
+  inactive: "Inactive",
+  limit_reached: "Limit reached",
+};
+
+function accountStatus(account: ModelAccountChoiceOption): string | null {
+  // Inactive is a broad refusal; retain the actual status when it explains why.
+  if (account.refusal && account.refusal !== "inactive") return REFUSAL_COPY[account.refusal];
+  if (account.status !== "active") return STATUS_COPY[account.status] ?? account.status;
+  return account.refusal ? REFUSAL_COPY[account.refusal] : null;
+}
+
+function accountSource(account: ModelAccountChoiceOption): string {
+  return account.personal
+    ? "Your account"
+    : account.source === "workspace"
+      ? "This workspace"
+      : "Organization";
+}
+
+const PROVIDER_MARK: Record<string, BillingClass> = {
+  codex: "codex_subscription",
+  claude: "claude_subscription",
+  supergrok: "supergrok_subscription",
 };
 
 export function ModelAccountIndicator({
@@ -55,8 +76,6 @@ export function ModelAccountIndicator({
   const accounts = (choice?.accounts ?? []).filter((each) => each.provider === provider);
   if (accounts.length === 0) return null;
 
-  const shared = accounts.filter((each) => !each.personal);
-  const personal = accounts.filter((each) => each.personal);
   const binding = choice?.binding?.provider === provider ? choice.binding : null;
   const explicit = binding?.choice === "explicit";
   const current = binding?.connectionId
@@ -68,115 +87,73 @@ export function ModelAccountIndicator({
       ? "Account unavailable"
       : "Automatic";
   const ariaLabel = `Model account · ${displayName}`;
-
-  const row = (each: ModelAccountChoiceOption) => {
-    const selected = explicit && binding?.connectionId === each.connectionId;
-    return (
-      <DropdownMenuItem
-        key={each.connectionId}
-        disabled={account.choosing || !each.choosable}
-        onSelect={(event) => {
-          event.preventDefault();
-          if (selected) return;
-          void account.choose(each.connectionId);
-        }}
-        className="cursor-pointer"
-      >
-        <span className="min-w-0 flex-1 truncate">{accountLabel(each)}</span>
-        {each.refusal ? (
-          <DropdownMenuMeta>{REFUSAL_COPY[each.refusal]}</DropdownMenuMeta>
-        ) : each.planType ? (
-          <DropdownMenuMeta>{each.planType}</DropdownMenuMeta>
-        ) : null}
-        {account.choosingTarget === each.connectionId ? (
-          <Loader2Icon className="size-4 shrink-0 animate-spin" />
-        ) : (
-          <DropdownMenuCheck checked={selected} className="ml-0" />
-        )}
-      </DropdownMenuItem>
-    );
-  };
+  const billingClass = PROVIDER_MARK[provider] ?? "external";
+  const currentStatus = current ? accountStatus(current) : null;
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={ariaLabel}
-          title={ariaLabel}
-          className={cn(
-            "group/account relative inline-flex h-6 shrink-0 cursor-pointer items-center gap-0.5 rounded-full border border-border/70 bg-surface-2/50 px-1.5 text-fg-muted outline-none transition-[background-color,border-color,color] hover:border-border hover:bg-surface-2 hover:text-fg focus-visible:ring-1 focus-visible:ring-ring/40 data-[state=open]:border-border data-[state=open]:bg-surface-2 data-[state=open]:text-fg",
-            account.choosing && "opacity-60",
-          )}
-        >
-          {current?.personal ? (
-            <UserRoundIcon className="size-3.5 text-current" aria-hidden />
-          ) : (
-            <KeyRoundIcon className="size-3.5 text-current" aria-hidden />
-          )}
-          {account.choosing ? (
-            <Loader2Icon className="size-2.5 animate-spin text-current" aria-hidden />
-          ) : (
-            <ChevronDownIcon
-              className="size-2.5 shrink-0 opacity-70 transition-opacity group-hover/account:opacity-100"
-              aria-hidden
-            />
-          )}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        side="bottom"
-        sideOffset={8}
-        collisionPadding={12}
-        className="flex max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-72 flex-col overflow-hidden"
-      >
-        <div className="shrink-0 px-2.5 pt-1.5 pb-2">
-          <p className="text-2xs text-fg-subtle">{explicit ? "Chosen account" : "Account"}</p>
-          <p className="truncate text-sm font-medium text-fg">{displayName}</p>
-          {current ? (
-            <p className="truncate text-2xs text-fg-subtle">
-              {current.personal ? "Your account" : "Shared"}
-            </p>
-          ) : null}
-        </div>
-        <DropdownMenuSeparator className="shrink-0" />
-        <DropdownMenuLabel className="shrink-0">Use for next turn</DropdownMenuLabel>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-          <DropdownMenuItem
-            disabled={account.choosing}
-            onSelect={(event) => {
-              event.preventDefault();
-              if (!explicit) return;
-              void account.choose(null);
-            }}
-            className="cursor-pointer"
-          >
-            <span className="min-w-0 flex-1 truncate">Automatic</span>
-            {account.choosingTarget === null ? (
-              <Loader2Icon className="size-4 shrink-0 animate-spin" />
-            ) : (
-              <DropdownMenuCheck checked={!explicit} className="ml-0" />
-            )}
-          </DropdownMenuItem>
-          {shared.map(row)}
-          {personal.length > 0 ? (
-            <>
-              <DropdownMenuLabel className="pt-2">Your accounts</DropdownMenuLabel>
-              {personal.map(row)}
-            </>
-          ) : null}
-          {account.mutationError ? (
-            <DropdownMenuNote role="alert" className="text-xs text-danger">
-              {account.mutationError.message}
-            </DropdownMenuNote>
-          ) : account.appliedTo === "waiting_turn" ? (
-            <DropdownMenuNote>Saved. Retrying the waiting turn.</DropdownMenuNote>
-          ) : account.appliedTo === "next_turn" ? (
-            <DropdownMenuNote>Saved for the next turn.</DropdownMenuNote>
-          ) : null}
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <SubscriptionAccountMenu
+      ariaLabel={ariaLabel}
+      triggerMark={
+        <BillingClassMark
+          billingClass={billingClass}
+          className="size-3.5 text-current"
+          aria-label=""
+        />
+      }
+      headerMark={<BillingClassMark billingClass={billingClass} className="size-4 text-current" />}
+      selectionLabel={
+        explicit ? "Chosen account" : current ? "Current account" : "Account selection"
+      }
+      displayName={displayName}
+      identity={current?.accountEmail !== displayName ? current?.accountEmail : null}
+      metadata={
+        current
+          ? [current.planType, accountSource(current), currentStatus].filter(Boolean).join(" · ")
+          : "Subscription account"
+      }
+      tone={
+        currentStatus
+          ? current?.status === "needs_relogin" || current?.status === "error"
+            ? "bad"
+            : "warn"
+          : "ok"
+      }
+      // The neutral endpoint has no usage windows or refresh API. Do not borrow
+      // a provider's legacy inventory/selection path to manufacture readings.
+      usage={{ unavailable: true }}
+      accounts={accounts.map((each) => ({
+        id: each.connectionId,
+        label: accountLabel(each),
+        plan: each.planType,
+        status: accountStatus(each),
+        detail: [
+          accountLabel(each),
+          each.accountEmail,
+          each.planType,
+          accountSource(each),
+          accountStatus(each),
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        personal: each.personal,
+        disabled: !each.choosable,
+      }))}
+      selectedId={explicit ? binding.connectionId : null}
+      automaticSelected={!explicit}
+      choosing={account.choosing}
+      choosingTarget={account.choosingTarget}
+      error={account.mutationError?.message}
+      note={
+        account.appliedTo === "waiting_turn"
+          ? "Selection saved. Capacity is being rechecked."
+          : account.appliedTo === "next_turn"
+            ? "Selection saved for the next turn."
+            : "Applies next turn. The current turn keeps its account."
+      }
+      onChoose={(id) => {
+        if (id === null ? !explicit : explicit && binding.connectionId === id) return;
+        void account.choose(id);
+      }}
+    />
   );
 }
