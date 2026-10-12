@@ -779,8 +779,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       sandboxBackend: "selfhosted",
       targetSandboxId,
       workingDir,
-      variableSetIds,
-      variableSetId: variableSetIds[1],
       rigId: expect.any(String),
       toolsProvided: true,
       selectionHistory: {
@@ -866,18 +864,15 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       const session = await createUninitializedSession(context);
       await initialize(context, session.id, 1);
       const seeded = await readDraft(workspaceId, context.subjectId);
-      return { chosen, variableSetIds, options: publicNewSessionDraftOptions(seeded!) };
+      return { chosen, options: publicNewSessionDraftOptions(seeded!) };
     };
 
-    // The choice replaced the workspace default (and the default Variable Sets
-    // it carries) for that one session. The next form starts on the default
-    // again; added Variable Sets are still remembered because they only add.
+    // The choice replaced the workspace default for that one session, so the
+    // next form starts on the default again. Stale Variable Set selections
+    // from old drafts are never carried into the seed.
     const replacedDefault = await seedWithRigChoice(true);
     expect(replacedDefault.options).not.toHaveProperty("rigId");
-    expect(replacedDefault.options).toMatchObject({
-      variableSetIds: replacedDefault.variableSetIds,
-      variableSetId: replacedDefault.variableSetIds[0],
-    });
+    expect(replacedDefault.options).not.toHaveProperty("variableSetIds");
 
     // Without a workspace default nothing was replaced, so the choice is
     // remembered like any other selection.

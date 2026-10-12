@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { acquireOwnerMigratedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
 import {
   createDb,
-  createVariableSet,
   ensureManagedAccessForUser,
   updateScheduledTask,
   withSessionRlsActorContext,
 } from "@opengeni/db";
+import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "../../../packages/db/src/provision-roles";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
@@ -85,7 +85,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await database.admin`insert into workspace_inference_controls (account_id, workspace_id)
       values (${accountId}::uuid, ${workspaceId}::uuid)`;
     const variableSet = await withSessionRlsActorContext({ subjectId }, () =>
-      createVariableSet(client!.db, {
+      createLegacyVariableSet(client!.db, {
         accountId,
         workspaceId,
         subjectId,

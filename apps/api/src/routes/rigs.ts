@@ -1,7 +1,4 @@
-import {
-  legacyVariableSetFields,
-  variableSetsRemovedResponse,
-} from "../http/variable-sets-removed";
+import { legacyVariableSetFields, VariableSetsRemovedError } from "../http/variable-sets-removed";
 import {
   CreateRigRequest,
   ProposeRigChangeRequest,
@@ -52,7 +49,7 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
     ...legacyVariableSetFields(payloadRecord).map((field) => `payload.${field}`),
   ];
   if (legacyFields.length > 0) {
-    throw new HTTPException(422, { res: variableSetsRemovedResponse(c, 422, legacyFields) });
+    throw new VariableSetsRemovedError(legacyFields);
   }
   if (bodyRecord) delete bodyRecord.defaultVariableSetIds;
   if (payloadRecord) delete payloadRecord.defaultVariableSetIds;

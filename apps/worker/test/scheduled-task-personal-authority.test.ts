@@ -39,7 +39,6 @@ import {
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
   createSession,
-  createVariableSet,
   createXaiSubscriptionCredential,
   disconnectXaiSubscriptionCredential,
   getScheduledTaskRunAcceptedExecution,
@@ -57,6 +56,7 @@ import {
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
+import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import {
   acquireSharedTestDatabase,
   acquireBlankTestDatabase,
@@ -685,12 +685,12 @@ describe("scheduled task personal MCP authority", () => {
   test("generated sessions resolve workspace and organization Variable Sets without personal authority", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const workspaceSet = await createVariableSet(client.db, {
+    const workspaceSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "scheduled workspace variables",
     });
-    const organizationSet = await createVariableSet(client.db, {
+    const organizationSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "organization",
       allowOrganization: true,
@@ -1420,7 +1420,7 @@ describe("scheduled task personal MCP authority", () => {
   test("suspending the revision authorizer after dispatch rejects common resource work", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "claim-time suspended authorizer",
@@ -2323,7 +2323,7 @@ describe("scheduled task personal MCP authority", () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const originalDelegations = delegation(workspace.subjectId, "linear", "linear.app");
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       name: "scheduled restore variables",
     });
@@ -2428,7 +2428,7 @@ describe("scheduled task personal MCP authority", () => {
   test("a materialized reusable workspace Variable Set task keeps its causal human on the next occurrence", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "reusable workspace variables",
@@ -2548,7 +2548,7 @@ describe("scheduled task personal MCP authority", () => {
 
     // A workspace Variable Set is ordinary workspace authority: a non-human
     // writer may keep automating with it, exactly as before the cutover.
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "service writer workspace variables",

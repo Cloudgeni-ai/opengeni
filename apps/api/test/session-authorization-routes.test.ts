@@ -15,7 +15,6 @@ import {
   createSessionMcpServers,
   createScheduledTask,
   deleteScheduledTask,
-  createVariableSet,
   getActiveSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEvents,
@@ -29,6 +28,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
+import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import {
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -616,7 +616,7 @@ describe("embedding host session authorization routes", () => {
   test("preserves unrelated create-time foreign key failures", async () => {
     if (!available || !shared) return;
     const value = await fixture();
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       accountId: value.grant.accountId,
       workspaceId: value.grant.workspaceId,
       name: `session-create-unrelated-fk-${crypto.randomUUID()}`,

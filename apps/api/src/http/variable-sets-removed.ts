@@ -1,5 +1,6 @@
 import type { VaultApiError } from "@opengeni/contracts";
 import type { Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 
 const VARIABLE_SETS_REMOVED_MESSAGE =
   "Variable Sets were replaced by vaults. Save secrets with /v1/workspaces/{workspaceId}/vaults and choose a session's vaults with PUT /sessions/{sessionId}/vault-policy.";
@@ -16,6 +17,31 @@ export function variableSetsRemovedResponse(
     details: { vaultsPath: "/vaults", ...(fields?.length ? { fields: [...fields] } : {}) },
   };
   return c.json(body, status);
+}
+
+/** Thrown where a route cannot return directly; `app.onError` renders it. */
+export class VariableSetsRemovedError extends Error {
+  override readonly name = "VariableSetsRemovedError";
+  constructor(readonly fields: readonly string[]) {
+    super(`variable_sets_removed: ${fields.join(", ")}`);
+  }
+}
+
+const CORE_VARIABLE_SETS_REMOVED = /^variable_sets_removed: (\S+) /;
+
+/**
+ * The RM-1 body for a removed-field error from a route or from core's
+ * `variableSetsRemovedError`, or null for any other error.
+ */
+export function variableSetsRemovedErrorResponse(c: Context, error: unknown): Response | null {
+  if (error instanceof VariableSetsRemovedError) {
+    return variableSetsRemovedResponse(c, 422, error.fields);
+  }
+  if (error instanceof HTTPException && error.status === 422) {
+    const field = CORE_VARIABLE_SETS_REMOVED.exec(error.message)?.[1];
+    if (field) return variableSetsRemovedResponse(c, 422, [field]);
+  }
+  return null;
 }
 
 /**

@@ -290,6 +290,7 @@ import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
 import { registerVariableSetsRemovedRoutes } from "./routes/variable-sets-removed";
+import { variableSetsRemovedErrorResponse } from "./http/variable-sets-removed";
 import { registerVaultRoutes } from "./routes/vaults";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
@@ -2257,6 +2258,8 @@ export function createAppComposition(deps: AppDependencies): {
     // Archives remain read-only through the existing Send/Steer/control paths.
     const importErrorResponse = archivedSessionImportErrorResponse(c, rawError);
     if (importErrorResponse) return importErrorResponse;
+    const removedResponse = variableSetsRemovedErrorResponse(c, rawError);
+    if (removedResponse) return removedResponse;
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =

@@ -28,7 +28,6 @@ import {
   createDb,
   createRig,
   setWorkspaceDefaultRig,
-  createVariableSet,
   bindAuthorizedGitHubInstallationRepositories,
   enableCapabilityInstallation,
   upsertCapabilityCatalogItem,
@@ -1529,11 +1528,6 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         kind: "mcp",
         metadata: { mcpConnectivity: { status: "ok" } },
       });
-      const variables = await createVariableSet(client.db, {
-        ...target,
-        subjectId: value.owner.subjectId,
-        name: "Build credentials",
-      });
       const checkedAt = new Date();
       await bindAuthorizedGitHubInstallationRepositories(client.db, {
         ...target,
@@ -1652,7 +1646,6 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
             reasoningEffort: "high",
             latencyMode: "standard",
             options: {
-              variableSetIds: [variables.id],
               firstPartyMcpTools: [],
               firstPartyMcpPermissions: ["sessions:read"],
               goal: { text: "UNSENT GOAL", successCriteria: "never" },

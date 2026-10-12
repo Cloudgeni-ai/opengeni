@@ -6,6 +6,8 @@ import { testSettings } from "@opengeni/testing";
 import {
   legacyVariableSetFields,
   rejectLegacyVariableSetFields,
+  VariableSetsRemovedError,
+  variableSetsRemovedErrorResponse,
   withoutLegacyVariableSetFields,
 } from "../src/http/variable-sets-removed";
 import { registerVariableSetsRemovedRoutes } from "../src/routes/variable-sets-removed";
@@ -95,6 +97,40 @@ describe("RM-1 legacy Variable Set fields", () => {
     expect(error.status).toBe(422);
     expect(error.message).toContain("variable_sets_removed");
     expect(error.message).toContain("defaultVariableSetIds");
+  });
+});
+
+describe("RM-1 thrown errors", () => {
+  const app = new Hono();
+  app.get("/route", () => {
+    throw new VariableSetsRemovedError(["defaultVariableSetIds"]);
+  });
+  app.get("/core", () => {
+    throw variableSetsRemovedError("variableSetId");
+  });
+  app.get("/other", () => {
+    throw new HTTPException(422, { message: "something else" });
+  });
+  app.onError(
+    (error, c) => variableSetsRemovedErrorResponse(c, error) ?? c.json({ error: "other" }, 500),
+  );
+
+  for (const [path, field] of [
+    ["/route", "defaultVariableSetIds"],
+    ["/core", "variableSetId"],
+  ] as const) {
+    test(`${path} renders the RM-1 body naming ${field}`, async () => {
+      const response = await app.request(path);
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({
+        error: "variable_sets_removed",
+        details: { fields: [field] },
+      });
+    });
+  }
+
+  test("other 422s are left to the central handler", async () => {
+    expect((await app.request("/other")).status).toBe(500);
   });
 });
 
