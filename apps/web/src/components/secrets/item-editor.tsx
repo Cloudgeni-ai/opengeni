@@ -163,7 +163,13 @@ export function ItemEditorPage({
     item && item.type !== "passkey" ? item.type : initialType,
   );
   const [name, setName] = useState(item?.name ?? "");
-  const [websites, setWebsites] = useState<string[]>(item?.websites.length ? item.websites : [""]);
+  // Each row keeps its id, so removing one keeps focus and edits on the rest.
+  const [websites, setWebsites] = useState<{ id: string; value: string }[]>(() =>
+    (item?.websites.length ? item.websites : [""]).map((value) => ({
+      id: crypto.randomUUID(),
+      value,
+    })),
+  );
   const [expires, setExpires] = useState(toDateInput(item?.expiresAt ?? null));
   const [drafts, setDrafts] = useState<Draft[]>(() => (item ? fromItem(item) : template(type)));
   const [errors, setErrors] = useState<Errors>({ fields: {} });
@@ -259,7 +265,7 @@ export function ItemEditorPage({
     const fields = drafts
       .map(fieldInput)
       .filter((input): input is VaultFieldInput => input !== null);
-    const cleanWebsites = websites.map((site) => site.trim()).filter(Boolean);
+    const cleanWebsites = websites.map((site) => site.value.trim()).filter(Boolean);
     const expiresAt = expires ? new Date(`${expires}T00:00:00Z`).toISOString() : null;
     try {
       if (item) {
@@ -539,13 +545,15 @@ export function ItemEditorPage({
           <Field label={websites.length > 1 ? "Websites" : "Website"} optional>
             <div className="flex min-w-0 flex-col gap-2">
               {websites.map((site, index) => (
-                <div key={index} className="flex min-w-0 items-center gap-2">
+                <div key={site.id} className="flex min-w-0 items-center gap-2">
                   <TextInput
-                    value={site}
+                    value={site.value}
                     aria-label={`Website ${index + 1}`}
                     onChange={(event) =>
                       setWebsites((current) =>
-                        current.map((each, at) => (at === index ? event.target.value : each)),
+                        current.map((each) =>
+                          each.id === site.id ? { ...each, value: event.target.value } : each,
+                        ),
                       )
                     }
                     placeholder="github.com"
@@ -560,7 +568,7 @@ export function ItemEditorPage({
                       size="icon-sm"
                       aria-label={`Remove website ${index + 1}`}
                       onClick={() =>
-                        setWebsites((current) => current.filter((_, at) => at !== index))
+                        setWebsites((current) => current.filter((each) => each.id !== site.id))
                       }
                       className={cn("text-fg-muted hover:text-danger", HIT_AREA)}
                     >
@@ -575,7 +583,9 @@ export function ItemEditorPage({
                   variant="ghost"
                   size="sm"
                   className="-ml-2.5 self-start text-fg-muted hover:text-fg pointer-coarse:h-11"
-                  onClick={() => setWebsites((current) => [...current, ""])}
+                  onClick={() =>
+                    setWebsites((current) => [...current, { id: crypto.randomUUID(), value: "" }])
+                  }
                 >
                   <PlusIcon aria-hidden="true" />
                   Add website

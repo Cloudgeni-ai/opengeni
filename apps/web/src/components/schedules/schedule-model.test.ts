@@ -175,9 +175,10 @@ describe("schedule requests", () => {
     expect(updateRequestFromDraft(task(), initial, widened, { now: NOW }).vaultPolicy).toEqual({
       mode: "all",
     });
-    expect(
-      updateRequestFromDraft(task(), base(), initial, { now: NOW }).vaultPolicy,
-    ).toEqual({ mode: "selected", vaultIds });
+    expect(updateRequestFromDraft(task(), base(), initial, { now: NOW }).vaultPolicy).toEqual({
+      mode: "selected",
+      vaultIds,
+    });
   });
 
   test("a new schedule is shared by default and sends Only me only when chosen", () => {

@@ -118,7 +118,7 @@ export function VaultPage({
   const [type, setType] = useState<"all" | VaultItemType>("all");
   const [syncing, setSyncing] = useState(false);
   const words = useMemo(() => query.trim().toLowerCase().split(/\s+/u).filter(Boolean), [query]);
-  const all = items ?? [];
+  const all = useMemo(() => items ?? [], [items]);
   const typesPresent = useMemo(() => new Set(all.map((item) => item.type)), [all]);
   const visible = useMemo(
     () => all.filter((item) => (type === "all" || item.type === type) && matches(item, words)),

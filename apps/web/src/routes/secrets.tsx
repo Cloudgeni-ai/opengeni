@@ -9,7 +9,6 @@ import {
   useVaultItem,
   useVaultItems,
   useVaults,
-  type VaultItemType,
   type VaultSummary,
   type VaultsApi,
 } from "@opengeni/react";
@@ -141,10 +140,10 @@ export function SecretsRoute({
     [navigate, workspaceId],
   );
   const openItem = useCallback(
-    (vault: string, item: string, search: { view?: SecretsItemView } = {}) =>
+    (inVaultId: string, targetItemId: string, search: { view?: SecretsItemView } = {}) =>
       void navigate({
         to: "/workspaces/$workspaceId/secrets/$vaultId/$itemId",
-        params: { workspaceId, vaultId: vault, itemId: item },
+        params: { workspaceId, vaultId: inVaultId, itemId: targetItemId },
         search,
       }),
     [navigate, workspaceId],
