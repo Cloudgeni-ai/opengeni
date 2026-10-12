@@ -347,20 +347,22 @@ describe("migration ordinal helpers", () => {
 
   test("exhausts three-name head, protected-base and custom-base allocations", () => {
     const names = [name("0730_a.sql"), name("0730_b.sql"), name("0730_z.sql")];
-    const subsets = Array.from({ length: 8 }, (_, mask) => names.filter((_, i) => mask & (1 << i)));
+    const subsets = Array.from({ length: 8 }, (_value, mask) =>
+      names.filter((_entry, i) => mask & (1 << i)),
+    );
     for (const head of subsets)
       for (const main of subsets)
         for (const production of subsets) {
           for (const custom of subsets) {
             const contains = (whole: typeof names, part: typeof names) =>
-              part.every((name) => whole.includes(name));
+              part.every((migration) => whole.includes(migration));
             const witnessed = (group: typeof names) =>
               contains(main, group) || contains(production, group);
             const expectedDuplicate = head.length > 1 && !witnessed(head);
             const expectedCollision = [main, production, custom].some(
               (base) =>
                 base.length > 0 &&
-                head.some((name) => !base.includes(name)) &&
+                head.some((migration) => !base.includes(migration)) &&
                 !witnessed([...head, ...base]),
             );
             const result = findProtectedOrdinalCollisions(head, [
