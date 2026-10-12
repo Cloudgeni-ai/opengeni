@@ -140,11 +140,13 @@ export class NativeBrokerDriver {
 
   /** A new reservation may be dispatched once. Re-entering a known request
    * inspects its durable phase without silently repeating a provider write. */
-  async send(request: NativeBrokerRequest, signal?: AbortSignal) {
+  async send(request: NativeBrokerRequest, signal?: AbortSignal, expectedEpoch?: number) {
     return this.exclusive(async () => {
       signal?.throwIfAborted();
       await this.identity();
       const writer = await this.journal.claimWriter(this.writerId);
+      if (expectedEpoch !== undefined && writer.epoch !== expectedEpoch)
+        throw new Error("Native broker launch writer epoch changed before reservation");
       const reserved = await this.journal.reserve(this.writerId, writer.epoch, request);
       const old = await this.journal.request(request.requestId);
       if (!old) throw new Error("Native broker reserved request is absent");

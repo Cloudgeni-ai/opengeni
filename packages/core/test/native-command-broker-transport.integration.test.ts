@@ -29,6 +29,9 @@ import {
 import {
   initialNativeBrokerTransportState,
   NativeBrokerDriver,
+  NativeBrokerCoordinator,
+  NativeBrokerReconciliationRequiredError,
+  startNativeBrokerCommand,
   NativeBrokerDispatchUnknownError,
   type NativeBrokerChannel,
   readNativeBrokerBootstrap,
@@ -53,6 +56,11 @@ import {
   NativeBrokerFrameDecoder,
 } from "../../runtime/src/sandbox/providers/native-command-broker-wire";
 import type { NativeBrokerOutputPage } from "../../runtime/src/sandbox/providers/native-command-broker-output";
+import {
+  withCommandSupervisionReady,
+  withProviderCommandHandle,
+  withSupervisedLaunchReservation,
+} from "../../runtime/src/sandbox/provider-command-session";
 
 let database: SharedTestDatabase, client: DbClient;
 const key = randomBytes(32);
@@ -570,7 +578,7 @@ test("a diagnostic fault does not block exact cancel, status, replay, ACK or wri
     await f.service().recordDiagnosticFault(diagnosticFault(f));
     const request = {
       ...fence(),
-      commandId: crypto.randomUUID(),
+      commandId: selected.kind === "control" ? crypto.randomUUID() : null,
       ...selected,
     };
     expect(await f.service().claimWriter(active.writerId)).toMatchObject({ epoch: 1 });
@@ -676,6 +684,307 @@ test("uncertain diagnostic reads remain unavailable without inventing a permanen
       })
     ).status,
   ).toBe("clean_observation");
+});
+
+async function coordinatedFixture() {
+  const f = await fixture();
+  const writerId = crypto.randomUUID();
+  const pages: NativeBrokerOutputPage[] = [];
+  const wake = new Set<() => void>();
+  const readStarted = new Set<() => void>();
+  const writes: Array<{ index: number; requestId: string }> = [];
+  let sequence = 0,
+    activeReaders = 0,
+    maxReaders = 0,
+    failNext = false;
+  let beforeWrite: (() => Promise<void>) | undefined;
+  const channel: NativeBrokerChannel = {
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    async write(input) {
+      const decoder = new NativeBrokerFrameDecoder(f.binding.brokerId);
+      const [request] = decoder.push(input.input);
+      decoder.finish();
+      if (!request || request.direction !== "request") throw new Error("Fixture request missing");
+      writes.push({ index: input.index, requestId: request.requestId });
+      const block = beforeWrite;
+      beforeWrite = undefined;
+      await block?.();
+      if (failNext) {
+        failNext = false;
+        throw new Error("fixture ambiguous provider write");
+      }
+      const response = (kind: "accepted" | "status", payload: Uint8Array, offset: number) =>
+        encodeNativeBrokerFrame({
+          ...request,
+          direction: "response",
+          kind,
+          sequence: ++sequence,
+          payload,
+          offset,
+        });
+      const bytes = Buffer.concat([
+        response("accepted", new Uint8Array(), input.index),
+        ...(request.kind === "ack" ? [] : [response("status", Buffer.from('{"fixture":true}'), 0)]),
+      ]);
+      pages.push(page(f, bytes.toString(), `${pages.length + 1}-0`));
+      for (const notify of wake) notify();
+    },
+    async *output(cursor, signal) {
+      activeReaders++;
+      maxReaders = Math.max(maxReaders, activeReaders);
+      for (const resolve of readStarted) resolve();
+      readStarted.clear();
+      try {
+        let offset = Number(cursor.split("-")[0]);
+        for (;;) {
+          signal?.throwIfAborted();
+          if (offset < pages.length) {
+            yield pages[offset++]!;
+            continue;
+          }
+          await new Promise<void>((resolve, reject) => {
+            const clean = () => {
+              wake.delete(notify);
+              signal?.removeEventListener("abort", abort);
+            };
+            const notify = () => {
+              clean();
+              resolve();
+            };
+            const abort = () => {
+              clean();
+              reject(signal!.reason);
+            };
+            wake.add(notify);
+            signal?.addEventListener("abort", abort, { once: true });
+          });
+        }
+      } finally {
+        activeReaders--;
+      }
+    },
+  };
+  return {
+    f,
+    writerId,
+    channel,
+    writes,
+    coordinator: new NativeBrokerCoordinator(f.service(), channel, writerId),
+    counters: () => ({ activeReaders, maxReaders }),
+    failNext: () => {
+      failNext = true;
+    },
+    blockNext: (block: () => Promise<void>) => {
+      beforeWrite = block;
+    },
+    nextReader: () => new Promise<void>((resolve) => readStarted.add(resolve)),
+  };
+}
+
+test("shared coordination serializes native acceptance, preserves request bytes and uses one output collector", async () => {
+  const f = await coordinatedFixture();
+  const first = {
+    ...fence(),
+    kind: "prepare" as const,
+    commandId: crypto.randomUUID(),
+    payload: Buffer.from("original"),
+  };
+  const second = { ...first, requestId: crypto.randomUUID(), payload: Buffer.from("second") };
+  try {
+    const a = f.coordinator.send(first),
+      b = f.coordinator.send(second);
+    first.payload.fill(0);
+    expect(await Promise.all([a, b])).toEqual([
+      { state: "accepted", index: 2 },
+      { state: "accepted", index: 3 },
+    ]);
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2, 3]);
+    expect(
+      Buffer.from((await f.f.service().request(first.requestId))!.frame.payload).toString(),
+    ).toBe("original");
+    expect(
+      JSON.parse(Buffer.from((await f.coordinator.reply(second.requestId)).payload).toString()),
+    ).toEqual({ fixture: true });
+    expect(f.counters().maxReaders).toBe(1);
+    const before = f.writes.length;
+    await expect(f.coordinator.send(second)).resolves.toMatchObject({ state: "accepted" });
+    expect(f.writes).toHaveLength(before);
+  } finally {
+    await f.coordinator.close();
+  }
+  expect(f.counters().activeReaders).toBe(0);
+  await expect(f.coordinator.claimWriter()).rejects.toThrow("closed");
+});
+
+test("one cancelled output waiter does not cancel a sibling or duplicate provider collectors", async () => {
+  const f = await coordinatedFixture();
+  try {
+    await f.coordinator.claimWriter();
+    const sequence = (await f.f.service().read()).output.lastSequence;
+    const cancelled = new AbortController();
+    const a = f.coordinator.observeAfter(sequence, cancelled.signal);
+    const b = f.coordinator.observeAfter(sequence, AbortSignal.timeout(5_000));
+    const rejected = a.then(
+      () => {
+        throw new Error("Cancelled observer unexpectedly succeeded");
+      },
+      (error: unknown) => error,
+    );
+    cancelled.abort(new Error("only first reader"));
+    expect(await rejected).toMatchObject({ message: "only first reader" });
+    await f.coordinator.send({ ...fence(), kind: "prepare", commandId: crypto.randomUUID() });
+    expect((await b).lastSequence).toBeGreaterThan(sequence);
+    expect(f.counters().maxReaders).toBe(1);
+  } finally {
+    await f.coordinator.close();
+  }
+  expect(f.counters().activeReaders).toBe(0);
+});
+
+test("coordinator never replays uncertain input and joins only explicit same-index recovery", async () => {
+  const f = await coordinatedFixture();
+  const request = { ...fence(), kind: "prepare" as const, commandId: crypto.randomUUID() };
+  try {
+    await f.coordinator.claimWriter();
+    f.failNext();
+    await expect(f.coordinator.send(request)).rejects.toBeInstanceOf(
+      NativeBrokerDispatchUnknownError,
+    );
+    const before = await f.f.service().read();
+    const cancelled = new AbortController();
+    const reading = f.nextReader();
+    const waiting = f.coordinator.send(request, cancelled.signal).then(
+      () => {
+        throw new Error("Unknown request unexpectedly settled");
+      },
+      (error: unknown) => error,
+    );
+    await reading;
+    cancelled.abort(new Error("Bounded reconciliation observation ended"));
+    expect(await waiting).toBeInstanceOf(NativeBrokerReconciliationRequiredError);
+    expect(f.writes).toHaveLength(2);
+    expect((await f.f.service().read()).input).toEqual(before.input);
+    // This is a separately invoked, explicit recovery; the coordinator itself
+    // has no automatic replay path and must not increment the provider index.
+    await new NativeBrokerDriver(f.f.service(), f.channel, f.writerId).replayPending();
+    await f.coordinator.observeAfter(before.output.lastSequence, AbortSignal.timeout(5_000));
+    expect(await f.coordinator.send(request)).toEqual({ state: "accepted", index: 2 });
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2, 2]);
+  } finally {
+    await f.coordinator.close();
+  }
+});
+
+test("coordinator dispatches the original reserved body once and refuses a mismatched launch epoch", async () => {
+  const f = await coordinatedFixture();
+  const request = { ...fence(), kind: "launch" as const, commandId: crypto.randomUUID() };
+  try {
+    await f.coordinator.claimWriter();
+    await expect(f.coordinator.send(request, undefined, 2)).rejects.toThrow("epoch changed");
+    expect(await f.f.service().request(request.requestId)).toBeNull();
+    await f.f.service().reserve(f.writerId, 1, request);
+    expect(await f.coordinator.send(request, undefined, 1)).toEqual({
+      state: "accepted",
+      index: 2,
+    });
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2]);
+  } finally {
+    await f.coordinator.close();
+  }
+});
+
+test("cancelled queued input cannot let its successor overtake the original dispatch", async () => {
+  const f = await coordinatedFixture();
+  let unblock!: () => void, reached!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  try {
+    await f.coordinator.claimWriter();
+    f.blockNext(async () => {
+      reached();
+      await blocked;
+    });
+    const request = () => ({
+      ...fence(),
+      commandId: crypto.randomUUID(),
+      kind: "prepare" as const,
+    });
+    const first = f.coordinator.send(request());
+    await entered;
+    const cancel = new AbortController();
+    const second = f.coordinator.send(request(), cancel.signal).catch((error: unknown) => error);
+    const lastRequest = request();
+    const third = f.coordinator.send(lastRequest);
+    cancel.abort(new Error("cancelled queue slot"));
+    expect(await second).toMatchObject({ message: "cancelled queue slot" });
+    expect(
+      await Promise.race([third.then(() => "overtook"), Bun.sleep(30).then(() => "blocked")]),
+    ).toBe("blocked");
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2]);
+    unblock();
+    await first;
+    await third;
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2, 3]);
+    expect(f.writes.at(-1)!.requestId).toBe(lastRequest.requestId);
+  } finally {
+    unblock();
+    await f.coordinator.close();
+  }
+});
+
+test("output retirement acknowledges only a committed prefix and has no automatic ACK feedback loop", async () => {
+  const f = await coordinatedFixture();
+  try {
+    await f.coordinator.claimWriter();
+    const before = await f.f.service().read();
+    for (const invalid of [
+      { offset: before.output.lastSequence + 1 },
+      { payload: Buffer.from("not an empty ACK") },
+      { commandId: crypto.randomUUID() },
+    ]) {
+      const request = {
+        ...fence(),
+        kind: "ack" as const,
+        offset: before.output.lastSequence,
+        ...invalid,
+      };
+      await expect(f.f.service().reserve(f.writerId, 1, request)).rejects.toThrow();
+      expect(await f.f.service().request(request.requestId)).toBeNull();
+    }
+    expect((await f.f.service().read()).input).toEqual(before.input);
+    const receipt = await f.coordinator.acknowledgeOutput();
+    const original = await f.f.service().request(receipt.requestId);
+    expect(original).toMatchObject({
+      accepted: true,
+      frame: {
+        kind: "ack",
+        commandId: null,
+        ownerEpoch: 1,
+        offset: before.output.lastSequence,
+      },
+    });
+    expect(original!.frame.payload).toHaveLength(0);
+    expect(receipt.sequence).toBe(before.output.lastSequence);
+    expect((await f.f.service().read()).output.lastSequence).toBe(before.output.lastSequence + 1);
+    expect(f.writes).toHaveLength(2);
+    // Retiring the provider's window does not delete the durable frames.
+    expect((await f.f.service().framesAfter(0, 128)).frames).toHaveLength(
+      before.output.lastSequence + 1,
+    );
+    f.failNext();
+    await expect(f.coordinator.acknowledgeOutput()).rejects.toBeInstanceOf(
+      NativeBrokerDispatchUnknownError,
+    );
+    expect((await f.f.service().read()).input.pending?.phase).toBe("dispatch_intent");
+    expect(f.writes).toHaveLength(3);
+  } finally {
+    await f.coordinator.close();
+  }
 });
 
 test("initial entry insertion failure rolls back the transport and every receipt", async () => {
@@ -1871,7 +2180,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
           const chunk = await input.read();
           const text = chunk.done ? "" : Buffer.from(chunk.value).toString("ascii");
           bytes += text.length;
-          if (bytes > 2 * 1024 * 1024) throw new Error("Native fixture output exceeds bound");
+          if (bytes > 16 * 1024 * 1024) throw new Error("Native fixture output exceeds bound");
           pages.push({ ...page(f, text, `${pages.length + 1}-0`), eof: chunk.done });
           wake();
           if (chunk.done) break;
@@ -1957,11 +2266,14 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     };
     let writerId = crypto.randomUUID();
     let driver: NativeBrokerDriver;
-    const frames = async () => (await f.service().framesAfter(0, 128)).frames;
+    let coordinator: NativeBrokerCoordinator | undefined;
+    const frames = async (after = 0) => (await f.service().framesAfter(after, 128)).frames;
     async function observeUntil(predicate: () => Promise<boolean>) {
       for (let attempt = 0; attempt < 128; attempt++) {
+        const sequence = coordinator ? (await f.service().read()).output.lastSequence : 0;
         if (await predicate()) return;
-        await driver.observe(undefined, 1);
+        if (coordinator) await coordinator.observeAfter(sequence, AbortSignal.timeout(5_000));
+        else await driver.observe(undefined, 1);
       }
       throw new Error("Native fixture observation bound exceeded");
     }
@@ -1972,7 +2284,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       offset = 0,
       requestId = crypto.randomUUID(),
     ) {
-      await driver.send({ requestId, commandId, kind, payload, offset });
+      await (coordinator ?? driver).send({ requestId, commandId, kind, payload, offset });
       await observeUntil(async () => (await f.service().request(requestId))?.accepted === true);
       if (kind === "ack") return null;
       await observeUntil(async () =>
@@ -2166,48 +2478,108 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       expect((await custody.settle()).settled).toBe(true);
       expect((await getRetainedProcess(client.db, custody.scope))?.state).toBe("exited");
 
-      // A second real command exercises controller-owned release, durable
+      coordinator = new NativeBrokerCoordinator(f.service(), channel, writerId);
+      const startRetained = async (cmd: string, handle: number) => {
+        let commandCustody!: Awaited<ReturnType<typeof retainNativeFixture>>;
+        const command = await withProviderCommandHandle(handle, () =>
+          withCommandSupervisionReady(
+            true,
+            () =>
+              withSupervisedLaunchReservation(
+                {
+                  reserve: async (reservedCommand) => {
+                    commandCustody = await retainNativeFixture(
+                      f,
+                      ModalBrokerProviderCommand.parse(reservedCommand),
+                      handle,
+                    );
+                  },
+                },
+                () =>
+                  startNativeBrokerCommand(
+                    { journal: f.service(), coordinator: coordinator! },
+                    { cmd },
+                    { root: directory, environment: { PATH: "/usr/bin:/bin" } },
+                  ),
+              ),
+            "native-subreaper-broker-channel-v1",
+          ),
+        );
+        return { command, custody: commandCustody };
+      };
+
+      // More than the actual 4 MiB native output window. Every provider ACK
+      // follows durable journal capture; the complete canonical command output
+      // remains available and is independently hashed before settlement.
+      const bulkBytes = 6 * 1024 * 1024;
+      const bulk = await startRetained(`yes x | head -c ${bulkBytes}`, 2);
+      const bulkControl = new NativeBrokerRetainedCommand(
+        bulk.command,
+        bulk.custody.persistence,
+        f.service(),
+        coordinator,
+      );
+      await bulkControl.release();
+      let collected = 0,
+        bulkExit: number | null = null,
+        acknowledgements = 0;
+      const bulkHash = createHash("sha256");
+      for (let attempt = 0; attempt < 512; attempt++) {
+        const view = await bulkControl.capture(64);
+        let progress = false;
+        for (const chunk of view.chunks) {
+          expect(chunk.stream).toBe("stdout");
+          bulkHash.update(chunk.text);
+          collected += Buffer.byteLength(chunk.text);
+          progress ||= chunk.text.length > 0;
+        }
+        if (progress) {
+          await coordinator.acknowledgeOutput();
+          acknowledgements++;
+        }
+        bulkExit = view.exitCode;
+        if (bulkExit !== null) break;
+        if (view.hasMore) continue;
+        const sequence = (await f.service().read()).output.lastSequence;
+        await bulkControl.status();
+        await coordinator.observeAfter(sequence, AbortSignal.timeout(5_000));
+      }
+      expect(bulkExit).toBe(0);
+      expect(collected).toBe(bulkBytes);
+      expect(bulkHash.digest("hex")).toBe(
+        createHash("sha256")
+          .update("x\n".repeat(bulkBytes / 2))
+          .digest("hex"),
+      );
+      expect(acknowledgements).toBeGreaterThan(1);
+      expect((await bulk.custody.settle()).settled).toBe(true);
+
+      // A third real command exercises controller-owned release, durable
       // cancellation, repeated status and receipt ACK through a fresh object.
       // This local seeded fixture is not the remote 2s/35s release canary.
-      const cancelId = crypto.randomUUID(),
-        cancelLaunchId = crypto.randomUUID();
-      const cancelLocator = ModalBrokerProviderCommand.parse({
-        ...retained,
-        execId: cancelId,
-        supervision: {
-          ...retained.supervision,
-          invocationId: cancelId,
-          launchRequestId: cancelLaunchId,
-          launchEpoch: 2,
-        },
-        capture: {
-          sequence: (await f.service().read()).output.lastSequence,
-          receiptAckObserved: false,
-        },
-      });
-      const cancellationCustody = await retainNativeFixture(f, cancelLocator, 2);
-      const cancelDefinition = encodeNativeBrokerCommandDefinition({
-        mode: "pipe",
-        cwd: directory,
-        argv: ["/bin/sh", "-c", "trap '' TERM; printf ready; while :; do sleep 1; done"],
-        env: [["PATH", "/usr/bin:/bin"]],
-        rows: 0,
-        columns: 0,
-      });
-      const cancelSize = Buffer.alloc(4);
-      cancelSize.writeUInt32BE(cancelDefinition.length);
-      await request("prepare", cancelId, cancelSize);
-      await request("definition", cancelId, cancelDefinition);
-      await request("launch", cancelId, new Uint8Array(), 0, cancelLaunchId);
+      const { command: cancelLocator, custody: cancellationCustody } = await startRetained(
+        "trap '' TERM; printf ready; while :; do sleep 1; done",
+        3,
+      );
+      const cancelId = cancelLocator.execId;
+      expect(cancelLocator.supervision.launchEpoch).toBe(2);
+      expect(await cancellationCustody.persistence.load()).toEqual(cancelLocator);
+      expect(
+        (await frames(cancelLocator.capture.sequence)).some(
+          (frame) => frame.commandId === cancelId && frame.kind === "stdout",
+        ),
+      ).toBe(false);
       const cancellation = new NativeBrokerRetainedCommand(
         cancelLocator,
         cancellationCustody.persistence,
         f.service(),
-        driver,
+        coordinator,
       );
       await cancellation.release();
       await observeUntil(async () =>
-        (await frames()).some((frame) => frame.commandId === cancelId && frame.kind === "stdout"),
+        (await frames(cancelLocator.capture.sequence)).some(
+          (frame) => frame.commandId === cancelId && frame.kind === "stdout",
+        ),
       );
       await cancellation.capture(128);
       // Inject a definite host-observed fault after release. The real static
@@ -2225,17 +2597,18 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
           cancelLocator,
           cancellationCustody.persistence,
           f.service(),
-          driver,
+          coordinator,
         ).capture(128);
         cancelledExit = view.exitCode;
         if (cancelledExit !== null) break;
-        await cancellation.status();
         const sequence = (await f.service().read()).output.lastSequence;
+        await cancellation.status();
         await observeUntil(async () => (await f.service().read()).output.lastSequence > sequence);
       }
       expect(cancelledExit).toBe(137);
       expect((await cancellationCustody.settle(137)).settled).toBe(true);
     } finally {
+      await coordinator?.close();
       child.stdin.end();
       const stopped = await Promise.race([
         child.exited,

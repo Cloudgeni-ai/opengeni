@@ -221,6 +221,16 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
     tx.requireWriter(writerId, epoch);
     const state = validate(tx.state, identity);
     if (state.output.providerEof || state.input.writerEpoch !== epoch) invalid();
+    // The native broker knows what it emitted, not what this host committed.
+    // Never let any driver retire unretained output, even if its caller supplied
+    // a plausible sent sequence. The journal itself owns this prefix boundary.
+    if (
+      request.kind === "ack" &&
+      (request.commandId !== null ||
+        request.payload.length ||
+        request.offset > state.output.lastSequence)
+    )
+      invalid();
     const old = await tx.read("request", request.requestId);
     if (old) {
       const frame = requestFromWire(old.value, identity);

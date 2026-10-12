@@ -5,8 +5,8 @@ current increments provide bounded framing, a native bootstrap preflight,
 input/output custody state machines, encrypted atomic transport storage, a
 private inherited supervisor channel, strict command-definition codec, native
 initial-process command multiplexer, journal-backed host transport driver and
-canonical retained-command descriptor/output fences and a retained-command
-control bridge.
+canonical retained-command descriptor/output fences, a retained-command
+control bridge, shared host coordinator and pre-reserved idle-launch primitive.
 The native `broker` mode and host driver can launch fixture commands, but no
 application command-admission route selects this protocol.
 These increments do not change a production protocol tuple or qualify an
@@ -416,6 +416,38 @@ and complete artifact prefix, checks actual bytes against the independently
 selected pin, and returns no command authority. A later hello, partial artifact,
 provider EOF or self-reported hash is not an authenticated initial admission.
 
+`NativeBrokerCoordinator` owns one demand-driven output collector and serializes
+input only until actual native acceptance, never for a command's lifetime. A
+cancelled reader does not cancel sibling readers; a cancelled input queue slot
+cannot let its successor pass an earlier dispatch. Writer fences have stable
+epoch-bound identities. Unknown input is observed, not automatically replayed,
+and a five-second acceptance/reply observation bound never settles a command.
+Explicit recovery remains the driver's separately invoked exact-index operation.
+Closing the coordinator ends its host observers, not the physical sandbox or
+initial stdin.
+
+Its explicit `acknowledgeOutput` retires only a committed journal prefix. The
+transport also enforces that boundary for direct driver callers; neither a
+provider's sent sequence nor a caller-supplied offset permits dropping uncaptured
+bytes. The application collector must invoke it after useful progress, not
+recursively for ACK-only replies. This global output-window ACK does not erase
+journal frames or replace a command's native receipt ACK. The local real-native
+fixture preserves and hashes a six-MiB command output across the four-MiB native
+window, then verifies canonical receipt/output/exit settlement.
+
+`startNativeBrokerCommand` requires the exact private broker protocol, canonical
+provider handle and durable reservation callback. It freezes the literal
+definition, verifies the fenced writer and commits the original command locator
+before any prepare, definition or launch input. Definitions are chunked at the
+wire bound; each operation requires its exact accepted native reply. The final
+supervisor remains idle until the retained controller's separate release. A
+partial or uncertain start keeps its original identity and never allocates a
+replacement. The private ready-context union does not widen the router's public
+descriptor: the task-router adapter explicitly refuses broker-only admission.
+These primitives still require application selection and complete lifecycle
+wiring. In particular, positive native never-started cancellation needs its own
+canonical settlement bridge; retaining an uncertain locator is not that proof.
+
 `native-command-broker-command.ts` projects each command from committed frames.
 It joins control evidence to the exact accepted immutable request and ties data,
 stream EOF and independent supervisor exit to the original launch epoch/request.
@@ -493,8 +525,9 @@ and exact stored bytes; cancellation/settlement closes new reservations without
 erasing an already committed operation. This permits reconciliation of its
 original outcome, not a new stdin authorization. The path currently accepts one
 native-frame-bounded payload per admission; a future application adapter must
-not silently split larger input into fresh admissions or truncate it. Shared
-channel scheduling and the provider command-session adapter remain unimplemented gates.
+not silently split larger input into fresh admissions or truncate it. The shared
+coordinator provides input scheduling and demand-driven observation; wiring the
+provider command-session adapter remains an unimplemented gate.
 
 Rolling migration `0748` adds immutable `request_reply` and
 `stdin_reservation` indexes. Native status/error replies commit with their

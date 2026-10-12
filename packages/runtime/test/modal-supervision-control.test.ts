@@ -109,6 +109,20 @@ test("admitted protocol must match native command shape; unsupported calls remai
   expect(f.starts).toHaveLength(2);
 });
 
+test("router refuses broker-only admission instead of selecting its mutable-path launcher", async () => {
+  const f = fixture();
+  for (const protocol of [
+    "native-subreaper-broker-channel-v1",
+    "native-subreaper-broker-channel-pty-v1",
+  ] as const) {
+    await expect(withReady(true, () => f.control.start({ cmd: "work" }), protocol)).rejects.toThrow(
+      "Task router cannot start",
+    );
+  }
+  expect(f.starts).toHaveLength(0);
+  expect(f.reads).toHaveLength(0);
+});
+
 test("qualified PTY launch and control use distinct protocol and preserve provider PTY", async () => {
   const f = fixture();
   const command = await withSupervisedLaunchReservation({ reserve: async () => {} }, () =>

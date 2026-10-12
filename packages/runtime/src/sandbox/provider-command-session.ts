@@ -5,6 +5,7 @@ import type {
   ModalBrokerProviderCommand,
   CommandSupervisionReceipt,
   CommandSupervisionProtocol,
+  NativeBrokerCommandProtocol,
 } from "@opengeni/contracts";
 
 export type ProviderCommandOutput = {
@@ -54,7 +55,7 @@ export class ProviderCommandStartRejectedError extends Error {
  * The client-chosen locator is reconciliation authority, never replay authority. */
 export class ProviderCommandStartOutcomeUnknownError extends Error {
   constructor(
-    readonly command: ModalRouterProviderCommand,
+    readonly command: ModalRouterProviderCommand | ModalBrokerProviderCommand,
     cause: unknown,
   ) {
     super("Provider command Start outcome is unknown; the invocation was not replayed", { cause });
@@ -224,7 +225,12 @@ export function markPendingCommandSupervised(): void {
     state.settlePreparation?.();
   }
 }
-const supervisionReady = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
+/** Private admission context spans distinct protocols; this does not widen the
+ * router's public descriptor, path schema or qualification contract. */
+export type AdmittedCommandSupervisionProtocol =
+  | CommandSupervisionProtocol
+  | NativeBrokerCommandProtocol;
+const supervisionReady = new AsyncLocalStorage<AdmittedCommandSupervisionProtocol | undefined>();
 const requiredSupervision = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
 const turnCommandSupervision = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
 /** Shape of a trusted turn command, not an enrollment or model-supplied
@@ -250,7 +256,7 @@ export function requiredCommandSupervisionProtocol(): CommandSupervisionProtocol
   return requiredSupervision.getStore();
 }
 type SupervisedLaunchReservation = {
-  reserve(command: ModalRouterProviderCommand): Promise<void>;
+  reserve(command: ModalRouterProviderCommand | ModalBrokerProviderCommand): Promise<void>;
 };
 const supervisedLaunch = new AsyncLocalStorage<SupervisedLaunchReservation>();
 export function withSupervisedLaunchReservation<T>(
@@ -259,22 +265,29 @@ export function withSupervisedLaunchReservation<T>(
 ): T {
   return supervisedLaunch.run(reservation, fn);
 }
-export async function reserveSupervisedLaunch(command: ModalRouterProviderCommand): Promise<void> {
+export function requireSupervisedLaunchReservation(): SupervisedLaunchReservation {
   const reservation = supervisedLaunch.getStore();
   if (!reservation) throw new Error("Supervised launch requires durable pre-dispatch reservation");
-  await reservation.reserve(command);
+  return reservation;
+}
+export async function reserveSupervisedLaunch(
+  command: ModalRouterProviderCommand | ModalBrokerProviderCommand,
+): Promise<void> {
+  await requireSupervisedLaunchReservation().reserve(command);
 }
 export function withCommandSupervisionReady<T>(
   ready: boolean,
   fn: () => T,
-  protocol: CommandSupervisionProtocol = "native-subreaper-v1",
+  protocol: AdmittedCommandSupervisionProtocol = "native-subreaper-v1",
 ): T {
   return supervisionReady.run(ready ? protocol : undefined, fn);
 }
 export function admittedCommandSupervisionReady(): boolean {
   return supervisionReady.getStore() !== undefined;
 }
-export function admittedCommandSupervisionProtocol(): CommandSupervisionProtocol | undefined {
+export function admittedCommandSupervisionProtocol():
+  | AdmittedCommandSupervisionProtocol
+  | undefined {
   return supervisionReady.getStore();
 }
 export const MAX_PROVIDER_COMMAND_HANDLE = 2147483647;

@@ -17,6 +17,11 @@ export {
   NativeBrokerDispatchUnknownError,
 } from "./providers/native-command-broker-driver";
 export { NativeBrokerRetainedCommand } from "./providers/native-command-broker-retained-command";
+export { startNativeBrokerCommand } from "./providers/native-command-broker-start";
+export {
+  NativeBrokerCoordinator,
+  NativeBrokerReconciliationRequiredError,
+} from "./providers/native-command-broker-coordinator";
 export type { NativeBrokerChannel } from "./providers/native-command-broker-driver";
 export { ModalNativeBrokerChannel } from "./providers/modal-native-broker-channel";
 export {

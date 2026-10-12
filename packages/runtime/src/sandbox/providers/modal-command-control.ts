@@ -243,6 +243,8 @@ export class ModalCommandControl {
   async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalRouterProviderCommand> {
     signal?.throwIfAborted();
     const protocol = admittedCommandSupervisionProtocol();
+    if (protocol && protocol !== "native-subreaper-v1" && protocol !== "native-subreaper-pty-v1")
+      throw new Error("Task router cannot start an admitted initial-process broker command");
     const supervised =
       Boolean(protocol) &&
       !args.runAs &&

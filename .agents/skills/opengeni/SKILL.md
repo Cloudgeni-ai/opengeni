@@ -109,6 +109,14 @@ Then open the smallest source files that answer the question:
   new work without clearing uncertain input or blocking exact cancellation and
   output retirement. A completed empty query is not durable health or command
   authority; live application observation and provider qualification remain open.
+  `native-command-broker-coordinator.ts` shares one demand-driven output reader,
+  serializes input through native acceptance and never silently replays uncertain
+  dispatch. Explicit global output ACK retires only the committed transport
+  prefix, not canonical command custody. `native-command-broker-start.ts`
+  requires private protocol/handle context and durable reservation before an
+  idle native launch. Partial starts preserve their original locator. These
+  primitives do not activate application routing or solve prelaunch-cancellation
+  settlement; the task router rejects broker-only admission.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse

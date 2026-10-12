@@ -78,6 +78,14 @@ retirement. Clean queries cannot erase that fault. Query failure alone is
 unavailability, not a fabricated permanent fault; neither clean observations nor
 bootstrap registration grants command authority. Ongoing application lifecycle
 observation and provider qualification remain separate, incomplete gates.
+`native-command-broker-coordinator.ts` shares one demand-driven collector and
+serializes input through native acceptance. It never automatically replays an
+unknown dispatch. Explicit global output ACK is limited to the committed prefix
+by the transport itself and is not command settlement. The idle-start primitive
+in `native-command-broker-start.ts` requires private exact-protocol context and a
+committed canonical reservation before prepare/definition/launch. Application
+selection, prelaunch cancellation settlement and setup ownership remain open;
+the router refuses broker-only admission rather than using its older launcher.
 `retained-provider-commands.ts` atomically captures the versioned broker locator
 and session output under the canonical native receipt/holder/settlement guards;
 the task-router adapter explicitly refuses that separate locator.
