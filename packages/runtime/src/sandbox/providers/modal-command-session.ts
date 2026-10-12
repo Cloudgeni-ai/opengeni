@@ -83,6 +83,8 @@ export function installModalCommandSession(
     };
   }
   session.verifyCommandSupervisionCapability = async (protocol) => {
+    if (protocol && protocol !== "native-subreaper-v1" && protocol !== "native-subreaper-pty-v1")
+      throw new Error("Task-router session cannot qualify an initial-process broker protocol");
     if (!control.verifySupervisionCapability)
       throw new Error("Modal instance lacks supervised command capability verification");
     return await control.verifySupervisionCapability(protocol);

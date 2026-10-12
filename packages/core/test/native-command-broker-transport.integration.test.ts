@@ -30,8 +30,8 @@ import {
   initialNativeBrokerTransportState,
   NativeBrokerDriver,
   NativeBrokerCoordinator,
+  NativeBrokerCommandSession,
   NativeBrokerReconciliationRequiredError,
-  startNativeBrokerCommand,
   NativeBrokerDispatchUnknownError,
   type NativeBrokerChannel,
   readNativeBrokerBootstrap,
@@ -2267,6 +2267,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
     let writerId = crypto.randomUUID();
     let driver: NativeBrokerDriver;
     let coordinator: NativeBrokerCoordinator | undefined;
+    let brokerSession: NativeBrokerCommandSession | undefined;
     const frames = async (after = 0) => (await f.service().framesAfter(after, 128)).frames;
     async function observeUntil(predicate: () => Promise<boolean>) {
       for (let attempt = 0; attempt < 128; attempt++) {
@@ -2479,9 +2480,24 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       expect((await getRetainedProcess(client.db, custody.scope))?.state).toBe("exited");
 
       coordinator = new NativeBrokerCoordinator(f.service(), channel, writerId);
+      const sessionOptions = {
+        journal: f.service(),
+        coordinator,
+        root: directory,
+        environment: () => ({ PATH: "/usr/bin:/bin" }),
+        identity: {
+          sandboxId: f.binding.sandboxId,
+          taskId: f.binding.taskId,
+          brokerId: f.binding.brokerId,
+        },
+        // The isolated fixture seeds canonical qualification above. No caller
+        // should infer production admission from this test-only callback.
+        verify: async () => ({ sandboxId: f.binding.sandboxId, taskId: f.binding.taskId }),
+      };
+      brokerSession = new NativeBrokerCommandSession(sessionOptions);
       const startRetained = async (cmd: string, handle: number) => {
         let commandCustody!: Awaited<ReturnType<typeof retainNativeFixture>>;
-        const command = await withProviderCommandHandle(handle, () =>
+        const started = await withProviderCommandHandle(handle, () =>
           withCommandSupervisionReady(
             true,
             () =>
@@ -2493,39 +2509,53 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
                       ModalBrokerProviderCommand.parse(reservedCommand),
                       handle,
                     );
+                    brokerSession!.bindProviderCommand(
+                      handle,
+                      reservedCommand,
+                      commandCustody.persistence,
+                    );
                   },
                 },
-                () =>
-                  startNativeBrokerCommand(
-                    { journal: f.service(), coordinator: coordinator! },
-                    { cmd },
-                    { root: directory, environment: { PATH: "/usr/bin:/bin" } },
-                  ),
+                () => brokerSession!.execCommand({ cmd }),
               ),
             "native-subreaper-broker-channel-v1",
           ),
         );
+        const command = brokerSession!.getProviderCommand(handle)!;
+        expect(brokerSession!.getProviderCommandOutput(started)).toMatchObject({
+          exitCode: null,
+          chunks: [],
+        });
+        expect(await brokerSession!.captureCommandOutput(started)).toBe(true);
         return { command, custody: commandCustody };
       };
 
       // More than the actual 4 MiB native output window. Every provider ACK
-      // follows durable journal capture; the complete canonical command output
-      // remains available and is independently hashed before settlement.
+      // follows durable journal capture; complete output is independently
+      // hashed before canonical receipt/exit settlement.
       const bulkBytes = 6 * 1024 * 1024;
       const bulk = await startRetained(`yes x | head -c ${bulkBytes}`, 2);
-      const bulkControl = new NativeBrokerRetainedCommand(
-        bulk.command,
-        bulk.custody.persistence,
-        f.service(),
-        coordinator,
+      await brokerSession.releaseSupervisedCommand(2);
+      await observeUntil(async () =>
+        (await frames(bulk.command.capture.sequence)).some(
+          (frame) => frame.commandId === bulk.command.execId && frame.kind === "stdout",
+        ),
       );
-      await bulkControl.release();
+      uncertain = true; // Lose only the first global output ACK, after capture.
       let collected = 0,
         bulkExit: number | null = null,
-        acknowledgements = 0;
+        presentations = 0;
       const bulkHash = createHash("sha256");
       for (let attempt = 0; attempt < 512; attempt++) {
-        const view = await bulkControl.capture(64);
+        const result = await brokerSession.writeStdin({
+          sessionId: 2,
+          yieldTimeMs: 250,
+          maxOutputTokens: 100,
+        });
+        const view = brokerSession.getProviderCommandOutput(result)!;
+        expect(view).not.toBeNull();
+        expect(await bulk.custody.persistence.load()).toEqual(view.command);
+        expect(await brokerSession.captureCommandOutput(result)).toBe(true);
         let progress = false;
         for (const chunk of view.chunks) {
           expect(chunk.stream).toBe("stdout");
@@ -2534,15 +2564,20 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
           progress ||= chunk.text.length > 0;
         }
         if (progress) {
-          await coordinator.acknowledgeOutput();
-          acknowledgements++;
+          presentations++;
+        }
+        if (attempt === 0) {
+          const pending = (await f.service().read()).input.pending;
+          expect(pending?.phase).toBe("dispatch_intent");
+          const decoder = new NativeBrokerFrameDecoder(f.binding.brokerId);
+          expect(decoder.push(Buffer.from(pending!.frameBase64, "base64"))[0]!.kind).toBe("ack");
+          decoder.finish();
+          const sequence = (await f.service().read()).output.lastSequence;
+          await driver.replayPending(); // Explicit original-index recovery only.
+          await coordinator.observeAfter(sequence, AbortSignal.timeout(5_000));
         }
         bulkExit = view.exitCode;
         if (bulkExit !== null) break;
-        if (view.hasMore) continue;
-        const sequence = (await f.service().read()).output.lastSequence;
-        await bulkControl.status();
-        await coordinator.observeAfter(sequence, AbortSignal.timeout(5_000));
       }
       expect(bulkExit).toBe(0);
       expect(collected).toBe(bulkBytes);
@@ -2551,7 +2586,7 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
           .update("x\n".repeat(bulkBytes / 2))
           .digest("hex"),
       );
-      expect(acknowledgements).toBeGreaterThan(1);
+      expect(presentations).toBeGreaterThan(1);
       expect((await bulk.custody.settle()).settled).toBe(true);
 
       // A third real command exercises controller-owned release, durable
@@ -2569,45 +2604,41 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
           (frame) => frame.commandId === cancelId && frame.kind === "stdout",
         ),
       ).toBe(false);
-      const cancellation = new NativeBrokerRetainedCommand(
-        cancelLocator,
-        cancellationCustody.persistence,
-        f.service(),
-        coordinator,
-      );
-      await cancellation.release();
+      await brokerSession.releaseSupervisedCommand(3);
       await observeUntil(async () =>
         (await frames(cancelLocator.capture.sequence)).some(
           (frame) => frame.commandId === cancelId && frame.kind === "stdout",
         ),
       );
-      await cancellation.capture(128);
       // Inject a definite host-observed fault after release. The real static
       // broker must still accept cancellation and the receipt ACK; the fault
       // is not itself an exit receipt and must not cause early settlement.
       await f.service().recordDiagnosticFault(diagnosticFault(f));
       await expect(cancellationCustody.settle()).rejects.toThrow();
-      await cancellation.cancel("explicit_stop");
+      await brokerSession.cancelSupervisedCommand(3, "explicit_stop");
       expect(await cancellationCustody.persistence.cancellationRequested()).toBe(true);
       await observeUntil(async () => !(await f.service().read()).input.pending);
       let cancelledExit: number | null = null;
+      await brokerSession.close();
+      // New host object adopts only the exact canonical retained command.
+      brokerSession = new NativeBrokerCommandSession(sessionOptions);
+      brokerSession.bindProviderCommand(
+        3,
+        ModalBrokerProviderCommand.parse(await cancellationCustody.persistence.load()),
+        cancellationCustody.persistence,
+      );
       for (let attempt = 0; attempt < 64; attempt++) {
         await observeUntil(async () => !(await f.service().read()).input.pending);
-        const view = await new NativeBrokerRetainedCommand(
-          cancelLocator,
-          cancellationCustody.persistence,
-          f.service(),
-          coordinator,
-        ).capture(128);
+        const result = await brokerSession.writeStdin({ sessionId: 3, yieldTimeMs: 250 });
+        const view = brokerSession.getProviderCommandOutput(result)!;
+        expect(await brokerSession.captureCommandOutput(result)).toBe(true);
         cancelledExit = view.exitCode;
         if (cancelledExit !== null) break;
-        const sequence = (await f.service().read()).output.lastSequence;
-        await cancellation.status();
-        await observeUntil(async () => (await f.service().read()).output.lastSequence > sequence);
       }
       expect(cancelledExit).toBe(137);
       expect((await cancellationCustody.settle(137)).settled).toBe(true);
     } finally {
+      await brokerSession?.close();
       await coordinator?.close();
       child.stdin.end();
       const stopped = await Promise.race([

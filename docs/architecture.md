@@ -83,9 +83,13 @@ serializes input through native acceptance. It never automatically replays an
 unknown dispatch. Explicit global output ACK is limited to the committed prefix
 by the transport itself and is not command settlement. The idle-start primitive
 in `native-command-broker-start.ts` requires private exact-protocol context and a
-committed canonical reservation before prepare/definition/launch. Application
-selection, prelaunch cancellation settlement and setup ownership remain open;
-the router refuses broker-only admission rather than using its older launcher.
+committed canonical reservation before prepare/definition/launch.
+`NativeBrokerCommandSession` provides the distinct retained-handle/banner
+surface without a legacy fallback. It captures output before presentation,
+preserves pages when a global ACK becomes unknown, and keeps the shared physical
+coordinator alive when one session surface closes. Application selection,
+prelaunch cancellation settlement and setup ownership remain open; the router
+refuses broker-only admission rather than using its older launcher.
 `retained-provider-commands.ts` atomically captures the versioned broker locator
 and session output under the canonical native receipt/holder/settlement guards;
 the task-router adapter explicitly refuses that separate locator.

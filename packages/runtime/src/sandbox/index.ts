@@ -18,6 +18,7 @@ export {
 } from "./providers/native-command-broker-driver";
 export { NativeBrokerRetainedCommand } from "./providers/native-command-broker-retained-command";
 export { startNativeBrokerCommand } from "./providers/native-command-broker-start";
+export { NativeBrokerCommandSession } from "./providers/native-command-broker-session";
 export {
   NativeBrokerCoordinator,
   NativeBrokerReconciliationRequiredError,

@@ -6,7 +6,8 @@ input/output custody state machines, encrypted atomic transport storage, a
 private inherited supervisor channel, strict command-definition codec, native
 initial-process command multiplexer, journal-backed host transport driver and
 canonical retained-command descriptor/output fences, a retained-command
-control bridge, shared host coordinator and pre-reserved idle-launch primitive.
+control bridge, shared host coordinator, pre-reserved idle-launch primitive and
+dedicated broker command-session surface.
 The native `broker` mode and host driver can launch fixture commands, but no
 application command-admission route selects this protocol.
 These increments do not change a production protocol tuple or qualify an
@@ -481,8 +482,28 @@ remains unchanged; the encrypted transport journal is separate custody.
 
 These retention guards are not bootstrap authentication, cohort qualification or
 permission to launch. No application route selects broker execution yet. New
-creation/restore selection, release authority, the runtime command-session
-adapter and journal retirement remain separate integration requirements.
+creation/restore selection, release authority, command-session installation and
+journal retirement remain separate integration requirements.
+
+`NativeBrokerCommandSession` is the broker-only retained-handle/banner adapter.
+Its live verifier is supplied by the canonical owner; it cross-checks exact
+physical identities but does not mint qualification. It requires private
+protocol/handle context, returns an idle start receipt and releases only through
+protected retained control. A fresh object can bind the same canonical command;
+foreign task/broker IDs and handle rebinding are refused. There is no TaskExec,
+unretained setup, legacy input allocator or generic PID cancellation fallback.
+
+Output commits before presentation. An unknown global output ACK preserves the
+already committed page and original pending ACK identity; it does not silently
+replay input. Output replay from an ended initial process needs no new window
+ACK, but still needs the command's own complete terminal evidence. Presentation
+receipts are bounded host correlations, not durable output custody. Closing one
+session surface aborts only its observations and leaves the shared coordinator
+and physical commands owned by their existing lifecycle. Stdin requires its
+exact existing private child admission and currently rejects payloads beyond
+one native frame rather than silently splitting, truncating or reauthorizing.
+Application installation, larger-input framing, continuously owned diagnostics,
+prelaunch never-started settlement and setup-command ownership remain gates.
 
 `NativeBrokerRetainedCommand` bridges an already retained command to that
 canonical persistence. Each bounded read reconstructs its exact locator and
@@ -526,8 +547,9 @@ erasing an already committed operation. This permits reconciliation of its
 original outcome, not a new stdin authorization. The path currently accepts one
 native-frame-bounded payload per admission; a future application adapter must
 not silently split larger input into fresh admissions or truncate it. The shared
-coordinator provides input scheduling and demand-driven observation; wiring the
-provider command-session adapter remains an unimplemented gate.
+coordinator provides input scheduling and demand-driven observation. The dedicated
+command-session surface carries exact private admissions; selecting/installing
+it in application sessions remains an unimplemented gate.
 
 Rolling migration `0748` adds immutable `request_reply` and
 `stdin_reservation` indexes. Native status/error replies commit with their

@@ -117,6 +117,12 @@ Then open the smallest source files that answer the question:
   idle native launch. Partial starts preserve their original locator. These
   primitives do not activate application routing or solve prelaunch-cancellation
   settlement; the task router rejects broker-only admission.
+  `native-command-broker-session.ts` supplies the distinct retained-handle/banner
+  surface without a legacy setup or TaskExec fallback. Output commits before
+  presentation, and an uncertain global ACK retains the captured page without
+  replaying input. Session-surface close does not close the shared coordinator.
+  Application installation, larger stdin framing and canonical never-started
+  settlement remain incomplete; do not confuse adapter tests with activation.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse

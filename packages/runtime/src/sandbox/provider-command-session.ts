@@ -123,7 +123,7 @@ export function isProviderCommandObservationUnavailableError(error: unknown): bo
 
 export type ProviderCommandSession = {
   verifyCommandSupervisionCapability?(
-    protocol?: CommandSupervisionProtocol,
+    protocol?: AdmittedCommandSupervisionProtocol,
   ): Promise<{ sandboxId: string; taskId: string }>;
   releaseSupervisedCommand?(handle: number): Promise<void>;
   cancelSupervisedCommand?(
