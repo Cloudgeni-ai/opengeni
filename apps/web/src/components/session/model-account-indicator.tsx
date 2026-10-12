@@ -28,6 +28,7 @@ const REFUSAL_COPY: Record<NonNullable<ModelAccountChoiceOption["refusal"]>, str
   inactive: "Unavailable",
   personal_not_allowed: "Turned off here",
   personal_not_owner_work: "Private chats only",
+  session_has_no_owner: "Needs an owner",
 };
 
 export function ModelAccountIndicator({
