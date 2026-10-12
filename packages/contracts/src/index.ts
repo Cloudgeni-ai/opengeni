@@ -17331,18 +17331,19 @@ export const HumanInputSecretSpec = z
     fieldKind: z.enum(["concealed", "totp", "text"]).default("concealed"),
     itemType: z.enum(["login", "api_key", "note"]).default("login"),
     username: z
-      .object({ prompt: z.string().max(200), value: z.string().max(512).optional() })
+      .object({ prompt: z.string().max(200), value: z.string().max(512).nullable().optional() })
       .strict()
+      .nullable()
       .optional(),
-    website: z.string().max(2_048).optional(),
-    looksLike: z.string().max(80).optional(),
+    website: z.string().max(2_048).nullable().optional(),
+    looksLike: z.string().max(80).nullable().optional(),
     /** Soft client-side warning only. */
-    pattern: z.string().max(200).optional(),
+    pattern: z.string().max(200).nullable().optional(),
     saveTo: z.enum(["user", "task", "workspace"]).default("user"),
     /** Hosted vault in the saveTo scope (Q-05). */
-    vault: VaultName.optional(),
+    vault: VaultName.nullable().optional(),
     allowGenerate: z.boolean().default(false),
-    generate: GeneratePasswordSpec.optional(),
+    generate: GeneratePasswordSpec.nullable().optional(),
     autocomplete: z
       .enum(["current-password", "new-password", "one-time-code", "off"])
       .default("current-password"),
@@ -17395,8 +17396,8 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
       // A real review reference still requires every authority-bearing field.
       skillReview: SkillReviewReference.nullable().optional(),
       options: z.array(HumanInputOption).max(20).default([]),
-      /** Required exactly when `kind` is "secret". */
-      secret: HumanInputSecretSpec.optional(),
+      /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
+      secret: HumanInputSecretSpec.nullable().optional(),
       required: z.boolean().default(true),
       // Retained on the wire for older hosts. Opengeni's stock runtime and
       // surfaces always expose Other for choice questions, including requests
@@ -17422,7 +17423,7 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
         });
       }
       if (question.kind === "secret") {
-        if (question.secret === undefined) {
+        if (question.secret == null) {
           ctx.addIssue({
             code: "custom",
             path: ["secret"],
@@ -17443,7 +17444,7 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
             message: "secret questions do not use Other",
           });
         }
-      } else if (question.secret !== undefined) {
+      } else if (question.secret != null) {
         ctx.addIssue({
           code: "custom",
           path: ["secret"],

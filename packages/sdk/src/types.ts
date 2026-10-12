@@ -2156,14 +2156,14 @@ export type HumanInputSecretSpec = {
   field?: string | undefined;
   fieldKind?: "concealed" | "totp" | "text" | undefined;
   itemType?: "login" | "api_key" | "note" | undefined;
-  username?: { prompt: string; value?: string | undefined } | undefined;
-  website?: string | undefined;
-  looksLike?: string | undefined;
-  pattern?: string | undefined;
+  username?: { prompt: string; value?: string | null | undefined } | null | undefined;
+  website?: string | null | undefined;
+  looksLike?: string | null | undefined;
+  pattern?: string | null | undefined;
   saveTo?: HumanInputSecretSaveTo | undefined;
-  vault?: string | undefined;
+  vault?: string | null | undefined;
   allowGenerate?: boolean | undefined;
-  generate?: GeneratePasswordSpec | undefined;
+  generate?: GeneratePasswordSpec | null | undefined;
   autocomplete?: "current-password" | "new-password" | "one-time-code" | "off" | undefined;
 };
 
@@ -2209,8 +2209,8 @@ export type HumanInputQuestion = {
   label?: string | null | undefined;
   helpText?: string | null | undefined;
   options: HumanInputOption[];
-  /** Required exactly when `kind` is "secret". */
-  secret?: HumanInputSecretSpec | undefined;
+  /** Required exactly when `kind` is "secret"; null otherwise. */
+  secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
   allowOther: boolean;
   validation?:

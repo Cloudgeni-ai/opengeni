@@ -140,6 +140,49 @@ describe("ask card secret field", () => {
     prompt: "GitHub password",
     secret: { item: "GitHub" },
   };
+  test("strict tool schemas encode absent optional fields as null", () => {
+    const strictNulls = {
+      label: null,
+      helpText: null,
+      skillReview: null,
+      options: [],
+      required: true,
+      allowOther: false,
+      validation: null,
+    };
+    expect(
+      HumanInputQuestion.safeParse({
+        id: "t",
+        kind: "text",
+        prompt: "Which region?",
+        ...strictNulls,
+        secret: null,
+      }).success,
+    ).toBe(true);
+    const parsed = HumanInputQuestion.parse({
+      ...secretQuestion,
+      ...strictNulls,
+      secret: {
+        item: "GitHub",
+        field: "password",
+        fieldKind: "concealed",
+        itemType: "login",
+        username: null,
+        website: null,
+        looksLike: null,
+        pattern: null,
+        saveTo: "user",
+        vault: null,
+        allowGenerate: false,
+        generate: null,
+        autocomplete: "current-password",
+      },
+    });
+    expect(parsed.secret?.item).toBe("GitHub");
+    expect(
+      HumanInputQuestion.safeParse({ ...secretQuestion, ...strictNulls, secret: null }).success,
+    ).toBe(false);
+  });
   test("secret questions require a spec and no options", () => {
     const parsed = HumanInputQuestion.parse(secretQuestion);
     expect(parsed.secret).toEqual({
