@@ -52,6 +52,8 @@ const { registerClaudeSubscriptionOAuthRoutes } =
   await import("../src/routes/claude-subscription-oauth");
 const { registerModelConnectionAccessRoutes } =
   await import("../src/routes/model-connection-access");
+const { subscriptionSettingsLockedHttpError } =
+  await import("../src/routes/model-account-settings");
 const { startClaudeSubscriptionOAuth, completeClaudeSubscriptionOAuth } =
   await import("../src/claude-subscription-oauth");
 const { requireClaudeCorePersonalWorkspace } = await import("../src/claude-subscription-core");
@@ -165,9 +167,11 @@ beforeAll(async () => {
     } as never,
     claudeFetch(crypto.randomUUID(), "key@example.test"),
   );
-  // The typed errors as the API renders them (code and details).
+  // The typed errors as the API renders them (code and details), with the
+  // app's central settings-lock mapping.
   for (const routes of [app, keyApp])
-    routes.onError((error, c) => {
+    routes.onError((raw, c) => {
+      const error: Error = subscriptionSettingsLockedHttpError(raw) ?? raw;
       const typed = error as { status?: number; code?: string; details?: Record<string, unknown> };
       return c.json(
         { code: typed.code ?? null, message: error.message, ...(typed.details ?? {}) },
@@ -486,6 +490,59 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     expect(await rotation.json()).toMatchObject({
       rotationEnabled: false,
       activeCredentialId: body.accountId,
+    });
+
+    // An organization lock on rotation (0724) binds the Claude core writers
+    // as it binds Codex's and SuperGrok's. Locking clears the workspace's
+    // rotation map (its primary column stays but is inert without a rotation
+    // entry), so the listing shows the organization's values; rotation and
+    // activate are then refused with the 409 `setting_locked` and write
+    // nothing.
+    const lockRotation = async (locked: string[]) => {
+      const updated = await shared!.admin`
+        update subscription_settings set locked_settings = ${locked}::text[]
+        where account_id = ${accountId}::uuid and workspace_id is null`;
+      if (updated.count === 0) {
+        await shared!.admin`
+          insert into subscription_settings (account_id, workspace_id, locked_settings)
+          values (${accountId}::uuid, null, ${locked}::text[])`;
+      }
+    };
+    const storedOverride = async () =>
+      await shared!.admin<{ rotation: unknown; primary: string | null }[]>`
+        select rotation, claude_primary_connection_id::text as primary from subscription_settings
+        where account_id = ${accountId}::uuid and workspace_id = ${workspaceId}::uuid`;
+    await lockRotation(["rotation"]);
+    try {
+      const lockedOverride = await storedOverride();
+      expect(lockedOverride).toEqual([{ rotation: null, primary: body.accountId }]);
+      expect(await listed()).toMatchObject({
+        activeAccountId: null,
+        settings: { rotationEnabled: true, activeCredentialId: null },
+      });
+      for (const [path, method, lockedBody] of [
+        ["/claude/settings", "PATCH", { rotationEnabled: false }],
+        [`/claude/accounts/${body.accountId}/activate`, "POST", undefined],
+      ] as const) {
+        const locked = await request(path, { method, body: lockedBody });
+        expect({ path, status: locked.status, body: await locked.json() }).toMatchObject({
+          path,
+          status: 409,
+          body: { code: "conflict", reason: "setting_locked", settings: ["rotation"] },
+        });
+      }
+      expect(await storedOverride()).toEqual(lockedOverride);
+    } finally {
+      await lockRotation([]);
+    }
+    // Unlocked, the workspace may override again.
+    const reactivated = await request(`/claude/accounts/${body.accountId}/activate`, {
+      method: "POST",
+    });
+    expect(reactivated.status).toBe(200);
+    expect(await listed()).toMatchObject({
+      activeAccountId: body.accountId,
+      settings: { activeCredentialId: body.accountId },
     });
 
     // The access policy is the core connection's (the legacy row is never read).

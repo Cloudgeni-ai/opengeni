@@ -52,6 +52,8 @@ const { registerClaudeSubscriptionOAuthRoutes } =
   await import("../src/routes/claude-subscription-oauth");
 const { registerModelConnectionAccessRoutes } =
   await import("../src/routes/model-connection-access");
+const { subscriptionSettingsLockedHttpError } =
+  await import("../src/routes/model-account-settings");
 const { synchronizeCanonicalHumanLoginBindings } =
   await import("@opengeni/db/canonical-human-identities");
 
@@ -177,8 +179,10 @@ beforeAll(async () => {
   registerClaudeSubscriptionAccountRoutes(app, deps);
   registerClaudeSubscriptionOAuthRoutes(app, deps, claudeFetch);
   registerModelConnectionAccessRoutes(app, deps);
-  // The typed errors as the API renders them (code and details).
-  app.onError((error: Error, c: Context) => {
+  // The typed errors as the API renders them (code and details), with the
+  // app's central settings-lock mapping.
+  app.onError((raw: Error, c: Context) => {
+    const error: Error = subscriptionSettingsLockedHttpError(raw) ?? raw;
     const typed = error as { status?: number; code?: string; details?: Record<string, unknown> };
     return c.json(
       { code: typed.code ?? null, message: error.message, ...(typed.details ?? {}) },

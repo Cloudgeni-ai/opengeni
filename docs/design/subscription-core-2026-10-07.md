@@ -5363,10 +5363,10 @@ including comments.
   accepted (confirmed decision; a test pins it). The refresh generation
   stays internal for usage staleness. C2a's usage routes report the same
   row version. Personal rows are read through the
-  owner reader, which does not return the version, so migration 0725 adds
+  owner reader, which does not return the version, so migration 0729 adds
   `opengeni_private.subscription_core_personal_connection_versions`,
   derived from the live owner reader (0707, as 0715 rewrote it) by
-  drift-checked replacement (the 0724 pattern) and returning only
+  drift-checked replacement (the 0728 pattern) and returning only
   `(id, version)`. A schema test compares the two live bodies outside the
   patched name, `RETURNS` and `SELECT` parts, so a later fix to the owner
   reader must reach the version reader too. The workspace listing reads the
@@ -5378,7 +5378,7 @@ including comments.
   exactly that connection at that version, or nothing is written and the
   route answers the legacy 409. A reconnect never creates a connection. For
   a shared row the writer checks under its row lock; for a personal row the
-  0724 writer serializes and moves the version by exactly one, so the
+  0728 writer serializes and moves the version by exactly one, so the
   writer reads the version back and rolls the whole write back unless it is
   the target at `expectedVersion + 1`.
 - **Identity.** A core connection's Claude identity never changes. The
@@ -5427,7 +5427,7 @@ including comments.
   do, so the owner connects, lists, renames, reconnects and disconnects
   there (a Personal workspace has no ordinary membership, which legacy's
   `ordinary_workspace` place requires). Another member's Personal workspace
-  is not visible to the person (404). The 0724 writer checks the exact
+  is not visible to the person (404). The 0728 writer checks the exact
   owner membership and authority generation in its transaction; a personal
   sign-in completed elsewhere is refused 403, never turned into a shared
   connection. On legacy the routes keep `ordinary_workspace` after the same
@@ -5468,9 +5468,8 @@ including comments.
 Generalizations (provider-neutral): the connect writer's `reconnect` fence,
 `returnVersion` and the connected result's `version`; the `changed`
 refusal; `SubscriptionCoreConnectionRow.version` and
-`readSubscriptionCorePersonalConnectionVersionsInTransaction` (0725; C2a
-carries identical copies, its migration numbered 0720 on its own stack,
-and merges first);
+`readSubscriptionCorePersonalConnectionVersionsInTransaction` (0729; C2a
+carries identical copies and merges first);
 `SubscriptionPoolCore.listedAccountJson`; `deliverPoolCoreWake` takes only
 the binding.
 
