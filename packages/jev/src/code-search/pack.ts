@@ -109,6 +109,7 @@ export function diverseOrder(
   eff: (x: EvidencePassage) => number,
   penalty: number,
   taken: Map<string, number>,
+  free = 0,
 ): EvidencePassage[] {
   const tie = (a: EvidencePassage, b: EvidencePassage) =>
     a.path < b.path ? -1 : a.path > b.path ? 1 : a.start - b.start;
@@ -119,7 +120,7 @@ export function diverseOrder(
     let bi = 0;
     let bv = -Infinity;
     left.forEach((x, i) => {
-      const v = eff(x) - penalty * (taken.get(x.path) ?? 0);
+      const v = eff(x) - penalty * Math.max(0, (taken.get(x.path) ?? 0) - free);
       if (v > bv || (v === bv && tie(x, left[bi]!) < 0)) {
         bv = v;
         bi = i;
@@ -204,6 +205,7 @@ export function priorityOrder(
     eff,
     p.filePenalty,
     new Map(taken),
+    p.filePenaltyFree,
   ))
     add(x);
   // declarations a correct change must also touch (sibling mutations, other entry points), best first.
