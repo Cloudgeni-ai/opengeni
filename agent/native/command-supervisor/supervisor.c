@@ -913,9 +913,9 @@ static int service(char **command) {
 #define BROKER_DEFINITION_MAX_STRING (128 * 1024 - 1)
 
 /* Internal explicit command body, never a shell template or inherited env.
- * This parser alone does not authorize or start a supervisor. External linkage
- * keeps it independently exercisable by the native parity harness while the
- * full broker is under construction; no provider/CLI route calls it yet. */
+ * This parser alone does not authorize or start a supervisor. The native broker
+ * owns a separate launch transition; external linkage also permits the actual
+ * decoder to be exercised by the native/host parity harness. */
 struct broker_definition {
     char *cwd, **argv, **env;
     size_t argc, envc;
@@ -1187,6 +1187,186 @@ rejected:
     return false;
 }
 
+struct broker_input_state {
+    char broker_id[37];
+    uint64_t epoch;
+    uint32_t sequence;
+    size_t previous_size;
+    unsigned char previous[BROKER_FRAME_MAX_BYTES];
+};
+
+enum broker_input_result { BROKER_INPUT_INVALID, BROKER_INPUT_REJECTED,
+                           BROKER_INPUT_NEW, BROKER_INPUT_REPLAY };
+
+bool broker_input_initialize(struct broker_input_state *state, const char *broker_id) {
+    memset(state, 0, sizeof(*state));
+    if (!broker_uuid(broker_id)) return false;
+    memcpy(state->broker_id, broker_id, 37);
+    return true;
+}
+
+/* Input ordering only. A NEW result reserves this exact input before its
+ * operation can have a side effect. The caller must retain/emit acceptance and
+ * the distinct operation result; REPLAY must never execute the operation.
+ * The host journal permits only one pending indexed body. Only the immediately
+ * previous body may replay, and only byte-for-byte; older indexes reject even
+ * if once valid. Global request-ID uniqueness and command birth/admission are
+ * separate durable obligations, not proved by this bounded native memory.
+ * INVALID requires the future stream owner to poison/close its input; no scan
+ * for a later marker. REJECTED is a valid frame with disallowed ordering/fence.
+ */
+enum broker_input_result broker_input_accept(struct broker_input_state *state,
+    const unsigned char *bytes, size_t size, struct broker_request *request) {
+    if (!broker_request_decode(bytes, size, state->broker_id, request)) return BROKER_INPUT_INVALID;
+    if (state->previous_size > BROKER_FRAME_MAX_BYTES ||
+        (state->sequence == 0 ? (state->epoch != 0 || state->previous_size != 0) :
+                               (state->epoch == 0 || state->previous_size == 0)) ||
+        state->epoch > BROKER_SAFE_INTEGER || request->sequence > UINT32_MAX)
+        return BROKER_INPUT_REJECTED;
+    if (request->sequence == state->sequence && state->sequence > 0)
+        return size == state->previous_size && !memcmp(bytes, state->previous, size) ?
+            BROKER_INPUT_REPLAY : BROKER_INPUT_REJECTED;
+    if (state->sequence == UINT32_MAX || request->sequence != (uint64_t)state->sequence + 1)
+        return BROKER_INPUT_REJECTED;
+    if (request->kind == BROKER_FENCE) {
+        if (!request->broker_level || request->offset || request->size || request->epoch <= state->epoch)
+            return BROKER_INPUT_REJECTED;
+    } else if (!state->epoch || request->epoch != state->epoch) return BROKER_INPUT_REJECTED;
+    state->epoch = request->epoch;
+    state->sequence = (uint32_t)request->sequence;
+    state->previous_size = size;
+    memcpy(state->previous, bytes, size);
+    return BROKER_INPUT_NEW;
+}
+
+#define BROKER_OUTPUT_MAX_BYTES (4 * 1024 * 1024)
+#define BROKER_OUTPUT_CONTROL_RESERVE (128 * 1024)
+
+struct broker_output_frame {
+    struct broker_output_frame *next;
+    uint64_t sequence;
+    size_t size, written;
+    char bytes[];
+};
+
+struct broker_output_queue {
+    struct broker_output_frame *first, *last;
+    uint64_t sequence, acknowledged, sent_through;
+    size_t bytes;
+};
+
+static bool broker_response_kind(const char *kind) {
+    const char *names[] = {"hello", "artifact", "accepted", "status", "stdout", "stderr", "exit", "error"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (!strcmp(kind, names[i])) return true;
+    return false;
+}
+
+static void broker_output_collect(struct broker_output_queue *queue) {
+    while (queue->first && queue->first->sequence <= queue->acknowledged) {
+        struct broker_output_frame *frame = queue->first;
+        /* An ACK may race replay of bytes already captured by the host. Finish
+         * a partly written replay line before freeing it; otherwise the next
+         * frame would concatenate onto that partial line and poison the log. */
+        if (frame->written && frame->written < frame->size) break;
+        queue->first = frame->next;
+        queue->bytes -= sizeof(*frame) + frame->size;
+        free(frame);
+    }
+    if (!queue->first) queue->last = NULL;
+}
+
+void broker_output_free(struct broker_output_queue *queue) {
+    while (queue->first) {
+        struct broker_output_frame *next = queue->first->next;
+        free(queue->first);
+        queue->first = next;
+    }
+    memset(queue, 0, sizeof(*queue));
+}
+
+/* False is bounded pressure or invalid input, never permission to discard
+ * output. Future callers must keep command reads paused while continuing their
+ * independent control/reaper loop. Only trusted metadata uses control reserve;
+ * ordinary command output cannot select it. Nothing is emitted by this call. */
+bool broker_output_append(struct broker_output_queue *queue, const char *broker_id,
+    uint64_t epoch, const char *request_id, const char *command_id, const char *kind,
+    uint64_t offset, const unsigned char *payload, size_t size, bool control) {
+    if (!broker_uuid(broker_id) || !broker_uuid(request_id) ||
+        (command_id && !broker_uuid(command_id)) || !broker_response_kind(kind) ||
+        epoch == 0 || epoch > BROKER_SAFE_INTEGER || queue->sequence >= BROKER_SAFE_INTEGER ||
+        size > BROKER_CHUNK_BYTES || offset > BROKER_SAFE_INTEGER - size ||
+        ((!strcmp(kind, "stdout") || !strcmp(kind, "stderr")) && control)) return false;
+    char encoded[((BROKER_CHUNK_BYTES + 2) / 3) * 4 + 1];
+    (void)broker_base64(payload, size, encoded);
+    char header[512];
+    uint64_t sequence = queue->sequence + 1;
+    int count = snprintf(header, sizeof(header),
+        "OGB1\tresponse\t%s\t%" PRIu64 "\t%" PRIu64 "\t%s\t%s\t%s\t%" PRIu64 "\t%zu\tbase64\t",
+        broker_id, epoch, sequence, request_id, command_id ? command_id : "-", kind, offset, size);
+    if (count <= 0 || (size_t)count >= sizeof(header)) return false;
+    size_t encoded_size = strlen(encoded), frame_size = (size_t)count + encoded_size + 1;
+    size_t capacity = BROKER_OUTPUT_MAX_BYTES - (control ? 0 : BROKER_OUTPUT_CONTROL_RESERVE);
+    size_t allocation = sizeof(struct broker_output_frame) + frame_size;
+    if (frame_size > BROKER_FRAME_MAX_BYTES || queue->bytes > capacity ||
+        allocation > capacity - queue->bytes) return false;
+    struct broker_output_frame *frame = malloc(allocation);
+    if (!frame) return false;
+    *frame = (struct broker_output_frame){.sequence = sequence, .size = frame_size};
+    memcpy(frame->bytes, header, (size_t)count);
+    memcpy(frame->bytes + count, encoded, encoded_size);
+    frame->bytes[frame_size - 1] = '\n';
+    if (queue->last) queue->last->next = frame; else queue->first = frame;
+    queue->last = frame;
+    queue->bytes += allocation;
+    queue->sequence = sequence;
+    return true;
+}
+
+/* The initial-process stdout descriptor must already be nonblocking. A caller
+ * must never pass a guest command's descriptor or reinterpret a false return
+ * as complete output. Work per tick is bounded independently of cancellation. */
+bool broker_output_flush(struct broker_output_queue *queue, int fd, size_t budget) {
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || !(flags & O_NONBLOCK)) return false;
+    for (struct broker_output_frame *frame = queue->first; frame && budget; frame = frame->next) {
+        if (frame->written == frame->size) continue;
+        size_t count = frame->size - frame->written;
+        if (count > budget) count = budget;
+        ssize_t written;
+        do { written = write(fd, frame->bytes + frame->written, count); }
+        while (written < 0 && errno == EINTR);
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
+        if (written <= 0) return false;
+        frame->written += (size_t)written;
+        budget -= (size_t)written;
+        if (frame->written == frame->size) {
+            if (frame->sequence > queue->sent_through) queue->sent_through = frame->sequence;
+        } else break; /* Never interleave part of the next protocol line. */
+    }
+    broker_output_collect(queue);
+    return true;
+}
+
+bool broker_output_acknowledge(struct broker_output_queue *queue, uint64_t sequence) {
+    if (sequence < queue->acknowledged || sequence > queue->sent_through) return false;
+    queue->acknowledged = sequence;
+    broker_output_collect(queue);
+    return true;
+}
+
+/* Replay starts at the oldest unacknowledged frame. There is no cursor reset,
+ * skipped prefix or fresh sequence assignment. A partial physical write must
+ * finish before replay can rewind; false leaves all cursors unchanged. */
+bool broker_output_replay(struct broker_output_queue *queue, uint64_t first) {
+    if (first != queue->acknowledged + 1) return false;
+    for (struct broker_output_frame *frame = queue->first; frame; frame = frame->next)
+        if (frame->written && frame->written < frame->size) return false;
+    for (struct broker_output_frame *frame = queue->first; frame; frame = frame->next)
+        frame->written = 0;
+    return true;
+}
+
 static void broker_probe_frame(const char *id, unsigned int sequence, const char *kind,
                                size_t offset, const unsigned char *payload, size_t size) {
     if (size > BROKER_CHUNK_BYTES) fail("broker probe frame exceeds bound");
@@ -1373,7 +1553,584 @@ static int broker_preflight(int argc, char **argv) {
     return 0;
 }
 
+#define BROKER_PROTOCOL "native-command-broker-v1"
+#define BROKER_COMMAND_MEMORY (16 * 1024 * 1024)
+#define BROKER_REPLY_SPACE (2 * BROKER_FRAME_MAX_BYTES)
+
+struct broker_command {
+    struct broker_command *next;
+    char id[37], nonce[65], launch_request[37], control_request[37], input_request[37];
+    uint64_t epoch, control_epoch, input_epoch, input_offset, output_offset[2];
+    unsigned char *definition;
+    size_t definition_size, definition_filled;
+    pid_t pid;
+    int handle, control, input, output[2];
+    bool launched, launch_closed, pty, exited, exit_reported, eof_reported[2], input_eof;
+    int exit_code;
+    unsigned char *pending_input;
+    size_t input_size, input_written;
+};
+
+struct broker {
+    int artifact, signals;
+    struct artifact facts;
+    struct broker_input_state input;
+    struct broker_output_queue output;
+    struct broker_command *commands;
+    size_t command_memory;
+    struct pollfd *polls;
+    size_t poll_capacity;
+};
+
+static bool broker_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+    return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+static void broker_close(int *fd) {
+    if (*fd >= 0) close(*fd);
+    *fd = -1;
+}
+
+static bool broker_reply(struct broker *broker, const struct broker_request *request,
+                         const char *kind, uint64_t offset, const char *body) {
+    return broker_output_append(&broker->output, broker->input.broker_id, request->epoch,
+        request->request_id, request->broker_level ? NULL : request->command_id,
+        kind, offset, (const unsigned char *)body, strlen(body), true);
+}
+
+static bool broker_error(struct broker *broker, const struct broker_request *request, const char *code) {
+    /* Only fixed content-free codes, never caller-controlled strings. */
+    char body[96];
+    int size = snprintf(body, sizeof(body), "{\"error\":\"%s\"}", code);
+    return size > 0 && (size_t)size < sizeof(body) && broker_reply(broker, request, "error", 0, body);
+}
+
+static void broker_nonce(char nonce[65]) {
+    unsigned char bytes[32];
+    size_t filled = 0;
+    while (filled < sizeof(bytes)) {
+        ssize_t count = getrandom(bytes + filled, sizeof(bytes) - filled, 0);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) fail("broker randomness unavailable");
+        filled += (size_t)count;
+    }
+    for (size_t i = 0; i < sizeof(bytes); i++)
+        (void)snprintf(nonce + i * 2, 3, "%02x", bytes[i]);
+}
+
+/* All opened endpoints are private to this initial process. The child cannot
+ * exec until its parent owns a pidfd. No PDEATHSIG kills a live subreaper: loss
+ * of this broker instead closes the private control channel and lets it drain.
+ * A failure after fork retains pid/handle for the broker's all-child shutdown;
+ * it is never returned as a safe retry or forgotten physical child. */
+static bool broker_spawn(struct broker *broker, struct broker_command *command,
+                         const struct broker_definition *definition) {
+    int control_pair[2] = {-1, -1}, input[2] = {-1, -1}, output[2] = {-1, -1};
+    int error[2] = {-1, -1}, barrier[2] = {-1, -1}, master = -1, slave = -1;
+    bool success = false;
+    char **arguments = calloc(definition->argc + 12, sizeof(char *));
+    if (!arguments) return false;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, control_pair) ||
+        pipe2(barrier, O_CLOEXEC)) goto done;
+    if (definition->pty) {
+        master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (master < 0 || grantpt(master) || unlockpt(master)) goto done;
+        char *name = ptsname(master);
+        if (!name) goto done;
+        slave = open(name, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NOFOLLOW);
+        struct winsize dimensions = {.ws_row = definition->rows, .ws_col = definition->columns};
+        if (slave < 0 || ioctl(slave, TIOCSWINSZ, &dimensions)) goto done;
+    } else if (pipe2(input, O_CLOEXEC) || pipe2(output, O_CLOEXEC) || pipe2(error, O_CLOEXEC)) goto done;
+    char descriptor[24];
+    (void)snprintf(descriptor, sizeof(descriptor), "%d", control_pair[1]);
+    size_t argc = 0;
+    arguments[argc++] = "opengeni-command-supervisor";
+    arguments[argc++] = "launch-channel";
+    arguments[argc++] = "--control-fd"; arguments[argc++] = descriptor;
+    arguments[argc++] = "--invocation"; arguments[argc++] = command->id;
+    arguments[argc++] = "--nonce"; arguments[argc++] = command->nonce;
+    if (definition->pty) arguments[argc++] = "--pty";
+    arguments[argc++] = "--";
+    for (size_t i = 0; i < definition->argc; i++) arguments[argc++] = definition->argv[i];
+    pid_t child = fork();
+    if (child < 0) goto done;
+    if (!child) {
+        close(barrier[1]);
+        child_signals();
+        char release;
+        ssize_t count;
+        do { count = read(barrier[0], &release, 1); } while (count < 0 && errno == EINTR);
+        if (count != 1 || release != '+') _exit(125);
+        close(barrier[0]);
+        /* Mark every inherited private endpoint close-on-exec in one bounded
+         * kernel operation. Denial is not permission to leak a sibling channel.
+         * The only extra surviving descriptor is this child's control endpoint. */
+        if (syscall(SYS_close_range, 3U, ~0U, 4U /* CLOSE_RANGE_CLOEXEC */) ||
+            fcntl(control_pair[1], F_SETFD, 0) || setsid() < 0 || chdir(definition->cwd)) _exit(125);
+        if (definition->pty) {
+            if (ioctl(slave, TIOCSCTTY, 0) || dup2(slave, 0) < 0 ||
+                dup2(slave, 1) < 0 || dup2(slave, 2) < 0) _exit(125);
+        } else if (dup2(input[0], 0) < 0 || dup2(output[1], 1) < 0 || dup2(error[1], 2) < 0) _exit(125);
+        (void)syscall(SYS_execveat, broker->artifact, "", arguments, definition->env, AT_EMPTY_PATH);
+        _exit(125);
+    }
+    command->pid = child;
+    close(barrier[0]); barrier[0] = -1;
+    command->handle = (int)syscall(SYS_pidfd_open, child, 0);
+    if (command->handle < 0) goto done; /* EOF forbids exec; child remains owned. */
+    close(control_pair[1]); control_pair[1] = -1;
+    command->control = control_pair[0]; control_pair[0] = -1;
+    if (definition->pty) {
+        close(slave); slave = -1;
+        command->output[0] = master; master = -1;
+        command->input = fcntl(command->output[0], F_DUPFD_CLOEXEC, 3);
+    } else {
+        close(input[0]); input[0] = -1;
+        close(output[1]); output[1] = -1;
+        close(error[1]); error[1] = -1;
+        command->input = input[1]; input[1] = -1;
+        command->output[0] = output[0]; output[0] = -1;
+        command->output[1] = error[0]; error[0] = -1;
+    }
+    if (command->input < 0 || !broker_nonblocking(command->control) ||
+        !broker_nonblocking(command->input) || !broker_nonblocking(command->output[0]) ||
+        (!definition->pty && !broker_nonblocking(command->output[1]))) goto done;
+    ssize_t written;
+    do { written = write(barrier[1], "+", 1); } while (written < 0 && errno == EINTR);
+    success = written == 1;
+done:
+    for (int i = 0; i < 2; i++) {
+        broker_close(&control_pair[i]); broker_close(&input[i]); broker_close(&output[i]);
+        broker_close(&error[i]); broker_close(&barrier[i]);
+    }
+    broker_close(&master); broker_close(&slave);
+    free(arguments);
+    return success;
+}
+
+static struct broker_command *broker_find(struct broker *broker, const char *id) {
+    for (struct broker_command *command = broker->commands; command; command = command->next)
+        if (!strcmp(command->id, id)) return command;
+    return NULL;
+}
+
+static bool broker_prepare(struct broker *broker, const struct broker_request *request) {
+    if (request->offset || request->size != 4 || broker_find(broker, request->command_id))
+        return broker_error(broker, request, "invalid_prepare");
+    struct broker_definition_reader reader = {.bytes = request->payload, .size = request->size};
+    uint32_t size;
+    if (!broker_definition_u32(&reader, &size) || size < 20 || size > BROKER_DEFINITION_MAX_BYTES)
+        return broker_error(broker, request, "invalid_definition_size");
+    size_t required = sizeof(struct broker_command) + size;
+    if (required > BROKER_COMMAND_MEMORY - broker->command_memory)
+        return broker_error(broker, request, "command_memory_pressure");
+    struct broker_command *command = calloc(1, sizeof(*command));
+    if (!command) return broker_error(broker, request, "command_memory_pressure");
+    command->definition = malloc(size);
+    if (!command->definition) { free(command); return broker_error(broker, request, "command_memory_pressure"); }
+    command->definition_size = size;
+    command->epoch = request->epoch;
+    command->handle = command->control = command->input = command->output[0] = command->output[1] = -1;
+    memcpy(command->id, request->command_id, 37);
+    broker_nonce(command->nonce);
+    command->next = broker->commands;
+    broker->commands = command;
+    broker->command_memory += required;
+    return broker_reply(broker, request, "status", 0, "{\"state\":\"preparing\"}");
+}
+
+static bool broker_command_request(struct broker *broker, const struct broker_request *request) {
+    if (request->kind == BROKER_PREPARE) return broker_prepare(broker, request);
+    struct broker_command *command = broker_find(broker, request->command_id);
+    if (!command) return broker_error(broker, request, "command_unknown");
+    if (request->kind == BROKER_CONTROL && !command->launched && request->offset == 0 &&
+        request->size == 6 && !memcmp(request->payload, "cancel", 6)) {
+        command->launch_closed = true;
+        if (command->definition) {
+            free(command->definition); command->definition = NULL;
+            broker->command_memory -= command->definition_size;
+            command->definition_size = command->definition_filled = 0;
+        }
+        /* Positive local pre-spawn rejection, deliberately not a quiescence
+         * receipt from a supervisor that never existed. */
+        return broker_reply(broker, request, "status", 0, "{\"state\":\"not_started\",\"launchClosed\":true}");
+    }
+    if (request->kind == BROKER_DEFINITION) {
+        if (command->launched || command->launch_closed || !request->size ||
+            request->offset != command->definition_filled ||
+            request->size > command->definition_size - command->definition_filled)
+            return broker_error(broker, request, "invalid_definition_chunk");
+        memcpy(command->definition + command->definition_filled, request->payload, request->size);
+        command->definition_filled += request->size;
+        return broker_reply(broker, request, "status", command->definition_filled, "{\"state\":\"preparing\"}");
+    }
+    if (request->kind == BROKER_LAUNCH) {
+        if (request->offset || request->size || command->launched || command->launch_closed ||
+            command->definition_filled != command->definition_size)
+            return broker_error(broker, request, "invalid_launch");
+        struct broker_definition definition;
+        if (!broker_definition_decode(command->definition, command->definition_size, &definition)) {
+            command->launch_closed = true;
+            free(command->definition); command->definition = NULL;
+            broker->command_memory -= command->definition_size;
+            command->definition_size = command->definition_filled = 0;
+            return broker_error(broker, request, "invalid_definition");
+        }
+        command->launched = command->launch_closed = true; /* reserve birth before fork */
+        command->pty = definition.pty;
+        command->epoch = request->epoch;
+        memcpy(command->launch_request, request->request_id, 37);
+        bool spawned = broker_spawn(broker, command, &definition);
+        broker_definition_free(&definition);
+        free(command->definition); command->definition = NULL;
+        broker->command_memory -= command->definition_size;
+        command->definition_size = command->definition_filled = 0;
+        /* A failed spawn never permits another start for this identity. Global
+         * shutdown owns any child left at its pre-exec barrier. */
+        if (!spawned) return false;
+        return broker_reply(broker, request, "status", 0, "{\"state\":\"supervisor_started\",\"released\":false}");
+    }
+    if (!command->launched || command->exited)
+        return broker_error(broker, request, "supervisor_unavailable");
+    if (request->kind == BROKER_CONTROL) {
+        if (request->offset || command->control < 0 || command->control_request[0] ||
+            request->size >= 48 || memchr(request->payload, 0, request->size))
+            return broker_error(broker, request, "control_unavailable");
+        char action[48];
+        memcpy(action, request->payload, request->size); action[request->size] = 0;
+        const char *receipt = "-";
+        if (!strncmp(action, "ack\t", 4) && broker_uuid(action + 4)) {
+            receipt = action + 4; action[3] = 0;
+        } else if (strcmp(action, "status") && strcmp(action, "release") && strcmp(action, "cancel"))
+            return broker_error(broker, request, "invalid_control");
+        char frame[FRAME_SIZE];
+        int size = snprintf(frame, sizeof(frame), "%s\t%s\t%s\t%s\t%s",
+            command->pty ? CHANNEL_PTY_PROTOCOL : CHANNEL_PROTOCOL, command->id, command->nonce, action, receipt);
+        if (size <= 0 || (size_t)size >= sizeof(frame)) return false;
+        ssize_t sent = send(command->control, frame, (size_t)size, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return broker_error(broker, request, "control_pressure");
+        if (sent != size) return false;
+        memcpy(command->control_request, request->request_id, 37);
+        command->control_epoch = request->epoch;
+        return true;
+    }
+    if (request->kind == BROKER_STDIN) {
+        if (command->input < 0 || command->input_eof || command->input_size || !request->size ||
+            request->offset != command->input_offset)
+            return broker_error(broker, request, "stdin_unavailable");
+        if (request->size > BROKER_COMMAND_MEMORY - broker->command_memory)
+            return broker_error(broker, request, "command_memory_pressure");
+        command->pending_input = malloc(request->size);
+        if (!command->pending_input) return broker_error(broker, request, "command_memory_pressure");
+        memcpy(command->pending_input, request->payload, request->size);
+        command->input_size = request->size; command->input_written = 0;
+        broker->command_memory += request->size;
+        command->input_epoch = request->epoch;
+        memcpy(command->input_request, request->request_id, 37);
+        return true;
+    }
+    if (request->kind == BROKER_EOF) {
+        if (request->size || request->offset != command->input_offset || command->input_size || command->pty)
+            return broker_error(broker, request, command->pty ? "pty_half_close_unsupported" : "invalid_eof");
+        broker_close(&command->input); command->input_eof = true;
+        return broker_reply(broker, request, "status", command->input_offset, "{\"stdinClosed\":true}");
+    }
+    if (request->kind == BROKER_RESIZE) {
+        if (!command->pty || command->input < 0 || request->offset || request->size != 4)
+            return broker_error(broker, request, "invalid_resize");
+        struct winsize dimensions = {
+            .ws_row = (unsigned short)((unsigned int)request->payload[0] << 8 | request->payload[1]),
+            .ws_col = (unsigned short)((unsigned int)request->payload[2] << 8 | request->payload[3])};
+        if (!dimensions.ws_row || !dimensions.ws_col || ioctl(command->input, TIOCSWINSZ, &dimensions))
+            return broker_error(broker, request, "resize_unavailable");
+        return broker_reply(broker, request, "status", 0, "{\"resized\":true}");
+    }
+    return broker_error(broker, request, "invalid_command_operation");
+}
+
+static bool broker_hello(struct broker *broker, const struct broker_request *request) {
+    char body[768];
+    int size = snprintf(body, sizeof(body),
+        "{\"protocol\":\"%s\",\"sealedExec\":\"execveat\",\"pipeCapability\":\"%s\","
+        "\"ptyCapability\":\"%s\",\"artifact\":{\"byteSize\":%zu,\"target\":\"%s\","
+        "\"seals\":%d,\"device\":\"%ju\",\"inode\":\"%ju\"}}", BROKER_PROTOCOL,
+        CHANNEL_PROTOCOL, CHANNEL_PTY_PROTOCOL, broker->facts.size, broker->facts.target,
+        broker->facts.seals, broker->facts.device, broker->facts.inode);
+    return size > 0 && (size_t)size < sizeof(body) && broker_reply(broker, request, "hello", 0, body);
+}
+
+static bool broker_dispatch(struct broker *broker, const struct broker_request *request) {
+    if (!request->broker_level) return broker_command_request(broker, request);
+    if (request->size) return broker_error(broker, request, "invalid_broker_operation");
+    switch (request->kind) {
+        case BROKER_FENCE:
+            return broker_reply(broker, request, "status", 0, "{\"fenced\":true}");
+        case BROKER_HELLO:
+            return !request->offset ? broker_hello(broker, request) : broker_error(broker, request, "invalid_hello");
+        case BROKER_ACK:
+            return broker_output_acknowledge(&broker->output, request->offset) ?
+                true : broker_error(broker, request, "invalid_output_ack");
+        case BROKER_REPLAY:
+            return broker_output_replay(&broker->output, request->offset) ?
+                true : broker_error(broker, request, "replay_unavailable");
+        default:
+            return broker_error(broker, request, "invalid_broker_operation");
+    }
+}
+
+/* Per-tick observation is bounded. A full data window stops data reads, not
+ * control, pidfd observation or cancellation. The reserved window still has a
+ * hard cap: if host retention stops, this loop does not invent acknowledgement. */
+static bool broker_observe(struct broker *broker, struct broker_command *command) {
+    if (!command->launched) return true;
+    bool replies = broker->output.bytes <= BROKER_OUTPUT_MAX_BYTES - BROKER_REPLY_SPACE;
+    if (command->control >= 0 && command->control_request[0] && replies) {
+        char response[FRAME_SIZE];
+        ssize_t count = recv(command->control, response, sizeof(response) - 1, MSG_TRUNC | MSG_DONTWAIT);
+        if (count > 0) {
+            if (count >= (ssize_t)sizeof(response) - 1 || memchr(response, 0, (size_t)count)) return false;
+            response[count] = 0;
+            if (!broker_output_append(&broker->output, broker->input.broker_id, command->control_epoch,
+                command->control_request, command->id, "status", 0, (unsigned char *)response, (size_t)count, true))
+                return false;
+            command->control_request[0] = 0;
+        } else if (count == 0) {
+            static const unsigned char body[] = "{\"error\":\"control_outcome_unknown\"}";
+            if (!broker_output_append(&broker->output, broker->input.broker_id, command->control_epoch,
+                command->control_request, command->id, "error", 0, body, sizeof(body) - 1, true)) return false;
+            command->control_request[0] = 0;
+            broker_close(&command->control);
+        }
+        else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return false;
+    }
+    if (command->input_size && replies) {
+        ssize_t count = write(command->input, command->pending_input + command->input_written,
+                              command->input_size - command->input_written);
+        if (count > 0) {
+            command->input_written += (size_t)count;
+            command->input_offset += (uint64_t)count;
+        } else if (count <= 0 && !(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))) {
+            broker_close(&command->input); command->input_eof = true;
+        }
+        if (command->input_written == command->input_size || command->input < 0) {
+            const char *body = command->input < 0 ? "{\"error\":\"stdin_closed\"}" : "{\"stdinWritten\":true}";
+            if (!broker_output_append(&broker->output, broker->input.broker_id, command->input_epoch,
+                command->input_request, command->id, command->input < 0 ? "error" : "status", command->input_offset,
+                (const unsigned char *)body, strlen(body), true)) return false;
+            free(command->pending_input); command->pending_input = NULL;
+            broker->command_memory -= command->input_size;
+            command->input_size = command->input_written = 0;
+        }
+    }
+    for (int stream = 0; stream < 2; stream++) {
+        if (command->output[stream] >= 0 &&
+            broker->output.bytes <= BROKER_OUTPUT_MAX_BYTES - BROKER_OUTPUT_CONTROL_RESERVE - BROKER_FRAME_MAX_BYTES) {
+            unsigned char bytes[BROKER_CHUNK_BYTES];
+            ssize_t count = read(command->output[stream], bytes, sizeof(bytes));
+            if (count > 0) {
+                if (!broker_output_append(&broker->output, broker->input.broker_id, command->epoch,
+                    command->launch_request, command->id, stream ? "stderr" : "stdout",
+                    command->output_offset[stream], bytes, (size_t)count, false)) return false;
+                command->output_offset[stream] += (uint64_t)count;
+            } else if (count == 0 || (count < 0 && command->pty && errno == EIO)) broker_close(&command->output[stream]);
+            else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return false;
+        }
+        if (command->output[stream] < 0 && !command->eof_reported[stream] && replies) {
+            const char *body = stream ? "{\"stream\":\"stderr\",\"eof\":true}" : "{\"stream\":\"stdout\",\"eof\":true}";
+            if (!broker_output_append(&broker->output, broker->input.broker_id, command->epoch,
+                command->launch_request, command->id, "status", command->output_offset[stream],
+                (const unsigned char *)body, strlen(body), true)) return false;
+            command->eof_reported[stream] = true;
+        }
+    }
+    if (!command->exited) {
+        int status;
+        pid_t observed = waitpid(command->pid, &status, WNOHANG);
+        if (observed == command->pid) {
+            command->exited = true;
+            command->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+            broker_close(&command->handle);
+            /* Unexpected supervisor death can orphan still-writing children
+             * into this broker. Fence every admission and drain the whole
+             * owned child set instead of letting them outlive their owner. */
+            if (command->exit_code != 0) return false;
+        } else if (observed < 0 && errno != EINTR) return false;
+    }
+    if (command->exited && command->eof_reported[0] && command->eof_reported[1] &&
+        !command->exit_reported && !command->control_request[0] && replies) {
+        char body[128];
+        int size = snprintf(body, sizeof(body), "{\"supervisorExitCode\":%d,\"stdoutEof\":true,\"stderrEof\":true}",
+                            command->exit_code);
+        if (size <= 0 || (size_t)size >= sizeof(body) ||
+            !broker_output_append(&broker->output, broker->input.broker_id, command->epoch,
+                command->launch_request, command->id, "exit", 0, (unsigned char *)body, (size_t)size, true)) return false;
+        command->exit_reported = true;
+        broker_close(&command->control); broker_close(&command->input);
+        /* Keep the birth tombstone. Never recycle a command ID after exit. */
+    }
+    return true;
+}
+
+static bool broker_wait(struct broker *broker, bool can_read_input) {
+    size_t needed = 3;
+    for (struct broker_command *command = broker->commands; command; command = command->next)
+        if (command->launched && !command->exit_reported) needed += 5;
+    if (needed > broker->poll_capacity) {
+        struct pollfd *expanded = realloc(broker->polls, needed * sizeof(struct pollfd));
+        if (!expanded) return false;
+        broker->polls = expanded; broker->poll_capacity = needed;
+    }
+    size_t count = 0;
+    broker->polls[count++] = (struct pollfd){.fd = broker->signals, .events = POLLIN};
+    if (can_read_input) broker->polls[count++] = (struct pollfd){.fd = 0, .events = POLLIN};
+    for (struct broker_output_frame *frame = broker->output.first; frame; frame = frame->next) {
+        if (frame->written < frame->size) {
+            broker->polls[count++] = (struct pollfd){.fd = 1, .events = POLLOUT};
+            break;
+        }
+    }
+    bool replies = broker->output.bytes <= BROKER_OUTPUT_MAX_BYTES - BROKER_REPLY_SPACE;
+    bool data = broker->output.bytes <= BROKER_OUTPUT_MAX_BYTES - BROKER_OUTPUT_CONTROL_RESERVE - BROKER_FRAME_MAX_BYTES;
+    for (struct broker_command *command = broker->commands; command; command = command->next) {
+        if (!command->launched || command->exit_reported) continue;
+        if (command->handle >= 0)
+            broker->polls[count++] = (struct pollfd){.fd = command->handle, .events = POLLIN};
+        if (replies && command->control >= 0 && command->control_request[0])
+            broker->polls[count++] = (struct pollfd){.fd = command->control, .events = POLLIN};
+        if (replies && command->input >= 0 && command->input_size)
+            broker->polls[count++] = (struct pollfd){.fd = command->input, .events = POLLOUT};
+        for (int stream = 0; stream < 2; stream++)
+            if (data && command->output[stream] >= 0)
+                broker->polls[count++] = (struct pollfd){.fd = command->output[stream], .events = POLLIN};
+    }
+    /* Only actual readiness wakes the broker. Fully sent/unacknowledged data,
+     * tombstones and an idle initial channel cause no periodic CPU wakeups. */
+    int result = poll(broker->polls, (nfds_t)count, -1);
+    return result >= 0 || errno == EINTR;
+}
+
+/* Exceptional initial-channel loss is not clean command settlement. Close all
+ * channels, then keep this subreaper alive until positive all-child ECHILD.
+ * Whole-broker shutdown may stop all of its children, never unrelated processes.
+ * No receipt or clean exit frame is fabricated from this cleanup. */
+static int broker_shutdown(struct broker *broker) {
+    for (struct broker_command *command = broker->commands; command; command = command->next) {
+        broker_close(&command->control); broker_close(&command->input);
+    }
+    long long started = milliseconds();
+    int status = 125; bool seen = false;
+    while (!reap(0, &status, &seen)) {
+        if (milliseconds() - started >= CANCEL_GRACE_MS) signal_children(SIGKILL);
+        (void)poll(NULL, 0, 10);
+    }
+    while (broker->commands) {
+        struct broker_command *command = broker->commands;
+        broker->commands = command->next;
+        broker_close(&command->handle);
+        broker_close(&command->output[0]); broker_close(&command->output[1]);
+        free(command->definition); free(command->pending_input); free(command);
+    }
+    broker_output_free(&broker->output);
+    free(broker->polls);
+    broker_close(&broker->artifact); broker_close(&broker->signals);
+    return 125;
+}
+
+static int broker_run(int argc, char **argv) {
+    if (argc != 4 || strcmp(argv[2], "--broker-id") || !broker_uuid(argv[3])) fail("invalid broker identity");
+    initialize();
+    struct broker broker = {.artifact = -1, .signals = -1};
+    if (!broker_input_initialize(&broker.input, argv[3])) fail("invalid broker identity");
+    broker.artifact = sealed_artifact(&broker.facts);
+    if (syscall(SYS_close_range, ~0U, ~0U, 4U /* CLOSE_RANGE_CLOEXEC */))
+        fail("broker descriptor isolation unavailable");
+    /* Verify both real execution modes before advertising them. Fixed probes
+     * execute only sealed helper code, never user setup or a command definition. */
+    unsigned char proof[1024];
+    size_t size = broker_probe_exec(broker.artifact, "capabilities", NULL, false, proof, sizeof(proof));
+    if (size != strlen(PROTOCOL) || memcmp(proof, PROTOCOL, size)) fail("broker pipe proof failed");
+    size = broker_probe_exec(broker.artifact, "capabilities", "--pty", true, proof, sizeof(proof));
+    if (size != strlen(PTY_PROTOCOL) || memcmp(proof, PTY_PROTOCOL, size)) fail("broker PTY proof failed");
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM); sigaddset(&signals, SIGINT); sigaddset(&signals, SIGHUP); sigaddset(&signals, SIGCHLD);
+    if (sigprocmask(SIG_BLOCK, &signals, NULL) || signal(SIGPIPE, SIG_IGN) == SIG_ERR ||
+        signal(SIGTERM, SIG_DFL) == SIG_ERR || signal(SIGINT, SIG_DFL) == SIG_ERR ||
+        signal(SIGHUP, SIG_DFL) == SIG_ERR) fail("broker signals unavailable");
+    broker.signals = signalfd(-1, &signals, SFD_CLOEXEC | SFD_NONBLOCK);
+    if (broker.signals < 0 || !broker_nonblocking(0) || !broker_nonblocking(1)) fail("broker channels unavailable");
+    struct broker_request boot = {.epoch = 1, .broker_level = true};
+    memcpy(boot.request_id, argv[3], 37);
+    if (!broker_hello(&broker, &boot)) return broker_shutdown(&broker);
+    for (size_t offset = 0; offset < broker.facts.size; offset += BROKER_CHUNK_BYTES) {
+        unsigned char bytes[BROKER_CHUNK_BYTES];
+        size_t count = broker.facts.size - offset;
+        if (count > sizeof(bytes)) count = sizeof(bytes);
+        read_exact_at(broker.artifact, bytes, count, (off_t)offset);
+        if (!broker_output_append(&broker.output, argv[3], 1, argv[3], NULL, "artifact", offset, bytes, count, true))
+            return broker_shutdown(&broker);
+    }
+    unsigned char input[BROKER_FRAME_MAX_BYTES];
+    size_t used = 0;
+    for (;;) {
+        struct pollfd channels[2] = {{.fd = 0, .events = POLLIN}, {.fd = 1, .events = POLLOUT}};
+        int channel_state = poll(channels, 2, 0);
+        if ((channel_state < 0 && errno != EINTR) ||
+            ((channels[0].revents | channels[1].revents) & (POLLHUP | POLLERR | POLLNVAL))) break;
+        /* Initial-channel closure wins over already buffered release/input,
+         * just as private supervisor-channel closure wins over release. */
+        if (!broker_output_flush(&broker.output, 1, 65536)) break;
+        struct signalfd_siginfo signal;
+        for (;;) {
+            ssize_t count = read(broker.signals, &signal, sizeof(signal));
+            if (count == (ssize_t)sizeof(signal)) {
+                if (signal.ssi_signo != SIGCHLD) return broker_shutdown(&broker);
+            } else if (count < 0 && errno == EINTR) continue;
+            else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+            else return broker_shutdown(&broker);
+        }
+        for (struct broker_command *command = broker.commands; command; command = command->next)
+            if (!broker_observe(&broker, command)) return broker_shutdown(&broker);
+        unsigned char *newline = memchr(input, '\n', used);
+        if (newline) {
+            size_t length = (size_t)(newline - input) + 1;
+            struct broker_input_state next = broker.input;
+            struct broker_request request;
+            enum broker_input_result accepted = broker_input_accept(&next, input, length, &request);
+            if (accepted == BROKER_INPUT_INVALID || accepted == BROKER_INPUT_REJECTED) break;
+            if (accepted == BROKER_INPUT_REPLAY) {
+                if (!broker_output_replay(&broker.output, broker.output.acknowledged + 1)) goto yield;
+            } else {
+                /* An ACK may release pressure before its acceptance frame is
+                 * appended; it is ordered/validated already, and is idempotent.
+                 * Its dispatch below repeats only the same monotonic ACK. */
+                if (request.kind == BROKER_ACK && request.broker_level && !request.size)
+                    (void)broker_output_acknowledge(&broker.output, request.offset);
+                /* Exhausting even the reserved response window is a broken
+                 * retention/control channel, not permission to drop evidence
+                 * or hold a pending input forever while the host awaits ACK. */
+                if (broker.output.bytes > BROKER_OUTPUT_MAX_BYTES - BROKER_REPLY_SPACE) break;
+                broker.input = next;
+                if (!broker_reply(&broker, &request, "accepted", request.sequence, "") ||
+                    !broker_dispatch(&broker, &request)) break;
+            }
+            memmove(input, input + length, used - length); used -= length;
+            continue;
+        }
+        if (used == sizeof(input)) break;
+        ssize_t count = read(0, input + used, sizeof(input) - used);
+        if (count > 0) { used += (size_t)count; continue; }
+        if (count == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) break;
+yield:
+        if (!broker_wait(&broker, !newline)) break;
+    }
+    return broker_shutdown(&broker);
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "broker")) return broker_run(argc, argv);
     if (argc >= 2 && !strcmp(argv[1], "broker-preflight")) return broker_preflight(argc, argv);
     if (argc >= 2 && !strcmp(argv[1], "keeper")) return keeper(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "artifact-capabilities")) return artifact_capability(false);

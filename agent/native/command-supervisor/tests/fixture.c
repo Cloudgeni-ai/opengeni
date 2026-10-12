@@ -124,6 +124,7 @@ int main(int argc, char **argv) {
             !strcmp(mode, "deny-setpgid") ? SYS_setpgid :
             !strcmp(mode, "deny-memfd") ? SYS_memfd_create :
             !strcmp(mode, "deny-execveat") ? SYS_execveat :
+            !strcmp(mode, "deny-close-range") ? SYS_close_range :
             !strcmp(mode, "deny-seals") ? SYS_fcntl : SYS_prctl;
         deny_syscall(nr);
         execvp(argv[2], &argv[2]);

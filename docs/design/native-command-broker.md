@@ -3,9 +3,10 @@
 Status: implementation in progress; not an admitted runtime capability. The
 current increments provide bounded framing, a native bootstrap preflight,
 input/output custody state machines, encrypted atomic transport storage, a
-private inherited supervisor channel and a strict command-definition codec.
-They do not
-enable new command starts, change a production protocol tuple, or qualify an
+private inherited supervisor channel, strict command-definition codec and native
+initial-process command multiplexer. The native `broker` mode can launch test
+commands, but no runtime/provider adapter selects it for application commands.
+These increments do not change a production protocol tuple or qualify an
 existing sandbox. The existing [command supervision](../command-supervision.md)
 and [native keeper](../../agent/native/command-supervisor/README.md) contracts
 remain authoritative until the complete new path is independently qualified.
@@ -80,7 +81,7 @@ descendants before exit 125; that exit supplies no receipt or clean ACK proof.
 Creation-time parent credentials only check the intended topology. They do not
 authenticate a host invocation or make a transferred socket trustworthy. The
 broker's sealed initial custody and full dispatch/exit binding remain required.
-This primitive is not yet called by a live broker or an admitted runtime route.
+The native broker calls this primitive; an admitted runtime route does not yet.
 
 The internal codec is
 `packages/runtime/src/sandbox/providers/native-command-broker-wire.ts`.
@@ -114,10 +115,10 @@ inbox, rather than an in-memory parser, decides whether they are exact duplicate
 The native `broker_request_decode` implements the same closed one-frame request
 contract and canonical base64/decimal rules. It accepts no response kind, returns
 no pointer into caller input and clears partial results on rejection. It is a
-parser, not the input-stream state machine: its future caller must refuse gaps,
+parser, not the input-stream state machine: its caller must refuse gaps,
 poison malformed streams and enforce writer/request replay and the provider's
-uint32 input-index bound before any side effect. There is no live dispatch caller
-yet. `make test-broker-codec-parity` compares native framing and definition
+uint32 input-index bound before any side effect. The native broker supplies that
+caller. `make test-broker-codec-parity` compares native framing and definition
 parsers against the real host codecs, including byte-mutated and truncated input.
 
 ## Literal command definitions
@@ -152,6 +153,82 @@ codec over positive, truncated, byte-mutated and boundary fixtures. The harness
 is not a production subcommand, and this codec does not establish provider
 admission, custody or native cancellation.
 
+## Native initial-process multiplexer
+
+`broker --broker-id UUID` is the separate `native-command-broker-v1` executable
+mode. It seals its own static ELF and exercises pipe/controlling-PTY capability
+children through `execveat(AT_EMPTY_PATH)` before emitting hello and actual sealed
+artifact bytes. Required `close_range(CLOSE_RANGE_CLOEXEC)` support is checked
+before hello. The host must independently verify those bytes and the exact
+initial provider process; neither a printed hash nor starting this CLI locally
+establishes authenticated admission. The old keeper mode is unchanged.
+
+The initial process owns one nonblocking input stream, one encoded output stream
+and each command's separate supervisor, private control pair and pipe or newly
+allocated real PTY. It pins a supervisor pidfd before releasing its pre-exec
+barrier, then executes only the retained sealed descriptor. Child `close_range`
+marks every extra descriptor close-on-exec; only that command's control endpoint
+survives into its supervisor, and it is closed before user code. No mutable
+pathname launcher, extra capability, provider TaskExec, inherited environment or
+shell interpolation supplies the supervisor. Command cwd, argv and environment
+are the validated literal definition. New supervisors remain idle until release.
+
+After the initial empty fence, command requests have these explicit bodies:
+
+| Request | Body and effect |
+| --- | --- |
+| `prepare` | Four-byte big-endian total definition length; reserves a fresh command ID, not a process. |
+| `definition` | Consecutive offset-addressed definition bytes, at most 8192 per frame. |
+| `launch` | Empty body, offset zero; validates the complete definition and starts exactly one idle sealed supervisor. |
+| `control` | Literal `status`, `release`, `cancel`, or `ack` + TAB + exact receipt UUID. One pending private control request per command. |
+| `stdin` | Nonempty bytes at the exact input offset; bounded nonblocking write. A separate result reports completion or partial-write failure. |
+| `eof` | Empty body at the exact input offset, after pending input settles; closes only pipe stdin. PTY half-close is explicitly unsupported, not simulated as Ctrl-D or output loss. |
+| `resize` | Four bytes: big-endian uint16 rows and columns, both nonzero, on a real PTY only. |
+
+Broker-only `ack` acknowledges the sent output prefix named by offset; `replay`
+starts at the first unacknowledged frame, without new output sequence numbers.
+These are not native receipt ACKs. Input acceptance only confirms its reserved
+identity; a separate result records the operation. Exact immediately previous
+input replay retransmits retained output without executing the operation again.
+Stale epochs, gaps, conflicting input reuse and malformed framing poison the
+initial channel and fence further launches. Higher writer fences do not cancel,
+restart or rebind already launched commands.
+
+The output queue retains at most 4 MiB including frame storage, reserving 128 KiB
+for control metadata. Data reads pause before that reserve; cancellation, control
+replies and independent supervisor observation continue. Sent output is retained
+until host acknowledgement. Partial writes never interleave protocol lines. An
+ACK racing a partially written replay lets that line finish before collection.
+Exhausting even the control-response window triggers exceptional shutdown rather
+than dropping evidence or deadlocking a pending acceptance. The host must commit
+capture and send bounded/coalesced ACKs; it must not ACK every ACK into an idle
+loop. This memory queue is not the host's durable journal.
+
+The broker caps command definitions, pending input and identity tombstones at
+16 MiB. Completed bodies are freed, but command IDs are never recycled. Capacity
+failure rejects new preparation/input explicitly; it does not impose a command
+run-time limit or terminate a normally running command. Readiness-driven polling
+has no periodic idle wakeup; sent-but-unacknowledged data does not busy-poll a
+writable stdout descriptor. Command output is always encoded, so protocol-looking
+user text cannot masquerade as initial-process control output.
+
+Native quiescence receipts are forwarded from the private supervisor channel.
+Only after exact receipt ACK does a normally exiting supervisor return zero;
+the broker independently reaps it and waits for captured stream EOFs before its
+separate `supervisorExitCode` frame. Neither that frame nor input acceptance is a
+replacement for the receipt. Pre-spawn cancel closes a birth as `not_started`,
+without fabricating a supervisor receipt. Initial-channel EOF/error, TERM/INT/HUP,
+unexpected supervisor death or malformed input closes all owned private channels
+and keeps the broker subreaper alive until kernel ECHILD. It returns 125, never
+claims clean settlement. Initial-channel closure wins over buffered release.
+
+Local native tests exercise the actual static executable, including literal
+environment/argv, binary stdin, multiple commands, detached/clone writers,
+duplicate release, writer takeover, real PTY, descriptor hygiene, full data-window
+cancellation and fatal-channel cleanup. They do not replace exact remote-provider
+qualification, the host admission/retention integration, the 100-repetition and
+35-second cancellation gates, or preservation-safe old-group compatibility.
+
 ## Durable transport obligations
 
 The pure input transitions in `native-command-broker-input.ts` serialize a
@@ -162,6 +239,18 @@ pending epoch, index and body verbatim, resolves it, then appends its own fence
 before any new command request. Modal 0.9.0 serializes the provider index as
 `uint32`; the transitions refuse exhaustion rather than wrapping. Command EOF
 is an encoded request and never closes the initial broker stdin.
+
+The native `broker_input_accept` reducer mirrors the ordered side of that
+contract. It requires a broker-only empty first fence, consecutive uint32 input
+indexes, strictly increasing fence epochs and the currently accepted epoch for
+ordinary requests. Only the exact immediately previous body may replay; older
+indexes and conflicting reuse reject without changing state. Exhaustion refuses
+new input instead of wrapping. The reducer reserves a new body's identity before
+the native broker performs its operation; replay never authorizes that operation
+again. A malformed frame has a distinct invalid result which the stream owner
+treats as poisoned input, never resynchronizes past. This bounded native state
+is not the durable global request-ID index, host command-birth ledger or an
+admission decision.
 
 The output planner in `native-command-broker-output.ts` keeps all command
 frames and the incomplete framing suffix in one atomic capture plan for the

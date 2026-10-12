@@ -137,7 +137,8 @@ provider's command ownership contract.
 The in-progress broker's literal command-definition decoder lives beside this
 primitive. Its binary format and bounds are described in
 [the broker design](../../../docs/design/native-command-broker.md#literal-command-definitions).
-It is not a production CLI mode and starts no process. Native tests use a
+The parser alone starts no process; the separate native broker owns launch.
+Native tests also use a
 separate parser/round-trip executable, including malformed Unicode, length,
 environment and aggregate-bound cases. With Bun installed, the explicit
 `make test-definition-parity` target compares it against the real runtime codec.
@@ -163,11 +164,17 @@ natural leader-exit semantics while descendants remain.
 
 ## Sealed artifact keeper
 
-The proposed keeper-owned broker is a separately versioned implementation in
+The keeper-owned broker is a separately versioned implementation in
 progress, described in [its design](../../../docs/design/native-command-broker.md).
-Its bounded host-side framing codec and native `broker-preflight --broker-id UUID`
-probe do not activate a broker, change the existing keeper behavior, or qualify
-any runtime command. The explicit preflight runs fixed sealed-ELF inspection and
+The native `broker --broker-id UUID` mode now implements sealed supervisor
+launch, bounded nonblocking command/control/output multiplexing and independent
+supervisor reaping. It is not wired into an admitted application runtime or
+qualified on a provider. Its native tests include multi-command pipe/PTY work,
+replay, output pressure and fatal-channel cleanup. See the design for exact
+operation bodies, explicit PTY half-close limits and remaining activation gates.
+
+The separate `broker-preflight --broker-id UUID` probe does not activate a broker,
+change the existing keeper behavior, or qualify any runtime command. It runs fixed sealed-ELF inspection and
 pipe/PTY capability children with `execveat(AT_EMPTY_PATH)` under the initial
 process, emits bounded artifact frames only after exact-byte/identity and
 independent-exit checks, and reports `commandAdmission: false`. It accepts no
