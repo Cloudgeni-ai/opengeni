@@ -70,11 +70,13 @@ mock.module("@tanstack/react-router", () => ({
   ),
 }));
 const { InlineChatImage } = await import("./inline-chat-image");
+const { resetRetainedImageCaches } = await import("./retained-image-cache");
 
 let notify: IntersectionObserverCallback | undefined;
 let container: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
+  resetRetainedImageCaches();
   metadata = deferred();
   bytes = deferred();
   metadataCalls = 0;
@@ -231,4 +233,30 @@ test("the optional artifact link stays inside the original reserved slot", async
   await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
   expect(slot()).toBe(reserved);
   expect(reserved.querySelector("img")).not.toBeNull();
+});
+
+test("a remounted thumbnail reuses the fetched metadata and bytes", async () => {
+  await render(true);
+  await act(async () => metadata.resolve(artifact));
+  await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
+  expect(container.querySelector("img")).not.toBeNull();
+  // Switching tabs unmounts the card; coming back mounts a fresh one.
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await render(true);
+  expect(container.querySelector("img")).not.toBeNull();
+  expect(metadataCalls).toBe(1);
+  expect(byteCalls).toBe(1);
+});
+
+test("retry after a failure fetches again instead of reusing the cache", async () => {
+  await render();
+  await enterViewport();
+  await act(async () => metadata.resolve(artifact));
+  await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
+  await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+  bytes = deferred();
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+  expect(metadataCalls).toBe(2);
+  expect(byteCalls).toBe(2);
 });
