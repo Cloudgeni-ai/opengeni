@@ -53,7 +53,7 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("child-lifecycle-notices", {
     // The xai capacity wait case drives the legacy SuperGrok waiters, which
     // the drained cutover makes read-only.
-    withheldMigrations: ["0731_subscription_core_xai_cutover.sql"],
+    withheldMigrations: ["0733_subscription_core_xai_cutover.sql"],
   });
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;

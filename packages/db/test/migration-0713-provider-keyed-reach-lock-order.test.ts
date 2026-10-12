@@ -46,7 +46,7 @@ const LATER_MIGRATION = "0714_subscription_workspace_managed_organization_accoun
 // 0715 rewrites routines 0713 and 0714 create, so a deployment before 0713
 // is also before it: held back with 0713 and left pending.
 const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
-const MAINTENANCE_MIGRATION = "0731_subscription_core_xai_cutover.sql";
+const MAINTENANCE_MIGRATION = "0733_subscription_core_xai_cutover.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 73);
 // What the runner sends ahead of a migration body, in the same transaction

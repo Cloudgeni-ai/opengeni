@@ -5111,16 +5111,19 @@ unchanged on 0729. An opt-in a person turned on stays in effect after a
 rollback (placement already read it); dropping the four policies and two
 routines removes only the person's own access.
 
-### SuperGrok on the shared subscription core (0731)
+### SuperGrok on the shared subscription core (0733)
 
-Migration `0731_subscription_core_xai_cutover.sql` is a one-way maintenance
+Migration `0733_subscription_core_xai_cutover.sql` is a one-way maintenance
 cutover, the SuperGrok counterpart of 0689. It moves every organization's
 SuperGrok (`xai`) subscription state onto the shared subscription core,
 records the `xai` receipt and registry row, and enables the SuperGrok cutover
 row for every organization, in one transaction. Design record:
 [subscription core, X3](design/subscription-core-2026-10-07.md#x3-the-drained-supergrok-cutover).
-It requires 0712 through 0717; 0717 adds the core acceptance reads that give
-work accepted after the cutover its owner's personal SuperGrok generation.
+It requires the generic precursor, core acceptance reads, SuperGrok runtime
+and personal-status recovery, and per-provider session-binding migration.
+The latter must supply the `(workspace_id, session_id, provider)` primary
+key and enabled `subscription_session_bindings_provider_fixed` trigger;
+the cutover refuses a missing or malformed prerequisite before writing state.
 The release that carries it must also carry the dormant SuperGrok core
 runtime (chat, refresh, media, routes and capacity waits); after the receipt
 the runtime serves SuperGrok only through the core.
@@ -5144,11 +5147,14 @@ connect and rotation routines that run as the schema owner; the legacy
 disconnect refuses (accounts are disconnected on the core); and no role can
 add a legacy SuperGrok personal authority.
 
-Other providers' rows are not changed, with these SuperGrok-owned
-exceptions. A session whose current model is SuperGrok gets its SuperGrok
-binding in place of another provider's binding; a session on another model
-keeps its binding, and its SuperGrok pin is recorded as the
-`pin_other_provider_binding_kept` disposition. Shared settings rows gain
+Every pre-existing binding for another provider stays byte-identical.
+Eligible automatic and explicit SuperGrok pins become a separate `xai`
+binding regardless of the session's current model; Codex and Claude pins
+coexist with it. After the drained preflight, before inserting new-provider
+bindings or enabling SuperGrok, the first provider cutover drops
+`subscription_session_bindings_rolling_session_idx`. A later provider
+cutover tolerates its absence. The provider-identity trigger stays enabled
+throughout the owner window. Shared settings rows gain
 only their `xai` keys and the SuperGrok primary, and a Personal workspace
 with moved accounts gets the provider-neutral `personal_fallback_allowed`
 override. The owner of accounts connected in their Personal workspace is
@@ -5226,15 +5232,18 @@ WHERE org.locked_settings && ARRAY['providers', 'rotation']
     WHERE credential.account_id = workspace.account_id
       AND credential.workspace_id = workspace.id
       AND credential.authority_scope = 'workspace')
-  AND NOT EXISTS (SELECT 1 FROM organization_memberships owner
-    WHERE owner.account_id = workspace.account_id
-      AND owner.personal_workspace_id = workspace.id);
+;
 ```
 
 **2. Stop and drain.** Stop every API, control worker and turn worker of the
 old and the new release, including idle pooled connections. Drain processes,
 not work: queued, waiting, checkpointed and scheduled work stays in the
 database and is moved. Do not cancel turns or video operations.
+Prevent old images from restarting (including autoscalers, rollback jobs and
+restart policies) before releasing the drain. Dropping the rolling index
+does not make old readers or Codex's old automatic-binding UPDATE fail
+closed: an old process can read or mutate another provider's pin. Keep the
+drain and startup refusal effective until an old image cannot run again.
 
 **3. Back up.** Take a consistent backup (or snapshot) after the drain and
 before migrating. It is the only recovery point before the one-way commit.
@@ -5265,7 +5274,7 @@ ownership ambiguity, named by content-free classes such as
 `personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
 session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
 waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
-pre-existing core SuperGrok state; or any parity mismatch (`0731 parity
+pre-existing core SuperGrok state; or any parity mismatch (`0733 parity
 mismatch (<metrics>)`). A database error while writing the core surfaces only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
 statement parameter, token, label or email leaves the migration. Fix the named
@@ -5295,7 +5304,7 @@ restarted after it.
 
   returns no rows. `compat:dependent_sources_without_record` is zero.
   `disposition:*` rows record accepted non-parity outcomes: expired leases,
-  dropped Personal-pool and `user` rotation rows and fairness cursors, pins
+  dropped rotation rows with no local accounts, `user` rotation rows and fairness cursors, pins
   whose target has no connection the session may use, collapsed duplicate
   waiters, in-flight videos whose credential no longer existed (their
   reference names no connection, so they are never polled again and end at
@@ -5340,6 +5349,13 @@ restarted after it.
 - Work accepted before the cutover keeps exactly the accounts it was
   accepted with. Personal access is re-issued at one new generation per
   owner, so a later disconnect-all revokes it as for Codex.
+- Personal-workspace rotation and primary selection move with the owner's
+  accounts, unless an organization lock requires the organization value
+  instead. The owner's rotation and activate routes remain available subject
+  to those locks; the administrator settings API still refuses Personal
+  overrides.
+- Activating an account through a legacy alias returns its new canonical
+  connection id in `accountId`.
 
 **Containment.** An organization administrator (or an operator acting for one)
 may set that organization's SuperGrok cutover row `enabled = false`. That is
@@ -5361,19 +5377,19 @@ legacy tables and only their own provider's keys in shared relations, and
 each commits in its own transaction with its own parity. Either order of
 releases works:
 
-- Separately: deploy the release that carries 0731, run steps 1 to 6 in one
+- Separately: deploy the release that carries 0733, run steps 1 to 6 in one
   window, and run the Claude cutover's window with its later release.
 - In one window: deploy a release that carries both. Drain and back up once,
   take both inventories, and run the migrator once with the same roles and
-  key; it applies 0731 and then the Claude cutover in ledger order. If the
-  Claude cutover aborts, 0731 stays committed: fix the named Claude rows and
+  key; it applies 0733 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0733 stays committed: fix the named Claude rows and
   run the migrator again (it resumes at the Claude cutover). Start binaries
   only after both receipts exist; readiness refuses a database missing
-  either. Validate each provider's report rows separately. While only 0731
+  either. Validate each provider's report rows separately. While only 0733
   is committed no binary can start: this release needs both receipts and
-  the old release must not run after 0731. If the Claude rows cannot be
+  the old release must not run after 0733. If the Claude rows cannot be
   fixed within the window, restore the step 3 backup and use the separate
-  path, or deploy a release that carries 0731 but not the Claude cutover.
+  path, or deploy a release that carries 0733 but not the Claude cutover.
 
 ### Slack API pilot activation (0597)
 

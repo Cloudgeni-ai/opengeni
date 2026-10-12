@@ -149,6 +149,16 @@ beforeAll(async () => {
       : await (async () => {
           const owned = await acquireOwnerMigratedTestDatabase("api-supergrok-routes");
           if (!owned) return null;
+          // Characterizes the legacy runtime before the drained cutover.
+          const ledger = postgres(owned.ownerUrl, { max: 1, prepare: false });
+          try {
+            await ledger`CREATE TABLE IF NOT EXISTS schema_migrations(
+              name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
+            await ledger`INSERT INTO schema_migrations(name)
+              VALUES ('0733_subscription_core_xai_cutover.sql')`;
+          } finally {
+            await ledger.end();
+          }
           await migrate(owned.ownerUrl);
           await provisionRoles(owned.adminUrl, {
             appPassword: owned.appPassword,

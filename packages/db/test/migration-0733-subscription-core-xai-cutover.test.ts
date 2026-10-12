@@ -1,5 +1,5 @@
 /**
- * Migration 0731: the drained, one-way SuperGrok cutover onto the shared
+ * Migration 0733: the drained, one-way SuperGrok cutover onto the shared
  * subscription core (design 5.3 "Data mapping", "Accepted authority across
  * the cutover", "Personal authority generations", "Cutover protocol"). The
  * legacy state is seeded as the database superuser (an upgrade fixture, not
@@ -31,9 +31,9 @@ import {
 import { decodeSubscriptionCoreXaiCredential } from "../src/subscription-core-xai-adapter";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
 import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
-import { deleteSubscriptionCoreWaitersOfEveryProviderForTurns } from "../src/subscription-core-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
 
-const MIGRATION = "0731_subscription_core_xai_cutover.sql";
+const MIGRATION = "0733_subscription_core_xai_cutover.sql";
 const key = Buffer.alloc(32, 73);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const NIL = "00000000-0000-0000-0000-000000000000";
@@ -101,6 +101,7 @@ const a = {
   image: randomUUID(),
   // Codex state in the same organization that the cutover must keep.
   cx: randomUUID(), // shared Codex connection, the organization's Codex primary
+  cc: randomUUID(), // pre-existing shared Claude connection from an earlier cutover
   s8: randomUUID(), // W1 shared, current model Codex, Codex binding, legacy SuperGrok pin
   t8: randomUUID(),
   s9: randomUUID(), // W1 shared, current model SuperGrok, Codex binding, legacy SuperGrok pin
@@ -127,6 +128,10 @@ const b = {
 // workspaces with local accounts keep following the organization's values.
 const d = {
   account: randomUUID(),
+  personal: randomUUID(),
+  membership: randomUUID(),
+  owner: "user:x3-d-owner",
+  zp: randomUUID(),
   w1: randomUUID(), // local account, rotation off; a pre-existing override row
   w2: randomUUID(), // local account, no override row
   z1: randomUUID(),
@@ -343,6 +348,7 @@ async function seed() {
       [c.w1, c.account],
       [d.w1, d.account],
       [d.w2, d.account],
+      [d.personal, d.account],
     ] as const) {
       await admin`INSERT INTO workspaces (id, account_id, name) VALUES (${id}, ${account}, 'Cutover workspace')`;
     }
@@ -350,6 +356,7 @@ async function seed() {
       [a.om, a.account, a.owner, a.pa, "owner"],
       [a.bm, a.account, a.bob, a.pb, "member"],
       [b.membership, b.account, b.owner, b.personal, "owner"],
+      [d.membership, d.account, d.owner, d.personal, "owner"],
     ] as const) {
       await admin`INSERT INTO organization_memberships (id, account_id, subject_id, status, personal_workspace_id, role)
         VALUES (${id}, ${account}, ${subject}, 'active', ${personal}, ${role})`;
@@ -449,7 +456,7 @@ async function seed() {
     await admin`INSERT INTO xai_rotation_settings (account_id, workspace_id, authority_scope, owner_organization_membership_id, active_credential_id, rotation_enabled, fairness_cursor)
       VALUES (${a.account}, NULL, 'organization', NULL, ${a.x3}, false, 0),
              (${a.account}, ${a.w1}, 'workspace', NULL, ${a.x1}, false, 7),
-             (${a.account}, ${a.pa}, 'workspace', NULL, ${a.x5}, true, 0),
+             (${a.account}, ${a.pa}, 'workspace', NULL, ${a.x5}, false, 0),
              (${a.account}, ${a.w1}, 'user', ${a.om}, ${a.x6}, false, 0)`;
 
     await session({
@@ -629,7 +636,8 @@ async function seed() {
     await admin`INSERT INTO workspace_memberships (account_id, workspace_id, subject_id, role)
       VALUES (${a.account}, ${a.w1}, ${a.owner}, 'owner')`;
     await admin`INSERT INTO subscription_connections (id, account_id, provider, credential_encrypted, ownership, scope_kind, label)
-      VALUES (${a.cx}, ${a.account}, 'codex', 'codex-ciphertext-a', 'shared', 'organization', 'Codex A')`;
+      VALUES (${a.cx}, ${a.account}, 'codex', 'codex-ciphertext-a', 'shared', 'organization', 'Codex A'),
+             (${a.cc}, ${a.account}, 'claude', 'claude-core-ciphertext-a', 'shared', 'organization', 'Claude A')`;
     await admin`INSERT INTO subscription_settings (account_id, workspace_id, personal_connections_allowed,
         personal_fallback_allowed, cross_provider_failover, rotation, providers, fallback_order,
         codex_primary_connection_id, version, updated_by_subject_id)
@@ -665,11 +673,13 @@ async function seed() {
       });
     }
     await admin`INSERT INTO xai_session_account_pins (account_id, workspace_id, session_id, authority_scope, owner_organization_membership_id, pinned_credential_id, pin_source, last_credential_id)
-      VALUES (${a.account}, ${a.w1}, ${a.s8}, 'workspace', NULL, NULL, NULL, ${a.x1}),
-             (${a.account}, ${a.w1}, ${a.s9}, 'workspace', NULL, NULL, NULL, ${a.x1})`;
+      VALUES (${a.account}, ${a.w1}, ${a.s8}, 'workspace', NULL, ${a.x1}, 'manual', ${a.x1}),
+             (${a.account}, ${a.w1}, ${a.s9}, 'workspace', NULL, NULL, NULL, ${a.x1}),
+             (${a.account}, ${a.w1}, ${a.s10}, 'workspace', NULL, NULL, NULL, ${a.x1})`;
     await admin`INSERT INTO subscription_session_bindings (account_id, workspace_id, session_id, provider, connection_id, model_id, choice, version)
       VALUES (${a.account}, ${a.w1}, ${a.s8}, 'codex', ${a.cx}, ${CODEX_MODEL}, 'explicit', 2),
-             (${a.account}, ${a.w1}, ${a.s9}, 'codex', ${a.cx}, ${CODEX_MODEL}, 'automatic', 4)`;
+             (${a.account}, ${a.w1}, ${a.s9}, 'codex', ${a.cx}, ${CODEX_MODEL}, 'automatic', 4),
+             (${a.account}, ${a.w1}, ${a.s10}, 'claude', ${a.cc}, 'claude/sonnet', 'explicit', 7)`;
     await admin`INSERT INTO subscription_leases (account_id, workspace_id, session_id, turn_id, connection_id, provider, holder_id, generation, leased_until)
       VALUES (${a.account}, ${a.w1}, ${a.s10}, ${a.t10}, ${a.cx}, 'codex', 'attempt-codex', 3, now() + interval '10 minutes')`;
     await admin`INSERT INTO subscription_capacity_waiters (account_id, workspace_id, session_id, turn_id, waiter_id, provider, wait_reason, generation, wake_revision, observed_wake_revision, next_check_at, blocked_turn_generation)
@@ -714,7 +724,7 @@ async function seed() {
         locked_settings, version)
       VALUES (${d.account}, NULL, true, false, false, '{}'::jsonb,
           '{"xai":{"inferenceSource":"organization"}}'::jsonb, '{}'::jsonb,
-          ARRAY['rotation', 'providers'], 5),
+          ARRAY['rotation', 'providers', 'personalFallbackAllowed'], 5),
         (${d.account}, ${d.w1}, NULL, NULL, NULL, '{"codex":{"mode":"spread"}}'::jsonb,
           '{"codex":{"inferenceSource":"organization"}}'::jsonb, NULL, '{}', 2)`;
     await credential({
@@ -733,6 +743,15 @@ async function seed() {
     });
     await admin`INSERT INTO xai_rotation_settings (account_id, workspace_id, authority_scope, owner_organization_membership_id, active_credential_id, rotation_enabled, fairness_cursor)
       VALUES (${d.account}, ${d.w1}, 'workspace', NULL, ${d.z1}, false, 0)`;
+    await credential({
+      id: d.zp,
+      account: d.account,
+      workspace: d.personal,
+      scope: "workspace",
+      subject: "sub-d-personal",
+    });
+    await admin`INSERT INTO xai_rotation_settings (account_id, workspace_id, authority_scope, active_credential_id, rotation_enabled)
+      VALUES (${d.account}, ${d.personal}, 'workspace', ${d.zp}, false)`;
 
     // Organization C: Codex core and Claude legacy rows.
     await admin`INSERT INTO subscription_connections (id, account_id, provider, credential_encrypted, ownership, scope_kind, label)
@@ -750,7 +769,7 @@ async function snapshotUntouched() {
     (SELECT md5(string_agg(to_jsonb(turn)::text, ',' ORDER BY id)) FROM session_turns turn) AS turns,
     (SELECT md5(string_agg(to_jsonb(task)::text, ',' ORDER BY id)) FROM scheduled_tasks task) AS tasks,
     (SELECT count(*)::int FROM host_export_outbox) AS facts,
-    (SELECT md5(string_agg(to_jsonb(binding)::text, ',' ORDER BY workspace_id, session_id))
+    (SELECT md5(string_agg(to_jsonb(binding)::text, ',' ORDER BY workspace_id, session_id, provider))
       FROM subscription_session_bindings binding
       WHERE provider <> 'xai') AS bindings,
     (SELECT md5(string_agg(to_jsonb(lease)::text, ',' ORDER BY turn_id))
@@ -759,7 +778,7 @@ async function snapshotUntouched() {
       FROM subscription_capacity_waiters waiter WHERE provider <> 'xai') AS waiters,
     (SELECT md5(string_agg(to_jsonb(preference)::text, ',' ORDER BY account_id, organization_membership_id))
       FROM subscription_person_preferences preference
-      WHERE organization_membership_id <> ${a.om}) AS preferences,
+      WHERE organization_membership_id NOT IN (${a.om}, ${d.membership})) AS preferences,
     (SELECT md5(string_agg((to_jsonb(setting) - 'rotation' - 'providers' - 'xai_primary_connection_id'
         - 'xai_primary_provider' - 'version' - 'updated_by_subject_id' - 'updated_at'
         || jsonb_build_object('rotation', setting.rotation - 'xai', 'providers', setting.providers - 'xai'))::text,
@@ -832,7 +851,7 @@ function errorChain(error: unknown): string {
 }
 
 describe.skipIf(!realDb)(
-  "SUB-COMPAT-02 migration 0731: SuperGrok onto the shared subscription core",
+  "SUB-COMPAT-02 migration 0733: SuperGrok onto the shared subscription core",
   () => {
     let before: Awaited<ReturnType<typeof snapshotUntouched>>;
     beforeAll(async () => {
@@ -917,13 +936,62 @@ describe.skipIf(!realDb)(
       try {
         const isolated = await migrateCutover({ key }).catch((error: Error) => error);
         expect(isolated).toMatchObject({ code: "55000" });
-        expect(errorChain(isolated)).toContain("0719 must run at READ COMMITTED");
+        expect(errorChain(isolated)).toContain("0733 must run at READ COMMITTED");
       } finally {
         await owned.admin.unsafe(
           `ALTER ROLE "${owned.ownerRole}" RESET default_transaction_isolation`,
         );
       }
       await noPartialCutover();
+    }, 180_000);
+
+    test("the cutover refuses the old session-only key without changing any binding", async () => {
+      await owned.admin`ALTER TABLE subscription_session_bindings DROP CONSTRAINT subscription_session_bindings_pkey`;
+      await owned.admin`ALTER TABLE subscription_session_bindings ADD PRIMARY KEY (workspace_id, session_id)`;
+      try {
+        expect(await abortMessage()).toContain(
+          "requires the per-provider binding key and enabled provider guard",
+        );
+        expect((await snapshotUntouched()).bindings).toBe(before.bindings);
+      } finally {
+        await owned.admin`ALTER TABLE subscription_session_bindings DROP CONSTRAINT subscription_session_bindings_pkey`;
+        await owned.admin`ALTER TABLE subscription_session_bindings ADD PRIMARY KEY (workspace_id, session_id, provider)`;
+      }
+    }, 180_000);
+
+    test("the cutover refuses a disabled provider guard and keeps the rolling index", async () => {
+      await owned.admin`ALTER TABLE subscription_session_bindings DISABLE TRIGGER subscription_session_bindings_provider_fixed`;
+      try {
+        expect(await abortMessage()).toContain(
+          "requires the per-provider binding key and enabled provider guard",
+        );
+        const [index] =
+          await owned.admin`SELECT to_regclass('subscription_session_bindings_rolling_session_idx') IS NOT NULL AS present`;
+        expect(index!.present).toBe(true);
+      } finally {
+        await owned.admin`ALTER TABLE subscription_session_bindings ENABLE TRIGGER subscription_session_bindings_provider_fixed`;
+      }
+    }, 180_000);
+
+    test("a later provider cutover accepts an already-closed rolling window", async () => {
+      const later = await acquireOwnerMigratedTestDatabase("xai-after-peer-cutover");
+      if (!later) throw new Error("Real PostgreSQL required");
+      const connection = postgres(later.ownerUrl, { max: 1 });
+      try {
+        await connection`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
+        await connection`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+        await migrate(later.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
+        await connection`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
+        await connection`DROP INDEX subscription_session_bindings_rolling_session_idx`;
+        await migrate(later.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
+        const [state] = await later.admin`SELECT
+          opengeni_private.subscription_provider_cutover_committed('xai') AS receipt,
+          to_regclass('subscription_session_bindings_rolling_session_idx') IS NULL AS closed`;
+        expect(state).toEqual({ receipt: true, closed: true });
+      } finally {
+        await connection.end();
+        await later.release();
+      }
     }, 180_000);
 
     test("a missing or wrong key rolls everything back without leaking material", async () => {
@@ -995,7 +1063,7 @@ describe.skipIf(!realDb)(
       // A rule silently drops moved leases, which only the parity check can see.
       await owned.admin`CREATE RULE xai_cutover_parity_probe AS ON INSERT TO subscription_leases DO INSTEAD NOTHING`;
       try {
-        expect(await abortMessage()).toContain("0731 parity mismatch (live_leases)");
+        expect(await abortMessage()).toContain("0733 parity mismatch (live_leases)");
       } finally {
         await owned.admin`DROP RULE xai_cutover_parity_probe ON subscription_leases`;
       }
@@ -1185,7 +1253,7 @@ describe.skipIf(!realDb)(
         const [legacy] = await owned.admin`SELECT count(*)::int AS total,
             count(*) FILTER (WHERE credential_encrypted = '')::int AS blank
           FROM xai_subscription_credentials`;
-        expect(legacy).toEqual({ total: 12, blank: 12 });
+        expect(legacy).toEqual({ total: 13, blank: 13 });
         // Quota: one window; the rate-limited exhaustion keeps its kind.
         const quotas =
           await owned.admin`SELECT connection_id::text AS id, quota, selection_count::int AS selection_count
@@ -1347,6 +1415,7 @@ describe.skipIf(!realDb)(
           writer: null,
         });
         expect(byWorkspace.has(d.w2)).toBe(false);
+        expect(byWorkspace.has(d.personal)).toBe(false);
         // The effective settings of both workspaces follow the organization.
         for (const workspace of [d.w1, d.w2]) {
           const [effective] = await owned.admin`SELECT
@@ -1370,7 +1439,8 @@ describe.skipIf(!realDb)(
           WHERE provider = 'xai' AND account_id = ${d.account} ORDER BY metric`;
         expect(report.filter((row) => row.legacy !== row.core)).toEqual([]);
         const metrics = new Map(report.map((row) => [row.metric, row.legacy]));
-        expect(metrics.get("locked_workspace_keys_untouched")).toBe(4);
+        expect(metrics.get("locked_workspace_keys_untouched")).toBe(6);
+        expect(metrics.get("disposition:personal_fallback_locked_off")).toBe(1);
         expect(metrics.has("source_modes")).toBe(false);
         expect(metrics.has("workspace_rotation")).toBe(false);
         expect(
@@ -1384,6 +1454,7 @@ describe.skipIf(!realDb)(
             `disposition:local_pool_freeze_locked:${d.w2}`,
             `disposition:local_rotation_locked:${d.w1}`,
             `disposition:local_rotation_locked:${d.w2}`,
+            `disposition:local_rotation_locked:${d.personal}`,
           ].sort(),
         );
       });
@@ -1405,7 +1476,8 @@ describe.skipIf(!realDb)(
         // Both directions preserve the existing Codex row exactly while
         // adding the independent SuperGrok binding, regardless of model.
         expect(bySession.get(a.s9)).toMatchObject({ connection: a.x1, choice: "automatic" });
-        expect(bySession.get(a.s8)).toMatchObject({ connection: a.x1, choice: "automatic" });
+        expect(bySession.get(a.s8)).toMatchObject({ connection: a.x1, choice: "explicit" });
+        expect(bySession.get(a.s10)).toMatchObject({ connection: a.x1, choice: "automatic" });
         const [kept] =
           await owned.admin`SELECT provider, connection_id::text AS connection, choice, version::int AS version
           FROM subscription_session_bindings WHERE session_id = ${a.s8} AND provider = 'codex'`;
@@ -1421,6 +1493,31 @@ describe.skipIf(!realDb)(
         const [added] =
           await owned.admin`SELECT version::int AS version FROM subscription_session_bindings WHERE session_id = ${a.s9} AND provider = 'xai'`;
         expect(added!.version).toBe(1);
+        const [claude] = await owned.admin`SELECT provider, connection_id::text AS connection,
+          choice, version::int AS version FROM subscription_session_bindings
+          WHERE session_id = ${a.s10} AND provider = 'claude'`;
+        expect(claude).toEqual({
+          provider: "claude",
+          connection: a.cc,
+          choice: "explicit",
+          version: 7,
+        });
+        const [protocol] = await owned.admin`SELECT
+          to_regclass('subscription_session_bindings_rolling_session_idx') IS NULL AS dropped,
+          (SELECT tgenabled FROM pg_trigger WHERE tgrelid = 'subscription_session_bindings'::regclass
+            AND tgname = 'subscription_session_bindings_provider_fixed') AS guard`;
+        expect(protocol).toEqual({ dropped: true, guard: "O" });
+      });
+
+      test("Personal-workspace rotation remains the owner's override", async () => {
+        const [settings] = await owned.admin`SELECT rotation->'xai' AS rotation,
+          personal_fallback_allowed, xai_primary_connection_id::text AS primary FROM subscription_settings
+          WHERE account_id = ${a.account} AND workspace_id = ${a.pa}`;
+        expect(settings).toEqual({
+          rotation: { mode: "primary_first" },
+          personal_fallback_allowed: true,
+          primary: a.x5,
+        });
       });
 
       test("live leases and waiters keep their fences, ids and pending wakes", async () => {
@@ -1548,6 +1645,43 @@ describe.skipIf(!realDb)(
         const [image] =
           await owned.admin`SELECT status FROM image_generation_operations WHERE id = ${a.image}`;
         expect(image!.status).toBe("prepared");
+      });
+
+      test("compat:dependent_sources_without_record: retained parent and withdrawn draft sources copy after cutover", async () => {
+        for (const sourceTurnId of [a.t5, a.t6]) {
+          const id = randomUUID();
+          await withSessionRlsActorContext({ subjectId: a.owner }, () =>
+            withRlsContext(client.db, { accountId: a.account, workspaceId: a.w2 }, async (tx) => {
+              await tx.execute(sql`INSERT INTO session_system_updates (
+                id, account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary,
+                payload, lineage, xai_provider_account_authority_snapshot,
+                claude_provider_account_authority_snapshot, subscription_authority
+              ) SELECT ${id}::uuid, account_id, workspace_id, session_id,
+                'session_wait_timeout', ${id}, ${`x3-copy:${id}`}, 'Wait expired',
+                '{"type":"session_wait_timeout"}'::jsonb,
+                jsonb_build_object('causalTurnId', id::text),
+                xai_provider_account_authority_snapshot, claude_provider_account_authority_snapshot,
+                subscription_authority
+                FROM session_turns WHERE workspace_id = ${a.w2}::uuid AND id = ${sourceTurnId}::uuid`);
+              const [copied] = await rawRows<{ copied: boolean }>(
+                tx,
+                sql`SELECT
+                opengeni_private.copy_subscription_authority_compat('xai', 'session_system_update',
+                  ${a.w2}::uuid, ${id}::uuid, null) AS copied`,
+              );
+              expect(copied!.copied).toBe(true);
+            }),
+          );
+          const [parity] = await owned.admin`SELECT
+            source.personal = target.personal AND source.shared_pool = target.shared_pool
+              AND source.legacy_scope = target.legacy_scope
+              AND source.owner_subject_id IS NOT DISTINCT FROM target.owner_subject_id AS same
+            FROM opengeni_private.subscription_authority_compat source
+            JOIN opengeni_private.subscription_authority_compat target
+              ON target.provider = source.provider AND target.system_update_id = ${id}
+            WHERE source.provider = 'xai' AND source.turn_id = ${sourceTurnId}`;
+          expect(parity).toEqual({ same: true });
+        }
       });
 
       test("the parity report has every metric equal, with dispositions and impact rows", async () => {
@@ -1774,7 +1908,7 @@ describe.skipIf(!realDb)(
             (SELECT count(*)::int FROM xai_subscription_credentials WHERE id = ${a.x1}) AS legacy,
             (SELECT count(*)::int FROM xai_session_account_pins WHERE last_credential_id = ${a.x1}) AS pins,
             (SELECT status FROM subscription_connections WHERE id = ${a.x1}) AS core`;
-        expect(state).toEqual({ legacy: 1, pins: 2, core: "active" });
+        expect(state).toEqual({ legacy: 1, pins: 3, core: "active" });
       }, 60_000);
 
       test("new work accepted after the cutover carries the owner's current SuperGrok generation", async () => {
@@ -1858,7 +1992,7 @@ describe.skipIf(!realDb)(
           client.db,
           { accountId: a.account, workspaceId: waiter!.workspace },
           (tx) =>
-            deleteSubscriptionCoreWaitersOfEveryProviderForTurns(tx, {
+            deleteSubscriptionCoreWaitersForTurns(tx, null, {
               workspaceId: waiter!.workspace,
               turnIds: [a.t1],
             }),
@@ -1894,7 +2028,7 @@ describe.skipIf(!realDb)(
         // The member's migrated personal connection is deleted with their
         // Personal workspace. The legacy row stays: the retention delete has no
         // workspace context and the legacy `user` row is not visible to it, the
-        // same as before the receipt (its ciphertext is blank since 0731).
+        // same as before the receipt (its ciphertext is blank since 0733).
         expect(finalized!.result.deletedResources).toMatchObject({
           subscriptionConnections: 1,
           personalWorkspaces: 1,

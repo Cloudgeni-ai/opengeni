@@ -53,11 +53,11 @@ const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
-const MAINTENANCE_MIGRATIONS = ["0731_subscription_core_xai_cutover.sql"];
-// A binary that knows 0731 reports only the missing SuperGrok receipt until
+const MAINTENANCE_MIGRATIONS = ["0733_subscription_core_xai_cutover.sql"];
+// A binary that knows 0733 reports only the missing SuperGrok receipt until
 // the maintenance step runs.
 const BEFORE_XAI_CUTOVER = [
-  "database is missing the xai subscription-core cutover receipt (0731_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0733_subscription_core_xai_cutover.sql); apply the pending migrations first",
 ];
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 71);

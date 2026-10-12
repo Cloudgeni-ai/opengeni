@@ -4,7 +4,7 @@
  *
  * A session workflow that parked on a legacy SuperGrok capacity wait recorded
  * the peek activity's result (provider `xai`, waiter id, generation, wake
- * revision) in its history before the drained migration ran. 0731 moves that
+ * revision) in its history before the drained migration ran. 0733 moves that
  * waiter onto the shared core with the same id, generation and revisions, and
  * a wake the workflow had not observed lands in the core wake outbox. The
  * activity and signal names and payload shapes are unchanged, and a recorded
@@ -40,7 +40,7 @@ import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0731_subscription_core_xai_cutover.sql";
+const MIGRATION = "0733_subscription_core_xai_cutover.sql";
 const MODEL = "xai/grok-4";
 const key = Buffer.alloc(32, 79);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
