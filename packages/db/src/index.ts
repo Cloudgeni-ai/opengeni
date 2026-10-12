@@ -22195,14 +22195,9 @@ export async function updateSessionVariableSets(
         if (pendingWork?.blocker !== null && pendingWork?.blocker !== undefined) {
           return { status: "blocked", reason: "turn_in_flight" };
         }
-        const [groupCount] = await rawRows<{ count: number }>(
-          tx,
-          sql`select count(*)::int as count
-          from sessions
-          where workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${session.sandboxGroupId}`,
-        );
-        if (Number(groupCount?.count ?? 0) > 1) {
+        // Count the complete group, not the actor-visible subset: a sibling
+        // may be another person's Only-me session on the same box.
+        if ((await completeRecoveryGroupCount(tx, input, session.sandboxGroupId)) > 1) {
           return { status: "blocked", reason: "shared_sandbox_group" };
         }
         // Serialize with the get-or-create admission path even when this group
@@ -32293,8 +32288,27 @@ async function createSessionInTransaction(
         }
         owner = scheduledOwner;
         await setSubjectRlsContext(tx, owner);
-      } else if (frozenCreator.initiator.kind !== "subject" || !owner || input.sandboxGroupId) {
-        throw new Error("Private session creation requires a top-level managed-human singleton");
+      } else if (frozenCreator.initiator.kind !== "subject" || !owner) {
+        throw new Error("Private session creation requires a top-level managed human");
+      } else if (input.sandboxGroupId) {
+        // An Only-me session may share an existing sandbox: who can read the
+        // conversation and who can use the box are separate. The creator must
+        // already see a session on that box, so a group id alone grants nothing.
+        await setSubjectRlsContext(tx, owner);
+        const [visibleMember] = await tx
+          .select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.accountId, input.accountId),
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+            ),
+          )
+          .limit(1);
+        if (!visibleMember) {
+          throw new Error("Private session sandbox group is not visible to its creator");
+        }
       }
       if (!owner) throw new Error("Private session owner is unavailable");
       const capability = await openPrivateSessionCreateCapability(tx, {
@@ -64854,6 +64868,29 @@ export async function listSessionIdsInGroup(
     `,
     );
     return rows.map((r) => r.id);
+  });
+}
+
+/**
+ * Count every session on a sandbox group, including Only-me sessions the
+ * caller cannot read. Whether a box is shared is a property of the box, so the
+ * shared-exposure disclosure must not depend on the caller's visibility. Only
+ * a number leaves this function; member ids stay actor-scoped
+ * (listSessionIdsInGroup).
+ */
+export async function countAllSessionsInGroup(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+    const [row] = await rawRows<{ count: number }>(
+      scopedDb,
+      sql`select count(*)::int as count from sessions
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}`,
+    );
+    return Number(row?.count ?? 0);
   });
 }
 
