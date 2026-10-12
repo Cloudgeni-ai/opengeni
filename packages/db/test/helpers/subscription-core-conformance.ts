@@ -4717,7 +4717,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         }
       });
 
-      test("SUB-WAIT-02, SUB-SEL-04: a choice for a waiting turn wakes it, and turning the fallback opt-in on wakes waiting turns", async () => {
+      test("SUB-WAIT-02, SUB-SEL-04: a choice for a waiting turn wakes it, and turning the fallback opt-in on wakes only the person's own waiting turns", async () => {
         const armWaiter = async (org: Org, turn: Turn): Promise<string> => {
           const tenant = { accountId: org.accountId, workspaceId: org.sharedWorkspaceId };
           const waiter = await withRlsContext(db(), tenant, (tx) =>
@@ -4773,6 +4773,27 @@ export function describeSubscriptionCoreConformance<Credential>(
         });
         expect(await placeChecked(waiting)).toMatchObject({ kind: "wait" });
         const fallbackWaiter = await armWaiter(fallback, waiting);
+        // Waiting turns that the person's accounts can never serve: an
+        // ownerless session and a colleague's session. Placement offers a
+        // personal account only to its owner's sessions, so the opt-in wake
+        // leaves them alone.
+        const ownerless = await runningTurn(fallback, { owner: "none" });
+        const ownerlessWaiter = await armWaiter(fallback, ownerless);
+        const colleague = await workspaceMember(fallback);
+        const [colleagueMembership] = await admin()<{ id: string }[]>`
+          select id::text as id from organization_memberships
+          where account_id = ${fallback.accountId}::uuid and subject_id = ${colleague}`;
+        const theirs = await runningTurn(fallback, { visibility: "workspace_shared" });
+        // Fixture only: hand the session to the colleague. Session authority
+        // is guarded by triggers, which this superuser transaction skips.
+        await admin().begin(async (fixture) => {
+          await fixture`set local session_replication_role = replica`;
+          await fixture`update sessions
+            set owner_subject_id = ${colleague},
+              owner_organization_membership_id = ${colleagueMembership!.id}::uuid
+            where id = ${theirs.identity.sessionId}::uuid`;
+        });
+        const colleagueWaiter = await armWaiter(fallback, theirs);
         const on = await writeSubscriptionPersonPreferences(
           db(),
           { ...owner, personalFallbackOptIn: true },
@@ -4781,8 +4802,11 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(on.outcome).toBe("written");
         const wakes = on.outcome === "written" ? on.wakes : [];
         expect(wakes.map((wake) => wake.provider)).toEqual([providerId]);
+        expect(wakes.map((wake) => wake.ownerMembershipId)).toEqual([fallback.ownerMembershipId]);
         await deliverSubscriptionCoreProviderWakes(db(), wakes);
         expect(await revisionOf(fallbackWaiter)).toBe(2);
+        expect(await revisionOf(ownerlessWaiter)).toBe(1);
+        expect(await revisionOf(colleagueWaiter)).toBe(1);
         expect(await placeChecked(waiting)).toMatchObject({
           kind: "run",
           connectionId: personal,

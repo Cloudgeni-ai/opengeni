@@ -801,16 +801,16 @@ export async function writeSubscriptionPersonPreferences(
         },
       };
     }
-    // Wake the organization's waiters of every provider on the core when the
-    // opt-in turns on. The wake is organization-wide (waiters recheck and
-    // keep waiting when nothing changed for them); the person's waiting
-    // turns are among them.
+    // Wake the person's own waiting turns of every provider on the core when
+    // the opt-in turns on. Placement offers a personal account only to
+    // sessions its owner owns, so no other session can place differently.
     const wakes: SubscriptionCoreProviderWake[] =
       row.personal_fallback_opt_in && !own.optIn
         ? (await enabledProviders(tx, input.accountId, providers)).map((binding) => ({
             provider: binding.adapter.provider,
             accountId: input.accountId,
             reason: subscriptionCoreWakeReason(binding, "person_preferences_changed"),
+            ownerMembershipId: own.membershipId,
           }))
         : [];
     return {

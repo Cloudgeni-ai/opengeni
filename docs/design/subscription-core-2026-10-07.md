@@ -5469,10 +5469,12 @@ or provider on a shared account). This change does not alter either order.
    account's owner. A turn waiting
    for capacity is woken and re-placed at once; otherwise the choice applies
    from the next turn. It records `model_account.selection.changed`.
-   Saving a person's personal-fallback opt-in wakes the organization's
-   waiting turns of every enabled provider when the opt-in turns on, so a
-   turn already waiting can fall back at once. Turning it off wakes nothing
-   and moves no running turn (D-27).
+   Saving a person's personal-fallback opt-in wakes that person's own
+   waiting turns (sessions whose owner membership is theirs) of every
+   enabled provider when the opt-in turns on, so a turn already waiting can
+   fall back at once. No other session can place on their personal account,
+   so no other turn is woken. Turning it off wakes nothing and moves no
+   running turn (D-27).
 3. Migration 0729 (rolling) lets a person read and change only their own
    `subscription_person_preferences` row (see `docs/deployment.md`). Its
    membership routine reads the caller's own membership through an
