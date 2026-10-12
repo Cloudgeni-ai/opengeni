@@ -456,7 +456,7 @@ describe("a personal connection's owner (own Personal workspace)", () => {
       const [row] = await rows(workspaceId, org.ownerSubjectId);
       expect(row?.id).toBe(personal);
       expect(row?.status).toBe("active");
-      expect((row?.quota as SubscriptionQuota).windows).toMatchObject([
+      expect((row!.quota as SubscriptionQuota).windows).toMatchObject([
         { id: "spend_budget", usedPercent: 100, status: "exhausted", resetsAt },
       ]);
     }
