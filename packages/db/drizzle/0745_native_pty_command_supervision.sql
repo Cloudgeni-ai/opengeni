@@ -1,6 +1,6 @@
 -- deployment-mode: maintenance
 -- Extend initial native ownership to PTYs and initial-process broker locators.
--- This unpublished candidate follows the additive 0738 transport journal.
+-- This unpublished candidate follows the additive 0744 transport journal.
 -- Existing v1 rows and all immutable
 -- receipt/output, cancellation, loss and holder fences remain unchanged.
 -- No legacy row is upgraded. Drain old writers before this readiness marker

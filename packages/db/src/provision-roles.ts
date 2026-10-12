@@ -2085,7 +2085,8 @@ BEGIN
     -- read RPCs are runtime capabilities; repair table and column ACLs after
     -- the blanket private-function grant without granting enrollment writers.
     FOREACH routine_signature IN ARRAY ARRAY[
-      'freeze_native_command_group_birth()', 'freeze_native_command_provider_enrollment()'
+      'freeze_native_command_group_birth()', 'freeze_native_command_provider_enrollment()',
+      'guard_native_broker_create()'
     ] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);

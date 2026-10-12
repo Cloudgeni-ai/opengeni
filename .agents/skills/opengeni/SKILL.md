@@ -117,7 +117,11 @@ Then open the smallest source files that answer the question:
   `modal-native-broker-create.ts` binds the internal fixed initial-process
   recipe to the physical create wire request. Its lifecycle requires separate
   durable admission and post-receipt bootstrap gates before manifest setup;
-  application selection and qualification remain separate, incomplete gates.
+  the operator ledger and independent SQL guard bind the distinct broker tuple,
+  artifact pin and original create recipe without enrolling old groups. See
+  `native-command-qualification.ts` and migration `0749`; snapshot capture/drain
+  remains separate from as-yet-unqualified broker snapshot restore.
+  Application selection and physical qualification remain incomplete gates.
   Journal capture/dispatch and a passing native fixture do not imply canonical
   application admission or old-group enrollment. Follow the remaining gates in
   `docs/design/native-command-broker.md` before enabling that path.

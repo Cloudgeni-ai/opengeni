@@ -85,6 +85,12 @@ The internal Modal creation opt-in binds a fixed image-owned initial broker to
 the actual physical request and requires durable admission and post-receipt
 bootstrap gates before manifest setup (`modal-native-broker-create.ts`). This
 request binding is not qualification; application selection remains disabled.
+The broker protocol has its own operator-only artifact qualification; the
+canonical create ledger and an independent SQL guard bind the original recipe
+and reject reused physical broker identities. Router qualifications and old
+births cannot enroll this path (`native-command-qualification.ts`, migration
+`0749`). Snapshot retention remains valid, but broker snapshot restore needs
+separate preservation qualification.
 The native supervisor's distinct `broker` mode multiplexes initial-process
 input/output and launches sealed per-command supervisors through its private
 `launch-channel` primitive, not a guest-path authentication fallback. Its native
@@ -671,7 +677,7 @@ Those groups require native ownership for every new turn command while the
 global flag stays false. Read-only scoped RPCs inspect the owner-only ledger;
 existing groups never gain retrospective qualification. Canonical source:
 `packages/db/src/native-command-qualification.ts` and maintenance migrations
-`0739`/`0740`.
+`0745`/`0746`.
 Exact-instance capability verification precedes admission; durable invocation
 retention precedes dispatch. The supervisor starts idle. Only original launch
 releases user code; reconstructed observers never release abandoned reservations.

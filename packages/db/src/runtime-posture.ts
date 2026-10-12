@@ -1085,6 +1085,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "freeze_native_command_group_birth()",
   "freeze_native_command_provider_enrollment()",
+  "guard_native_broker_create()",
   "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",

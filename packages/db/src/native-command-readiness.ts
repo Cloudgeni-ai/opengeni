@@ -42,6 +42,16 @@ export function nativeCommandQualificationTriggerBindings(targetSchema: string) 
     {
       schema: targetSchema,
       relation: "sandbox_leases",
+      name: "guard_native_broker_create",
+      functionSchema: targetSchema,
+      functionName: "guard_native_broker_create",
+      type: 19, // BEFORE ROW UPDATE OF canonical create/warm fields
+      updateColumns: ["liveness", "provider_create_attempt"],
+      securityDefiner: true,
+    },
+    {
+      schema: targetSchema,
+      relation: "sandbox_leases",
       name: "freeze_native_command_provider_enrollment",
       functionSchema: targetSchema,
       functionName: "freeze_native_command_provider_enrollment",
@@ -99,7 +109,8 @@ export async function inspectNativeCommandQualificationTriggers(
       'native_command_qualification_guard', 'native_command_birth_immutable',
       'native_command_enrollment_immutable', 'native_command_binding_immutable'))
       or (n.nspname = coalesce(${targetSchema ?? null}, current_schema()) and t.tgname in (
-        'freeze_native_command_group_birth', 'freeze_native_command_provider_enrollment'))
+        'freeze_native_command_group_birth', 'freeze_native_command_provider_enrollment',
+        'guard_native_broker_create'))
     order by n.nspname, t.tgname, c.relname
   `);
   const rows = Array.isArray(result) ? result : (result as { rows?: unknown }).rows;

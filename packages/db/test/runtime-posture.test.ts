@@ -1629,7 +1629,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 0738 adds one mutable transport head and one append-only inbox/outbox.
+          // 0744 adds one mutable transport head and one append-only inbox/outbox.
           (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
             ? 2
             : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
@@ -1741,7 +1741,7 @@ describe("runtime database posture evaluator", () => {
         "UPDATE",
       ]);
       const tableCount =
-        2 + // 0738 encrypted native broker head and append-only receipts.
+        2 + // 0744 encrypted native broker head and append-only receipts.
         (hasCurrentMainActivityLedger ? 341 : 218) +
         9 +
         12 +

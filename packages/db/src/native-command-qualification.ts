@@ -2,12 +2,15 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   canonicalModalCheckpointProviderBinding,
+  NativeBrokerArtifactPin,
+  NativeBrokerCreatePlan,
   type CommandSupervisionProtocol,
+  type NativeBrokerCommandProtocol,
 } from "@opengeni/contracts";
 import { withRlsContext, type Database } from "./database";
 import { assertNativeCommandQualificationReady } from "./native-command-readiness";
 
-const Qualification = z.object({
+const QualificationBase = z.object({
   id: z.uuid(),
   accountId: z.uuid(),
   workspaceId: z.uuid(),
@@ -33,9 +36,21 @@ const Qualification = z.object({
         return false;
       }
     }, "Qualification requires a canonical authenticated provider namespace"),
-  protocols: z.tuple([z.literal("native-subreaper-v1"), z.literal("native-subreaper-pty-v1")]),
   acceptanceEvidenceHash: z.string().regex(/^[a-f0-9]{64}$/u),
 });
+const Qualification = z.union([
+  QualificationBase.extend({
+    protocols: z.tuple([z.literal("native-subreaper-v1"), z.literal("native-subreaper-pty-v1")]),
+    brokerArtifact: z.undefined().optional(),
+  }),
+  QualificationBase.extend({
+    protocols: z.tuple([
+      z.literal("native-subreaper-broker-channel-v1"),
+      z.literal("native-subreaper-broker-channel-pty-v1"),
+    ]),
+    brokerArtifact: NativeBrokerArtifactPin,
+  }),
+]);
 
 export type NativeCommandBirthQualification = z.infer<typeof Qualification>;
 export type NativeCommandQualification = NativeCommandBirthQualification & {
@@ -50,6 +65,31 @@ export type NativeCommandProviderQualification =
   | { status: "legacy" }
   | { status: "enrolled"; qualification: NativeCommandBirthQualification }
   | { status: "blocked"; reason: string; qualification?: NativeCommandBirthQualification };
+
+/** Data validation only. The trusted provider caller obtains the plan from
+ * the original physical intent, never from public metadata. SQL repeats this
+ * binding and preserves the original immutable enrollment on every update. */
+export function validateQualifiedNativeBrokerPlan(
+  qualification: NativeCommandBirthQualification | null,
+  input: unknown,
+): NativeBrokerCreatePlan | undefined {
+  if (!qualification?.brokerArtifact) {
+    if (input !== undefined)
+      throw new Error("Native broker creation requires a broker-qualified group birth");
+    return undefined;
+  }
+  const plan = NativeBrokerCreatePlan.parse(input);
+  const artifact = qualification.brokerArtifact;
+  if (
+    plan.sourceSha !== qualification.sourceSha ||
+    plan.imageId !== qualification.providerImageId ||
+    plan.artifact.artifactSha256 !== artifact.artifactSha256 ||
+    plan.artifact.byteSize !== artifact.byteSize ||
+    plan.artifact.target !== artifact.target
+  )
+    throw new Error("Native broker create plan differs from its exact qualification");
+  return plan;
+}
 
 /** Operator-only: its DB handle must own the private ledger. Runtime roles
  * cannot publish or enable qualification, regardless of supplied scope IDs.
@@ -76,11 +116,12 @@ export async function publishNativeCommandQualification(
         await tx.execute(sql`update opengeni_private.native_command_qualifications
       set enrollment_enabled = false where data_schema = current_schema() and workspace_id = ${input.workspaceId}::uuid and enrollment_enabled`);
       await tx.execute(sql`insert into opengeni_private.native_command_qualifications
-      (data_schema,id,account_id,workspace_id,creator_kind,creator_subject_id,create_idempotency_key,activation_generation,source_sha,image_ref,provider_image_id,provider_binding_key,protocols,acceptance_evidence_hash,enrollment_enabled)
+      (data_schema,id,account_id,workspace_id,creator_kind,creator_subject_id,create_idempotency_key,activation_generation,source_sha,image_ref,provider_image_id,provider_binding_key,protocols,acceptance_evidence_hash,enrollment_enabled,broker_artifact)
       values (current_schema(),${qualification.id}::uuid,${qualification.accountId}::uuid,${qualification.workspaceId}::uuid,
         'subject',${qualification.creatorSubjectId},${qualification.createIdempotencyKey},
         ${qualification.activationGeneration},${qualification.sourceSha},${qualification.imageRef},${qualification.providerImageId},${qualification.providerBindingKey},
-        ARRAY['native-subreaper-v1','native-subreaper-pty-v1'],${qualification.acceptanceEvidenceHash},${input.enrollmentEnabled})`);
+        ARRAY[${qualification.protocols[0]},${qualification.protocols[1]}]::text[],${qualification.acceptanceEvidenceHash},${input.enrollmentEnabled},
+        ${qualification.brokerArtifact ? JSON.stringify(qualification.brokerArtifact) : null}::jsonb)`);
     }),
   );
 }
@@ -129,7 +170,7 @@ export async function inspectNativeCommandProviderQualification(
   input: NativeCommandQualificationScope & {
     providerInstanceId: string;
     leaseEpoch: number;
-    protocol: CommandSupervisionProtocol;
+    protocol: CommandSupervisionProtocol | NativeBrokerCommandProtocol;
     sourceSha: string;
   },
 ): Promise<NativeCommandProviderQualification> {
@@ -158,7 +199,7 @@ export async function inspectNativeCommandProviderQualification(
         reason: "source_identity_unqualified",
         qualification: decision.qualification,
       };
-    if (!decision.qualification.protocols.includes(input.protocol))
+    if (!decision.qualification.protocols.some((protocol) => protocol === input.protocol))
       return {
         status: "blocked",
         reason: "protocol_unqualified",

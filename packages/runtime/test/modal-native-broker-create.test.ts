@@ -181,6 +181,8 @@ describe("initial broker physical-create binding", () => {
 
   test.each([
     { brokerId: "caller-string" },
+    { brokerId: "00000000-0000-0000-0000-000000000000" },
+    { brokerId: "ffffffff-ffff-ffff-ffff-ffffffffffff" },
     { brokerId: brokerId.toUpperCase() },
     { sourceSha: "main" },
     { imageId: "latest" },

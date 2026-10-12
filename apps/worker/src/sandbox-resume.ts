@@ -81,6 +81,7 @@ import {
   modalSessionMatchesCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
   readModalCreateImagePreparation,
+  readModalNativeBrokerCreate,
   serializeReplacementSandboxEnvelope,
   tagModalSandbox,
   terminateUnpublishedSandboxSession,
@@ -1810,6 +1811,7 @@ async function resumeBoxForTurnOnce(
           const operationId = intent.operationId;
           const nativeSourceSha = await readImmutableServerSourceSha();
           const nativeImagePreparation = readModalCreateImagePreparation(intent);
+          const nativeBroker = readModalNativeBrokerCreate(intent)?.plan;
           await beginModalProviderCreate(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -1826,6 +1828,7 @@ async function resumeBoxForTurnOnce(
             requestSha256: intent.requestSha256,
             ...(nativeSourceSha ? { nativeSourceSha } : {}),
             ...(nativeImagePreparation ? { nativeImagePreparation } : {}),
+            ...(nativeBroker ? { nativeBroker } : {}),
           });
           providerCreateOperationId = operationId;
           providerCreateBindingKey = binding.key;

@@ -1,27 +1,16 @@
-import { z } from "zod";
-import { NativeBrokerArtifactPinSchema } from "./native-command-broker-bootstrap";
-
-const planSchema = z
-  .object({
-    version: z.literal(1),
-    brokerId: z.uuid().regex(/^[a-f0-9-]+$/),
-    sourceSha: z.string().regex(/^[a-f0-9]{40}$/),
-    imageId: z.string().regex(/^im-[A-Za-z0-9_-]{1,200}$/),
-    artifact: NativeBrokerArtifactPinSchema,
-  })
-  .strict();
+import { NativeBrokerCreatePlan } from "@opengeni/contracts";
 
 /** Internal creation recipe, never qualification or user command authority.
  * The caller must independently select its release pin and frozen cohort, then
  * persist the exact plan with physical-create admission before dispatch. */
 export type ModalNativeBrokerCreatePlan = Readonly<
-  Omit<z.infer<typeof planSchema>, "artifact"> & {
-    artifact: Readonly<z.infer<typeof NativeBrokerArtifactPinSchema>>;
+  Omit<NativeBrokerCreatePlan, "artifact"> & {
+    artifact: Readonly<NativeBrokerCreatePlan["artifact"]>;
   }
 >;
 
 export function parseModalNativeBrokerCreatePlan(input: unknown): ModalNativeBrokerCreatePlan {
-  const plan = planSchema.parse(input);
+  const plan = NativeBrokerCreatePlan.parse(input);
   return Object.freeze({ ...plan, artifact: Object.freeze(plan.artifact) });
 }
 

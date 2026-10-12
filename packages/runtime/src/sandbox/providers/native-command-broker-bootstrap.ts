@@ -1,20 +1,11 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { NativeBrokerArtifactPin as NativeBrokerArtifactPinSchema } from "@opengeni/contracts";
 import { encodeNativeBrokerFrame, type NativeBrokerFrame } from "./native-command-broker-wire";
 import type { DurableNativeBrokerTransport } from "./native-command-broker-transport";
 
 const target = z.enum(["linux-amd64", "linux-arm64"]);
-export const NativeBrokerArtifactPinSchema = z
-  .object({
-    artifactSha256: z.string().regex(/^[a-f0-9]{64}$/),
-    byteSize: z
-      .number()
-      .int()
-      .min(64)
-      .max(256 * 1024),
-    target,
-  })
-  .strict();
+export { NativeBrokerArtifactPinSchema };
 const uint64 = z
   .string()
   .regex(/^(?:0|[1-9][0-9]{0,19})$/)

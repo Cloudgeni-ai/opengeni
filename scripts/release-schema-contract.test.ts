@@ -37,6 +37,14 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("registers distinct broker creation qualification as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0749_native_broker_creation_qualification.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
   test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -205,10 +213,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0739_native_pty_command_supervision.sql",
+        (migration) => migration.path === "0745_native_pty_command_supervision.sql",
       ),
     ).toMatchObject({
-      path: "0739_native_pty_command_supervision.sql",
+      path: "0745_native_pty_command_supervision.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -217,10 +225,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0740_native_command_qualification.sql",
+        (migration) => migration.path === "0746_native_command_qualification.sql",
       ),
     ).toMatchObject({
-      path: "0740_native_command_qualification.sql",
+      path: "0746_native_command_qualification.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -229,10 +237,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0738_native_command_broker_transport.sql",
+        (migration) => migration.path === "0744_native_command_broker_transport.sql",
       ),
     ).toMatchObject({
-      path: "0738_native_command_broker_transport.sql",
+      path: "0744_native_command_broker_transport.sql",
       deploymentMode: "rolling",
     });
   });
@@ -241,10 +249,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0741_native_command_broker_control_replies.sql",
+        (migration) => migration.path === "0747_native_command_broker_control_replies.sql",
       ),
     ).toMatchObject({
-      path: "0741_native_command_broker_control_replies.sql",
+      path: "0747_native_command_broker_control_replies.sql",
       deploymentMode: "rolling",
     });
   });
@@ -253,10 +261,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0742_native_command_broker_input_replies.sql",
+        (migration) => migration.path === "0748_native_command_broker_input_replies.sql",
       ),
     ).toMatchObject({
-      path: "0742_native_command_broker_input_replies.sql",
+      path: "0748_native_command_broker_input_replies.sql",
       deploymentMode: "rolling",
     });
   });
@@ -2355,11 +2363,12 @@ describe("release schema contract", () => {
       "0701_quiescence_receipt_wake_repair.sql",
       "0700_codex_ownerless_person_refresh.sql",
       "0734_connected_output_reachable_due.sql",
-      "0739_native_pty_command_supervision.sql",
-      "0740_native_command_qualification.sql",
-      "0738_native_command_broker_transport.sql",
-      "0741_native_command_broker_control_replies.sql",
-      "0742_native_command_broker_input_replies.sql",
+      "0745_native_pty_command_supervision.sql",
+      "0746_native_command_qualification.sql",
+      "0744_native_command_broker_transport.sql",
+      "0747_native_command_broker_control_replies.sql",
+      "0748_native_command_broker_input_replies.sql",
+      "0749_native_broker_creation_qualification.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
       "0698_codex_ownerless_person_turns.sql",
       "0697_codex_retry_after_unknown_outcome.sql",

@@ -52,6 +52,7 @@ export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   ToolReviewContext,
+  NativeBrokerCreatePlan,
   WorkspaceModelCompactionThresholdsPatch,
   cleanStoredSessionTitle,
   workspaceSettingsAllowCreditModels,
@@ -239,7 +240,10 @@ import {
 } from "./credit-debit-attribution";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { readSessionFileAttachments } from "./session-file-attachments";
-import { loadNativeCommandBirthQualification } from "./native-command-qualification";
+import {
+  loadNativeCommandBirthQualification,
+  validateQualifiedNativeBrokerPlan,
+} from "./native-command-qualification";
 export {
   acceptSessionFileAttachments,
   readSessionFileAttachments,
@@ -43493,6 +43497,8 @@ export type SandboxProviderCreateAttempt = {
     imageId: string;
     checkpointArtifactId: string | null;
   };
+  /** Exact original physical request recipe, not a metadata enrollment flag. */
+  nativeBroker?: NativeBrokerCreatePlan;
 };
 
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
@@ -48403,8 +48409,13 @@ export async function beginModalProviderCreate(
     nativeImagePreparation?:
       | { kind: "registry-import"; imageRef: string; imageId: string }
       | { kind: "provider-image-id" | "unqualified-image"; imageId: string };
+    /** Read from the original physical intent's private issuance only. */
+    nativeBroker?: NativeBrokerCreatePlan;
   },
 ): Promise<void> {
+  // Copy before any await; caller mutation cannot change the admitted recipe.
+  const selectedBroker =
+    input.nativeBroker === undefined ? undefined : NativeBrokerCreatePlan.parse(input.nativeBroker);
   if (
     !input.operationId ||
     !input.providerBindingKey ||
@@ -48446,6 +48457,7 @@ export async function beginModalProviderCreate(
         throw new Error("provider_create_outcome_unknown: provider attempt cannot be replayed");
       }
       const qualification = await loadNativeCommandBirthQualification(tx, input);
+      const nativeBroker = validateQualifiedNativeBrokerPlan(qualification, selectedBroker);
       if (
         qualification &&
         (qualification.sourceSha !== input.nativeSourceSha ||
@@ -48466,6 +48478,10 @@ export async function beginModalProviderCreate(
           archive?.version === 2 &&
           (archive.provider === "modal_snapshot_filesystem" ||
             archive.provider === "modal_snapshot_directory");
+        if (nativeBroker && nativeArchive)
+          throw new Error(
+            "Native broker snapshot creation requires separate preservation qualification",
+          );
         let artifact: { id: string; object_id: string; object_kind: string } | undefined;
         if (nativeArchive) {
           if (
@@ -48545,6 +48561,7 @@ export async function beginModalProviderCreate(
             }
           : {}),
         ...(nativeImageSource ? { nativeImageSource } : {}),
+        ...(nativeBroker ? { nativeBroker } : {}),
       };
       await tx.execute(sql`
         update sandbox_leases set provider_create_attempt = ${JSON.stringify(attempt)}::jsonb,

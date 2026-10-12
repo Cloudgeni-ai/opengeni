@@ -394,6 +394,7 @@ test("required owner selectors and copied receipt facts are constrained, immutab
 async function qualification(
   scope: Awaited<ReturnType<typeof workspace>>,
   generation = 1,
+  broker = false,
 ): Promise<NativeCommandQualification> {
   const row: NativeCommandQualification = {
     accountId: scope.accountId,
@@ -406,7 +407,24 @@ async function qualification(
     imageRef: IMAGE,
     providerImageId: PROVIDER_IMAGE,
     providerBindingKey: BINDING_KEY,
-    protocols: ["native-subreaper-v1", "native-subreaper-pty-v1"],
+    ...(broker
+      ? {
+          protocols: [
+            "native-subreaper-broker-channel-v1",
+            "native-subreaper-broker-channel-pty-v1",
+          ] as ["native-subreaper-broker-channel-v1", "native-subreaper-broker-channel-pty-v1"],
+          brokerArtifact: {
+            artifactSha256: "e".repeat(64),
+            byteSize: 108144,
+            target: "linux-amd64" as const,
+          },
+        }
+      : {
+          protocols: ["native-subreaper-v1", "native-subreaper-pty-v1"] as [
+            "native-subreaper-v1",
+            "native-subreaper-pty-v1",
+          ],
+        }),
     acceptanceEvidenceHash: "c".repeat(64),
     enrollmentEnabled: true,
   };
@@ -1093,15 +1111,257 @@ test("FORCE-RLS owner-only writes, immutable evidence and scoped reads survive p
   await fixture.admin.unsafe(
     "GRANT EXECUTE ON FUNCTION opengeni_private.native_command_qualification_guard() TO opengeni_app",
   );
+  await fixture.admin.unsafe(
+    "GRANT EXECUTE ON FUNCTION guard_native_broker_create() TO opengeni_app",
+  );
   await provisionRoles(fixture.adminUrl, { appPassword: fixture.appPassword });
   const [acl] =
     await fixture.admin`select has_table_privilege('opengeni_app','opengeni_private.native_command_qualifications','INSERT') as insertable,
     has_column_privilege('opengeni_app','opengeni_private.native_command_qualifications','enrollment_enabled','UPDATE') as mutable,
-    has_function_privilege('opengeni_app','opengeni_private.native_command_qualification_guard()','EXECUTE') as guard`;
-  expect(acl).toEqual({ insertable: false, mutable: false, guard: false });
+    has_function_privilege('opengeni_app','opengeni_private.native_command_qualification_guard()','EXECUTE') as guard,
+    has_function_privilege('opengeni_app','guard_native_broker_create()','EXECUTE') as broker_guard`;
+  expect(acl).toEqual({ insertable: false, mutable: false, guard: false, broker_guard: false });
   expect((await loadNativeCommandBirthQualification(app.db, scope))?.id).toBe(q.id);
   await assertRuntimeDatabasePosture(app.db, {
     rlsStrategy: "force",
     expectedRole: "opengeni_app",
   });
+});
+
+function brokerPlan(q: NativeCommandQualification) {
+  if (!q.brokerArtifact) throw new Error("Expected broker fixture qualification");
+  return {
+    version: 1 as const,
+    brokerId: crypto.randomUUID(),
+    sourceSha: q.sourceSha,
+    imageId: q.providerImageId,
+    artifact: { ...q.brokerArtifact },
+  };
+}
+
+test("both publisher and SQL reject incomplete or mixed broker qualification pins", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws, 1, true);
+  for (const pin of [
+    null,
+    {},
+    { ...q.brokerArtifact, extra: true },
+    { ...q.brokerArtifact, artifactSha256: "E".repeat(64) },
+    { ...q.brokerArtifact, byteSize: 63 },
+    { ...q.brokerArtifact, byteSize: 262145 },
+    { ...q.brokerArtifact, byteSize: "108144" },
+    { ...q.brokerArtifact, byteSize: 64.5 },
+    { ...q.brokerArtifact, target: "darwin-arm64" },
+  ]) {
+    await expect(
+      publishNativeCommandQualification(owner.db, {
+        ...q,
+        id: crypto.randomUUID(),
+        activationGeneration: 2,
+        brokerArtifact: pin,
+      } as NativeCommandQualification),
+    ).rejects.toThrow();
+    await expect(
+      Promise.resolve(fixture.admin`insert into opengeni_private.native_command_qualifications
+      (data_schema,id,account_id,workspace_id,creator_kind,creator_subject_id,create_idempotency_key,
+       activation_generation,source_sha,image_ref,provider_image_id,provider_binding_key,
+       protocols,acceptance_evidence_hash,enrollment_enabled,broker_artifact)
+      select data_schema,${crypto.randomUUID()}::uuid,account_id,workspace_id,creator_kind,
+       creator_subject_id,create_idempotency_key,2,source_sha,image_ref,provider_image_id,
+       provider_binding_key,protocols,acceptance_evidence_hash,false,${pin === null ? null : fixture.admin.json(pin)}
+      from opengeni_private.native_command_qualifications where id=${q.id}`),
+    ).rejects.toThrow("native_command_qualifications_protocols_check");
+  }
+  await expect(
+    publishNativeCommandQualification(owner.db, {
+      ...q,
+      id: crypto.randomUUID(),
+      activationGeneration: 2,
+      protocols: ["native-subreaper-v1", "native-subreaper-pty-v1"],
+    } as NativeCommandQualification),
+  ).rejects.toThrow();
+  await expect(
+    Promise.resolve(fixture.admin`insert into opengeni_private.native_command_qualifications
+    (data_schema,id,account_id,workspace_id,creator_kind,creator_subject_id,create_idempotency_key,
+     activation_generation,source_sha,image_ref,provider_image_id,provider_binding_key,
+     protocols,acceptance_evidence_hash,enrollment_enabled,broker_artifact)
+    select data_schema,${crypto.randomUUID()}::uuid,account_id,workspace_id,creator_kind,
+     creator_subject_id,create_idempotency_key,2,source_sha,image_ref,provider_image_id,
+     provider_binding_key,ARRAY['native-subreaper-v1','native-subreaper-pty-v1'],
+     acceptance_evidence_hash,false,broker_artifact
+    from opengeni_private.native_command_qualifications where id=${q.id}`),
+  ).rejects.toThrow("native_command_qualifications_protocols_check");
+  const [count] = await fixture.admin`select count(*)::int as n from
+    opengeni_private.native_command_qualifications where workspace_id=${ws.workspaceId}`;
+  expect(count!.n).toBe(1);
+});
+
+test("broker qualifications retain exact pins and do not inherit router or pre-existing group authority", async () => {
+  const ws = await workspace();
+  const legacy = await session(ws);
+  const router = await qualification(ws);
+  const routerBorn = await session(ws);
+  const q = await qualification(ws, 2, true);
+  const born = await session(ws);
+  const scope = scopeFor(ws, born.id);
+  expect(await loadNativeCommandBirthQualification(app.db, scopeFor(ws, legacy.id))).toBeNull();
+  expect(
+    (await loadNativeCommandBirthQualification(app.db, scopeFor(ws, routerBorn.id)))?.protocols,
+  ).toEqual(router.protocols);
+  expect(await loadNativeCommandBirthQualification(app.db, scope)).toEqual(
+    (({ enrollmentEnabled: _enabled, ...value }) => value)(q),
+  );
+  await expect(
+    Promise.resolve(fixture.admin`update opengeni_private.native_command_qualifications
+    set broker_artifact=${fixture.admin.json({ ...q.brokerArtifact, byteSize: 100 })} where id=${q.id}`),
+  ).rejects.toThrow("immutable");
+  await warming(scope);
+  const create = createInput(scope, 0, { nativeBroker: brokerPlan(q) });
+  await beginModalProviderCreate(app.db, create);
+  const physical = await warm(scope, create);
+  expect(
+    await inspectNativeCommandProviderQualification(app.db, {
+      ...scope,
+      ...physical,
+      protocol: "native-subreaper-broker-channel-pty-v1",
+      sourceSha: SOURCE,
+    }),
+  ).toMatchObject({ status: "enrolled", qualification: { brokerArtifact: q.brokerArtifact } });
+  expect(await inspect(scope, physical)).toMatchObject({
+    status: "blocked",
+    reason: "protocol_unqualified",
+  });
+});
+
+test("broker create admission rejects missing, changed and unqualified plans without recording a dispatch", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws, 1, true);
+  const scope = scopeFor(ws, (await session(ws)).id);
+  const leaseId = await warming(scope);
+  const plan = brokerPlan(q);
+  for (const candidate of [
+    undefined,
+    { ...plan, sourceSha: "f".repeat(40) },
+    { ...plan, imageId: "im-other" },
+    { ...plan, artifact: { ...plan.artifact, artifactSha256: "f".repeat(64) } },
+    { ...plan, artifact: { ...plan.artifact, byteSize: plan.artifact.byteSize + 1 } },
+    { ...plan, artifact: { ...plan.artifact, target: "linux-arm64" as const } },
+    { ...plan, brokerId: "not-a-uuid" },
+  ]) {
+    await expect(
+      beginModalProviderCreate(
+        app.db,
+        createInput(scope, 0, candidate ? { nativeBroker: candidate } : {}),
+      ),
+    ).rejects.toThrow();
+    const [state] =
+      await fixture.admin`select provider_create_attempt from sandbox_leases where id=${leaseId}`;
+    expect(state!.provider_create_attempt).toBeNull();
+  }
+  for (const selected of [false, true]) {
+    const tenant = await workspace();
+    if (selected) await qualification(tenant);
+    const unqualified = scopeFor(tenant, (await session(tenant)).id);
+    await warming(unqualified);
+    await expect(
+      beginModalProviderCreate(app.db, createInput(unqualified, 0, { nativeBroker: plan })),
+    ).rejects.toThrow("broker-qualified group birth");
+  }
+});
+
+test("SQL independently binds the broker recipe and forbids missing or changed plans at physical receipt", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws, 1, true);
+  const scope = scopeFor(ws, (await session(ws)).id);
+  const leaseId = await warming(scope);
+  const create = createInput(scope, 0, { nativeBroker: brokerPlan(q) });
+  await beginModalProviderCreate(app.db, create);
+  const [saved] =
+    await fixture.admin`select provider_create_attempt from sandbox_leases where id=${leaseId}`;
+  const original = saved!.provider_create_attempt;
+  expect(original.nativeBroker).toEqual(create.nativeBroker);
+  for (const invalid of [
+    null,
+    {},
+    { ...original.nativeBroker, sourceSha: "f".repeat(40) },
+    { ...original.nativeBroker, brokerId: "00000000-0000-0000-0000-000000000000" },
+    { ...original.nativeBroker, brokerId: "ffffffff-ffff-ffff-ffff-ffffffffffff" },
+    { ...original.nativeBroker, extra: true },
+    {
+      ...original.nativeBroker,
+      artifact: { ...original.nativeBroker.artifact, target: "linux-arm64" },
+    },
+  ]) {
+    await expect(
+      Promise.resolve(fixture.admin`update sandbox_leases set
+      provider_create_attempt=${fixture.admin.json({ ...original, nativeBroker: invalid })} where id=${leaseId}`),
+    ).rejects.toThrow("exact qualification");
+  }
+  const { nativeBroker: _removed, ...missing } = original;
+  await expect(
+    Promise.resolve(fixture.admin`update sandbox_leases set
+    provider_create_attempt=${fixture.admin.json(missing)} where id=${leaseId}`),
+  ).rejects.toThrow("exact qualification");
+  // The pre-existing unknown-outcome fence refuses even a valid UUID change
+  // before the later immutable enrollment trigger gets a chance to run.
+  await expect(
+    Promise.resolve(fixture.admin`update sandbox_leases set
+    provider_create_attempt=${fixture.admin.json({
+      ...original,
+      nativeBroker: { ...original.nativeBroker, brokerId: crypto.randomUUID() },
+    })} where id=${leaseId}`),
+  ).rejects.toThrow(
+    "provider_create_outcome_unknown: preserve operation until exact provider attribution",
+  );
+  const legacyWs = await workspace();
+  const legacyScope = scopeFor(legacyWs, (await session(legacyWs)).id);
+  const legacyLease = await warming(legacyScope);
+  await expect(
+    Promise.resolve(fixture.admin`update sandbox_leases set
+    provider_create_attempt=${fixture.admin.json(original)} where id=${legacyLease}`),
+  ).rejects.toThrow("broker-qualified group birth");
+});
+
+test("one broker identity cannot be rebound to another physical create", async () => {
+  const ws = await workspace();
+  const firstQ = await qualification(ws, 1, true);
+  const first = scopeFor(ws, (await session(ws)).id);
+  await warming(first);
+  const plan = brokerPlan(firstQ);
+  await beginModalProviderCreate(app.db, createInput(first, 0, { nativeBroker: plan }));
+  await qualification(ws, 2, true);
+  const second = scopeFor(ws, (await session(ws)).id);
+  const secondLease = await warming(second);
+  await expect(
+    beginModalProviderCreate(app.db, createInput(second, 0, { nativeBroker: plan })),
+  ).rejects.toThrow();
+  const [row] =
+    await fixture.admin`select provider_create_attempt from sandbox_leases where id=${secondLease}`;
+  expect(row!.provider_create_attempt).toBeNull();
+  await beginModalProviderCreate(
+    app.db,
+    createInput(second, 0, {
+      nativeBroker: { ...plan, brokerId: crypto.randomUUID() },
+    }),
+  );
+});
+
+test("broker capture and cold transition preserve history without admitting an unqualified snapshot restore", async () => {
+  const ws = await workspace();
+  const q = await qualification(ws, 1, true);
+  const scope = scopeFor(ws, (await session(ws)).id);
+  const leaseId = await warming(scope);
+  const create = createInput(scope, 0, { nativeBroker: brokerPlan(q) });
+  await beginModalProviderCreate(app.db, create);
+  const physical = await warm(scope, create);
+  const saved = await checkpoint(scope, leaseId, physical, "im-broker-snapshot");
+  await expect(
+    beginModalProviderCreate(app.db, {
+      ...saved.create,
+      nativeBroker: brokerPlan(q),
+    }),
+  ).rejects.toThrow("separate preservation qualification");
+  const [retained] =
+    await fixture.admin`select id from sandbox_checkpoint_artifacts where id=${saved.artifactId}`;
+  expect(retained!.id).toBe(saved.artifactId);
 });

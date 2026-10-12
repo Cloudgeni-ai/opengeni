@@ -64,6 +64,35 @@ export const NativeBrokerCommandProtocol = z.enum([
 ]);
 export type NativeBrokerCommandProtocol = z.infer<typeof NativeBrokerCommandProtocol>;
 
+/** Independently selected release bytes. A pin is not command authority. */
+export const NativeBrokerArtifactPin = z
+  .object({
+    artifactSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    byteSize: z
+      .number()
+      .int()
+      .min(64)
+      .max(256 * 1024),
+    target: z.enum(["linux-amd64", "linux-arm64"]),
+  })
+  .strict();
+export type NativeBrokerArtifactPin = z.infer<typeof NativeBrokerArtifactPin>;
+
+/** Internal physical-create recipe, never a public session create option. */
+export const NativeBrokerCreatePlan = z
+  .object({
+    version: z.literal(1),
+    // Match the native frame codec; nil/max UUID sentinels are not broker IDs.
+    brokerId: z
+      .string()
+      .regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u),
+    sourceSha: z.string().regex(/^[a-f0-9]{40}$/u),
+    imageId: z.string().regex(/^im-[A-Za-z0-9_-]{1,200}$/u),
+    artifact: NativeBrokerArtifactPin,
+  })
+  .strict();
+export type NativeBrokerCreatePlan = z.infer<typeof NativeBrokerCreatePlan>;
+
 export const CommandSupervisionReceipt = z
   .object({
     protocol: z.union([CommandSupervisionProtocol, NativeBrokerCommandProtocol]),

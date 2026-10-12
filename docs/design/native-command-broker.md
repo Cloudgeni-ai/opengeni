@@ -93,10 +93,22 @@ intent and receipt objects. Copies have no issuance. It refuses changed request
 bytes after an awaited admission. Late receipts are still recorded; timeouts,
 rejected admission and failed bootstrap never proceed to manifest setup.
 
+The distinct broker protocol tuple now has an operator-only artifact pin in
+the qualification ledger (forward migration `0749`). Existing router rows and
+frozen group births remain unchanged. The worker carries the original intent's
+private creation proof to `beginModalProviderCreate`; persistence and an
+independent database trigger require the exact source, provider image, artifact
+and closed creation recipe. A broker identity cannot be reused for another
+physical create. Runtime roles still cannot publish qualification or alter
+birth/enrollment evidence. Missing or unsafe trigger bindings fail closed.
+Canonical capture/drain may retain a broker group's checkpoint, but consuming
+a provider snapshot remains refused until its separate preservation path is
+qualified; that refusal never discards the snapshot or changes cohort birth.
+
 This is request binding and lifecycle ordering, not provider qualification.
 Neither the plan nor its in-memory proof grants command authority or verifies
 the initial stream. Application code does not yet select the opt-in. The frozen
-cohort/qualified image decision, durable plan/receipt binding, authenticated task
+cohort/qualified image selection, authenticated task
 and initial stdout/stderr verification, the verified-prefix journal composition
 and session adapter must be connected before activation. Fake-provider lifecycle tests do not
 replace that physical proof, and this recipe cannot enroll an old warm sandbox
@@ -386,7 +398,7 @@ that locator and the independently persisted native receipt. The existing
 TaskExec/session adapter explicitly rejects this descriptor, rather than treating
 its UUID as a provider execution ID.
 
-The maintenance-only candidate migration `0739` extends the canonical retained
+The maintenance-only candidate migration `0745` extends the canonical retained
 process guard without changing legacy descriptor/path rules. A broker command
 must match its registered account/workspace/group/lease/physical task and provider
 namespace. One native birth cannot own two retained process rows. Its shared
@@ -419,7 +431,7 @@ response is polled with status, not treated as a permanent cached outcome. The
 input coordinator must resolve each pending acceptance before a different
 request; the command bridge cannot skip that shared transport fence.
 
-Rolling migration `0741` adds the `control_reply` journal kind: an immutable,
+Rolling migration `0747` adds the `control_reply` journal kind: an immutable,
 request-keyed copy of a committed control response, bound to the accepted input
 and identical canonical frame. It commits with output and cursor, enabling a
 bounded reconnect lookup without decrypting the entire command history. The
@@ -448,7 +460,7 @@ native-frame-bounded payload per admission; a future application adapter must
 not silently split larger input into fresh admissions or truncate it. Shared
 channel scheduling and the provider command-session adapter remain unimplemented gates.
 
-Rolling migration `0742` adds immutable `request_reply` and
+Rolling migration `0748` adds immutable `request_reply` and
 `stdin_reservation` indexes. Native status/error replies commit with their
 original accepted request, exact frame and output cursor. For stdin, the
 reservation index binds the command's reserved end offset to that original
