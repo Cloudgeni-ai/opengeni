@@ -13110,4 +13110,8 @@ function sortJson(value: unknown): unknown {
 }
 
 export { createFirstPartyAttemptClient } from "./first-party-client";
-export { withClaudeUsageObserver } from "./claude-subscription-usage";
+export {
+  withClaudeUsageObserver,
+  type ClaudeRequestCustody,
+  type PreparedUsageRequest,
+} from "./claude-subscription-usage";

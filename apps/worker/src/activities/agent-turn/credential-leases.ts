@@ -281,37 +281,6 @@ function scopedLeaseCallbacks(
   };
 }
 
-/** Scoped subscriptions share the existing holder and monotonic deadline implementation. */
-class ScopedSubscriptionTurnLease extends SubscriptionTurnLease {
-  subjectId: string | null = null;
-  constructor(
-    deps: TurnCredentialLeaseDeps,
-    provider: {
-      name: string;
-      code: string;
-      ttlMs: number;
-      heartbeat: typeof heartbeatClaudeCredentialLeaseUntil;
-    },
-  ) {
-    super({
-      ttlMs: provider.ttlMs,
-      getTurnId: deps.getTurnId,
-      heartbeat: ({ turnId, holderId, generation }) =>
-        this.subjectId
-          ? provider.heartbeat(deps.db, {
-              workspaceId: deps.workspaceId,
-              subjectId: this.subjectId,
-              turnId,
-              holderId,
-              generation,
-              leaseTtlMs: provider.ttlMs,
-            })
-          : Promise.resolve(null),
-      ...scopedLeaseCallbacks(deps, provider),
-    });
-  }
-}
-
 /**
  * The SuperGrok credential holder: the legacy scoped lease keyed by subject
  * until the organization's SuperGrok cutover, the core turn lease (provider
@@ -344,14 +313,36 @@ export class XaiTurnLease extends CoreSubscriptionTurnLease {
     );
   }
 }
-export class ClaudeTurnLease extends ScopedSubscriptionTurnLease {
+/**
+ * The Claude credential holder: the legacy scoped lease keyed by subject
+ * until the organization's Claude cutover, the core turn lease (provider
+ * `claude`) after core placement. Both modes keep the legacy lost error code
+ * and warnings.
+ */
+export class ClaudeTurnLease extends CoreSubscriptionTurnLease {
+  /** The legacy lease's subject; null on the core path. */
+  subjectId: string | null = null;
   constructor(deps: TurnCredentialLeaseDeps) {
-    super(deps, {
-      name: "Claude",
-      code: "claude_credential_lease_lost",
-      ttlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-      heartbeat: heartbeatClaudeCredentialLeaseUntil,
-    });
+    super(
+      deps,
+      {
+        id: "claude",
+        displayName: "Claude",
+        ttlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+        legacyHeartbeat: ({ turnId, holderId, generation }) =>
+          this.subjectId
+            ? heartbeatClaudeCredentialLeaseUntil(deps.db, {
+                workspaceId: deps.workspaceId,
+                subjectId: this.subjectId,
+                turnId,
+                holderId,
+                generation,
+                leaseTtlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+              })
+            : Promise.resolve(null),
+      },
+      scopedLeaseCallbacks(deps, { name: "Claude", code: "claude_credential_lease_lost" }),
+    );
   }
 }
 

@@ -34,6 +34,7 @@ import {
   type PlacementDecision,
   type PlacementInput,
   subscriptionCoreCredentialRefresher,
+  subscriptionCoreModelPolicyProviderIds,
   type ProviderErrorOutcome,
   type ReselectionReason,
   type SubscriptionQuota,
@@ -4905,6 +4906,59 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(new Set(sequences).size).toBe(changed.length);
       });
     });
+
+    test("workspace model policy allows a model only under every policy provider identity it carries", async () => {
+      const org = await organization();
+      await sharedConnection(org, `policy-${crypto.randomUUID()}`);
+      const policyIds = (model: { productModelId: string }) =>
+        subscriptionCoreModelPolicyProviderIds(provider.adapter, model.productModelId);
+      const turn = await runningTurn(org, { model: m2 });
+      const allowedUnder = async (allowedProviders: readonly string[]) => {
+        await admin()`
+          insert into workspace_model_policies (account_id, workspace_id, allowed_providers)
+          values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid,
+            ${`{${allowedProviders.join(",")}}`}::text[])
+          on conflict (workspace_id) do update set allowed_providers = excluded.allowed_providers`;
+        return await withSubscriptionCoreProviderPlacementWorld(
+          db(),
+          provider,
+          {
+            ...turn.identity,
+            preferredModelId: m2.productModelId,
+            reasoningLevel: "medium",
+            models: [m0, m1, m2].map((model) => ({
+              id: model.productModelId,
+              provider: providerId,
+              reasoningLevels: ["medium"],
+            })),
+            reselectionPoints: [],
+            now: new Date(),
+          },
+          async (_tx, input) => input.workspace.allowedModelIds,
+        );
+      };
+      const expected = (allowedProviders: readonly string[]) => ({
+        status: "completed" as const,
+        value: [m0, m1, m2]
+          .filter((model) => policyIds(model).every((id) => allowedProviders.includes(id)))
+          .map((model) => model.productModelId),
+      });
+      // A model's first identity alone never admits a model that also carries another.
+      const first = [policyIds(m2)[0]!];
+      expect(await allowedUnder(first)).toEqual(expected(first));
+      if (policyIds(m2).length > 1) {
+        expect(expected(first).value).not.toContain(m2.productModelId);
+        expect(await place(turn, { now: new Date() })).not.toMatchObject({ kind: "run" });
+      }
+      // The provider's declared identity alone admits exactly the models
+      // that carry no other identity.
+      const declared = [provider.adapter.modelPolicyProviderId];
+      expect(await allowedUnder(declared)).toEqual(expected(declared));
+      // Every identity allowed: the model is placed.
+      expect(await allowedUnder(policyIds(m2))).toEqual(expected(policyIds(m2)));
+      expect(await placeChecked(turn)).toMatchObject({ kind: "run" });
+    });
+
     const sessionWaits = subject.sessionWaits;
     test.skipIf(!sessionWaits)(
       "a placement wait parks the session on its core waiter; only this provider's wake reaches it; capacity resumes it",

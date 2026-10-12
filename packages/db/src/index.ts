@@ -396,6 +396,8 @@ export {
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
 export * from "./subscription-core-xai-compat";
+export * from "./subscription-core-claude-adapter";
+export * from "./subscription-core-claude";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,

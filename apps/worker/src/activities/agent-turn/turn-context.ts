@@ -193,7 +193,8 @@ export type SubscriptionCoreTurn = {
   placedRefreshGeneration: number;
   /**
    * Refresh generation of the credential the latest request carried, when
-   * the provider's resolver reports it (SuperGrok; Codex keeps its own field).
+   * the provider's resolver reports it (SuperGrok and Claude; Codex keeps its
+   * own field).
    */
   credentialVersion?: number;
   personal: boolean;
@@ -232,6 +233,13 @@ export type ProviderTurnState = {
   claudeUpstreamModelId: string | null;
   claudeRotationEnabled: boolean;
   claudeAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
+  /**
+   * Set only when this Claude turn was placed by the shared subscription core
+   * (the organization's Claude cutover committed and is enabled).
+   * `effectiveClaudeCredentialId` is then a core connection id: legacy Claude
+   * tables must never receive it.
+   */
+  claudeSubscriptionCore: SubscriptionCoreTurn | null;
   effectiveXaiCredentialId: string | null;
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
@@ -377,6 +385,7 @@ export function createTurnContext(input: {
       claudeUpstreamModelId: null,
       claudeRotationEnabled: false,
       claudeAuthoritySnapshot: null,
+      claudeSubscriptionCore: null,
       effectiveXaiCredentialId: null,
       xaiRotationEnabled: false,
       xaiAuthoritySnapshot: null,
@@ -393,7 +402,19 @@ export function createTurnContext(input: {
 
 /** The turn's shared-core placement, whichever provider placed it (at most one does). */
 export function subscriptionCoreTurnOf(
-  providerTurn: Pick<ProviderTurnState, "codexSubscriptionCore" | "xaiSubscriptionCore">,
+  providerTurn: SubscriptionCorePlacedFields,
 ): SubscriptionCoreTurn | null {
-  return providerTurn.codexSubscriptionCore ?? providerTurn.xaiSubscriptionCore ?? null;
+  return (
+    providerTurn.codexSubscriptionCore ??
+    providerTurn.xaiSubscriptionCore ??
+    providerTurn.claudeSubscriptionCore ??
+    null
+  );
 }
+
+/** The provider fields that can hold a turn's shared-core placement. */
+export type SubscriptionCorePlacedFields = Pick<
+  ProviderTurnState,
+  "codexSubscriptionCore" | "xaiSubscriptionCore"
+> &
+  Partial<Pick<ProviderTurnState, "claudeSubscriptionCore">>;
