@@ -6,6 +6,7 @@
 //   /secrets/$vaultId/$itemId     an item's page   ?view=edit
 import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
 import {
+  useVault,
   useVaultItem,
   useVaultItems,
   useVaults,
@@ -22,16 +23,23 @@ import { ConnectOnePasswordPage } from "@/components/secrets/connect-onepassword
 import { ItemEditorPage } from "@/components/secrets/item-editor";
 import { ItemPage, ItemPageLoading } from "@/components/secrets/item-page";
 import { MoveItemDialog } from "@/components/secrets/move-item-dialog";
-import { AvailabilityPage, NewVaultPage, RenameVaultDialog } from "@/components/secrets/vault-forms";
+import {
+  AvailabilityPage,
+  NewVaultPage,
+  RenameVaultDialog,
+} from "@/components/secrets/vault-forms";
 import { SecretsListPage, type SecretsListState } from "@/components/secrets/vault-list";
+import { MIN_HIT_AREAS } from "@/components/secrets/secret-actions";
 import { vaultError } from "@/components/secrets/vault-model";
 import { SecretsMissing, VaultPage, VaultPageLoading } from "@/components/secrets/vault-page";
 import { ContentPage } from "@/components/ui/content-layout";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
+import { cn } from "@/lib/utils";
 
 export type SecretsListView = "new" | "connect-1password";
 export type SecretsVaultView = "availability" | "new-item";
@@ -101,14 +109,28 @@ export function SecretsRoute({
     [context.workspaces, workspace?.accountId],
   );
   const capabilityOff = secretsCapabilityOff(workspace?.settings);
-  const canEditAgentDefaults = can("workspace:manage") || can("settings:write");
+  const canEditAgentDefaults = can("workspace:admin");
 
   const vaults = useVaults({ enabled: canList });
   const api = vaults.api;
   const list = vaults.vaults ?? [];
   const listState: SecretsListState =
-    vaults.loading && !vaults.vaults ? "loading" : vaults.error && !vaults.vaults ? "error" : "ready";
-  const vault = vaultId ? list.find((candidate) => candidate.id === vaultId) : undefined;
+    vaults.loading && !vaults.vaults
+      ? "loading"
+      : vaults.error && !vaults.vaults
+        ? "error"
+        : "ready";
+  const listed = vaultId ? list.find((candidate) => candidate.id === vaultId) : undefined;
+  // A task vault (or one shared since the list loaded) isn't in the list: read it directly.
+  const direct = useVault(vaultId ?? "", {
+    enabled: canList && Boolean(vaultId) && !listed && listState === "ready",
+  });
+  const vault = listed ?? (direct.vault?.id === vaultId ? direct.vault : null) ?? undefined;
+  const refreshDirect = direct.refresh;
+  const refreshList = vaults.refresh;
+  const refreshVaults = useCallback(async () => {
+    await Promise.all([refreshList(), listed ? null : refreshDirect()]);
+  }, [refreshList, refreshDirect, listed]);
 
   /* ------------------------------------------------------------ navigation */
 
@@ -236,7 +258,7 @@ export function SecretsRoute({
     page = <SecretsMissing what="vault" backLabel="Secrets" onBack={() => openList()} />;
   } else if (!vault) {
     page =
-      listState === "loading" ? (
+      listState === "loading" || direct.loading ? (
         <VaultPageLoading onBack={() => openList()} />
       ) : (
         <SecretsMissing what="vault" backLabel="Secrets" onBack={() => openList()} />
@@ -253,7 +275,7 @@ export function SecretsRoute({
         canUse={canUse}
         onBack={() => openVault(vault.id)}
         onOpenItem={openItem}
-        onChanged={() => vaults.refresh()}
+        onChanged={refreshVaults}
       />
     );
   } else if (view === "availability" && vault.canManage && vault.ownerKind === "organization") {
@@ -318,9 +340,11 @@ export function SecretsRoute({
 
   return (
     <ContentPage width="standard">
-      <div ref={root} className="min-w-0 pb-7">
-        {page}
-      </div>
+      <TooltipProvider delayDuration={300}>
+        <div ref={root} className={cn("min-w-0 pb-7", MIN_HIT_AREAS)}>
+          {page}
+        </div>
+      </TooltipProvider>
 
       <RenameVaultDialog
         vault={vault}
@@ -541,4 +565,3 @@ function ItemRoute({
     </>
   );
 }
-

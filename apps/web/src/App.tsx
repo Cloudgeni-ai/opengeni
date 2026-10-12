@@ -428,12 +428,8 @@ const workspaceSecretsVaultRoute = createRoute({
   validateSearch: (
     search: Record<string, unknown>,
   ): { view?: "availability" | "new-item"; type?: string } => ({
-    ...(search.view === "availability" || search.view === "new-item"
-      ? { view: search.view }
-      : {}),
-    ...(search.view === "new-item" && typeof search.type === "string"
-      ? { type: search.type }
-      : {}),
+    ...(search.view === "availability" || search.view === "new-item" ? { view: search.view } : {}),
+    ...(search.view === "new-item" && typeof search.type === "string" ? { type: search.type } : {}),
   }),
 });
 const workspaceSecretsItemRoute = createRoute({

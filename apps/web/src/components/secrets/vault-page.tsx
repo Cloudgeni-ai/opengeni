@@ -116,15 +116,11 @@ export function VaultPage({
   const [query, setQuery] = useState("");
   const [type, setType] = useState<"all" | VaultItemType>("all");
   const [syncing, setSyncing] = useState(false);
-  const words = useMemo(
-    () => query.trim().toLowerCase().split(/\s+/u).filter(Boolean),
-    [query],
-  );
+  const words = useMemo(() => query.trim().toLowerCase().split(/\s+/u).filter(Boolean), [query]);
   const all = items ?? [];
   const typesPresent = useMemo(() => new Set(all.map((item) => item.type)), [all]);
   const visible = useMemo(
-    () =>
-      all.filter((item) => (type === "all" || item.type === type) && matches(item, words)),
+    () => all.filter((item) => (type === "all" || item.type === type) && matches(item, words)),
     [all, type, words],
   );
   const [limit, setLimit] = useState(FIRST_ROWS);
@@ -220,8 +216,10 @@ export function VaultPage({
 
   let body: ReactNode;
   if (!loaded && itemsError) {
-    body = <SecretsLoadFailure title="Couldn't load items" error={itemsError} onRetry={actions.retry} />;
-  } else if (!loaded || itemsLoading && !items) {
+    body = (
+      <SecretsLoadFailure title="Couldn't load items" error={itemsError} onRetry={actions.retry} />
+    );
+  } else if (!loaded || (itemsLoading && !items)) {
     body = (
       <RowList variant="table" label="Items" columns={ITEM_COLUMNS} busy>
         <ListRowSkeleton count={8} />
@@ -302,7 +300,9 @@ export function VaultPage({
                   title={item.name}
                   titleAddon={item.hasTotp ? <TotpGlyph /> : null}
                   description={
-                    subtitle ? `${ITEM_TYPE_LABEL[item.type]} · ${subtitle}` : ITEM_TYPE_LABEL[item.type]
+                    subtitle
+                      ? `${ITEM_TYPE_LABEL[item.type]} · ${subtitle}`
+                      : ITEM_TYPE_LABEL[item.type]
                   }
                   status={
                     item.archivedAt ? (
@@ -328,7 +328,10 @@ export function VaultPage({
   }
 
   return (
-    <DetailPage back={{ label: "Secrets", onClick: actions.back }} className={FLUSH_DETAIL_PAGE_CLASS}>
+    <DetailPage
+      back={{ label: "Secrets", onClick: actions.back }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
       <DetailPageHeader
         leading={<VaultTile vault={vault} />}
         title={vault.name}
@@ -401,12 +404,15 @@ export function SecretsMissing({
   backLabel: string;
   onBack: () => void;
 }) {
+  const title = what === "vault" ? "This vault isn't here" : "This item isn't here";
   return (
     <DetailPage back={{ label: backLabel, onClick: onBack }} className={FLUSH_DETAIL_PAGE_CLASS}>
+      {/* The page's heading; the empty state shows the same words. */}
+      <h1 className="sr-only">{title}</h1>
       <EmptyState
         variant="page"
         icon={<KeyRoundIcon />}
-        title={what === "vault" ? "This vault isn't here" : "This item isn't here"}
+        title={<span aria-hidden="true">{title}</span>}
         description="It may have been deleted or moved, or you don't have access to it."
         action={
           <Button type="button" variant="outline" onClick={onBack}>

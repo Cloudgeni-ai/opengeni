@@ -199,7 +199,8 @@ const ERROR_COPY: Partial<Record<VaultErrorCode, string>> = {
   provider_conflict: "This item changed in 1Password. Sync, then try again.",
   secret_save_forbidden: "You can't save secrets there. Choose another place.",
   invalid_secret_name: "Names can't contain /, {, }, # or \\, or start or end with a space.",
-  secret_value_too_large: "This value is too large. Text can be up to 64 KB and files up to 256 KB.",
+  secret_value_too_large:
+    "This value is too large. Text can be up to 64 KB and files up to 256 KB.",
   human_auth_required: "Sign in again to continue.",
 };
 

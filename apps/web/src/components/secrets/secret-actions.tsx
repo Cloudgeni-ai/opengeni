@@ -15,6 +15,18 @@ import { vaultErrorText } from "./vault-model";
    32px to look quiet in a row; an ::after extends the hit area to 40px.
    -------------------------------------------------------------------------- */
 
+/**
+ * For a page root: every button and link under it gets an invisible hit area
+ * of at least 40x40px centred on it (UI-7), without changing how it looks.
+ * Absolutely positioned controls (a search field's clear button) keep theirs.
+ */
+export const MIN_HIT_AREAS = [
+  "[&_:is(button,a[href]):not(.absolute,.fixed,.sticky)]:relative",
+  "[&_:is(button,a[href])]:after:absolute [&_:is(button,a[href])]:after:top-1/2 [&_:is(button,a[href])]:after:left-1/2",
+  "[&_:is(button,a[href])]:after:h-[max(100%,40px)] [&_:is(button,a[href])]:after:w-[max(100%,40px)]",
+  "[&_:is(button,a[href])]:after:-translate-1/2 [&_:is(button,a[href])]:after:content-['']",
+].join(" ");
+
 export const HIT_AREA =
   "relative after:absolute after:-inset-1 after:content-[''] pointer-coarse:size-11";
 

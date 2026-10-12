@@ -54,8 +54,13 @@ import {
   LightboxProvider,
   sessionAdmissionBlocked,
   sessionDisplayStatus,
+  useSessionSecrets,
   type WorkspaceTab,
 } from "@opengeni/react";
+import {
+  SessionSecretsMenuBody,
+  sessionSecretsSummary,
+} from "@/components/secrets/session-secrets-panel";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
   ApprovalSurface,
@@ -2821,6 +2826,13 @@ function SessionChatPane(props: {
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
+  // The chat's Secrets row: hidden when its agent can't use secrets.
+  const sessionSecrets = useSessionSecrets(props.session.id, {
+    enabled:
+      workspacePermissions.includes("secrets:list") ||
+      workspacePermissions.includes("variable-sets:list"),
+  });
+  const secretsView = sessionSecrets.secrets;
   const renderMessageSender = useMessageSenderRenderer(
     context.client,
     props.session.workspaceId,
@@ -3489,6 +3501,49 @@ function SessionChatPane(props: {
                           />
                         ),
                       }}
+                      {...(secretsView?.capabilityEnabled
+                        ? {
+                            secrets: {
+                              summary: sessionSecretsSummary(
+                                secretsView.policy,
+                                secretsView.reachableVaults,
+                              ),
+                              panel: (
+                                <SessionSecretsMenuBody
+                                  vaults={secretsView.reachableVaults}
+                                  policy={secretsView.policy}
+                                  narrowedByParent={secretsView.narrowedBySessionId !== null}
+                                  taskItems={secretsView.taskItems}
+                                  canEdit={workspacePermissions.includes("sessions:control")}
+                                  disabled={terminal}
+                                  loading={sessionSecrets.loading}
+                                  error={sessionSecrets.error}
+                                  onRetry={() => void sessionSecrets.refresh()}
+                                  onPolicyChange={async (policy) => {
+                                    await sessionSecrets.api.setSessionVaultPolicy(
+                                      props.session.id,
+                                      policy,
+                                    );
+                                    await sessionSecrets.refresh();
+                                  }}
+                                  onSaveTo={async (item, target) => {
+                                    await sessionSecrets.api.moveItem(item.vaultId, item.id, {
+                                      targetVaultId: target.id,
+                                      mode: "copy",
+                                    });
+                                    toast.success(`Saved ${item.name} to ${target.name}`);
+                                  }}
+                                  onManage={() =>
+                                    void navigate({
+                                      to: "/workspaces/$workspaceId/secrets",
+                                      params: { workspaceId: props.session.workspaceId },
+                                    })
+                                  }
+                                />
+                              ),
+                            },
+                          }
+                        : {})}
                       repositories={{
                         selectedCount: repositories.selectionCount,
                         disabled: terminal || composer.sending,

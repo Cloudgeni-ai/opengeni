@@ -42,7 +42,11 @@ const PLAN_OPTIONS: { value: OnePasswordPlanTier; label: string }[] = [
 
 const MODE_OPTIONS: { value: Choice; label: string; description: string }[] = [
   { value: "off", label: "Off", description: "Agents can't use this vault." },
-  { value: "read_only", label: "Read-only", description: "Agents use items; nothing is written back." },
+  {
+    value: "read_only",
+    label: "Read-only",
+    description: "Agents use items; nothing is written back.",
+  },
   {
     value: "read_write",
     label: "Read & write",
@@ -56,7 +60,12 @@ function causeOf(error: unknown): unknown {
 
 export interface ConnectOnePasswordActions {
   install: (request: InstallOnePasswordRequest) => Promise<InstallOnePasswordResponse>;
-  link: (vault: ProviderVaultMeta, mode: VaultMode, owner: Owner, connectionId: string) => Promise<VaultSummary>;
+  link: (
+    vault: ProviderVaultMeta,
+    mode: VaultMode,
+    owner: Owner,
+    connectionId: string,
+  ) => Promise<VaultSummary>;
   createManaged: (name: string, owner: Owner, connectionId: string) => Promise<VaultSummary>;
   openVault: (vault: VaultSummary) => void;
 }
@@ -240,7 +249,8 @@ function TokenStep({
             <SegmentedControl
               options={owners.map((value) => ({
                 value,
-                label: value === "organization" ? "Organization" : ownerLabel(value, organizationName),
+                label:
+                  value === "organization" ? "Organization" : ownerLabel(value, organizationName),
               }))}
               value={owner}
               onValueChange={onOwnerChange}

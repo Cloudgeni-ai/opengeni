@@ -3,7 +3,7 @@ import { KeyRoundIcon, PlusIcon, ShieldOffIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { Notice } from "@/components/ui/notice";
 import { MoreMenu } from "@/components/ui/page-actions";
@@ -11,7 +11,13 @@ import { PageHeader } from "@/components/ui/page-header";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Section, SectionStack } from "@/components/ui/section";
 
-import { OnePasswordMark, SecretsLoadFailure, SyncStatus, VaultChips, VaultTile } from "./vault-parts";
+import {
+  OnePasswordMark,
+  SecretsLoadFailure,
+  SyncStatus,
+  VaultChips,
+  VaultTile,
+} from "./vault-parts";
 import { groupVaults, isMissingKeyError, itemsLabel, VAULT_GROUP_TITLE } from "./vault-model";
 
 /* ----------------------------------------------------------------------------
@@ -19,7 +25,8 @@ import { groupVaults, isMissingKeyError, itemsLabel, VAULT_GROUP_TITLE } from ".
    owns them. The whole row opens the vault's page.
    -------------------------------------------------------------------------- */
 
-export const SECRETS_DESCRIPTION = "Logins, keys and files your agents can use without seeing them.";
+export const SECRETS_DESCRIPTION =
+  "Logins, keys and files your agents can use without seeing them.";
 
 const COLUMNS: RowListColumn[] = [
   { id: "items", label: "Items", width: 96, hideLabel: true },
@@ -144,7 +151,16 @@ export function SecretsListPage({
             ? "Save logins and keys once, and your agents can sign in and call APIs for you."
             : "Someone who can manage secrets can add a vault here."
         }
-        action={canCreate ? newVaultButton : undefined}
+        action={
+          canCreate ? (
+            <div className="flex flex-col items-center gap-3">
+              {newVaultButton}
+              {canConnect ? (
+                <EmptyStateLink onClick={onConnectOnePassword}>Or connect 1Password</EmptyStateLink>
+              ) : null}
+            </div>
+          ) : undefined
+        }
       />
     );
   } else {
@@ -187,7 +203,9 @@ export function SecretsListPage({
             ) : undefined
           }
         >
-          Agents in this workspace can't use secrets. Turn on Secrets in agent settings.
+          {agentSettingsHref
+            ? "Agents in this workspace can't use secrets. Turn on Secrets in agent settings."
+            : "Agents in this workspace can't use secrets. A workspace admin can turn them on."}
         </Notice>
       ) : null}
       <div className="min-w-0 pt-6">{body}</div>

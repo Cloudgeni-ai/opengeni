@@ -7,7 +7,7 @@
  *   bun --no-env-file scripts/capture-secrets-screenshots.ts --stack sv-w7 \
  *     --out .agent/evidence/UI/pass-<n> [--base http://127.0.0.1:47200] [--api <url>] \
  *     [--viewports 390x844,820x1180,1440x900] [--themes light,dark] [--states 'S1-*,S3-*'] \
- *     [--user owner] [--concurrency 3] [--list]
+ *     [--user owner] [--concurrency 3] [--list] [--mock]
  *
  * - Login reuses the localstack `login.ts` storage states (run/auth-<stack>-<user>.json);
  *   other seeded people (for example tom@acme.dev) sign in through the form with the
@@ -22,6 +22,10 @@
  * - Output: <screen>-<state>-<vw>x<vh>-<theme>.png and index.json with the state
  *   description, axe (serious/critical), overflow, hit-target, primary-button and
  *   H1 checks per shot.
+ * - `--mock` (W3): the web app's DEV-only secrets mock answers the vault routes
+ *   in the page (localStorage og-dev-secrets-mock=1, plus a role and scenario per
+ *   state), ids come from its fixtures, and transient states use mock scenarios
+ *   instead of Playwright routes. Needs a Vite dev server, not a production build.
  */
 import AxeBuilder from "@axe-core/playwright";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -55,6 +59,7 @@ const { values: flags } = parseArgs({
     user: { type: "string", default: "owner" },
     concurrency: { type: "string", default: "3" },
     list: { type: "boolean", default: false },
+    mock: { type: "boolean", default: false },
   },
 });
 const stackEnv = flags.stack ? readEnvFile(join(LS, "run", `stack-${flags.stack}.env`)) : {};
@@ -124,10 +129,31 @@ type Ids = {
   variableSets: Record<string, string>;
 };
 
+// Mock roles: the in-page mock decides what each person may do.
+const MOCK_ROLE: Record<string, string> = {
+  owner: "owner",
+  admin: "admin",
+  member: "member",
+  viewer: "viewer",
+  tom: "viewer",
+};
+
+async function mockInit(context: BrowserContext, role: string, scenario: string) {
+  await context.addInitScript(
+    ([mockRole, mockScenario]) => {
+      window.localStorage.setItem("og-dev-secrets-mock", "1");
+      window.localStorage.setItem("og-dev-secrets-mock-role", mockRole!);
+      window.localStorage.setItem("og-dev-secrets-mock-scenario", mockScenario!);
+    },
+    [role, scenario],
+  );
+}
+
 async function resolveIds(browser: Browser): Promise<Ids> {
   const context = await browser.newContext({
     storageState: await storageStateFor(browser, "owner"),
   });
+  if (flags.mock) await mockInit(context, "owner", "");
   const page = await context.newPage();
   await page.goto(WEB);
   const ids = await page.evaluate(
@@ -184,7 +210,38 @@ async function resolveIds(browser: Browser): Promise<Ids> {
     .then(() => true)
     .catch(() => false);
   await context.close();
-  return { ...ids, secretsRoute } as Ids;
+  if (!flags.mock) return { ...ids, secretsRoute } as Ids;
+  const fixtures = await import(
+    resolve(import.meta.dir, "../apps/web/src/dev/secrets-mock/fixtures.ts")
+  );
+  const mock = fixtures.buildMockState(ids.ws);
+  const vaultName = new Map<string, string>(
+    mock.vaults.map((row: { id: string; name: string }) => [row.id, row.name]),
+  );
+  const anySession = Object.values(ids.sessions)[0];
+  return {
+    ...ids,
+    secretsRoute,
+    vaultsApi: true,
+    vaults: Object.fromEntries(
+      mock.vaults.map((row: { id: string; name: string }) => [row.name, row.id]),
+    ),
+    items: Object.fromEntries(
+      mock.items.map((row: { id: string; vaultId: string; name: string }) => [
+        `${vaultName.get(row.vaultId)}/${row.name}`,
+        { vault: row.vaultId, item: row.id },
+      ]),
+    ),
+    // The panel's data is mocked per session, so any real session hosts it.
+    sessions: anySession
+      ? {
+          ...ids.sessions,
+          "Seeded task session": anySession,
+          "Narrowed session": anySession,
+          "Seeded ask card": ids.sessions["Seeded ask card"] ?? "",
+        }
+      : ids.sessions,
+  } as Ids;
 }
 
 // --- state registry (§13A.2) -------------------------------------------------
@@ -201,6 +258,8 @@ type CaptureState = {
   path: (ids: Ids) => string | null;
   intercept?: (context: BrowserContext, ids: Ids) => Promise<void>;
   steps?: (page: Page, ids: Ids) => Promise<void>;
+  /** `--mock`: role and scenario for the in-page mock; replaces `intercept`. */
+  mock?: { role?: string; scenario?: string };
   /** Extra state-specific assertion recorded in index.json. */
   expect?: (page: Page, ids: Ids) => Promise<{ ok: boolean; detail: string }>;
 };
@@ -216,6 +275,20 @@ const item = (ids: Ids, key: string) => {
 };
 const click = (name: string | RegExp) => async (page: Page) => {
   await page.getByRole("button", { name }).first().click();
+  await page.waitForTimeout(500);
+};
+/** A button on the page, or else an item in the page's ⋯ menu. */
+const action = (name: string | RegExp) => async (page: Page) => {
+  const button = page.getByRole("button", { name }).first();
+  if (await button.isVisible().catch(() => false)) {
+    await button.click();
+  } else {
+    await page
+      .getByRole("button", { name: /^More /u })
+      .first()
+      .click();
+    await page.getByRole("menuitem", { name }).first().click();
+  }
   await page.waitForTimeout(500);
 };
 const delayApi = (pattern: RegExp) => async (context: BrowserContext) => {
@@ -256,23 +329,34 @@ export const CAPTURE_STATES: CaptureState[] = [
   }),
   s("S1", "loading", "Skeleton while vaults load", (ids) => secrets(ids), {
     intercept: delayApi(VAULTS_LIST),
+    mock: { scenario: "slow" },
   }),
   s("S1", "api-error", "Vault list request fails (500)", (ids) => secrets(ids), {
     intercept: failApi(VAULTS_LIST, 500, {
       error: { code: "internal_error", message: "Something went wrong" },
     }),
+    mock: { scenario: "error" },
   }),
   s("S1", "missing-key", "Encryption key missing (503 banner)", (ids) => secrets(ids), {
     intercept: failApi(VAULTS_LIST, 503, {
       error: { code: "encryption_key_missing", message: "Encryption key missing" },
     }),
+    mock: { scenario: "missing-key" },
   }),
-  s("S1", "capability-off", "Design preview workspace with secrets off", (ids) =>
-    secrets(ids, "", "Design preview"),
+  s(
+    "S1",
+    "capability-off",
+    "Design preview workspace with secrets off",
+    (ids) => secrets(ids, "", flags.mock ? undefined : "Design preview"),
+    { mock: { scenario: "capability-off" } },
   ),
   s("S1", "sync-error-row", "1P Shared row shows Sync failed", (ids) => secrets(ids)),
-  s("S1", "empty-org", "Workspace without vaults (Finance ops)", (ids) =>
-    secrets(ids, "", "Finance ops"),
+  s(
+    "S1",
+    "empty-org",
+    "Workspace without vaults (Finance ops)",
+    (ids) => secrets(ids, "", flags.mock ? undefined : "Finance ops"),
+    { mock: { scenario: "empty" } },
   ),
   // S2 Vault page
   s("S2", "populated", "Shared vault", (ids) => vault(ids, "Shared")),
@@ -297,6 +381,7 @@ export const CAPTURE_STATES: CaptureState[] = [
       intercept: failApi(VAULT_ITEMS, 429, {
         error: { code: "provider_rate_limited", retryAt: "2026-10-12T12:15:00Z" },
       }),
+      mock: { scenario: "rate-limited" },
     },
   ),
   s("S2", "viewer", "Shared vault as tom (viewer)", (ids) => vault(ids, "Shared"), { user: "tom" }),
@@ -311,10 +396,10 @@ export const CAPTURE_STATES: CaptureState[] = [
     steps: click("Reveal"),
   }),
   s("S3", "copied-toast", "Copied toast after Copy", (ids) => item(ids, "Private/GitHub"), {
-    steps: click(/^Copy$/u),
+    steps: click(/^Copy (password|value)$/u),
   }),
   s("S3", "history-open", "Deploy key history expanded", (ids) => item(ids, "Shared/Deploy key"), {
-    steps: click(/History/u),
+    steps: click(/history/iu),
   }),
   s("S3", "alias", "Staging DB with Also resolves as", (ids) => item(ids, "Shared/Staging DB")),
   s("S3", "expired", "Expired cert", (ids) => item(ids, "Shared/Expired cert")),
@@ -349,10 +434,10 @@ export const CAPTURE_STATES: CaptureState[] = [
   }),
   s("S6", "selected", "Available in editor (Org tooling)", (ids) => vault(ids, "Org tooling"), {
     user: "admin",
-    steps: click(/Available in/u),
+    steps: action(/Available in/u),
   }),
   s("S7", "step-1-empty", "Connect 1Password, token step", (ids) => secrets(ids), {
-    steps: click(/Connect 1Password/u),
+    steps: action(/Connect 1Password/u),
   }),
   // S8 provider status: covered by S1 sync-error-row and S2 sync-error / rate-limited.
   // S9 ask card: needs a seeded pending secret question (W2/W3 seed).
@@ -367,10 +452,15 @@ export const CAPTURE_STATES: CaptureState[] = [
       ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Seeded task session"]}`
       : null,
   ),
-  s("S10", "narrowed", "Narrowed session chip (Secrets: 2 vaults)", (ids) =>
-    ids.sessions["Narrowed session"]
-      ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Narrowed session"]}`
-      : null,
+  s(
+    "S10",
+    "narrowed",
+    "Narrowed session chip (Secrets: 2 vaults)",
+    (ids) =>
+      ids.sessions["Narrowed session"]
+        ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Narrowed session"]}`
+        : null,
+    { mock: { scenario: "narrowed" } },
   ),
   // Anchors that exist today (captured now; they gain the Secrets UI as W3 lands).
   s(
@@ -522,17 +612,23 @@ async function capture(
   if (!path)
     return { ...base, reason: "pending seed (W6): the seeded record for this state was not found" };
   const context = await browser.newContext({
-    storageState: await storageStateFor(browser, user),
+    storageState: await storageStateFor(browser, flags.mock && user === "tom" ? "viewer" : user),
     viewport: { width, height },
     colorScheme: theme,
     deviceScaleFactor: 1,
     hasTouch: width < 1024,
     isMobile: width < 600,
   });
+  if (flags.mock)
+    await mockInit(
+      context,
+      state.mock?.role ?? MOCK_ROLE[user] ?? "owner",
+      state.mock?.scenario ?? "",
+    );
   const page = await context.newPage();
   try {
     await page.clock.install({ time: CLOCK });
-    await state.intercept?.(context, ids);
+    if (!(flags.mock && state.mock)) await state.intercept?.(context, ids);
     await page.goto(`${WEB}${path}`, { waitUntil: "load" });
     await page
       .waitForFunction(
@@ -573,7 +669,7 @@ async function capture(
       ].filter((element) => element.getBoundingClientRect().width > 0).length;
       return {
         overflowPx,
-        smallTargets: [...new Set(small)].slice(0, 20),
+        smallTargets: [...new Set(small)].slice(0, 80),
         primaryButtons,
         h1Count: document.querySelectorAll("h1").length,
       };

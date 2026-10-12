@@ -37,12 +37,7 @@ import {
 /** The 1Password mark, drawn as a keyhole in a ring (no bitmap asset). */
 export function OnePasswordMark({ className }: { className?: string }) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      className={cn("size-full", className)}
-      fill="none"
-    >
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={cn("size-full", className)} fill="none">
       <circle cx="12" cy="12" r="10.25" fill="#0572EC" />
       <circle cx="12" cy="12" r="6.6" stroke="#fff" strokeWidth="1.7" />
       <rect x="10.85" y="7.6" width="2.3" height="8.8" rx="1.15" fill="#fff" />
@@ -169,8 +164,8 @@ export function VaultSyncNotice({
             </Button>
           }
         >
-          {vault.syncErrorMessage ?? "1Password didn't respond."} Agents use the last synced
-          items.{synced}
+          {vault.syncErrorMessage ?? "1Password didn't respond."} Agents use the last synced items.
+          {synced}
         </Notice>
       );
     case "auth_expired":

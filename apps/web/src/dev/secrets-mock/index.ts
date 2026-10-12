@@ -7,7 +7,12 @@
 //                                 capability-off, rate-limited, auth-expired,
 //                                 many-vaults, conflict, empty-task, narrowed,
 //                                 inherited
-import { totpCodeSync, totpRemainingMs, parseTotpInput, generatePassword } from "@opengeni/contracts";
+import {
+  totpCodeSync,
+  totpRemainingMs,
+  parseTotpInput,
+  generatePassword,
+} from "@opengeni/contracts";
 import type { VaultItemSummary, VaultSummary } from "@opengeni/react";
 
 import { buildMockState, mockId, MOCK_NOW, type MockItem, type MockState } from "./fixtures";
@@ -111,7 +116,16 @@ function visibleVault(vault: VaultSummary): VaultSummary {
 }
 
 function summary(item: MockItem): VaultItemSummary {
-  const { fields: _fields, passkey: _passkey, aliases: _aliases, primaryFieldId: _p, createdBySubjectId: _c, createdAt: _ca, generation: _g, ...rest } = item;
+  const {
+    fields: _fields,
+    passkey: _passkey,
+    aliases: _aliases,
+    primaryFieldId: _p,
+    createdBySubjectId: _c,
+    createdAt: _ca,
+    generation: _g,
+    ...rest
+  } = item;
   return rest;
 }
 
@@ -125,7 +139,9 @@ function detail(item: MockItem) {
 function refresh(state: MockState, vaultId: string) {
   const vault = state.vaults.find((each) => each.id === vaultId);
   if (vault) {
-    vault.itemCount = state.items.filter((each) => each.vaultId === vaultId && !each.archivedAt).length;
+    vault.itemCount = state.items.filter(
+      (each) => each.vaultId === vaultId && !each.archivedAt,
+    ).length;
     vault.updatedAt = new Date().toISOString();
   }
 }
@@ -166,7 +182,7 @@ function routes(state: MockState): Route[] {
         };
       });
 
-  return [
+  const first: Route[] = [
     {
       method: "GET",
       pattern: /\/vaults$/,
@@ -185,7 +201,9 @@ function routes(state: MockState): Route[] {
       method: "POST",
       pattern: /\/vaults$/,
       handle: (_m, body) => {
-        if (state.vaults.some((each) => each.name.toLowerCase() === String(body.name).toLowerCase()))
+        if (
+          state.vaults.some((each) => each.name.toLowerCase() === String(body.name).toLowerCase())
+        )
           return fail(409, "vault_name_conflict", "Name taken.");
         const base = state.vaults[1]!;
         const created: VaultSummary = {
@@ -195,7 +213,10 @@ function routes(state: MockState): Route[] {
           description: body.description ?? null,
           ownerKind: body.ownerKind,
           ownerLabel: body.ownerKind === "user" ? "Only me" : "Platform engineering",
-          availability: body.ownerKind === "organization" ? (body.availability ?? { allowedWorkspaceIds: null, allowPersonalWorkspaces: true }) : null,
+          availability:
+            body.ownerKind === "organization"
+              ? (body.availability ?? { allowedWorkspaceIds: null, allowPersonalWorkspaces: true })
+              : null,
           isDefault: false,
           itemCount: 0,
           createdAt: new Date().toISOString(),
@@ -308,10 +329,27 @@ function routes(state: MockState): Route[] {
         if (!vault) return notFound();
         const blocked = readOnly(vault);
         if (blocked) return blocked;
-        if (state.items.some((each) => each.vaultId === vault.id && each.name.toLowerCase() === String(body.name).toLowerCase()))
+        if (
+          state.items.some(
+            (each) =>
+              each.vaultId === vault.id &&
+              each.name.toLowerCase() === String(body.name).toLowerCase(),
+          )
+        )
           return fail(409, "vault_item_name_conflict", "Name taken.");
         const fields = fieldsFromInput(vault, body.name, body.fields);
-        const primary = fields.find((field) => field.name === (body.primaryFieldName ?? (body.type === "login" ? "password" : body.type === "api_key" ? "value" : body.type === "note" ? "note" : "file")));
+        const primary = fields.find(
+          (field) =>
+            field.name ===
+            (body.primaryFieldName ??
+              (body.type === "login"
+                ? "password"
+                : body.type === "api_key"
+                  ? "value"
+                  : body.type === "note"
+                    ? "note"
+                    : "file")),
+        );
         const totp = fields.find((field) => field.kind === "totp");
         const now = new Date().toISOString();
         const created: MockItem = {
@@ -350,7 +388,9 @@ function routes(state: MockState): Route[] {
       pattern: /\/vaults\/([^/]+)\/items\/([^/]+)$/,
       handle: (match) => {
         const found = itemOf(match[1]!, match[2]!);
-        return found ? json(200, detail(found)) : fail(404, "vault_item_not_found", "Item not found.");
+        return found
+          ? json(200, detail(found))
+          : fail(404, "vault_item_not_found", "Item not found.");
       },
     },
     {
@@ -371,7 +411,9 @@ function routes(state: MockState): Route[] {
         if (body.websites) found.websites = body.websites;
         if (body.expiresAt !== undefined) found.expiresAt = body.expiresAt;
         for (const input of body.fields ?? []) {
-          const existing = found.fields.find((field) => field.id === input.fieldId || field.name === input.name);
+          const existing = found.fields.find(
+            (field) => field.id === input.fieldId || field.name === input.name,
+          );
           if (input.remove && existing) {
             found.fields = found.fields.filter((field) => field !== existing);
             continue;
@@ -386,7 +428,12 @@ function routes(state: MockState): Route[] {
               existing.updatedAt = new Date().toISOString();
             }
           } else {
-            found.fields.push(...fieldsFromInput(vault, found.name, [input]).map((field) => ({ ...field, position: found.fields.length })));
+            found.fields.push(
+              ...fieldsFromInput(vault, found.name, [input]).map((field) => ({
+                ...field,
+                position: found.fields.length,
+              })),
+            );
           }
         }
         found.username = found.fields.find((field) => field.name === "username")?.value ?? null;
@@ -489,44 +536,49 @@ function routes(state: MockState): Route[] {
     {
       method: "GET",
       pattern: /\/sessions\/([^/]+)\/secrets$/,
-      handle: (match) => {
-        const active = scenarios();
-        const sessionId = match[1]!;
-        const inherited = active.has("inherited");
-        const policy =
-          state.sessionPolicies[sessionId] ??
-          (active.has("narrowed") || inherited
-            ? { mode: "selected" as const, vaultIds: [state.vaults[1]!.id, state.vaults[4]!.id] }
-            : { mode: "all" as const });
-        const reachable = state.vaults.filter((each) => each.ownerKind !== "task");
-        const allowedByParent = inherited ? new Set([state.vaults[0]!.id, state.vaults[1]!.id, state.vaults[4]!.id]) : null;
-        const selected = (id: string) => policy.mode === "all" || policy.vaultIds.includes(id);
-        const taskVault = state.vaults.find((each) => each.ownerKind === "task")!;
-        return json(200, {
-          capabilityEnabled: !active.has("capability-off"),
-          policy,
-          effectiveVaultIds: reachable.filter((each) => selected(each.id)).map((each) => each.id),
-          narrowedBySessionId: inherited ? state.taskSessionId : null,
-          taskVault: visibleVault(taskVault),
-          taskItems: active.has("empty-task")
-            ? []
-            : state.items.filter((each) => each.vaultId === taskVault.id).map(summary),
-          reachableVaults: reachable.map((each) => ({
-            ...visibleVault(each),
-            selected: selected(each.id) && (!allowedByParent || allowedByParent.has(each.id)),
-            selectable: !allowedByParent || allowedByParent.has(each.id),
-          })),
-        });
-      },
+      handle: (match) => sessionSecrets(match[1]!),
     },
     {
       method: "PUT",
       pattern: /\/sessions\/([^/]+)\/vault-policy$/,
       handle: (match, body) => {
         state.sessionPolicies[match[1]!] = body.policy;
-        return json(200, { ok: true });
+        return sessionSecrets(match[1]!);
       },
     },
+  ];
+  function sessionSecrets(sessionId: string): Response {
+    const active = scenarios();
+    const inherited = active.has("inherited");
+    const policy =
+      state.sessionPolicies[sessionId] ??
+      (active.has("narrowed") || inherited
+        ? { mode: "selected" as const, vaultIds: [state.vaults[1]!.id, state.vaults[4]!.id] }
+        : { mode: "all" as const });
+    const reachable = state.vaults.filter((each) => each.ownerKind !== "task");
+    const allowedByParent = inherited
+      ? new Set([state.vaults[0]!.id, state.vaults[1]!.id, state.vaults[4]!.id])
+      : null;
+    const selected = (id: string) => policy.mode === "all" || policy.vaultIds.includes(id);
+    const taskVault = state.vaults.find((each) => each.ownerKind === "task")!;
+    return json(200, {
+      capabilityEnabled: !active.has("capability-off"),
+      policy,
+      effectiveVaultIds: reachable.filter((each) => selected(each.id)).map((each) => each.id),
+      narrowedBySessionId: inherited ? state.taskSessionId : null,
+      taskVault: visibleVault(taskVault),
+      taskItems: active.has("empty-task")
+        ? []
+        : state.items.filter((each) => each.vaultId === taskVault.id).map(summary),
+      reachableVaults: reachable.map((each) => ({
+        ...visibleVault(each),
+        selected: selected(each.id) && (!allowedByParent || allowedByParent.has(each.id)),
+        selectable: !allowedByParent || allowedByParent.has(each.id),
+      })),
+    });
+  }
+  return [
+    ...first,
     {
       method: "POST",
       pattern: /\/connections\/1password\/install$/,
@@ -534,8 +586,7 @@ function routes(state: MockState): Route[] {
         const token = String(body.token ?? "");
         if (token.includes("invalid"))
           return fail(400, "provider_auth_invalid", "Invalid service account token.");
-        if (token.includes("expired"))
-          return fail(401, "provider_auth_expired", "Token expired.");
+        if (token.includes("expired")) return fail(401, "provider_auth_expired", "Token expired.");
         if (token.includes("rate"))
           return fail(429, "provider_rate_limited", "Rate limited.", {
             retryAt: new Date(MOCK_NOW + 20 * 60_000).toISOString(),
@@ -586,7 +637,39 @@ function routes(state: MockState): Route[] {
 }
 
 const WORKSPACE_PATH = /\/v1\/workspaces\/([^/]+)(\/.*)$/;
-const OWNED = /^\/(vaults(\/|$)|sessions\/[^/]+\/(secrets|vault-policy)$|connections\/(1password\/install|[^/]+\/(provider-vaults|managed-vaults))$)/;
+const WORKSPACE_READ = /\/v1\/workspaces(\/[^/]+)?$/;
+const OWNED =
+  /^\/(vaults(\/|$)|sessions\/[^/]+\/(secrets|vault-policy)$|connections\/(1password\/install|[^/]+\/(provider-vaults|managed-vaults))$)/;
+
+/** "capability-off": the workspace's default agent has Secrets switched off. */
+function withSecretsOff(workspace: unknown): unknown {
+  if (!workspace || typeof workspace !== "object" || !("settings" in workspace)) return workspace;
+  const settings = ((workspace as { settings?: Record<string, unknown> }).settings ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const defaults = (settings.sessionAgentDefaults ?? {}) as Record<string, unknown>;
+  return {
+    ...workspace,
+    settings: {
+      ...settings,
+      sessionAgentDefaults: { ...defaults, capabilities: { from: "all", secrets: false } },
+    },
+  };
+}
+
+async function patchWorkspaces(response: Response): Promise<Response> {
+  if (!response.ok) return response;
+  const body = (await response.clone().json()) as unknown;
+  const patched = Array.isArray(body)
+    ? body.map(withSecretsOff)
+    : body &&
+        typeof body === "object" &&
+        Array.isArray((body as { workspaces?: unknown }).workspaces)
+      ? { ...body, workspaces: (body as { workspaces: unknown[] }).workspaces.map(withSecretsOff) }
+      : withSecretsOff(body);
+  return json(response.status, patched);
+}
 
 export function installSecretsMock(target: Window = window): void {
   const original = target.fetch.bind(target);
@@ -596,8 +679,17 @@ export function installSecretsMock(target: Window = window): void {
       target.location.href,
     );
     const match = url.pathname.match(WORKSPACE_PATH);
+    if (
+      scenarios().has("capability-off") &&
+      WORKSPACE_READ.test(url.pathname) &&
+      (init?.method ?? "GET").toUpperCase() === "GET"
+    ) {
+      return patchWorkspaces(await original(input, init));
+    }
     if (!match || !OWNED.test(match[2]!)) return original(input, init);
-    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
     const state = stateFor(match[1]!);
     const rest = match[2]!;
     const body = typeof init?.body === "string" && init.body ? JSON.parse(init.body) : undefined;

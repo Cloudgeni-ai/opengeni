@@ -51,8 +51,7 @@ export function PasswordGeneratorPopover({
     }),
     [length, symbols],
   );
-  const make = (next: { length?: number; symbols?: boolean } = {}) =>
-    generatePassword(spec(next));
+  const make = (next: { length?: number; symbols?: boolean } = {}) => generatePassword(spec(next));
   const [preview, setPreview] = useState("");
   const lengthId = useId();
   const symbolsId = useId();
@@ -68,7 +67,12 @@ export function PasswordGeneratorPopover({
       }}
     >
       <PopoverPrimitive.Trigger asChild>
-        <Button type="button" variant="outline" disabled={disabled} className="shrink-0 pointer-coarse:h-11">
+        <Button
+          type="button"
+          variant="outline"
+          disabled={disabled}
+          className="shrink-0 pointer-coarse:h-11"
+        >
           <WandSparklesIcon aria-hidden="true" />
           Generate
         </Button>

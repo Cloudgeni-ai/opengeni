@@ -68,7 +68,11 @@ function template(type: CreatableType): Draft[] {
   });
   switch (type) {
     case "login":
-      return [make("username", "text"), make("password", "concealed"), make("one-time password", "totp")];
+      return [
+        make("username", "text"),
+        make("password", "concealed"),
+        make("one-time password", "totp"),
+      ];
     case "api_key":
       return [make("value", "concealed")];
     case "note":
@@ -102,7 +106,11 @@ const TYPE_OPTIONS: { value: CreatableType; label: string }[] = [
   { value: "file", label: "File" },
 ];
 
-const KIND_OPTIONS: { value: Exclude<VaultFieldKind, "file">; label: string; description: string }[] = [
+const KIND_OPTIONS: {
+  value: Exclude<VaultFieldKind, "file">;
+  label: string;
+  description: string;
+}[] = [
   { value: "text", label: "Text", description: "Shown on the page, like a username." },
   { value: "concealed", label: "Concealed", description: "Hidden until you reveal it." },
   { value: "totp", label: "One-time password", description: "A TOTP seed or otpauth:// link." },
@@ -122,7 +130,9 @@ function TotpPreview({ seed }: { seed: string }) {
   return (
     <span className="flex items-center gap-2">
       Current code
-      <span className="font-mono font-medium text-fg tabular-nums">{formatTotpCode(totp.code)}</span>
+      <span className="font-mono font-medium text-fg tabular-nums">
+        {formatTotpCode(totp.code)}
+      </span>
       <TotpRing remainingMs={totp.remainingMs} periodSeconds={totp.periodSeconds} />
     </span>
   );
@@ -166,7 +176,9 @@ export function ItemEditorPage({
     setType(next);
     // Keep what was typed into fields that exist in both templates.
     setDrafts((current) => {
-      const kept = new Map(current.filter((draft) => draft.value).map((draft) => [draft.name, draft]));
+      const kept = new Map(
+        current.filter((draft) => draft.value).map((draft) => [draft.name, draft]),
+      );
       return [
         ...template(next).map((draft) => kept.get(draft.name) ?? draft),
         ...current.filter((draft) => draft.custom),
@@ -176,7 +188,9 @@ export function ItemEditorPage({
 
   const update = (key: string, patch: Partial<Draft>) => {
     touched.current = true;
-    setDrafts((current) => current.map((draft) => (draft.key === key ? { ...draft, ...patch } : draft)));
+    setDrafts((current) =>
+      current.map((draft) => (draft.key === key ? { ...draft, ...patch } : draft)),
+    );
     setErrors((current) => {
       if (!current.fields[key]) return current;
       const fields = { ...current.fields };
@@ -214,15 +228,18 @@ export function ItemEditorPage({
         next.fields[draft.key] = "This file is too large. Files can be up to 256 KB.";
     }
     if (!editing && type === "file" && !visibleDrafts.some((draft) => draft.file))
-      next.fields[visibleDrafts.find((draft) => draft.kind === "file")?.key ?? ""] = "Choose a file.";
+      next.fields[visibleDrafts.find((draft) => draft.kind === "file")?.key ?? ""] =
+        "Choose a file.";
     return next;
   }
 
   function fieldInput(draft: Draft): VaultFieldInput | null {
     const base = { name: draft.name.trim(), ...(draft.fieldId ? { fieldId: draft.fieldId } : {}) };
     if (draft.removed) return draft.fieldId ? { ...base, remove: true } : null;
-    if (draft.file) return { ...base, kind: "file", fileBase64: draft.file.base64, fileName: draft.file.name };
-    if (draft.generate && !draft.value) return { ...base, kind: draft.kind, generate: draft.generate };
+    if (draft.file)
+      return { ...base, kind: "file", fileBase64: draft.file.base64, fileName: draft.file.name };
+    if (draft.generate && !draft.value)
+      return { ...base, kind: draft.kind, generate: draft.generate };
     const value = draft.kind === "totp" ? draft.value.trim() : draft.value;
     if (draft.existing) {
       // Text shows its value, so an unchanged one is skipped; concealed empty keeps the saved one.
@@ -239,7 +256,9 @@ export function ItemEditorPage({
     const found = validate();
     setErrors(found);
     if (found.name || Object.keys(found.fields).length) return false;
-    const fields = drafts.map(fieldInput).filter((input): input is VaultFieldInput => input !== null);
+    const fields = drafts
+      .map(fieldInput)
+      .filter((input): input is VaultFieldInput => input !== null);
     const cleanWebsites = websites.map((site) => site.trim()).filter(Boolean);
     const expiresAt = expires ? new Date(`${expires}T00:00:00Z`).toISOString() : null;
     try {
@@ -287,13 +306,21 @@ export function ItemEditorPage({
   }
 
   const kindChoices = useMemo(
-    () => KIND_OPTIONS.map((option) => ({ value: option.value, label: option.label, description: option.description })),
+    () =>
+      KIND_OPTIONS.map((option) => ({
+        value: option.value,
+        label: option.label,
+        description: option.description,
+      })),
     [],
   );
 
   const renderDraft = (draft: Draft) => {
     const error = errors.fields[draft.key];
-    const removable = draft.custom || (draft.existing && draft.name !== (type === "login" ? "password" : type === "api_key" ? "value" : type));
+    const removable =
+      draft.custom ||
+      (draft.existing &&
+        draft.name !== (type === "login" ? "password" : type === "api_key" ? "value" : type));
     const removeButton = removable ? (
       <Button
         type="button"
@@ -310,19 +337,29 @@ export function ItemEditorPage({
         <Trash2Icon aria-hidden="true" />
       </Button>
     ) : null;
-    const keepHint = draft.existing && draft.kind !== "text" ? "Leave empty to keep the saved value." : undefined;
+    const keepHint =
+      draft.existing && draft.kind !== "text" ? "Leave empty to keep the saved value." : undefined;
 
     let control: ReactNode;
     let hint: ReactNode = keepHint;
     if (draft.kind === "file") {
       control = (
         <div className="flex min-w-0 items-center gap-3">
-          <Button type="button" variant="outline" onClick={() => fileInput.current?.click()} className="pointer-coarse:h-11">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => fileInput.current?.click()}
+            className="pointer-coarse:h-11"
+          >
             <UploadIcon aria-hidden="true" />
             {draft.file || draft.existing ? "Replace file" : "Choose file"}
           </Button>
           <span className="min-w-0 truncate text-sm text-fg-muted">
-            {draft.file ? draft.file.name : draft.existing ? item?.fields.find((field) => field.id === draft.fieldId)?.fileName : "Up to 256 KB"}
+            {draft.file
+              ? draft.file.name
+              : draft.existing
+                ? item?.fields.find((field) => field.id === draft.fieldId)?.fileName
+                : "Up to 256 KB"}
           </span>
           <input
             ref={fileInput}
@@ -336,7 +373,9 @@ export function ItemEditorPage({
               const buffer = new Uint8Array(await file.arrayBuffer());
               let binary = "";
               for (const byte of buffer) binary += String.fromCharCode(byte);
-              update(draft.key, { file: { name: file.name, base64: btoa(binary), size: file.size } });
+              update(draft.key, {
+                file: { name: file.name, base64: btoa(binary), size: file.size },
+              });
             }}
           />
         </div>
@@ -360,7 +399,8 @@ export function ItemEditorPage({
           placeholder={draft.existing ? "Unchanged" : "Setup key or otpauth:// link"}
         />
       );
-      if (draft.value.trim() && isValidTotpInput(draft.value.trim())) hint = <TotpPreview seed={draft.value.trim()} />;
+      if (draft.value.trim() && isValidTotpInput(draft.value.trim()))
+        hint = <TotpPreview seed={draft.value.trim()} />;
     } else if (type === "note" && draft.name === "note") {
       control = (
         <TextArea
@@ -381,7 +421,9 @@ export function ItemEditorPage({
             className="min-w-0 flex-1"
             value={draft.value}
             defaultRevealed={Boolean(draft.revealNonce)}
-            onChange={(event) => update(draft.key, { value: event.target.value, generate: undefined })}
+            onChange={(event) =>
+              update(draft.key, { value: event.target.value, generate: undefined })
+            }
             placeholder={draft.existing ? "Unchanged" : undefined}
           />
           {passwordLike ? (
@@ -397,9 +439,16 @@ export function ItemEditorPage({
 
     if (draft.custom) {
       return (
-        <div key={draft.key} className="flex min-w-0 flex-col gap-2 rounded-[10px] border border-border p-3">
+        <div
+          key={draft.key}
+          className="flex min-w-0 flex-col gap-2 rounded-[10px] border border-border p-3"
+        >
           <div className="flex min-w-0 items-end gap-2">
-            <Field label="Field name" className="min-w-0 flex-1" error={error && !draft.value ? error : undefined}>
+            <Field
+              label="Field name"
+              className="min-w-0 flex-1"
+              error={error && !draft.value ? error : undefined}
+            >
               <TextInput
                 value={draft.name}
                 onChange={(event) => update(draft.key, { name: event.target.value })}
@@ -416,7 +465,11 @@ export function ItemEditorPage({
             />
             {removeButton}
           </div>
-          <Field label={`${draft.name.trim() ? fieldLabel(draft.name.trim()) : "Field"} value`} hint={hint} error={draft.value ? error : undefined}>
+          <Field
+            label={`${draft.name.trim() ? fieldLabel(draft.name.trim()) : "Field"} value`}
+            hint={hint}
+            error={draft.value ? error : undefined}
+          >
             {control}
           </Field>
         </div>
@@ -441,8 +494,14 @@ export function ItemEditorPage({
     <FlushFormPage
       backLabel={item ? item.name : vault.name}
       onClose={onClose}
-      title={item ? `Edit ${item.name}` : `New ${type === "api_key" ? "API key" : ITEM_TYPE_LABEL[type].toLowerCase()}`}
-      description={editing ? undefined : `Saved to ${vault.name}. Agents use it by reference, never by value.`}
+      title={
+        item
+          ? `Edit ${item.name}`
+          : `New ${type === "api_key" ? "API key" : ITEM_TYPE_LABEL[type].toLowerCase()}`
+      }
+      description={
+        editing ? undefined : `Saved to ${vault.name}. Agents use it by reference, never by value.`
+      }
       submitLabel={item ? "Save" : "Save item"}
       pendingLabel="Saving…"
       error={formError}
@@ -469,7 +528,9 @@ export function ItemEditorPage({
               setName(event.target.value);
               if (errors.name) setErrors((current) => ({ ...current, name: undefined }));
             }}
-            placeholder={type === "login" ? "GitHub" : type === "api_key" ? "OpenAI API" : undefined}
+            placeholder={
+              type === "login" ? "GitHub" : type === "api_key" ? "OpenAI API" : undefined
+            }
             maxLength={VAULT_LIMITS.nameMaxChars}
             suppressAutofill
           />
@@ -483,7 +544,9 @@ export function ItemEditorPage({
                     value={site}
                     aria-label={`Website ${index + 1}`}
                     onChange={(event) =>
-                      setWebsites((current) => current.map((each, at) => (at === index ? event.target.value : each)))
+                      setWebsites((current) =>
+                        current.map((each, at) => (at === index ? event.target.value : each)),
+                      )
                     }
                     placeholder="github.com"
                     inputMode="url"
@@ -496,7 +559,9 @@ export function ItemEditorPage({
                       variant="ghost"
                       size="icon-sm"
                       aria-label={`Remove website ${index + 1}`}
-                      onClick={() => setWebsites((current) => current.filter((_, at) => at !== index))}
+                      onClick={() =>
+                        setWebsites((current) => current.filter((_, at) => at !== index))
+                      }
                       className={cn("text-fg-muted hover:text-danger", HIT_AREA)}
                     >
                       <Trash2Icon aria-hidden="true" />
@@ -528,14 +593,25 @@ export function ItemEditorPage({
           onClick={() =>
             setDrafts((current) => [
               ...current,
-              { key: nextKey(), name: "", kind: "concealed", custom: true, value: "", existing: false },
+              {
+                key: nextKey(),
+                name: "",
+                kind: "concealed",
+                custom: true,
+                value: "",
+                existing: false,
+              },
             ])
           }
         >
           <PlusIcon aria-hidden="true" />
           Add field
         </Button>
-        <Field label="Expires" optional hint="Agents still get it after this date; it's marked Expired.">
+        <Field
+          label="Expires"
+          optional
+          hint="Agents still get it after this date; it's marked Expired."
+        >
           <TextInput
             type="date"
             value={expires}

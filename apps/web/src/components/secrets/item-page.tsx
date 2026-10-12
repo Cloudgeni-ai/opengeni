@@ -72,6 +72,27 @@ function formatBytes(bytes: number | null): string {
   return `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`;
 }
 
+/** The field the primary reference points at: the password of a login, else the first value. */
+function primaryFieldName(item: VaultItem): string {
+  const reference = item.references.primary ?? "";
+  const name = Object.entries(item.references.byField).find(([, ref]) => ref === reference)?.[0];
+  const field = item.fields.find((each) => each.id === name || each.name === name);
+  return field?.name ?? "password";
+}
+
+function ReferenceLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <span className="text-xs leading-4.5 text-fg-muted">{label}</span>
+      <CopyField
+        variant="field"
+        value={value}
+        label={label === "Reference" ? "reference" : `${label.toLowerCase()} reference`}
+      />
+    </div>
+  );
+}
+
 export interface ItemPageActions {
   back: () => void;
   edit: () => void;
@@ -298,7 +319,12 @@ function FieldHistory({
                   onClick={async () => {
                     setRestoring(version.version);
                     try {
-                      await api.restoreFieldVersion(item.vaultId, item.id, field.id, version.version);
+                      await api.restoreFieldVersion(
+                        item.vaultId,
+                        item.id,
+                        field.id,
+                        version.version,
+                      );
                       toast.success(`Restored version ${version.version}`, {
                         description: "It's now the current value.",
                       });
@@ -415,16 +441,6 @@ export function ItemPage({
 
   const aside = (
     <DetailAside label={`About ${item.name}`}>
-      {primaryReference ? (
-        <DetailAsideItem label="Use in agents">
-          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <CopyField variant="field" value={primaryReference} label="reference" />
-            {item.references.otp ? (
-              <CopyField variant="field" value={item.references.otp} label="one-time code reference" />
-            ) : null}
-          </div>
-        </DetailAsideItem>
-      ) : null}
       {item.websites.length ? (
         <DetailAsideItem label={item.websites.length === 1 ? "Website" : "Websites"}>
           <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0">
@@ -453,15 +469,16 @@ export function ItemPage({
   );
 
   return (
-    <DetailPage back={{ label: vault.name, onClick: actions.back }} className={FLUSH_DETAIL_PAGE_CLASS}>
+    <DetailPage
+      back={{ label: vault.name, onClick: actions.back }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
       <DetailPageHeader
         leading={<ItemTile item={item} />}
         title={item.name}
         chips={
           <>
-            {readOnly ? (
-              <span className="text-xs font-medium text-fg-muted">Read-only</span>
-            ) : null}
+            {readOnly ? <span className="text-xs font-medium text-fg-muted">Read-only</span> : null}
             <ExpiryBadge expiresAt={item.expiresAt} variant="outline" />
           </>
         }
@@ -476,7 +493,9 @@ export function ItemPage({
           editButton || menu.length ? (
             <div className="flex items-center gap-2">
               {editButton}
-              {menu.length ? <MoreMenu label={`More actions for ${item.name}`}>{menu}</MoreMenu> : null}
+              {menu.length ? (
+                <MoreMenu label={`More actions for ${item.name}`}>{menu}</MoreMenu>
+              ) : null}
             </div>
           ) : undefined
         }
@@ -490,7 +509,12 @@ export function ItemPage({
           action={
             vault.canWrite ? (
               <div className="flex items-center gap-2">
-                <Button type="button" variant="outline" size="sm" onClick={() => void actions.restore()}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void actions.restore()}
+                >
                   <ArchiveRestoreIcon aria-hidden="true" />
                   Restore
                 </Button>
@@ -521,12 +545,18 @@ export function ItemPage({
                 <dt className="text-fg-muted">User</dt>
                 <dd className="m-0 min-w-0 truncate text-fg">{item.passkey.userName ?? "—"}</dd>
                 <dt className="text-fg-muted">Credential</dt>
-                <dd className="m-0 min-w-0 font-mono text-fg">…{item.passkey.credentialIdSuffix}</dd>
+                <dd className="m-0 min-w-0 font-mono text-fg">
+                  …{item.passkey.credentialIdSuffix}
+                </dd>
                 <dt className="text-fg-muted">Sign-ins</dt>
                 <dd className="m-0 text-fg tabular-nums">{item.passkey.signCount}</dd>
                 <dt className="text-fg-muted">Last used</dt>
                 <dd className="m-0 text-fg">
-                  {item.passkey.lastUsedAt ? <RelativeTime date={item.passkey.lastUsedAt} /> : "Never"}
+                  {item.passkey.lastUsedAt ? (
+                    <RelativeTime date={item.passkey.lastUsedAt} />
+                  ) : (
+                    "Never"
+                  )}
                 </dd>
               </dl>
               {item.passkey.leasedUntil && Date.parse(item.passkey.leasedUntil) > Date.now() ? (
@@ -578,9 +608,26 @@ export function ItemPage({
               ) : null}
             </DetailSection>
           ) : null}
+          {primaryReference ? (
+            <DetailSection
+              title="Use in agents"
+              description="Put a reference in a task or a tool's settings. Agents get the value when they run; it never appears in chat."
+            >
+              <div className="flex min-w-0 flex-col gap-3">
+                <ReferenceLine
+                  label={item.references.otp ? fieldLabel(primaryFieldName(item)) : "Reference"}
+                  value={primaryReference}
+                />
+                {item.references.otp ? (
+                  <ReferenceLine label="One-time code" value={item.references.otp} />
+                ) : null}
+              </div>
+            </DetailSection>
+          ) : null}
           {(() => {
             const versioned = fields.filter(
-              (field) => field.kind !== "text" && field.currentVersion !== null && field.currentVersion > 1,
+              (field) =>
+                field.kind !== "text" && field.currentVersion !== null && field.currentVersion > 1,
             );
             if (versioned.length === 0 && item.aliases.length === 0) return null;
             return (

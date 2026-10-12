@@ -422,7 +422,9 @@ export function buildMockState(workspaceId: string): MockState {
             ? login(
                 `svc-${index}@acme.dev`,
                 `fake-${index}`,
-                withTotp ? [{ name: "one-time password", kind: "totp", values: ["JBSWY3DPEHPK3PXP"] }] : [],
+                withTotp
+                  ? [{ name: "one-time password", kind: "totp", values: ["JBSWY3DPEHPK3PXP"] }]
+                  : [],
               )
             : type === "api_key"
               ? apiKey(`fake-key-${index}`)
@@ -434,7 +436,17 @@ export function buildMockState(workspaceId: string): MockState {
     );
   }
 
-  const vaults = [privateVault, shared, dense, empty, orgTooling, noPersonal, opEngineering, opShared, taskVault];
+  const vaults = [
+    privateVault,
+    shared,
+    dense,
+    empty,
+    orgTooling,
+    noPersonal,
+    opEngineering,
+    opShared,
+    taskVault,
+  ];
   for (const each of vaults) {
     each.itemCount = items.filter((entry) => entry.vaultId === each.id && !entry.archivedAt).length;
   }
