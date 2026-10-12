@@ -1184,7 +1184,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "auth"],
     title: "Authenticate browser session",
     description:
-      "List configured site-auth connections and durable auth runs, or start, report, provider-advance, protected-fill, and verify one exact BrowserSession authentication run. Use advance_external for an external_provider authority. Provider secrets and hosted-login URLs never enter model tool arguments or results. If an operation returns needs_human, call interaction_request_human with the returned intervention id.",
+      "Reuse a saved sign-in, the first rung of the login ladder: list configured site-auth connections and durable auth runs, or start, report, provider-advance, and verify one exact BrowserSession authentication run. Use advance_external for an external_provider authority; provider credentials and hosted-login URLs stay with the provider. When no saved sign-in applies or a run returns needs_human, sign in yourself: type saved credentials as secret references (such as {{secret:Item}} and {{secret:Item/otp}}) when secrets are available, read email or SMS codes through connected tools, and solve CAPTCHAs yourself. Pass the returned intervention id to interaction_request_human only when a person must physically act, such as a push approval or a hardware key.",
     input: BrowserAuthInput,
     output: BrowserAuthOutput,
     readOnly: false,
@@ -1289,7 +1289,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "requestHuman"],
     title: "Request human interaction",
     description:
-      "Pause the current agent turn for a person to act in one exact browser tab or computer target. Browser login/MFA handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+      "Pause the current agent turn for a person to physically act in one exact browser tab or computer target: a push approval on their phone, a hardware security key, or another step only a person present can do. Log in yourself first (secret references and TOTP codes such as {{secret:Item/otp}} when secrets are available, email or SMS codes from connected tools) and solve CAPTCHAs yourself; never hand over a CAPTCHA or a step you can do. Handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
     input: RequestHumanInteractionToolInput,
     output: RequestHumanInteractionToolOutput,
     readOnly: false,

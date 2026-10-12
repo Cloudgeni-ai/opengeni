@@ -13,6 +13,7 @@ export const BundledSkillId = z.enum([
   "builtin:opengeni-presentations",
   "builtin:opengeni-sites",
   "builtin:opengeni-video-generation",
+  "builtin:opengeni-secrets",
 ]);
 export type BundledSkillId = z.infer<typeof BundledSkillId>;
 export const BundledSkillSelection = z

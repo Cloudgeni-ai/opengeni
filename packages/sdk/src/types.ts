@@ -46,7 +46,8 @@ export type BundledSkillId =
   | "builtin:opengeni-spreadsheets"
   | "builtin:opengeni-presentations"
   | "builtin:opengeni-sites"
-  | "builtin:opengeni-video-generation";
+  | "builtin:opengeni-video-generation"
+  | "builtin:opengeni-secrets";
 
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
