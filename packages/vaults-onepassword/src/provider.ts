@@ -42,6 +42,20 @@ export const ONEPASSWORD_GET_ALL_BATCH = 50;
  */
 export const ONEPASSWORD_MANAGED_GROUP_PERMISSIONS = 32 | 16 | 1024 | 128 | 64 | 256 | 512;
 
+/**
+ * 1Password vault and item IDs are short lowercase alphanumerics (26 chars).
+ * Anything else cannot exist, so refuse it as not found before spending a
+ * request (and before the SDK reports it as a generic validation error).
+ */
+const ONEPASSWORD_ID = /^[a-z0-9]{1,64}$/i;
+function assertOnePasswordIds(...ids: Array<string | undefined>) {
+  for (const id of ids) {
+    if (id !== undefined && !ONEPASSWORD_ID.test(id)) {
+      throw new VaultProviderError("provider_not_found", "No such 1Password vault or item");
+    }
+  }
+}
+
 export type OnePasswordVaultProviderOptions = {
   token: string;
   planTier?: OnePasswordPlanTier;
@@ -239,6 +253,7 @@ export function createOnePasswordVaultProvider(
     },
 
     async listItems(ctx, externalVaultId): Promise<ProviderItemMeta[]> {
+      assertOnePasswordIds(externalVaultId);
       const overviews = await call(ctx, "list", "itemsList", (client) =>
         client.items.list(externalVaultId, {
           type: "ByState",
@@ -260,6 +275,7 @@ export function createOnePasswordVaultProvider(
     },
 
     async readFields(ctx, externalVaultId, externalItemId, externalFieldIds) {
+      assertOnePasswordIds(externalVaultId, externalItemId);
       const item = await getItem(ctx, externalVaultId, externalItemId);
       const values: ProviderFieldValue[] = [];
       for (const externalFieldId of externalFieldIds) {
@@ -269,6 +285,7 @@ export function createOnePasswordVaultProvider(
     },
 
     async writeItem(ctx, externalVaultId, write) {
+      assertOnePasswordIds(externalVaultId, write.externalItemId);
       if (!write.externalItemId) {
         const params = buildCreateParams(externalVaultId, write);
         const created = await call(ctx, "write", "itemsCreate", (client) => client.items.create(params));
@@ -310,6 +327,7 @@ export function createOnePasswordVaultProvider(
     },
 
     async archiveItem(ctx, externalVaultId, externalItemId) {
+      assertOnePasswordIds(externalVaultId, externalItemId);
       await call(ctx, "write", "itemsArchive", (client) => client.items.archive(externalVaultId, externalItemId));
       forgetItem(ctx, externalVaultId, externalItemId);
     },
@@ -345,10 +363,12 @@ export function createOnePasswordVaultProvider(
     },
 
     async deleteVault(ctx, externalVaultId) {
+      assertOnePasswordIds(externalVaultId);
       await call(ctx, "admin", "vaultsDelete", (client) => client.vaults.delete(externalVaultId));
     },
 
     async deleteItem(ctx, externalVaultId, externalItemId) {
+      assertOnePasswordIds(externalVaultId, externalItemId);
       await call(ctx, "write", "itemsDelete", (client) => client.items.delete(externalVaultId, externalItemId));
       forgetItem(ctx, externalVaultId, externalItemId);
     },

@@ -7,7 +7,7 @@ import { type VaultProviderContext, VaultProviderError, totpCode } from "../src/
 import { type OnePasswordVaultProvider, createOnePasswordVaultProvider } from "../src/provider";
 import { type OnePasswordSdk, OnePasswordClientCache, loadOnePasswordSdk } from "../src/sdk";
 import { onePasswordTokenFingerprint } from "../src/token";
-import { defineVaultProviderContract } from "./contract-suite";
+import { runVaultProviderContractSuite } from "@opengeni/vaults/testing";
 
 /**
  * Live 1Password run (dossier §16.5, OP-1..OP-3). Never runs in CI:
@@ -200,12 +200,12 @@ describe("live 1Password (FAMILY fixture)", () => {
     writeEvidence();
   });
 
-  defineVaultProviderContract("live 1Password", async () => {
+  runVaultProviderContractSuite("live 1Password", async () => {
     await ready;
     return {
       provider,
       context,
-      readWriteVaultId: RW,
+      externalVaultId: RW,
       readOnlyVaultId: RO,
       fixtureItemName: "Test Login",
       namePrefix: PREFIX,

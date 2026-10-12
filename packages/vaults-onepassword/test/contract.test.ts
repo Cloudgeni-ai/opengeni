@@ -1,13 +1,13 @@
 import { createAttemptProviderBudget } from "../src/budget";
 import { createOnePasswordVaultProvider } from "../src/provider";
 import { OnePasswordClientCache } from "../src/sdk";
-import { defineVaultProviderContract } from "./contract-suite";
+import { createFakeVaultProvider, runVaultProviderContractSuite } from "@opengeni/vaults/testing";
 import { createFakeOnePasswordSdk, fakeServiceAccountToken } from "./fake-sdk";
 
 // The provider contract against the 1Password adapter over an in-memory SDK
 // double that reproduces the SDK's versioning and error strings. The live run
 // (test/live.test.ts) executes the same suite against real 1Password.
-defineVaultProviderContract("1Password adapter (SDK double)", async () => {
+runVaultProviderContractSuite("1Password adapter (SDK double)", async () => {
   const fake = createFakeOnePasswordSdk({
     vaults: [
       {
@@ -38,9 +38,36 @@ defineVaultProviderContract("1Password adapter (SDK double)", async () => {
       clientCache: new OnePasswordClientCache(),
     }),
     context: () => ({ connectionId, budget: createAttemptProviderBudget() }),
-    readWriteVaultId: "rw",
+    externalVaultId: "rw",
     readOnlyVaultId: "ro",
     fixtureItemName: "Test Login",
     namePrefix: "ogtest-",
   };
 });
+
+// The same suite against the shared in-memory fake provider (F1), so the fake
+// used by seeds and API tests keeps behaving like the 1Password adapter.
+runVaultProviderContractSuite("fake provider", async () => ({
+  provider: createFakeVaultProvider({
+    vaults: [
+      {
+        externalVaultId: "rw",
+        name: "OpenGeni Test RW",
+        items: [
+          {
+            name: "Test Login",
+            fields: [
+              { name: "username", kind: "text", value: "alice" },
+              { name: "password", kind: "concealed", value: "pw" },
+              { name: "one-time password", kind: "totp", value: "JBSWY3DPEHPK3PXP" },
+            ],
+          },
+        ],
+      },
+      { externalVaultId: "ro", name: "OpenGeni Test RO", readOnly: true },
+    ],
+  }),
+  externalVaultId: "rw",
+  readOnlyVaultId: "ro",
+  fixtureItemName: "Test Login",
+}));
