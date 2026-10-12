@@ -91,19 +91,19 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
   () => {
     test("links a 1Password vault, mirrors metadata and reports sync state", async () => {
       const w = await world();
-      const shared = await w.connection(false);
+      const sharedConnection = await w.connection(false);
       const linked = await linkProviderVault(w.db, w.context, {
         ownerKind: "workspace",
         name: "OpenGeni Test RW",
         source: "onepassword",
-        providerConnectionId: shared.id,
+        providerConnectionId: sharedConnection.id,
         providerVaultRef: "vaultrw0001",
         mode: "read_write",
       });
       expect(linked).toMatchObject({
         source: "onepassword",
         mode: "read_write",
-        providerConnectionId: shared.id,
+        providerConnectionId: sharedConnection.id,
         providerVaultRef: "vaultrw0001",
         syncStatus: "syncing",
         itemCount: 0,
@@ -113,7 +113,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         workspaceId: w.workspaceId,
         source: "onepassword",
         mode: "read_write",
-        providerConnectionId: shared.id,
+        providerConnectionId: sharedConnection.id,
         providerVaultRef: "vaultrw0001",
         providerContentVersion: null,
         rateLimitedUntil: null,
