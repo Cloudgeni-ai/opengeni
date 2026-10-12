@@ -3677,27 +3677,46 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     frameId?: string,
   ): Promise<void> {
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: point.x,
-      y: point.y,
-    });
+    const { x, y, sessionId } = await this.clickInput(state, point);
+    const input = sessionId === undefined ? {} : { sessionId };
+    await this.sendActionTarget(
+      state,
+      "Input.dispatchMouseEvent",
+      { type: "mouseMoved", x, y },
+      input,
+    );
     for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-        type: "mousePressed",
-        x: point.x,
-        y: point.y,
-        button,
-        clickCount,
-      });
-      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-        type: "mouseReleased",
-        x: point.x,
-        y: point.y,
-        button,
-        clickCount,
-      });
+      await this.sendActionTarget(
+        state,
+        "Input.dispatchMouseEvent",
+        { type: "mousePressed", x, y, button, clickCount },
+        input,
+      );
+      await this.sendActionTarget(
+        state,
+        "Input.dispatchMouseEvent",
+        { type: "mouseReleased", x, y, button, clickCount },
+        input,
+      );
     }
+  }
+
+  /**
+   * Where a click on a node goes. A node in a cross-origin frame is clicked
+   * through that frame's own session, in its local coordinates. Sent to the
+   * page at page coordinates, Chrome routes the event into the frame by the
+   * compositor's hit-test data, which can lag a freshly loaded frame: the
+   * click then lands on nothing although Blink's hit test passed (seen headed
+   * with a CAPTCHA widget, about one click in five).
+   */
+  private async clickInput(
+    state: TargetState,
+    point: { x: number; y: number },
+  ): Promise<{ x: number; y: number; sessionId?: string }> {
+    const route = state.nodeRoute;
+    if (!route) return point;
+    const offset = await this.frameOffset(state, route);
+    return { x: point.x - offset.x, y: point.y - offset.y, sessionId: route.sessionId };
   }
 
   /** Scroll offsets of the window, visual viewport and every composed
@@ -4488,8 +4507,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** Node-level calls for a node inside a cross-origin frame go to that frame's
-   * session. Input and page-level calls always use the page session; pointer
-   * coordinates are already translated into page space. */
+   * session. Input and page-level calls use the page session, with pointer
+   * coordinates translated into page space; node clicks pass their frame's
+   * session explicitly (see clickInput). */
   private commandSession(state: TargetState, method: string): string {
     const route = state.nodeRoute;
     if (!route) return state.sessionId;
@@ -4505,7 +4525,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
-    options: { potentialEffect?: boolean } = {},
+    options: { potentialEffect?: boolean; sessionId?: string } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
@@ -4520,7 +4540,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (options.potentialEffect !== false && method !== "Page.getNavigationHistory")
       state.actionEffectCount += 1;
     const command = connection.send<T>(method, params, {
-      sessionId: this.commandSession(state, method),
+      sessionId: options.sessionId ?? this.commandSession(state, method),
     });
     try {
       const result = await Promise.race([
