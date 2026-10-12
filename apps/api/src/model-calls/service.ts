@@ -60,7 +60,7 @@ import {
   SingleModelCallUnsupportedError,
   type SingleModelCallResult,
 } from "@opengeni/runtime/model-call";
-import { XaiSubscriptionReloginRequired, type XaiFetch } from "@opengeni/xai-subscription";
+import { XaiSubscriptionReloginRequired } from "@opengeni/xai-subscription";
 import {
   creditDebitAttributionForGrant,
   withAccessGrantSessionRlsContext,
@@ -73,7 +73,6 @@ export type ModelCallServiceDeps = {
   catalogSourceSettings?: Settings;
   entitlements?: EntitlementsPort | null;
   codexFetch?: CodexFetch;
-  xaiFetch?: XaiFetch;
   log?: (message: string, attributes: Record<string, string | number | boolean>) => void;
 };
 
@@ -122,7 +121,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       ).model;
     }
     const selection = admissibleWorkspaceModel(resolved.selections, modelId);
-    if (!selection) {
+    if (!selection || !servedBySingleModelCalls(selection)) {
       throw new ModelCallError({
         status: 404,
         type: "not_found_error",
@@ -137,11 +136,13 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
   return {
     async listModels(caller) {
       const { selections: all } = await selections(caller);
-      return all.filter(isWorkspaceModelAdmissible).map(({ model }) => ({
-        id: model.id,
-        label: model.label,
-        providerLabel: model.providerLabel,
-      }));
+      return all
+        .filter((entry) => isWorkspaceModelAdmissible(entry) && servedBySingleModelCalls(entry))
+        .map(({ model }) => ({
+          id: model.id,
+          label: model.label,
+          providerLabel: model.providerLabel,
+        }));
     },
 
     async call(input) {
@@ -196,12 +197,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         result =
           subscription === "codex"
             ? await withCodexOperation(deps, settings, input, model, execute)
-            : subscription === "xai"
-              ? // SuperGrok runs only on the shared core, which has no single
-                // model-call operation yet: fail closed (the legacy pool path
-                // was deleted after the SuperGrok cutover).
-                failXaiModelCall()
-              : await execute();
+            : await execute();
       } catch (error) {
         const mapped = publicModelCallError(error);
         if (mapped instanceof ModelCallError && mapped.status >= 500) {
@@ -324,8 +320,15 @@ async function withClaudeSubscriptionCredential(
   );
 }
 
-function failXaiModelCall(): never {
-  throw subscriptionCapacityUnavailable("SuperGrok");
+/**
+ * SuperGrok runs only on the shared subscription core, whose single-call
+ * `completion` operation stays Codex-only (design 5.3): this API neither
+ * lists nor serves a SuperGrok subscription model, so a request for one is
+ * `model_not_found` before admission, never a misleading capacity error.
+ */
+export function servedBySingleModelCalls(selection: WorkspaceModelSelection): boolean {
+  const source = selection.model.credentialSource;
+  return !(source.kind === "connected_subscription" && source.provider === "xai");
 }
 
 /**

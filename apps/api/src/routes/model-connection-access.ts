@@ -118,10 +118,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       }
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
       // A SuperGrok access policy is a shared core connection's, which the
-      // core editor authorizes (SuperGrok has no legacy pool rows).
-      const supergrokCore =
-        kind === "supergrok" &&
-        (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
+      // core editor authorizes (SuperGrok has no legacy pool rows); off
+      // `core` this refuses before any other check.
+      if (kind === "supergrok") await coreAccessDisposition(deps, kind, grant.accountId);
       if (kind === "claude_subscription") {
         const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
           workspaceId: scopeId,
@@ -160,7 +159,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         },
         core:
           kind === "supergrok"
-            ? supergrokCore
+            ? true
             : (await coreAccessDisposition(deps, kind, grant.accountId)) === "core",
       };
     }

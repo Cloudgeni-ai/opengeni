@@ -84,7 +84,10 @@ Subscription-backed models are supported:
   returns `429 subscription_usage_exhausted` when no account qualifies.
 - **Claude subscription:** the call uses the workspace's Claude connection
   credential selection, as turns do.
-- **SuperGrok:** the call uses the workspace's xAI subscription connection.
+- **SuperGrok:** not offered. SuperGrok runs only on the shared subscription
+  core, whose single-call `completion` operation is Codex-only, so `/models`
+  omits SuperGrok subscription models and a call naming one returns
+  `404 model_not_found`.
 
 An unavailable subscription returns `503 subscription_unavailable` or
 `503 subscription_reconnect_required`.

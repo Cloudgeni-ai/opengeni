@@ -598,7 +598,6 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
           entitlements: deps.entitlements ?? null,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
-          ...(deps.xaiFetch ? { xaiFetch: deps.xaiFetch as never } : {}),
           log: (message, attributes) => observability.error(message, attributes),
         })
       : deps.modelCalls;
