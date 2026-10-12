@@ -9,6 +9,14 @@
 -- pass the complete runtime-login list, apply, then start only a release
 -- that contains this migration. Never roll it back: recovery is fix-forward.
 --
+-- It also finalizes the provider-keyed reach rows (0713 note "Kept until
+-- retirement"): the reach table takes its provider-free name in place of
+-- 0713's view, gains the key to its connection's provider and loses the
+-- Codex default, and 0689's auto-assignment and plan-change triggers, their
+-- functions, its two owner-only auto-assignment policies and their setting
+-- take provider-free names. None of that could run while a rolling
+-- migration had to keep the names and defaults older binaries used.
+--
 -- Kept on purpose: historical migrations, the legacy tables and columns (M6),
 -- the v1 CHECK validators (*_provider_account_authority_snapshot_v1_valid),
 -- the column-immutability functions and triggers (prevent_*_snapshot_mutation),
@@ -123,6 +131,37 @@ DECLARE
     'claude_credential_leases.claude_lease_credential_pool_guard.enforce_claude_credential_pool_reference',
     'claude_session_account_pins.claude_pin_credential_pool_guard.enforce_claude_credential_pool_reference'
   ];
+  -- Reach finalization (steps 10 and 11): each opengeni_private trigger
+  -- function's Codex name and its provider-free name; each trigger's table,
+  -- Codex name, provider-free name and function; each owner-only policy's
+  -- table, Codex name and provider-free name.
+  renamed_routines text[] := ARRAY[
+    ['auto_assign_subscription_codex_workspace', 'auto_assign_subscription_core_workspace'],
+    ['auto_assign_subscription_codex_personal_workspace',
+      'auto_assign_subscription_core_personal_workspace'],
+    ['record_subscription_codex_plan_change', 'record_subscription_core_plan_change']
+  ];
+  renamed_triggers text[] := ARRAY[
+    ['workspaces', 'workspaces_subscription_codex_auto_assign',
+      'workspaces_subscription_core_auto_assign', 'auto_assign_subscription_codex_workspace'],
+    ['organization_memberships', 'organization_memberships_subscription_codex_auto_assign',
+      'organization_memberships_subscription_core_auto_assign',
+      'auto_assign_subscription_codex_personal_workspace'],
+    ['subscription_connections', 'subscription_connections_codex_plan_change_trg',
+      'subscription_connections_core_plan_change_trg', 'record_subscription_codex_plan_change']
+  ];
+  renamed_policies text[] := ARRAY[
+    ['subscription_connection_workspaces', 'subscription_connection_workspaces_codex_auto_assign',
+      'subscription_connection_workspaces_core_auto_assign'],
+    ['subscription_connection_assignment_policies',
+      'subscription_connection_assignment_policies_codex_auto_assign',
+      'subscription_connection_assignment_policies_core_auto_assign']
+  ];
+  renamed text[];
+  renamed_routine_ids oid[] := '{}';
+  renamed_policy_ids oid[] := '{}';
+  reach_view oid := to_regclass('opengeni_private.subscription_core_auto_assignments');
+  reach_table oid := to_regclass('opengeni_private.subscription_codex_auto_assignments');
   retired_routine_ids oid[];
   retired_policy_ids oid[];
   retired_trigger_ids oid[];
@@ -286,10 +325,109 @@ BEGIN
     RAISE EXCEPTION '0721 found a kept object that names a retired object: %', finding
       USING ERRCODE = '2BP01';
   END IF;
+
+  -- 6. Reach finalization (steps 10 and 11): the reach table and 0713's view
+  -- over it, the column's Codex default, the connections' (account,
+  -- provider, id) key the new reference needs, the three trigger functions
+  -- on their triggers and the two owner-only policies on the setting exist
+  -- exactly as 0713 left them, their provider-free names are free, and
+  -- nothing that stays names one of the Codex-named objects or the setting.
+  IF (SELECT relation.relkind FROM pg_class relation WHERE relation.oid = reach_table)
+      IS DISTINCT FROM 'r'
+    OR (SELECT relation.relkind FROM pg_class relation WHERE relation.oid = reach_view)
+      IS DISTINCT FROM 'v'
+    OR EXISTS (SELECT 1 FROM pg_depend d WHERE d.refclassid = 'pg_class'::regclass
+      AND d.refobjid = reach_view AND d.deptype <> 'i')
+    OR (SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d
+      JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+      WHERE d.adrelid = reach_table AND a.attname = 'provider') IS DISTINCT FROM '''codex''::text'
+    OR NOT EXISTS (SELECT 1 FROM pg_index i
+      WHERE i.indrelid = to_regclass(format('%I.subscription_connections', data_schema))
+        AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL
+        AND i.indnatts = 3 AND ARRAY(SELECT a.attname::text FROM unnest(i.indkey::int2[]) k
+          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k ORDER BY a.attname)
+          = ARRAY['account_id', 'id', 'provider']) THEN
+    RAISE EXCEPTION '0721 found the reach table, its view, its default or the connection key changed; see the runbook'
+      USING ERRCODE = '55000';
+  END IF;
+  FOREACH renamed SLICE 1 IN ARRAY renamed_routines LOOP
+    IF (SELECT routine.prorettype FROM pg_proc routine
+        WHERE routine.oid = to_regprocedure(format('opengeni_private.%I()', renamed[1])))
+        IS DISTINCT FROM 'trigger'::regtype
+      OR EXISTS (SELECT 1 FROM pg_proc routine
+        WHERE routine.pronamespace = 'opengeni_private'::regnamespace
+          AND routine.proname IN (renamed[1], renamed[2])
+          AND routine.oid <> to_regprocedure(format('opengeni_private.%I()', renamed[1]))) THEN
+      RAISE EXCEPTION '0721 found a reach routine missing, changed or already renamed: %; see the runbook',
+        renamed[1] USING ERRCODE = '55000';
+    END IF;
+    renamed_routine_ids := renamed_routine_ids
+      || to_regprocedure(format('opengeni_private.%I()', renamed[1]))::oid;
+  END LOOP;
+  FOREACH renamed SLICE 1 IN ARRAY renamed_triggers LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger trigger_row
+        JOIN pg_class relation ON relation.oid = trigger_row.tgrelid
+        WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
+          AND trigger_row.tgname = renamed[2] AND NOT trigger_row.tgisinternal
+          AND trigger_row.tgfoid = to_regprocedure(format('opengeni_private.%I()', renamed[4])))
+      OR EXISTS (SELECT 1 FROM pg_trigger trigger_row
+        JOIN pg_class relation ON relation.oid = trigger_row.tgrelid
+        WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
+          AND trigger_row.tgname = renamed[3]) THEN
+      RAISE EXCEPTION '0721 found a reach trigger missing, changed or already renamed: %.%; see the runbook',
+        renamed[1], renamed[2] USING ERRCODE = '55000';
+    END IF;
+  END LOOP;
+  FOREACH renamed SLICE 1 IN ARRAY renamed_policies LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_policy policy
+        JOIN pg_class relation ON relation.oid = policy.polrelid
+        WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
+          AND policy.polname = renamed[2] AND policy.polcmd = '*' AND policy.polpermissive
+          AND pg_get_expr(policy.polqual, policy.polrelid)
+            ~ '\mopengeni\.subscription_codex_auto_assign\M'
+          AND pg_get_expr(policy.polwithcheck, policy.polrelid)
+            ~ '\mopengeni\.subscription_codex_auto_assign\M')
+      OR EXISTS (SELECT 1 FROM pg_policy policy
+        JOIN pg_class relation ON relation.oid = policy.polrelid
+        WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
+          AND policy.polname = renamed[3]) THEN
+      RAISE EXCEPTION '0721 found a reach policy missing, changed or already renamed: %.%; see the runbook',
+        renamed[1], renamed[2] USING ERRCODE = '55000';
+    END IF;
+    renamed_policy_ids := renamed_policy_ids || (SELECT policy.oid FROM pg_policy policy
+      JOIN pg_class relation ON relation.oid = policy.polrelid
+      WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
+        AND policy.polname = renamed[2]);
+  END LOOP;
+  -- The two trigger functions and two policies that use the setting are
+  -- redefined in step 11; nothing else may name a Codex-named reach object.
+  SELECT string_agg(DISTINCT dependent, ', ') INTO finding
+  FROM (
+    SELECT 'routine ' || p.oid::regprocedure::text AS dependent
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND NOT (p.oid = ANY(retired_routine_ids)) AND NOT (p.oid = ANY(renamed_routine_ids))
+      AND p.prosrc ~ ('\m(subscription_codex_auto_assignments|subscription_codex_auto_assign|'
+        || array_to_string(ARRAY(SELECT unnest(renamed_routines[1:3][1:1])
+          UNION ALL SELECT unnest(renamed_triggers[1:3][2:2])
+          UNION ALL SELECT unnest(renamed_policies[1:2][2:2])), '|') || ')\M')
+    UNION ALL
+    SELECT 'policy ' || relation.relname || '.' || policy.polname
+    FROM pg_policy policy JOIN pg_class relation ON relation.oid = policy.polrelid
+    WHERE NOT (policy.oid = ANY(retired_policy_ids)) AND NOT (policy.oid = ANY(renamed_policy_ids))
+      AND coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') || ' '
+        || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')
+        ~ '\m(subscription_codex_auto_assignments|subscription_codex_auto_assign)\M'
+  ) dependents;
+  IF finding IS NOT NULL THEN
+    RAISE EXCEPTION '0721 found a kept object that names a Codex-named reach object: %', finding
+      USING ERRCODE = '2BP01';
+  END IF;
 END
 $retirement_preflight$;
 
--- 6. The policies that call the retired routines or read the retired
+-- 7. The policies that call the retired routines or read the retired
 -- runtime-capability tables: the legacy factory tables' scope policies, the
 -- Claude usage scope and the capability policies of the 0234/0598 protocol.
 -- The factory tables keep FORCE RLS and their X3/C3 *_closed policies;
@@ -317,7 +455,7 @@ DROP POLICY claude_subscription_capability_insert ON organization_user_resource_
 DROP POLICY claude_subscription_capability_read ON organization_user_resource_authorities;
 DROP POLICY claude_subscription_capability_revoke ON organization_user_resource_authorities;
 
--- 7. The triggers that call the retired trigger functions (the 0234 and 0598
+-- 8. The triggers that call the retired trigger functions (the 0234 and 0598
 -- factory's pool-reference, organization-runtime, live-disconnect and
 -- authority-immutability guards). The column-immutability triggers on
 -- sessions, turns, system updates and scheduled tasks stay.
@@ -336,7 +474,7 @@ DROP TRIGGER claude_rotation_credential_pool_guard ON claude_rotation_settings;
 DROP TRIGGER claude_lease_credential_pool_guard ON claude_credential_leases;
 DROP TRIGGER claude_pin_credential_pool_guard ON claude_session_account_pins;
 
--- 8. The routines. The SuperGrok and Claude pool routines (writers,
+-- 9. The routines. The SuperGrok and Claude pool routines (writers,
 -- resolvers, revalidators and the policy predicates), then their trigger
 -- functions; then the Codex-named twins of the 0707 neutral routines, before
 -- the owner-only internals only they call, and 0689's Codex apply routine,
@@ -383,3 +521,165 @@ DROP FUNCTION opengeni_private.set_subscription_codex_reach(uuid, uuid, boolean,
 DROP FUNCTION opengeni_private.subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint);
 DROP FUNCTION opengeni_subscription_internal.subscription_codex_writer_context(uuid, uuid, text);
 DROP FUNCTION opengeni_private.apply_subscription_codex_auto_assignments(uuid, uuid, boolean);
+
+-- 10. Reach finalization (0713 note "Kept until retirement"). 0713's view
+-- goes and the reach table takes its provider-free name, so the neutral
+-- routines, which name the view, need no change. Every row gains the key to
+-- its connection's provider (the connections' (account, provider, id) key
+-- exists since 0712) and the column loses the Codex default only an older
+-- binary's reach write needed. A row whose provider is not its connection's
+-- refuses the migration without naming it.
+DROP VIEW opengeni_private.subscription_core_auto_assignments;
+ALTER TABLE opengeni_private.subscription_codex_auto_assignments
+  RENAME TO subscription_core_auto_assignments;
+COMMENT ON TABLE opengeni_private.subscription_core_auto_assignments IS
+  'Owner-only reach of an organization connection over workspaces created later, keyed by the connection and its provider. Runtime roles never read or write it.';
+ALTER TABLE opengeni_private.subscription_core_auto_assignments
+  ADD CONSTRAINT subscription_core_auto_assignments_connection_provider_fkey
+    FOREIGN KEY (account_id, provider, connection_id)
+    REFERENCES subscription_connections (account_id, provider, id) ON DELETE CASCADE NOT VALID;
+DO $reach_key$
+BEGIN
+  ALTER TABLE opengeni_private.subscription_core_auto_assignments
+    VALIDATE CONSTRAINT subscription_core_auto_assignments_connection_provider_fkey;
+EXCEPTION WHEN foreign_key_violation THEN
+  RAISE EXCEPTION '0721 found a reach row whose provider is not its connection''s; see the runbook'
+    USING ERRCODE = '23503';
+END
+$reach_key$;
+ALTER TABLE opengeni_private.subscription_core_auto_assignments
+  ALTER COLUMN provider DROP DEFAULT;
+
+-- 11. Provider-free names for 0689's auto-assignment and plan-change
+-- triggers and their functions (owner, security mode and search path stay;
+-- "core" sorts where "codex" did among each table's triggers, so the firing
+-- order is unchanged), and for its two owner-only auto-assignment policies
+-- and their setting, which the two auto-assignment functions set to the
+-- organization around each provider's apply and then restore. The three
+-- functions end owner-only (below), whatever was granted on their Codex names.
+ALTER TRIGGER workspaces_subscription_codex_auto_assign ON workspaces
+  RENAME TO workspaces_subscription_core_auto_assign;
+ALTER TRIGGER organization_memberships_subscription_codex_auto_assign ON organization_memberships
+  RENAME TO organization_memberships_subscription_core_auto_assign;
+ALTER TRIGGER subscription_connections_codex_plan_change_trg ON subscription_connections
+  RENAME TO subscription_connections_core_plan_change_trg;
+ALTER FUNCTION opengeni_private.auto_assign_subscription_codex_workspace()
+  RENAME TO auto_assign_subscription_core_workspace;
+ALTER FUNCTION opengeni_private.auto_assign_subscription_codex_personal_workspace()
+  RENAME TO auto_assign_subscription_core_personal_workspace;
+ALTER FUNCTION opengeni_private.record_subscription_codex_plan_change()
+  RENAME TO record_subscription_core_plan_change;
+ALTER POLICY subscription_connection_workspaces_codex_auto_assign
+  ON subscription_connection_workspaces
+  RENAME TO subscription_connection_workspaces_core_auto_assign;
+ALTER POLICY subscription_connection_assignment_policies_codex_auto_assign
+  ON subscription_connection_assignment_policies
+  RENAME TO subscription_connection_assignment_policies_core_auto_assign;
+DO $reach_setting$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    ALTER POLICY subscription_connection_workspaces_core_auto_assign
+    ON %1$I.subscription_connection_workspaces
+    USING (CURRENT_USER = pg_catalog.pg_get_userbyid((SELECT relation.relowner
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = '%1$I.subscription_connection_workspaces'::regclass))
+      AND current_setting('opengeni.subscription_core_auto_assign', true) = account_id::text)
+    WITH CHECK (CURRENT_USER = pg_catalog.pg_get_userbyid((SELECT relation.relowner
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = '%1$I.subscription_connection_workspaces'::regclass))
+      AND current_setting('opengeni.subscription_core_auto_assign', true) = account_id::text)
+  $ddl$, data_schema);
+  EXECUTE format($ddl$
+    ALTER POLICY subscription_connection_assignment_policies_core_auto_assign
+    ON %1$I.subscription_connection_assignment_policies
+    USING (CURRENT_USER = pg_catalog.pg_get_userbyid((SELECT relation.relowner
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = '%1$I.subscription_connection_assignment_policies'::regclass))
+      AND current_setting('opengeni.subscription_core_auto_assign', true) = account_id::text)
+    WITH CHECK (CURRENT_USER = pg_catalog.pg_get_userbyid((SELECT relation.relowner
+        FROM pg_catalog.pg_class relation
+        WHERE relation.oid = '%1$I.subscription_connection_assignment_policies'::regclass))
+      AND current_setting('opengeni.subscription_core_auto_assign', true) = account_id::text)
+  $ddl$, data_schema);
+  -- 0713's bodies under the provider-free setting.
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION opengeni_private.auto_assign_subscription_core_workspace()
+    RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
+    AS $body$
+    DECLARE
+      reach_provider text;
+      previous text := current_setting('opengeni.subscription_core_auto_assign', true);
+    BEGIN
+      FOR reach_provider IN SELECT DISTINCT auto.provider
+          FROM opengeni_private.subscription_core_auto_assignments auto
+          WHERE auto.account_id = NEW.account_id ORDER BY auto.provider LOOP
+        PERFORM pg_catalog.set_config('opengeni.subscription_core_auto_assign',
+          NEW.account_id::text, true);
+        PERFORM opengeni_subscription_internal.apply_subscription_core_auto_assignments(
+          reach_provider, NEW.account_id, NEW.id, false);
+        PERFORM pg_catalog.set_config('opengeni.subscription_core_auto_assign',
+          coalesce(previous, ''), true);
+      END LOOP;
+      RETURN NEW;
+    END
+    $body$
+  $ddl$, data_schema);
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION opengeni_private.auto_assign_subscription_core_personal_workspace()
+    RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
+    AS $body$
+    DECLARE
+      reach_provider text;
+      previous text := current_setting('opengeni.subscription_core_auto_assign', true);
+    BEGIN
+      IF NEW.personal_workspace_id IS NOT NULL AND (TG_OP = 'INSERT'
+          OR NEW.personal_workspace_id IS DISTINCT FROM OLD.personal_workspace_id) THEN
+        FOR reach_provider IN SELECT DISTINCT auto.provider
+            FROM opengeni_private.subscription_core_auto_assignments auto
+            WHERE auto.account_id = NEW.account_id ORDER BY auto.provider LOOP
+          PERFORM pg_catalog.set_config('opengeni.subscription_core_auto_assign',
+            NEW.account_id::text, true);
+          PERFORM opengeni_subscription_internal.apply_subscription_core_auto_assignments(
+            reach_provider, NEW.account_id, NEW.personal_workspace_id, true);
+          PERFORM pg_catalog.set_config('opengeni.subscription_core_auto_assign',
+            coalesce(previous, ''), true);
+        END LOOP;
+      END IF;
+      RETURN NEW;
+    END
+    $body$
+  $ddl$, data_schema);
+END
+$reach_setting$;
+-- provision-roles grants EXECUTE on every opengeni_private function and then
+-- revokes the owner-only ones by name; it names these three by their
+-- provider-free names, which exist only from here on. Triggers fire without
+-- the caller holding EXECUTE, so no grantee keeps one: PUBLIC and every
+-- other grantee lose EXECUTE, in name order.
+DO $owner_only_trigger_functions$
+DECLARE
+  routine_name text;
+  grantee_name text;
+BEGIN
+  FOREACH routine_name IN ARRAY ARRAY[
+    'auto_assign_subscription_core_personal_workspace',
+    'auto_assign_subscription_core_workspace',
+    'record_subscription_core_plan_change'
+  ] LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%I() FROM PUBLIC', routine_name);
+    FOR grantee_name IN
+      SELECT DISTINCT pg_catalog.pg_get_userbyid(acl.grantee)
+      FROM pg_catalog.pg_proc proc, pg_catalog.aclexplode(proc.proacl) acl
+      WHERE proc.oid = format('opengeni_private.%I()', routine_name)::regprocedure
+        AND acl.grantee <> 0 AND acl.grantee <> proc.proowner
+      ORDER BY 1
+    LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%I() FROM %I',
+        routine_name, grantee_name);
+    END LOOP;
+  END LOOP;
+END
+$owner_only_trigger_functions$;

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  SUBSCRIPTION_RENAMED_POLICIES,
+  SUBSCRIPTION_RENAMED_RELATIONS,
+  SUBSCRIPTION_RENAMED_ROUTINES,
+  SUBSCRIPTION_RENAMED_TRIGGERS,
   SUBSCRIPTION_RETIRED_POLICIES,
   SUBSCRIPTION_RETIRED_ROUTINE_NAMES,
   SUBSCRIPTION_RETIRED_TRIGGERS,
@@ -455,7 +459,10 @@ describe("M4 R shared pool entry", () => {
       });
   });
   test("rejects every routine, policy and trigger the retirement migration drops", () => {
-    expect(SUBSCRIPTION_RETIRED_ROUTINE_NAMES).toHaveLength(42);
+    // 42 dropped routines and the Codex names of the three renamed ones.
+    expect(SUBSCRIPTION_RETIRED_ROUTINE_NAMES).toHaveLength(45);
+    for (const { from } of SUBSCRIPTION_RENAMED_ROUTINES)
+      expect(SUBSCRIPTION_RETIRED_ROUTINE_NAMES).toContain(from.slice(0, from.indexOf("(")));
     for (const name of SUBSCRIPTION_RETIRED_ROUTINE_NAMES) {
       const code = `const query = sql\`select opengeni_private.${name}($1)\`;`;
       expect({ name, findings: pool("packages/db/src/index.ts", code) }).toEqual({
@@ -480,6 +487,41 @@ describe("M4 R shared pool entry", () => {
           `const query = sql\`alter table ${table} enable trigger ${trigger}\`;`,
         ),
       ).toHaveLength(1);
+  });
+  test("rejects the Codex names the reach finalization replaces, never the provider-free ones", () => {
+    for (const { table, from } of SUBSCRIPTION_RENAMED_POLICIES)
+      expect(
+        pool("packages/db/src/index.ts", `const query = sql\`alter policy ${from} on ${table}\`;`),
+      ).toHaveLength(1);
+    for (const { table, from } of SUBSCRIPTION_RENAMED_TRIGGERS)
+      expect(
+        pool(
+          "packages/db/src/index.ts",
+          `const query = sql\`alter table ${table} disable trigger ${from}\`;`,
+        ),
+      ).toHaveLength(1);
+    for (const { schema, from } of SUBSCRIPTION_RENAMED_RELATIONS)
+      expect(
+        pool("packages/db/src/index.ts", `const query = sql\`select * from ${schema}.${from}\`;`),
+      ).toHaveLength(1);
+    expect(
+      pool(
+        "packages/db/src/index.ts",
+        "const query = sql`select set_config('opengeni.subscription_codex_auto_assign', $1, true)`;",
+      ),
+    ).toHaveLength(1);
+    expect(
+      pool(
+        "packages/db/src/index.ts",
+        `
+      const reach = sql\`select * from opengeni_private.subscription_core_auto_assignments\`;
+      const setting = sql\`select set_config('opengeni.subscription_core_auto_assign', $1, true)\`;
+      const trigger = sql\`alter table workspaces enable trigger workspaces_subscription_core_auto_assign\`;
+      const policy = sql\`alter policy subscription_connection_workspaces_core_auto_assign on subscription_connection_workspaces\`;
+      const plan = sql\`select opengeni_private.record_subscription_core_plan_change()\`;
+    `,
+      ),
+    ).toEqual([]);
   });
   test("rejects provider-templated routine names in every shape", () => {
     expect(
@@ -529,6 +571,20 @@ describe("M4 R shared pool entry", () => {
       pool(
         "packages/db/src/provision-roles.ts",
         'const routines = ["xai_subscription_pool_visible(uuid, uuid, text, text, uuid)"];',
+      ),
+    ).toHaveLength(1);
+    // 0689's codec stage fills the reach table under its Codex name while
+    // that historical migration replays; nothing else in the file may.
+    expect(
+      pool(
+        "packages/db/src/codex-subscription-core-cutover.ts",
+        "async function moveCodexCredentials() { await tx`INSERT INTO opengeni_private.subscription_codex_auto_assignments DEFAULT VALUES`; }",
+      ),
+    ).toEqual([]);
+    expect(
+      pool(
+        "packages/db/src/codex-subscription-core-cutover.ts",
+        "async function stageReach() { await tx`INSERT INTO opengeni_private.subscription_codex_auto_assignments DEFAULT VALUES`; }",
       ),
     ).toHaveLength(1);
   });

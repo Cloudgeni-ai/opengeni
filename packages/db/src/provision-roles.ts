@@ -2227,13 +2227,15 @@ BEGIN
       END IF;
     END LOOP;
     -- The drained cutover uses private routines: no previous binary remains.
+    -- Migration 0721 gives the plan-change and auto-assignment trigger
+    -- functions provider-free names.
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_cutover_v1_active()',
       'seed_subscription_codex_cutover()',
-      'record_subscription_codex_plan_change()',
+      'record_subscription_core_plan_change()',
       'keep_subscription_codex_cutover_identity()',
-      'auto_assign_subscription_codex_workspace()',
-      'auto_assign_subscription_codex_personal_workspace()'
+      'auto_assign_subscription_core_workspace()',
+      'auto_assign_subscription_core_personal_workspace()'
     ] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(
