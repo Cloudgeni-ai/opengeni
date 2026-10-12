@@ -64,6 +64,13 @@ describe("SuperGrok adapter", () => {
     );
   });
 
+  test("declares the one-hour prompt-cache cut-off placement honours (D-30)", () => {
+    expect(SUBSCRIPTION_CORE_XAI.adapter.cacheFacts).toEqual({
+      kind: "measured_idle_cutoff",
+      cutoffMs: 60 * 60 * 1000,
+    });
+  });
+
   test("round-trips the legacy v1 plaintext and drops unused legacy fields", () => {
     const plaintext = JSON.stringify({
       version: 1,

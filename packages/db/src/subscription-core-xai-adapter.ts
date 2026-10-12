@@ -44,6 +44,13 @@ export const SUBSCRIPTION_CORE_XAI_ENTITLEMENT_COOLDOWN_MS = 24 * 60 * 60 * 1000
 export const SUBSCRIPTION_CORE_XAI_RATE_LIMIT_FALLBACK_MS = 60 * 1000;
 /** An exhausted connection without a reset is retried after an hour (the quota probe may clear it sooner). */
 export const SUBSCRIPTION_CORE_XAI_EXHAUSTED_FALLBACK_MS = 60 * 60 * 1000;
+/**
+ * Prompt-cache idle cut-off placement honours (D-30). xAI documents no cache
+ * lifetime, so SuperGrok declares one hour on the same terms as Codex until a
+ * measured cut-off exists: erring long costs some rotation balance, erring
+ * short pays for a cache miss the provider would have avoided.
+ */
+export const SUBSCRIPTION_CORE_XAI_CACHE_IDLE_CUTOFF_MS = 60 * 60 * 1000;
 
 /** The decoded SuperGrok credential. */
 export type SubscriptionCoreXaiTokens = {
@@ -124,7 +131,10 @@ export function subscriptionCoreXaiAdapter(
     quotaKind: "usage_windows",
     // Workspace model policy names SuperGrok models by their resolved provider.
     modelPolicyProviderId: XAI_SUBSCRIPTION_PROVIDER_ID,
-    cacheFacts: { kind: "measured_idle_cutoff", cutoffMs: null },
+    cacheFacts: {
+      kind: "measured_idle_cutoff",
+      cutoffMs: SUBSCRIPTION_CORE_XAI_CACHE_IDLE_CUTOFF_MS,
+    },
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_XAI_FORBIDDEN_QUARANTINE_MS,
       entitlementCooldownMs: SUBSCRIPTION_CORE_XAI_ENTITLEMENT_COOLDOWN_MS,
