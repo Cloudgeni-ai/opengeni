@@ -26,6 +26,9 @@ import { cn } from "@/lib/utils";
 // web dependency on the server-only codex package.
 const CODEX_MODEL_ID_PREFIX = "codex/";
 const AUTO = "auto";
+// Reopening the menu reuses live readings this recent instead of asking the
+// provider again; older ones stay on screen while the menu re-checks.
+const LIVE_USAGE_REUSE_MS = 30_000;
 
 function accountLabel(account: CodexAccount | undefined | null): string {
   if (!account) return "—";
@@ -122,6 +125,10 @@ export function CodexAccountIndicator({
   const [checkingUsage, setCheckingUsage] = useState(false);
   const [usageChecked, setUsageChecked] = useState(false);
   const [usageCheckFailed, setUsageCheckFailed] = useState(false);
+  // Live readings from an earlier check (this menu, another session's, or
+  // Settings) stay visible while a new check runs instead of flashing away.
+  const hasLiveUsage = codex.liveUsageUpdatedAt !== null;
+  const awaitingFirstUsage = checkingUsage && !hasLiveUsage;
 
   if (!modelReady) {
     return (
@@ -176,7 +183,7 @@ export function CodexAccountIndicator({
         setCheckingUsage(true);
         setUsageChecked(false);
         setUsageCheckFailed(false);
-        void codex.refreshUsage().then(
+        void codex.refreshUsage({ maxAgeMs: LIVE_USAGE_REUSE_MS }).then(
           (ok) => {
             setUsageChecked(ok);
             setUsageCheckFailed(!ok);
@@ -245,7 +252,7 @@ export function CodexAccountIndicator({
               </p>
             </div>
           </div>
-          {checkingUsage ? (
+          {awaitingFirstUsage ? (
             <p className="text-2xs text-fg-subtle">Checking usage…</p>
           ) : usageUnavailable ? (
             <p className="text-2xs text-fg-subtle">Usage unavailable</p>
@@ -299,7 +306,7 @@ export function CodexAccountIndicator({
               >
                 <span className="min-w-0 flex-1 truncate">{accountLabel(account)}</span>
                 {account.plan ? <DropdownMenuMeta>{account.plan}</DropdownMenuMeta> : null}
-                {!checkingUsage &&
+                {!awaitingFirstUsage &&
                 !usageCheckFailed &&
                 (!usageChecked || codex.liveUsage[account.id]) &&
                 codex.liveUsage[account.id]?.status !== "error" &&
