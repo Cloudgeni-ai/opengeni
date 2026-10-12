@@ -2274,6 +2274,7 @@ describe("release schema contract", () => {
       "0730_maintenance_work_probes.sql",
       "0735_subscription_core_owned_connection_usage.sql",
       "0730_subscription_core_personal_connection_versions.sql",
+      "0743_subscription_core_legacy_retirement.sql",
       "0739_subscription_core_xai_cutover.sql",
       "0740_subscription_core_claude_cutover.sql",
       "0729_subscription_person_preferences_owner.sql",

@@ -18,7 +18,7 @@ import {
   subscriptionPoolWorkerSubject,
   withPoolWakeServiceScopeInTransaction,
   withSubscriptionPoolSessionAccess,
-} from "../../../src/subscription-session-access";
+} from "../legacy-subscription-session-access";
 import { subjectHasLiveWorkspaceAuthorityInScope } from "../../../src/workspace-authority";
 
 import type { SubscriptionPoolTables } from "../../../src/subscription-pool-schema";

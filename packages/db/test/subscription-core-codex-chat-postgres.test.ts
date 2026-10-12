@@ -1301,7 +1301,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
           (db) =>
             rawRows<{ marked: boolean }>(
               db,
-              sql`select opengeni_private.fail_subscription_codex_refresh(
+              sql`select opengeni_private.fail_subscription_core_refresh('codex',
                 ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid,
                 ${turn.identity.sessionId}::uuid, ${turn.identity.turnId}::uuid,
                 ${connectionId}::uuid, 1, 'forged') as marked`,

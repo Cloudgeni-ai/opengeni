@@ -2076,8 +2076,8 @@ receipt. Authority is freshly checked after exchange, before individual account 
 Organization attempts require organization administration and are not readable from
 a shared workspace's runtime scope.
 
-`packages/db/src/claude-subscription-account-tokens.ts` resolves the selected account;
-shared subscription repositories serialize renewal across replicas,
+`packages/db/src/subscription-core-claude.ts` binds Claude to the shared core's
+credential operations. The core serializes renewal across replicas,
 re-reads the captured generation and writes only encrypted token material. Renewal
 keeps connection identity, admission/credential generations, access policy and usage
 cache. Each physical Claude model request resolves its original binding before
@@ -2090,7 +2090,7 @@ sign-in discovers the provider account UUID, email and plan; setup tokens remain
 inference-only and do not expose profile details. Replacing a token targets one
 exact account generation and preserves its access policy.
 
-The worker reuses SuperGrok's scoped account selection, credential leases and
+The worker uses provider-neutral account selection, credential leases and
 durable same-turn capacity wait/resume protocol. Quotas and cooldowns apply to
 the exact upstream model: an Opus restriction need not block Sonnet. A manual
 pin or primary-only pool never silently borrows another subscription. Typed

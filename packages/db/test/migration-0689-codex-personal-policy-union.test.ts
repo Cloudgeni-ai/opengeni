@@ -33,6 +33,8 @@ const fences = "0717_subscription_authority_fences.sql";
 const personalConnectionVersions = "0730_subscription_core_personal_connection_versions.sql";
 const xaiCutover = "0739_subscription_core_xai_cutover.sql";
 const claudeCutover = "0740_subscription_core_claude_cutover.sql";
+// The drained retirement requires both receipts; held back with the cutovers.
+const retirement = "0743_subscription_core_legacy_retirement.sql";
 const key = Buffer.alloc(32, 87);
 const cases: Array<{
   name: string;
@@ -90,7 +92,7 @@ for (const shape of ["workspace-workspace", "workspace-user"] as const) {
     }));
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0738_subscription_failover_readiness_and_request_fence.sql'), ('0741_subscription_shared_personal_choice.sql'), ('0742_subscription_waiter_candidates.sql')`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       await owner`DELETE FROM schema_migrations WHERE name IN (${migration}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${personalConnectionVersions})`;
       const seedTables = [

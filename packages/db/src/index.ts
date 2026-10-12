@@ -132,12 +132,6 @@ export {
   type EffectiveSubscriptionSettingsRow,
 } from "./subscription-core-repository";
 export {
-  isSubscriptionPoolWorkerSubject,
-  subscriptionPoolWorkerSubject,
-  withSubscriptionPoolSessionAccess,
-  type SubscriptionPoolProvider,
-} from "./subscription-session-access";
-export {
   assertSubscriptionCoreAcceptedTurn,
   withSubscriptionCoreAcceptedTurn,
   type SubscriptionCoreAcceptedTurnAccessResult,
@@ -416,6 +410,7 @@ import {
   projectSubscriptionCoreCodexWorkspace,
   type SubscriptionCoreCodexWake,
 } from "./subscription-core-codex-compat";
+export { pinSubscriptionCoreSessionCodexAccount } from "./subscription-core-codex-compat";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
@@ -444,9 +439,6 @@ import { withPoolWakeServiceScopeInTransaction } from "./subscription-session-ac
 import {
   readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
   readSubscriptionSessionBinding as readCoreSessionBinding,
-  isSubscriptionSessionBindingRollingConflict,
-  resolveSubscriptionConnectionId as resolveCoreConnectionId,
-  writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
 import {
   wakeSubscriptionCoreCapacityWaiters,
@@ -28207,192 +28199,6 @@ export async function getSubscriptionCoreCodexCurrentSelections(
     });
   }
   return selections;
-}
-
-/**
- * Explicit session account choice on the core: a uuid makes the session's
- * binding `explicit` on that connection; `null` ("auto") returns it to
- * automatic placement. The binding guard enforces that the connection is
- * active and eligible for this session (personal connections only in their
- * owner's own session). Emits the legacy `codex.account.selection.changed`
- * receipt. A waiting turn re-places at its next check, which the returned
- * wake triggers; a running attempt keeps its account.
- */
-export async function pinSubscriptionCoreSessionCodexAccount(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    connectionId: string | null;
-    subjectId: string;
-  },
-): Promise<{
-  result: { changed: boolean; appliedTo: "waiting_turn" | "next_turn"; events: SessionEvent[] };
-  wake: SubscriptionCoreCodexWake | null;
-}> {
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (scopedDb) => {
-      const tx = scopedDb as unknown as Database;
-      // The binding guard authorizes the choosing human.
-      await tx.execute(
-        sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
-      );
-      // The legacy pin's lock contract: a preference change admits no
-      // inference (waiter reconciliation rechecks Pause), so the canonical
-      // session-events lock is taken without the workspace control prefix.
-      const locks = await lockSessionEventWriteRows(tx, {
-        workspaceId: input.workspaceId,
-        controlLock: "none",
-        sessionIds: [input.sessionId],
-        sessionLock: "no_key_update",
-      });
-      const session = locks.sessions.find((row) => row.id === input.sessionId);
-      const unchanged = {
-        result: { changed: false, appliedTo: "next_turn" as const, events: [] },
-        wake: null,
-      };
-      if (!session || session.accountId !== input.accountId) return unchanged;
-      // Lock the session's Codex binding (a session keeps one binding per
-      // provider, D-32; another provider's is never read or written here):
-      // a running turn's placement
-      // (`writeSubscriptionSessionBinding`) advances its version, and an
-      // unlocked read would lose the version compare-and-swap below to it and
-      // report the choice as not found. Cache-clock advances do not bump it.
-      const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
-        tx,
-        sql`select choice, version from subscription_session_bindings
-          where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
-            and provider = 'codex'
-          for update`,
-      );
-      const binding = lockedBinding
-        ? { choice: lockedBinding.choice, version: Number(lockedBinding.version) }
-        : null;
-      let connectionId: string | null = null;
-      if (input.connectionId !== null) {
-        // Canonical or visible alias; otherwise the raw id, which the binding
-        // guard alone judges (a personal connection is invisible here until
-        // the guard grants this exact session's owner access to it).
-        connectionId =
-          (await resolveCoreConnectionId(tx, {
-            accountId: input.accountId,
-            provider: "codex",
-            connectionId: input.connectionId,
-          })) ?? input.connectionId;
-      }
-      try {
-        const written = await tx.transaction(async (savepoint) => {
-          const scoped = savepoint as unknown as Database;
-          if (connectionId === null) {
-            if (!binding || binding.choice !== "explicit") return true;
-            // Leave connection_id alone: only the choice changes, so the
-            // connection guard (which needs an active connection) is not run.
-            const rows = await rawRows<{ version: number | string }>(
-              scoped,
-              sql`update subscription_session_bindings
-                set choice = 'automatic', version = version + 1
-                where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
-                  and version = ${binding.version}
-                returning version`,
-            );
-            return rows.length > 0;
-          }
-          if (binding) {
-            const rows = await rawRows<{ version: number | string }>(
-              scoped,
-              sql`update subscription_session_bindings
-                set connection_id = ${connectionId}::uuid,
-                    choice = 'explicit', last_switch_reason = 'explicit_choice',
-                    version = version + 1
-                where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
-                  and version = ${binding.version}
-                returning version`,
-            );
-            return rows.length > 0;
-          }
-          const version = await writeCoreSessionBinding(scoped, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            provider: "codex",
-            connectionId,
-            modelId: session.model,
-            choice: "explicit",
-            onlyThisModel: false,
-            lastModelCallAt: null,
-            lastSwitchReason: "explicit_choice",
-          });
-          return version !== null;
-        });
-        if (!written) return unchanged;
-      } catch (error) {
-        const code =
-          (error as { code?: unknown } | null)?.code ??
-          (error as { cause?: { code?: unknown } } | null)?.cause?.code;
-        // The guard refuses a connection this session may not use.
-        if (code === "42501") return unchanged;
-        // A racing first binding of the session met 0733's rolling index (a
-        // lost compare-and-swap); the savepoint rolled it back.
-        if (isSubscriptionSessionBindingRollingConflict(error)) return unchanged;
-        throw error;
-      }
-      const appliedTo: "waiting_turn" | "next_turn" =
-        session.status === "waiting_capacity" && session.activeTurnId
-          ? "waiting_turn"
-          : "next_turn";
-      const inserted = await tx
-        .insert(schema.sessionEvents)
-        .values(
-          withLosslessContentWriteVersion(
-            [
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                sequence: session.lastSequence + 1,
-                type: "codex.account.selection.changed",
-                payload: {
-                  credentialId: connectionId,
-                  appliedTo,
-                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
-                  subjectId: input.subjectId,
-                },
-                occurredAt: new Date(),
-              },
-            ],
-            "payload",
-            "payloadCodecVersion",
-          ),
-        )
-        .returning();
-      await tx
-        .update(schema.sessions)
-        .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        );
-      return {
-        result: { changed: true, appliedTo, events: inserted.map(mapEvent) },
-        // Legacy woke only this session: a pin changes nothing another
-        // session's waiter can place on.
-        wake: {
-          accountId: input.accountId,
-          reason: "core_codex_session_pin_changed",
-          workspaceIds: [input.workspaceId],
-          sessionIds: [input.sessionId],
-        },
-      };
-    },
-  );
 }
 
 /**

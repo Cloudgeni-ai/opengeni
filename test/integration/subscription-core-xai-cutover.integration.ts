@@ -46,6 +46,9 @@ import { createCodexCapacityActivities } from "../../apps/worker/src/activities/
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0739_subscription_core_xai_cutover.sql";
+// The drained retirement requires every receipt; this seam fixture records it
+// and never runs it.
+const RETIREMENT = "0743_subscription_core_legacy_retirement.sql";
 const MODEL = "xai/grok-4";
 const key = Buffer.alloc(32, 79);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -149,7 +152,7 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${RETIREMENT})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
         await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
       } finally {

@@ -17,6 +17,9 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
   SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
   withSubscriptionCoreAcceptedTurn,
@@ -32,8 +35,13 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appConnectionUrl = "";
-/** This binary requires the SuperGrok receipt, which the rolling state lacks. */
+/**
+ * This binary requires the SuperGrok and Claude receipts, which the rolling
+ * state lacks, and the absence of everything the drained retirement drops
+ * (held back with the cutovers, whose receipts it requires).
+ */
 const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
   "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
   "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
@@ -81,14 +89,22 @@ beforeAll(async () => {
     // Reads the registry/receipt and rewrites the admission guard withheld above.
     "0738_subscription_failover_readiness_and_request_fence.sql",
   ];
-  // The drained SuperGrok cutover is maintenance-only: a rolling deployment
-  // of 0707 never applies it, so it stays recorded and unapplied here.
+  // The drained SuperGrok and Claude cutovers and the retirement after them
+  // are maintenance-only: a rolling deployment of 0707 never applies them, so
+  // they stay recorded and unapplied here.
   const xaiCutover = "0739_subscription_core_xai_cutover.sql";
   const claudeCutover = "0740_subscription_core_claude_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    for (const name of [...withheld, xaiCutover, claudeCutover])
+    for (const name of [
+      ...withheld,
+      xaiCutover,
+      claudeCutover,
+      "0741_subscription_shared_personal_choice.sql",
+      "0742_subscription_waiter_candidates.sql",
+      SUBSCRIPTION_RETIREMENT_MIGRATION,
+    ])
       await owner`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });

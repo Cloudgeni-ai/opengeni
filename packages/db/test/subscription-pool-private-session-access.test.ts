@@ -11,20 +11,20 @@ import {
   createDb,
   createSession,
   getOrganizationPrivateSessionSettings,
-  subscriptionPoolWorkerSubject,
   updateOrganizationPrivateSessionSettings,
   withSessionActivityRlsContext,
   withSessionRlsActorContext,
-  withSubscriptionPoolSessionAccess,
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   type DbClient,
 } from "../src";
 import { currentSessionRlsActorContext } from "../src/database";
 import {
+  subscriptionPoolWorkerSubject,
+  withSubscriptionPoolSessionAccess,
   withPoolWakeServiceScopeInTransaction,
   withTemporaryPoolSessionAccessInTransaction,
-} from "../src/subscription-session-access";
+} from "./fixtures/legacy-subscription-session-access";
 
 // Retains the low-level session-authority isolation contract on the current
 // schema. Allocation and waiter regressions run for every provider in

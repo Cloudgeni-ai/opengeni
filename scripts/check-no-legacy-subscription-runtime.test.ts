@@ -1,9 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import {
+  SUBSCRIPTION_RENAMED_POLICIES,
+  SUBSCRIPTION_RENAMED_RELATIONS,
+  SUBSCRIPTION_RENAMED_ROUTINES,
+  SUBSCRIPTION_RENAMED_TRIGGERS,
+  SUBSCRIPTION_RETIRED_POLICIES,
+  SUBSCRIPTION_RETIRED_ROUTINE_NAMES,
+  SUBSCRIPTION_RETIRED_TRIGGERS,
+} from "../packages/db/src/runtime-posture";
 import { checkLegacySubscriptionSource } from "./check-no-legacy-subscription-runtime";
 import {
   LEGACY_CLAUDE_RUNTIME,
   LEGACY_CODEX_RUNTIME,
+  LEGACY_POOL_RUNTIME,
   LEGACY_SUBSCRIPTION_RETIREMENTS,
   LEGACY_XAI_RUNTIME,
   type LegacySubscriptionRetirement,
@@ -15,6 +25,9 @@ const xai = (file: string, code: string) =>
   checkLegacySubscriptionSource(file, code, [LEGACY_XAI_RUNTIME]);
 const claude = (file: string, code: string) =>
   checkLegacySubscriptionSource(file, code, [LEGACY_CLAUDE_RUNTIME]);
+const pool = (file: string, code: string) =>
+  checkLegacySubscriptionSource(file, code, [LEGACY_POOL_RUNTIME]);
+const TEMPLATED = "Retired provider-templated legacy subscription routine";
 
 describe("no-legacy subscription runtime guard: engine", () => {
   test("the engine names no provider; every provider is a registered entry", () => {
@@ -27,11 +40,13 @@ describe("no-legacy subscription runtime guard: engine", () => {
       "codex",
       "xai",
       "claude",
+      "pool",
     ]);
     expect(LEGACY_SUBSCRIPTION_RETIREMENTS.map((runtime) => runtime.name)).toEqual([
       "Codex (M3 PR4)",
       "SuperGrok (M4 X4)",
       "Claude (M4 C4)",
+      "Shared pool (M4 R)",
     ]);
   });
   test("a new entry is enforced without changing the engine", () => {
@@ -471,6 +486,190 @@ describe("M4 C4 Claude entry", () => {
       const route = "claude-subscription";
       const snapshot = turn.claudeProviderAccountAuthoritySnapshot;
       const recovery = turn.metadata.claudeRequestSizeRecoveryUsed;
+    `,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("M4 R shared pool entry", () => {
+  test("blocks pool-access helpers and historical grant fixtures from runtime source", () => {
+    for (const name of [
+      "withSubscriptionPoolSessionAccess",
+      "withTemporaryPoolSessionAccessInTransaction",
+    ]) {
+      for (const code of [
+        `import { ${name} } from '@opengeni/db';`,
+        `export { ${name} } from '@opengeni/db';`,
+        `await ${name}(db, args, work);`,
+      ])
+        expect(pool("packages/db/src/probe.ts", code).length).toBeGreaterThan(0);
+    }
+    for (const code of [
+      'import { restorePreRetirementGrants } from "../test/fixtures/pre-retirement-grants";',
+      'export * from "../test/fixtures/pre-retirement-grants";',
+      'const fixture = await import("../test/fixtures/pre-retirement-grants");',
+    ])
+      expect(pool("packages/db/src/probe.ts", code)).toHaveLength(1);
+  });
+  test("rejects the synthetic pool subjects, their helpers and every templated subject", () => {
+    for (const code of [
+      "const subject = subscriptionPoolWorkerSubject(provider);",
+      "if (isSubscriptionPoolWorkerSubject(subjectId)) return true;",
+      'const subject = "worker:xai-workspace";',
+      "const subject = 'worker:claude-workspace';",
+      "const subject = `worker:${provider}-workspace`;",
+      'const subject = "worker:" + provider + "-workspace";',
+    ])
+      expect({ code, findings: pool("packages/db/src/index.ts", code).length }).toEqual({
+        code,
+        findings: 1,
+      });
+  });
+  test("rejects every routine, policy and trigger the retirement migration drops", () => {
+    // 42 dropped routines and the Codex names of the three renamed ones.
+    expect(SUBSCRIPTION_RETIRED_ROUTINE_NAMES).toHaveLength(45);
+    for (const { from } of SUBSCRIPTION_RENAMED_ROUTINES)
+      expect(SUBSCRIPTION_RETIRED_ROUTINE_NAMES).toContain(from.slice(0, from.indexOf("(")));
+    for (const name of SUBSCRIPTION_RETIRED_ROUTINE_NAMES) {
+      const code = `const query = sql\`select opengeni_private.${name}($1)\`;`;
+      expect({ name, findings: pool("packages/db/src/index.ts", code) }).toEqual({
+        name,
+        findings: [
+          {
+            file: "packages/db/src/index.ts",
+            line: 1,
+            message: `Retired Shared pool (M4 R) decision state ${name} in query`,
+          },
+        ],
+      });
+    }
+    for (const { table, policy } of SUBSCRIPTION_RETIRED_POLICIES)
+      expect(
+        pool("packages/db/src/index.ts", `const query = sql\`drop policy ${policy} on ${table}\`;`),
+      ).toHaveLength(1);
+    for (const { table, trigger } of SUBSCRIPTION_RETIRED_TRIGGERS)
+      expect(
+        pool(
+          "packages/db/src/index.ts",
+          `const query = sql\`alter table ${table} enable trigger ${trigger}\`;`,
+        ),
+      ).toHaveLength(1);
+  });
+  test("rejects the Codex names the reach finalization replaces, never the provider-free ones", () => {
+    for (const { table, from } of SUBSCRIPTION_RENAMED_POLICIES)
+      expect(
+        pool("packages/db/src/index.ts", `const query = sql\`alter policy ${from} on ${table}\`;`),
+      ).toHaveLength(1);
+    for (const { table, from } of SUBSCRIPTION_RENAMED_TRIGGERS)
+      expect(
+        pool(
+          "packages/db/src/index.ts",
+          `const query = sql\`alter table ${table} disable trigger ${from}\`;`,
+        ),
+      ).toHaveLength(1);
+    for (const { schema, from } of SUBSCRIPTION_RENAMED_RELATIONS)
+      expect(
+        pool("packages/db/src/index.ts", `const query = sql\`select * from ${schema}.${from}\`;`),
+      ).toHaveLength(1);
+    expect(
+      pool(
+        "packages/db/src/index.ts",
+        "const query = sql`select set_config('opengeni.subscription_codex_auto_assign', $1, true)`;",
+      ),
+    ).toHaveLength(1);
+    expect(
+      pool(
+        "packages/db/src/index.ts",
+        `
+      const reach = sql\`select * from opengeni_private.subscription_core_auto_assignments\`;
+      const setting = sql\`select set_config('opengeni.subscription_core_auto_assign', $1, true)\`;
+      const trigger = sql\`alter table workspaces enable trigger workspaces_subscription_core_auto_assign\`;
+      const policy = sql\`alter policy subscription_connection_workspaces_core_auto_assign on subscription_connection_workspaces\`;
+      const plan = sql\`select opengeni_private.record_subscription_core_plan_change()\`;
+    `,
+      ),
+    ).toEqual([]);
+  });
+  test("rejects provider-templated routine names in every shape", () => {
+    expect(
+      pool(
+        "packages/db/src/subscription-account-repository.ts",
+        'const routine = "resolve_xai_authority_pool".replace("xai", provider);',
+      ).map((finding) => finding.message),
+    ).toEqual([
+      "Retired Shared pool (M4 R) decision state resolve_xai_authority_pool in routine",
+      `${TEMPLATED} in routine`,
+    ]);
+    expect(
+      pool(
+        "packages/db/src/index.ts",
+        'const routine = "revalidate_claude_subscription_authority".replaceAll("claude", provider);',
+      ).map((finding) => finding.message),
+    ).toEqual([
+      "Retired Shared pool (M4 R) decision state revalidate_claude_subscription_authority in routine",
+      `${TEMPLATED} in routine`,
+    ]);
+    for (const code of [
+      "const routine = `resolve_${provider}_authority_pool`;",
+      "const routine = `opengeni_private.enforce_${provider}_credential_pool_reference`;",
+      "const routine = `${provider}_subscription_authority_live`;",
+      'const routine = "resolve_" + provider + "_authority_pool";',
+      'const routine = provider + "_subscription_pool_visible";',
+    ])
+      expect({
+        code,
+        messages: pool("apps/worker/src/run.ts", code).map((f) => f.message),
+      }).toEqual({ code, messages: [`${TEMPLATED} in routine`] });
+  });
+  test("the runtime posture's retired inventory is the only exception", () => {
+    expect(
+      pool(
+        "packages/db/src/runtime-posture.ts",
+        'export const SUBSCRIPTION_RETIRED_ROUTINES = [{ schema: "public", signature: "resolve_xai_authority_pool(uuid, uuid, text, jsonb)" }];',
+      ),
+    ).toEqual([]);
+    expect(
+      pool(
+        "packages/db/src/runtime-posture.ts",
+        "function read() { return sql`select resolve_xai_authority_pool($1)`; }",
+      ),
+    ).toHaveLength(1);
+    expect(
+      pool(
+        "packages/db/src/provision-roles.ts",
+        'const routines = ["xai_subscription_pool_visible(uuid, uuid, text, text, uuid)"];',
+      ),
+    ).toHaveLength(1);
+    // 0689's codec stage fills the reach table under its Codex name while
+    // that historical migration replays; nothing else in the file may.
+    expect(
+      pool(
+        "packages/db/src/codex-subscription-core-cutover.ts",
+        "async function moveCodexCredentials() { await tx`INSERT INTO opengeni_private.subscription_codex_auto_assignments DEFAULT VALUES`; }",
+      ),
+    ).toEqual([]);
+    expect(
+      pool(
+        "packages/db/src/codex-subscription-core-cutover.ts",
+        "async function stageReach() { await tx`INSERT INTO opengeni_private.subscription_codex_auto_assignments DEFAULT VALUES`; }",
+      ),
+    ).toHaveLength(1);
+  });
+  test("kept routines, the neutral core and other subjects are not retired", () => {
+    expect(
+      pool(
+        "packages/db/src/index.ts",
+        `
+      // resolve_xai_authority_pool was dropped by the retirement migration.
+      const subject = "worker:model-access";
+      const reach = sql\`select opengeni_private.set_subscription_core_reach('codex', $1, $2, true, true)\`;
+      const allowed = sql\`select opengeni_private.subscription_codex_refresh_write_allowed($1, $2, $3)\`;
+      const wake = sql\`select list_organization_codex_workspace_ids($1)\`;
+      const receipt = sql\`select opengeni_private.claude_subscription_pool_protocol_v1_active()\`;
+      const validator = "xai_provider_account_authority_snapshot_v1_valid".replace("xai", provider);
+      const reject = "reject_legacy_claude_subscription_credentials";
+      const waiters = schema.subscriptionCapacityWaiters;
     `,
       ),
     ).toEqual([]);

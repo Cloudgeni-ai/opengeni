@@ -179,16 +179,15 @@ async function fixture(connectionKind: "subscription" | "api_key" = "subscriptio
 }
 
 /**
- * Run work with the refresh seam (the provider-named routines and their
- * provider-neutral equivalents from migration 0707) owned by a NOSUPERUSER,
+ * Run work with the refresh seam (the still-live Codex refresh write check
+ * and the provider-neutral routines from migration 0707; migration 0743
+ * dropped the Codex-named begin and persist twins) owned by a NOSUPERUSER,
  * NOBYPASSRLS role, as in production. The shared test database's objects are
  * owned by a superuser, which ignores FORCE RLS and would hide a missing
  * refresh policy.
  */
 const REFRESH_SEAM_ROUTINES = [
   "opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid)",
-  "opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)",
-  "opengeni_private.persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)",
   "opengeni_private.subscription_core_refresh_write_allowed(text,uuid,uuid,uuid)",
   "opengeni_private.begin_subscription_core_refresh(text,uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)",
   "opengeni_private.persist_subscription_core_refresh(text,uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)",
@@ -2296,14 +2295,12 @@ describe("provider-neutral subscription runtime persistence", () => {
             'authorize_subscription_ownerless_session_access',
             'authorize_subscription_personal_placement_access',
             'subscription_codex_refresh_write_allowed',
-            'begin_subscription_codex_refresh',
-            'persist_subscription_codex_refresh',
             'subscription_core_refresh_write_allowed',
             'begin_subscription_core_refresh',
             'persist_subscription_core_refresh'
           )
         order by proc.proname`;
-      expect(refreshRoutinePosture).toHaveLength(8);
+      expect(refreshRoutinePosture).toHaveLength(6);
       for (const routine of refreshRoutinePosture) {
         expect(routine.owner).toBe(routine.table_owner);
         expect(routine.security_definer).toBe(true);
@@ -2316,10 +2313,7 @@ describe("provider-neutral subscription runtime persistence", () => {
         expect(routine.app_execute).toBe(true);
         expect(routine.public_execute).toBe(false);
         expect(routine.lock_timeout).toBe(
-          routine.name === "persist_subscription_codex_refresh" ||
-            routine.name === "persist_subscription_core_refresh"
-            ? "lock_timeout=0"
-            : null,
+          routine.name === "persist_subscription_core_refresh" ? "lock_timeout=0" : null,
         );
       }
       const [persisted] = await shared!.admin<

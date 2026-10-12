@@ -666,7 +666,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
               refresh_generation: number | string;
             }>(
               tx,
-              sql`select refresh_generation from opengeni_private.begin_subscription_codex_connection_refresh(
+              sql`select refresh_generation from opengeni_private.begin_subscription_core_connection_refresh('codex',
             ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
             null, null, null, null)`,
             );
@@ -675,7 +675,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
             await release.promise;
             const [persisted] = await rawRows<{ persisted: boolean }>(
               tx,
-              sql`select opengeni_private.persist_subscription_codex_connection_refresh(
+              sql`select opengeni_private.persist_subscription_core_connection_refresh('codex',
             ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
             ${Number(started!.refresh_generation)}::bigint, ${encryptEnvironmentValue(key, JSON.stringify({ access_token: "synthetic-rotated" }))},
             now() + interval '1 hour', now()) as persisted`,
@@ -706,7 +706,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
             expect(
               await rawRows(
                 tx,
-                sql`select refresh_generation from opengeni_private.begin_subscription_codex_connection_refresh(
+                sql`select refresh_generation from opengeni_private.begin_subscription_core_connection_refresh('codex',
           ${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${connected.id}::uuid,
           null, null, null, null)`,
               ),
@@ -1549,7 +1549,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     );
     expect(schema!.usage).toBe(false);
     for (const signature of [
-      "opengeni_subscription_internal.subscription_codex_writer_context(uuid,uuid,text)",
+      "opengeni_subscription_internal.subscription_core_writer_context(text,uuid,uuid,text)",
       "opengeni_subscription_internal.grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)",
       "opengeni_subscription_internal.drop_subscription_codex_owner_capabilities(uuid)",
       "opengeni_subscription_internal.derive_scheduled_revision_subscription_authority()",
@@ -1669,7 +1669,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           async (tx) => {
             const [resolved] = await rawRows<{ result: { id: string } }>(
               tx,
-              sql`select opengeni_private.manage_subscription_codex_personal(${org.accountId}::uuid,
+              sql`select opengeni_private.manage_subscription_core_personal('codex', ${org.accountId}::uuid,
               ${org.personalWorkspaceId}::uuid, ${org.ownerSubjectId}, ${target}::uuid,
               'resolve', null, null, null) as result`,
             );
@@ -1719,13 +1719,13 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       };
       const posture = await inspectRuntimeDatabasePosture(ownerClient!.db, options);
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
-      // Exactly the four Codex writer internals, the neutral ones (0707, with
-      // 0713's provider-keyed auto-assignment apply path), the cutover-receipt
-      // and cutover-identity triggers (0712), the authority compatibility
-      // internals (0716) and the fences' helpers (0717).
+      // Exactly the three Codex capability internals (the Codex writer
+      // context went with the Codex twins in 0721), the neutral ones (0707,
+      // with 0713's provider-keyed auto-assignment apply path), the
+      // cutover-receipt and cutover-identity triggers (0712), the authority
+      // compatibility internals (0715) and the fences' helpers (0716).
       expect(posture.subscriptionOwnerRoutines!.map((routine) => routine.name).sort()).toEqual(
         [
-          "subscription_codex_writer_context(uuid, uuid, text)",
           "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
           "drop_subscription_codex_owner_capabilities(uuid)",
           "derive_scheduled_revision_subscription_authority()",
@@ -1814,7 +1814,7 @@ async function personalCase(): Promise<void> {
   const [adminRead] = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
     rawRows<{ total: number }>(
       client!.db,
-      sql`select count(*)::int as total from opengeni_private.subscription_codex_personal_connections(
+      sql`select count(*)::int as total from opengeni_private.subscription_core_personal_connections('codex',
         ${org.accountId}::uuid, ${member.personalWorkspaceId}::uuid, ${member.subjectId})`,
     ),
   );

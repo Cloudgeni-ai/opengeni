@@ -34,6 +34,7 @@ import {
 } from "@opengeni/db";
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
+import { restorePreRetirementGrants } from "../../packages/db/test/fixtures/pre-retirement-grants";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
 // The legacy Claude runtime is deleted (design 5.3, C4). The pre-cutover world
 // is staged with the retired account writers (now only a test fixture), the
@@ -47,6 +48,9 @@ import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtur
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0740_subscription_core_claude_cutover.sql";
+// The drained retirement requires every receipt; this seam fixture records it
+// and never runs it.
+const RETIREMENT = "0743_subscription_core_legacy_retirement.sql";
 const PROVIDER = "workspace-claude-subscription";
 const MODEL = `${PROVIDER}/claude-opus-5-5`;
 const key = Buffer.alloc(32, 83);
@@ -146,7 +150,7 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${RETIREMENT})`;
         await migrate(owned.ownerUrl, undefined, {
           applicationDatabaseRoles: ["opengeni_app"],
           environmentsEncryptionKey: key,
@@ -159,6 +163,9 @@ describe.skipIf(!realDb)(
         appRole: "opengeni_app",
         appPassword: owned.appPassword,
       });
+      // Both windows this seam models run before the retirement, under that
+      // release's grants.
+      await restorePreRetirementGrants(owned.adminUrl);
       client = createDb(appUrl(), { max: 4 });
     }, 180_000);
 
@@ -316,6 +323,7 @@ describe.skipIf(!realDb)(
         appRole: "opengeni_app",
         appPassword: owned.appPassword,
       });
+      await restorePreRetirementGrants(owned.adminUrl);
       client = createDb(appUrl(), { max: 4 });
 
       // The core waiter is the recorded one: same id, generation and wake

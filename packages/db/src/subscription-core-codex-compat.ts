@@ -14,6 +14,7 @@
  * owner, through the owner-only reader.
  */
 import { codexPlanKey } from "@opengeni/codex";
+import type { SessionEvent } from "@opengeni/contracts";
 import { CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS } from "./codex-plan-entitlement";
 import type { Database } from "./database";
 import { decodeSubscriptionQuota } from "./subscription-core-repository";
@@ -37,6 +38,7 @@ import {
   type SubscriptionCoreWake,
 } from "./subscription-core/administration";
 import { SUBSCRIPTION_CORE_CODEX } from "./subscription-core-codex-adapter";
+import { chooseSubscriptionCoreSessionAccount } from "./subscription-core/session-choice";
 import type {
   CodexAccountStatus,
   CodexRotationSettings,
@@ -74,6 +76,52 @@ export async function readCodexCutoverDisposition(
 
 /** A wake the caller delivers after its mutation committed. */
 export type SubscriptionCoreCodexWake = SubscriptionCoreWake;
+
+/**
+ * @deprecated Use chooseSubscriptionCoreSessionAccount with provider: "codex".
+ * The retained endpoint maps its single legacy receipt inside the neutral
+ * transaction. It has no separate binding writer or authority decision.
+ */
+export async function pinSubscriptionCoreSessionCodexAccount(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    connectionId: string | null;
+    subjectId: string;
+  },
+): Promise<{
+  result: { changed: boolean; appliedTo: "waiting_turn" | "next_turn"; events: SessionEvent[] };
+  wake: SubscriptionCoreCodexWake | null;
+}> {
+  const choice = await chooseSubscriptionCoreSessionAccount(
+    db,
+    { ...input, provider: "codex" },
+    undefined,
+    {
+      recordUnchanged: true,
+      project: ({ connectionId, appliedTo, turnId, subjectId }) => ({
+        type: "codex.account.selection.changed",
+        payload: { credentialId: connectionId, appliedTo, turnId, subjectId },
+      }),
+    },
+  );
+  // Legacy `changed` meant a successful acknowledgement, including choosing
+  // Automatic twice. Refusal and bounded binding conflicts remain its 404.
+  const accepted = choice.outcome === "changed" || choice.outcome === "unchanged";
+  return {
+    result: { changed: accepted, appliedTo: choice.appliedTo, events: choice.events },
+    wake: accepted
+      ? {
+          accountId: input.accountId,
+          reason: "core_codex_session_pin_changed",
+          workspaceIds: [input.workspaceId],
+          sessionIds: [input.sessionId],
+        }
+      : null,
+  };
+}
 
 function date(value: Date | string | null | undefined): Date | null {
   return value === null || value === undefined ? null : new Date(value);

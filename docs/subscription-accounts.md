@@ -545,17 +545,16 @@ frozen personal authority, compaction locks, quota shapes), bridged to the
 model. Requirements stay `pending` until production placement runs on the
 core.
 
-### Shadow comparison
+### Historical pre-cutover shadow comparison
 
-Before any provider moves to the core (SUB-COMPAT-03), every Codex, Claude and
-SuperGrok turn compares the core with the legacy selector. Right after the
-legacy selection, the worker
-(`apps/worker/src/activities/agent-turn/subscription-core-shadow.ts`) loads the
-placement world for that session and turn from today's tables through the
-legacy adapter (`packages/db/src/legacy-subscription-world.ts`). It then runs
-the core's placement and the reference model's `checkDecision` on it.
+Before the provider cutovers (SUB-COMPAT-03), the worker compared each legacy
+selection with the core and the reference model's `checkDecision`. That
+production shadow and its legacy readers are deleted after migration. The
+retained comparison fixture is
+`packages/db/test/fixtures/legacy-subscription-world.ts`; current production
+placement runs directly through the shared core, not a second selector.
 
-It never changes placement and never delays the turn:
+The former shadow protocol had these isolation guarantees:
 
 - it starts in the background after the legacy selection, and at most two run
   at once per worker process; further turns skip it (`busy`);

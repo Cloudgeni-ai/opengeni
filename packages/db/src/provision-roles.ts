@@ -8,7 +8,10 @@ import {
   RUNTIME_READ_UPDATE_TABLES,
   SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES,
   WORK_CLAIM_CAPABILITY_ROUTINES,
-  SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES,
+  SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES,
+  SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
+  SUBSCRIPTION_RETIRED_ROUTINES,
+  SUBSCRIPTION_RENAMED_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -531,6 +534,21 @@ async function grantAppRoleIfSchemaExists(
     )
     .join(", ")}]::text[][]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
+  // Provisioning may run before retirement. Keep the old owner-only ACLs
+  // through the same atomic DO statement as the schema-wide EXECUTE grant;
+  // a later readiness failure cannot undo a committed privilege exposure.
+  // Derive the signatures from the retirement inventory, not a second list
+  // of dead names. After retirement these conditional revokes are no-ops.
+  const twins = new Set<string>(SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES);
+  const retiringOwnerOnlyRoutines = `ARRAY[${[
+    ...SUBSCRIPTION_RETIRED_ROUTINES.filter(
+      ({ schema: home, signature }) =>
+        home !== "target" && !twins.has(signature) && !signature.endsWith("()"),
+    ).map(({ schema: home, signature }) => `${home}.${signature}`),
+    ...SUBSCRIPTION_RENAMED_ROUTINES.map(({ schema: home, from }) => `${home}.${from}`),
+  ]
+    .map(literal)
+    .join(", ")}]::text[]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "maintain_usage_allowances(integer,integer)",
     "usage_allowance_command(jsonb)",
@@ -1728,7 +1746,7 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
-    FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES.map(literal).join(", ")}] LOOP
+    FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES.map(literal).join(", ")}] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
         EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, routine_signature, ${literal(role)});
@@ -2110,39 +2128,26 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ${retiringOwnerOnlyRoutines} LOOP
+      IF to_regprocedure(routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, %I',
+          routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_connection_visible(uuid,uuid,uuid,text,text,uuid,text,text)',
       'authorize_subscription_ownerless_session_access(uuid,uuid,uuid,uuid)',
       'authorize_subscription_personal_placement_access(uuid,uuid,uuid,uuid,text,uuid,bigint,text,text)',
       'subscription_codex_refresh_write_allowed(uuid,uuid,uuid)',
-      'begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)',
-      'persist_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
-      'fail_subscription_codex_refresh(uuid,uuid,uuid,uuid,uuid,bigint,text)',
-      'quarantine_subscription_codex_connection(uuid,uuid,uuid,uuid,uuid,text,bigint,bigint,text,text,timestamptz)',
-      'recover_subscription_codex_connection_health(uuid,uuid,uuid,uuid)',
-      'persist_subscription_codex_refresh_with_plan(uuid,uuid,uuid,uuid,uuid,bigint,text,timestamptz,timestamptz,text)',
-      'subscription_codex_acceptance_authority_v2(uuid,uuid,uuid,text)',
       'resolve_subscription_codex_apps_designation(uuid,uuid)',
       'read_subscription_codex_apps_credential(uuid,uuid,uuid)',
       'begin_subscription_codex_apps_refresh(uuid,uuid,uuid)',
       'persist_subscription_codex_apps_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
       'fail_subscription_codex_apps_refresh(uuid,uuid,uuid,bigint,text)',
-      'read_subscription_codex_connection_credential(uuid,uuid,uuid,uuid,uuid,text,bigint)',
-      'begin_subscription_codex_connection_refresh(uuid,uuid,uuid,uuid,uuid,text,bigint)',
-      'persist_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text,timestamptz,timestamptz)',
-      'fail_subscription_codex_connection_refresh(uuid,uuid,uuid,bigint,text)',
       'subscription_codex_reset_authority(uuid,uuid,uuid,text)',
-      'connect_subscription_codex_personal(uuid,uuid,text,text,text,text,text,jsonb,timestamptz,timestamptz,text,text,text)',
-      'disconnect_subscription_codex_connection(uuid,uuid,text,uuid)',
-      'subscription_codex_personal_connections(uuid,uuid,text)',
       'subscription_codex_reset_credit_fence(uuid,uuid,uuid,text,text,uuid)',
       'subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean)',
       'subscription_codex_owner_membership_held(uuid,uuid)',
-      'subscription_codex_task_authority_v2(uuid,uuid,uuid,text)',
-      'subscription_codex_revision_authority_v2(uuid,uuid,uuid,bigint)',
-      'manage_subscription_codex_personal(uuid,uuid,text,uuid,text,text,boolean,integer)',
-      'subscription_codex_reach(uuid,uuid)',
-      'set_subscription_codex_reach(uuid,uuid,boolean,boolean)',
       'subscription_core_owner_capability_held(text,uuid,text[],text,uuid,boolean)',
       'subscription_core_owner_membership_held(uuid,uuid)',
       'subscription_core_refresh_write_allowed(text,uuid,uuid,uuid)',
@@ -2198,27 +2203,19 @@ BEGIN
     END LOOP;
     -- The Codex Apps designation target helper returns a full connection row;
     -- only its owner-run callers may execute it, never the runtime role.
-    -- The Codex connection target helper (M3 PR 2c) is owner-only for the same reason.
-    IF to_regprocedure('opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint)') IS NOT NULL THEN
-      EXECUTE format(
-        'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_connection_target(uuid,uuid,uuid,uuid,uuid,text,bigint) FROM %I',
-        ${literal(role)}
-      );
-    END IF;
     IF to_regprocedure('opengeni_private.subscription_codex_apps_designation_target(uuid,uuid)') IS NOT NULL THEN
       EXECUTE format(
         'REVOKE EXECUTE ON FUNCTION opengeni_private.subscription_codex_apps_designation_target(uuid,uuid) FROM %I',
         ${literal(role)}
       );
     END IF;
-    -- M3 PR 3b: the writers' caller check, capability internals and the
-    -- revision-authority trigger function are owner-only. Migration 0680: the
-    -- cutover receipt and its owner-run trigger functions are owner-only.
+    -- M3 PR 3b: the capability internals and the revision-authority trigger
+    -- function are owner-only. Migration 0707: the neutral writers' caller
+    -- check, capability internals and connection target are owner-only.
     -- Migration 0713: the provider-keyed auto-assignment apply path is
     -- owner-only.
     -- Triggers fire without the caller holding EXECUTE.
     FOREACH routine_signature IN ARRAY ARRAY[
-      'subscription_codex_writer_context(uuid,uuid,text)',
       'grant_subscription_codex_owner_capability(text,uuid,uuid,text,uuid)',
       'drop_subscription_codex_owner_capabilities(uuid)',
       'derive_scheduled_revision_subscription_authority()',
@@ -2262,14 +2259,15 @@ BEGIN
       END IF;
     END LOOP;
     -- The drained cutover uses private routines: no previous binary remains.
+    -- Migration 0743 gives the plan-change and auto-assignment trigger
+    -- functions provider-free names.
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_cutover_v1_active()',
       'seed_subscription_codex_cutover()',
-      'record_subscription_codex_plan_change()',
+      'record_subscription_core_plan_change()',
       'keep_subscription_codex_cutover_identity()',
-      'apply_subscription_codex_auto_assignments(uuid,uuid,boolean)',
-      'auto_assign_subscription_codex_workspace()',
-      'auto_assign_subscription_codex_personal_workspace()'
+      'auto_assign_subscription_core_workspace()',
+      'auto_assign_subscription_core_personal_workspace()'
     ] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format(

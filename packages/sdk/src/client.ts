@@ -9948,7 +9948,10 @@ export class OpenGeniClient {
     );
   }
 
-  /** Session-authorized retry choices plus the current accepted account. */
+  /**
+   * Session-authorized Codex choices plus the current accepted account.
+   * @deprecated Use getSessionModelAccount for provider-neutral choices.
+   */
   async listSessionCodexAccounts(
     workspaceId: string,
     sessionId: string,
@@ -10048,7 +10051,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Pin/unpin a Codex account. Overrides a capacity-blocked turn; otherwise applies next turn. */
+  /**
+   * Pin/unpin a Codex account without changing another provider's binding.
+   * @deprecated Use setSessionModelAccount with provider: "codex" and
+   * connectionId: null for Automatic, or the selected account id.
+   */
   async pinSessionCodexAccount(
     workspaceId: string,
     sessionId: string,

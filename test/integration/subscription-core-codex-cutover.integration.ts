@@ -58,6 +58,8 @@ const FENCES = "0717_subscription_authority_fences.sql";
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
 const XAI_CUTOVER = "0739_subscription_core_xai_cutover.sql";
 const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
+// The drained retirement requires every receipt; recorded and never applied.
+const RETIREMENT = "0743_subscription_core_legacy_retirement.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -98,7 +100,7 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${RETIREMENT})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
         await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS})`;
       } finally {

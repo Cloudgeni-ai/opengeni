@@ -67,7 +67,7 @@ import { CODEX_CAPACITY_RECOVERY_KEY, CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT, rea
 
 
 
-import { subscriptionPoolWorkerSubject, withSubscriptionPoolSessionAccess, withTemporaryPoolSessionAccessInTransaction } from "../../src/subscription-session-access";
+import { subscriptionPoolWorkerSubject, withSubscriptionPoolSessionAccess, withTemporaryPoolSessionAccessInTransaction } from "./legacy-subscription-session-access";
 
 
 

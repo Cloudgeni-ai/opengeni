@@ -25,6 +25,9 @@ import {
   evaluateRuntimeDatabasePosture,
   getSubscriptionCoreCodexModelConnectionAccess,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   wakeSubscriptionCoreCodexCapacityWaiters,
   withSessionRlsActorContext,
   type DbClient,
@@ -34,6 +37,7 @@ import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 // The provider-parameterized entry points are internal to the package.
 import {
   getSubscriptionCoreModelConnectionAccess,
@@ -47,15 +51,21 @@ const REACH_MIGRATION = "0713_subscription_core_provider_keyed_reach.sql";
 const UNREGISTERED_PROVIDER = "unregistered" as never;
 // 0714 redefines 0713's reach setters, so it is withheld and applied with it.
 const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_accounts.sql"];
-// The drained SuperGrok and Claude cutovers are maintenance steps this
-// rolling test never runs: they stay recorded as applied throughout.
+// The drained SuperGrok and Claude cutovers and the retirement after them are
+// maintenance steps this rolling test never runs: they stay recorded as
+// applied throughout.
 const MAINTENANCE_MIGRATIONS = [
+  "0738_subscription_failover_readiness_and_request_fence.sql",
   "0739_subscription_core_xai_cutover.sql",
   "0740_subscription_core_claude_cutover.sql",
+  "0741_subscription_shared_personal_choice.sql",
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
 ];
-// A binary that carries both cutovers reports the missing SuperGrok and
-// Claude receipts until the maintenance steps run.
+// A binary that knows 0719, 0720 and the retirement reports only the objects
+// the retirement drops and the missing SuperGrok and Claude receipts until
+// the maintenance steps run.
 const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
   "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
   "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
@@ -442,6 +452,8 @@ beforeAll(async () => {
       await owner`insert into schema_migrations(name) values (${later})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+    // A deployment before the retirement runs under that release's grants.
+    await restorePreRetirementGrants(database.adminUrl);
   } finally {
     await owner.end();
   }
@@ -500,6 +512,7 @@ beforeAll(async () => {
     await later.end();
   }
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+  await restorePreRetirementGrants(database.adminUrl);
   staged = {
     catalogBefore,
     catalogAfter,

@@ -22,6 +22,7 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "../src/environment-crypto";
 import { rawRows, withRlsContext } from "../src/database";
 import {
@@ -32,7 +33,12 @@ import {
   type DbClient,
 } from "../src";
 import { decodeSubscriptionCoreClaudeCredential } from "../src/subscription-core-claude-adapter";
-import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
+import {
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
 import { subscriptionCoreOperations } from "../src/subscription-core/operations";
 import { subscriptionCoreProvider } from "../src/subscription-core-providers";
@@ -957,7 +963,10 @@ describe.skipIf(!realDb)(
       owned = fixture;
       owner = postgres(owned.ownerUrl, { max: 1 });
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION})`;
+      // This file characterizes the window between the cutover and the drained
+      // retirement, which requires the receipt: the retirement stays recorded
+      // and never runs here.
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${SUBSCRIPTION_RETIREMENT_MIGRATION})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
       await seed();
@@ -995,6 +1004,8 @@ describe.skipIf(!realDb)(
         appRole: "opengeni_app",
         appPassword: owned.appPassword,
       });
+      // The window before the retirement runs under that release's grants.
+      await restorePreRetirementGrants(owned.adminUrl);
       const app = postgres(url.toString(), { max: 1 });
       try {
         await app`SELECT 1`;
@@ -1224,6 +1235,7 @@ describe.skipIf(!realDb)(
           appRole: "opengeni_app",
           appPassword: owned.appPassword,
         });
+        await restorePreRetirementGrants(owned.adminUrl);
         const url = new URL(owned.ownerUrl);
         url.username = "opengeni_app";
         url.password = owned.appPassword;
@@ -1697,7 +1709,10 @@ describe.skipIf(!realDb)(
         };
         const posture = await inspectRuntimeDatabasePosture(client.db, options);
         expect(posture.subscriptionProviderCutoverReceipts).toEqual(["claude", "codex", "xai"]);
-        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+        // Clean but for the objects the withheld retirement drops.
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+          retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+        );
       }, 180_000);
 
       test("no definer can write a legacy Claude row after the receipt", async () => {

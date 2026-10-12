@@ -91,6 +91,11 @@ const withheldMigrations = [
   "0730_subscription_core_personal_connection_versions.sql",
   "0739_subscription_core_xai_cutover.sql",
   "0740_subscription_core_claude_cutover.sql",
+  // The drained retirement requires both cutovers; it runs after them.
+  "0743_subscription_core_legacy_retirement.sql",
+  "0738_subscription_failover_readiness_and_request_fence.sql",
+  "0741_subscription_shared_personal_choice.sql",
+  "0742_subscription_waiter_candidates.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

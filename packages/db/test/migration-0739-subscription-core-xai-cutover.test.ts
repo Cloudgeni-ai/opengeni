@@ -30,7 +30,12 @@ import {
 } from "../src";
 import { decodeSubscriptionCoreXaiCredential } from "../src/subscription-core-xai-adapter";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
-import { SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES } from "../src/runtime-posture";
+import {
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 import { deleteSubscriptionCoreWaitersForTurns } from "../src/subscription-core/waiters";
 
 const MIGRATION = "0739_subscription_core_xai_cutover.sql";
@@ -861,7 +866,7 @@ describe.skipIf(!realDb)(
       owned = fixture;
       owner = postgres(owned.ownerUrl, { max: 1 });
       await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${CLAUDE_CUTOVER})`;
+      await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION})`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       await owner`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
       await seed();
@@ -980,7 +985,7 @@ describe.skipIf(!realDb)(
       const connection = postgres(later.ownerUrl, { max: 1 });
       try {
         await connection`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await connection`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${CLAUDE_CUTOVER})`;
+        await connection`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION})`;
         await migrate(later.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
         await connection`DELETE FROM schema_migrations WHERE name = ${MIGRATION}`;
         await connection`DROP INDEX subscription_session_bindings_rolling_session_idx`;
@@ -1803,9 +1808,12 @@ describe.skipIf(!realDb)(
         };
         const posture = await inspectRuntimeDatabasePosture(client.db, options);
         expect(posture.subscriptionProviderCutoverReceipts).toEqual(["codex", "xai"]);
-        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([
-          `database is missing the claude subscription-core cutover receipt (${CLAUDE_CUTOVER}); apply the pending migrations first`,
-        ]);
+        expect(evaluateRuntimeDatabasePosture(posture, options).sort()).toEqual(
+          [
+            `database is missing the claude subscription-core cutover receipt (${CLAUDE_CUTOVER}); apply the pending migrations first`,
+            ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+          ].sort(),
+        );
       }, 180_000);
 
       test("the legacy connect routine cannot write a SuperGrok account after the receipt", async () => {

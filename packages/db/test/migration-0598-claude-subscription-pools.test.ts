@@ -14,6 +14,7 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -89,6 +90,9 @@ const subscriptionCoreMigrations = [
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.
 const claudeCutover = "0740_subscription_core_claude_cutover.sql";
+// The drained retirement drops those pools' routines and requires the Claude
+// receipt: it stays recorded as applied and never runs here either.
+const retirement = "0743_subscription_core_legacy_retirement.sql";
 const key = Buffer.alloc(32, 67);
 const ids = {
   account: randomUUID(),
@@ -143,7 +147,7 @@ beforeAll(async () => {
   await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
   await owner`INSERT INTO schema_migrations(name) VALUES(${migration})`;
   await owner`INSERT INTO schema_migrations(name) SELECT unnest(${subscriptionCoreMigrations}::text[])`;
-  await owner`INSERT INTO schema_migrations(name) VALUES (${claudeCutover})`;
+  await owner`INSERT INTO schema_migrations(name) VALUES (${claudeCutover}), (${retirement}), ('0738_subscription_failover_readiness_and_request_fence.sql')`;
   await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
   await owner`DELETE FROM schema_migrations WHERE name = ${migration} OR name = ANY(${subscriptionCoreMigrations}::text[])`;
   await owned.admin`INSERT INTO managed_accounts(id, name) VALUES(${ids.account}, 'Subscription migration fixture')`;
@@ -394,6 +398,8 @@ test("cloned capacity waiters retain the enabled xAI tenancy fence and reject un
   expect(posture.every((row) => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
 
   await provisionRoles(owned.adminUrl, { appRole: "opengeni_app", appPassword: owned.appPassword });
+  // The pools run before the retirement, under that release's grants.
+  await restorePreRetirementGrants(owned.adminUrl);
   const url = new URL(owned.adminUrl);
   url.username = "opengeni_app";
   url.password = owned.appPassword;

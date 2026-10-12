@@ -234,4 +234,6 @@ export const embeddingMigrationTail = [
   "0740_subscription_core_claude_cutover.sql",
   // Extends the capacity waiter table from withheld shared-core migrations.
   "0742_subscription_waiter_candidates.sql",
+  // The drained retirement requires both cutovers; it runs after them.
+  "0743_subscription_core_legacy_retirement.sql",
 ];

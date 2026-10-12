@@ -28,6 +28,9 @@ import {
   createSession,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   sendAgentMessageInTransaction,
   submitHumanPromptInTransaction,
   withRlsContext,
@@ -51,6 +54,7 @@ import {
 } from "./fixtures/legacy-xai";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { subscriptionAuthorityCompatForCarriersInTransaction } from "../src/subscription-core-acceptance-authority";
 
 setDefaultTimeout(180_000);
@@ -59,8 +63,13 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const FENCES = "0717_subscription_authority_fences.sql";
 const XAI_CUTOVER = "0739_subscription_core_xai_cutover.sql";
 const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
-/** This binary requires the SuperGrok receipt, which the rolling state lacks. */
+/**
+ * This binary requires the SuperGrok and Claude receipts, which the rolling
+ * state lacks, and the absence of everything the drained retirement drops
+ * (held back with the cutovers, whose receipts it requires).
+ */
 const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
   "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
   "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
@@ -704,9 +713,11 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER})`;
+    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION}), ('0738_subscription_failover_readiness_and_request_fence.sql'), ('0741_subscription_shared_personal_choice.sql'), ('0742_subscription_waiter_candidates.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+    // The legacy pools run before the retirement, under that release's grants.
+    await restorePreRetirementGrants(database.adminUrl);
   } finally {
     await owner.end();
   }
@@ -753,6 +764,7 @@ beforeAll(async () => {
   };
   const unprovisioned = await evaluate();
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+  await restorePreRetirementGrants(database.adminUrl);
   posture = { unprovisioned, provisioned: await evaluate() };
   client = createDb(appUrl, { max: 4 });
   app = client.db;

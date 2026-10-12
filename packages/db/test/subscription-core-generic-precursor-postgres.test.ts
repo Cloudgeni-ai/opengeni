@@ -17,6 +17,9 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   withSessionRlsActorContext,
   withSubscriptionCoreAcceptedTurn,
   type DbClient,
@@ -35,8 +38,14 @@ const COMPAT = "0716_subscription_authority_compat.sql";
 const FENCES = "0717_subscription_authority_fences.sql";
 const XAI_CUTOVER = "0739_subscription_core_xai_cutover.sql";
 const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
-/** This binary requires the SuperGrok receipt, which the rolling state lacks. */
+// The drained retirement requires both receipts; held back with them.
+const RETIREMENT = SUBSCRIPTION_RETIREMENT_MIGRATION;
+/**
+ * This binary requires the SuperGrok and Claude receipts, which the rolling
+ * state lacks, and the absence of everything the retirement drops.
+ */
 const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
   "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
   "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
@@ -182,7 +191,7 @@ beforeAll(async () => {
   });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER})`;
+    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${RETIREMENT}), ('0738_subscription_failover_readiness_and_request_fence.sql'), ('0741_subscription_shared_personal_choice.sql'), ('0742_subscription_waiter_candidates.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,

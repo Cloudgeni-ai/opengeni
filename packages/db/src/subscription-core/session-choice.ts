@@ -396,6 +396,23 @@ export type SubscriptionCoreSessionChoiceResult = {
   wakes: SubscriptionCoreProviderWake[];
 };
 
+/** Presentation-only compatibility for an existing provider-qualified endpoint.
+ * It shares the same choice, authorization, locking and event transaction.
+ * The mapper cannot change the chosen account or accepted turn authority.
+ */
+export type SubscriptionCoreChoiceReceipt = {
+  recordUnchanged: boolean;
+  project: (choice: {
+    provider: string | null;
+    providers: string[];
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+    appliedTo: "waiting_turn" | "next_turn";
+    turnId: string | null;
+    subjectId: string;
+  }) => { type: SessionEventType; payload: Record<string, unknown> };
+};
+
 function mapSessionEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
   return {
     id: row.id,
@@ -448,7 +465,10 @@ export async function chooseSubscriptionCoreSessionAccount(
     provider?: string | null;
   },
   providers: SubscriptionCoreChoiceProviders = registeredProviders(),
+  receipt?: SubscriptionCoreChoiceReceipt,
 ): Promise<SubscriptionCoreSessionChoiceResult> {
+  if (receipt && !input.provider)
+    throw new Error("A compatibility choice receipt requires an explicit provider");
   // A choice locks the session row, then the binding, then (through the
   // binding's disconnect-admission trigger) the chosen connection's refresh
   // lock. A session's first placement takes that refresh lock before it
@@ -463,7 +483,7 @@ export async function chooseSubscriptionCoreSessionAccount(
       : input.connectionId;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await chooseOnce(db, { ...input, connectionId: requested }, providers);
+      return await chooseOnce(db, { ...input, connectionId: requested }, providers, receipt);
     } catch (error) {
       if (postgresErrorCode(error) !== "40P01") throw error;
       if (attempt >= maxAttempts) {
@@ -497,6 +517,7 @@ async function chooseOnce(
     provider?: string | null;
   },
   providers: SubscriptionCoreChoiceProviders,
+  receipt?: SubscriptionCoreChoiceReceipt,
 ): Promise<SubscriptionCoreSessionChoiceResult> {
   const none = (
     outcome: SubscriptionCoreSessionChoiceOutcome,
@@ -588,6 +609,7 @@ async function chooseOnce(
       const resetProvider = target === null ? (input.provider ?? null) : null;
       let touched: string[] = [];
       let written = false;
+      let bindingChanged = true;
       // An absent binding can be inserted by a concurrent placement between
       // our read and our insert; the retry then finds and locks that row.
       for (let attempt = 0; attempt < 3 && !written; attempt += 1) {
@@ -615,16 +637,29 @@ async function chooseOnce(
             for update`,
         );
         if (target === null) {
-          if (locked.length === 0) return none("unchanged");
+          if (locked.length === 0) {
+            if (!receipt?.recordUnchanged) return none("unchanged");
+            // Legacy endpoints acknowledge even an already-automatic choice.
+            // Record the receipt, without creating or mutating a binding.
+            touched = [input.provider!];
+            bindingChanged = false;
+            written = true;
+            break;
+          }
           touched = locked.map((row) => row.provider);
         } else {
           const own = locked[0];
           if (own && own.choice === "explicit" && own.connection_id === target.connectionId) {
-            return {
-              ...none("unchanged"),
-              provider: target.provider,
-              connectionId: target.connectionId,
-            };
+            if (!receipt?.recordUnchanged)
+              return {
+                ...none("unchanged"),
+                provider: target.provider,
+                connectionId: target.connectionId,
+              };
+            touched = [target.provider];
+            bindingChanged = false;
+            written = true;
+            break;
           }
           touched = [target.provider];
         }
@@ -717,6 +752,19 @@ async function chooseOnce(
         session.status === "waiting_capacity" && session.activeTurnId && waitingHasAuthority
           ? "waiting_turn"
           : "next_turn";
+      const choice = {
+        provider: changedProvider,
+        providers: touched,
+        connectionId: target?.connectionId ?? null,
+        choice: target ? ("explicit" as const) : ("automatic" as const),
+        appliedTo,
+        turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
+        subjectId: input.subjectId,
+      };
+      const event = receipt?.project(choice) ?? {
+        type: SUBSCRIPTION_CORE_ACCOUNT_CHOICE_EVENT,
+        payload: choice,
+      };
       const inserted = await tx
         .insert(schema.sessionEvents)
         .values(
@@ -727,16 +775,8 @@ async function chooseOnce(
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 sequence: session.lastSequence + 1,
-                type: SUBSCRIPTION_CORE_ACCOUNT_CHOICE_EVENT,
-                payload: {
-                  provider: changedProvider,
-                  providers: touched,
-                  connectionId: target?.connectionId ?? null,
-                  choice: target ? "explicit" : "automatic",
-                  appliedTo,
-                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
-                  subjectId: input.subjectId,
-                },
+                type: event.type,
+                payload: event.payload,
                 occurredAt: new Date(),
               },
             ],
@@ -757,7 +797,7 @@ async function chooseOnce(
       // Wake this session's waiters of the providers the choice touched: a
       // choice changes nothing another session can place on.
       return {
-        outcome: "changed",
+        outcome: bindingChanged ? "changed" : "unchanged",
         appliedTo,
         provider: changedProvider,
         connectionId: target?.connectionId ?? null,

@@ -3,7 +3,10 @@ import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { bootstrapWorkspace, createDb } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS } from "../src/runtime-posture";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 import postgres from "postgres";
 
 // The genuine complete migration replay runs as a non-bypass owner.
@@ -12,7 +15,8 @@ const migrationName = "0602_claude_account_lifecycle_facts.sql";
 // Characterizes the historical 0602 trigger replay. The legacy Claude account
 // writer is deleted (design 5.3, C4), so accounts are inserted directly the way
 // that writer stored them; the drained Claude cutover stays recorded and
-// unrun so the table still accepts connections at this point of history.
+// unrun so the table still accepts connections at this point of history, and
+// so does the retirement, which requires the Claude receipt.
 const claudeCutover = SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!;
 
 test("Claude account connection facts follow real insert, privacy and export boundaries without backfill", async () => {
@@ -26,7 +30,7 @@ test("Claude account connection facts follow real insert, privacy and export bou
     await owner`create table if not exists schema_migrations (
       name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${migrationName})`;
-    await owner`insert into schema_migrations(name) values (${claudeCutover})`;
+    await owner`insert into schema_migrations(name) values (${claudeCutover}), (${SUBSCRIPTION_RETIREMENT_MIGRATION})`;
     await migrate(owned.ownerUrl);
     await provisionRoles(owned.adminUrl, {
       appPassword: owned.appPassword,

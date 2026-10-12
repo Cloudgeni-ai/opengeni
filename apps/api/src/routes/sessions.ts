@@ -2379,7 +2379,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
-  // "auto" clears the pin (the session follows the workspace active pointer); a
+  // "auto" clears only the Codex pin (shared-core automatic selection); a
   // uuid pins the session to that specific account. Overrides a capacity-blocked
   // turn; a running attempt keeps its account. 404 when the session or the target
   // account id isn't in the workspace.
