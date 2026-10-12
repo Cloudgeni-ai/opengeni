@@ -851,6 +851,9 @@ const SettingsSchema = z.object({
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
   codexSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  // Cache the session-independent system-prompt prefix (on by default after the OPE-550 A/B;
+  // set false to disable) separately on Anthropic Messages requests.
+  experimentSystemPromptCacheSplit: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -4622,6 +4625,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
+    experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(

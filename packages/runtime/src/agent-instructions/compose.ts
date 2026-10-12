@@ -77,9 +77,26 @@ export type ComposeModularAgentInstructionsInput = {
   workspaceGovernance?: string | undefined;
   workspaceMemory?: string | undefined;
   sessionInstructions?: string | undefined;
+  /**
+   * Experiment (OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT): render the
+   * workspace- and turn-specific contract modules last and return the
+   * session-independent `stablePrefix` so a provider can cache it on its own.
+   */
+  stablePrefix?: boolean | undefined;
 };
 
 export const MODULAR_LAYER_SEPARATOR = "\n\n";
+
+/**
+ * Contract modules whose text depends on the workspace (environment name,
+ * variables, sandbox environment) or the turn (attachments). Under the
+ * stable-prefix experiment they follow every other module.
+ */
+const VOLATILE_CONTRACT_MODULE_IDS: ReadonlySet<AgentPromptModule["id"]> = new Set([
+  "workspace_environment",
+  "rig",
+  "attachments",
+]);
 
 /**
  * Heads the session instructions so the precedence rule has a concrete target
@@ -94,22 +111,35 @@ export const SESSION_INSTRUCTIONS_PREAMBLE =
  * or resource is present. Pure and deterministic: the same configuration and
  * resources always produce the same bytes.
  */
-export function composeOperationalContract(context: AgentPromptContext): {
+export function composeOperationalContract(
+  context: AgentPromptContext,
+  options: { volatileModulesLast?: boolean } = {},
+): {
   content: string;
   modules: ModelContextInstructionModule[];
+  /** With `volatileModulesLast`: the content before the first volatile module. */
+  stableContent?: string;
 } {
   const sections: Array<{ id: ModelContextInstructionModule["id"]; text: string }> = [
     { id: "base_behavior", text: renderBaseBehavior(context) },
     { id: "runtime_mechanics", text: renderRuntimeMechanics(context) },
   ];
+  const volatile: typeof sections = [];
   for (const module of AGENT_PROMPT_MODULES) {
     if (!module.applies(context)) continue;
     const text = module.render(context).trim();
-    if (text) sections.push({ id: module.id, text });
+    if (!text) continue;
+    if (options.volatileModulesLast && VOLATILE_CONTRACT_MODULE_IDS.has(module.id))
+      volatile.push({ id: module.id, text });
+    else sections.push({ id: module.id, text });
   }
+  const join = (parts: typeof sections) =>
+    parts.map((section) => section.text).join(MODULAR_LAYER_SEPARATOR);
+  const all = [...sections, ...volatile];
   return {
-    content: sections.map((section) => section.text).join(MODULAR_LAYER_SEPARATOR),
-    modules: sections.map((section) => ({ id: section.id, chars: section.text.length })),
+    content: join(all),
+    modules: all.map((section) => ({ id: section.id, chars: section.text.length })),
+    ...(options.volatileModulesLast ? { stableContent: join(sections) } : {}),
   };
 }
 
@@ -123,13 +153,23 @@ export function composeOperationalContract(context: AgentPromptContext): {
 export function composeModularAgentInstructions(input: ComposeModularAgentInstructionsInput): {
   layers: ModularInstructionLayer[];
   composed: string;
+  /**
+   * Only with `input.stablePrefix`: the leading part of `composed` that holds
+   * no workspace-, session- or turn-specific text (identity, the contract's
+   * session-independent modules, then the Codemode/code-search directives when
+   * no volatile module sits between). Undefined when it would be empty.
+   */
+  stablePrefix?: string;
 } {
-  const contract = composeOperationalContract({
-    capabilities: input.capabilities,
-    renderer: input.renderer,
-    resources: input.resources,
-    ...(input.toolAvailability ? { toolAvailability: input.toolAvailability } : {}),
-  });
+  const contract = composeOperationalContract(
+    {
+      capabilities: input.capabilities,
+      renderer: input.renderer,
+      resources: input.resources,
+      ...(input.toolAvailability ? { toolAvailability: input.toolAvailability } : {}),
+    },
+    { volatileModulesLast: input.stablePrefix === true },
+  );
   const layers: ModularInstructionLayer[] = [
     { id: "identity", title: "Identity", content: input.identity.trim(), joinBefore: "" },
     {
@@ -159,8 +199,17 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
       `${SESSION_INSTRUCTIONS_PREAMBLE}${session}`,
     );
   }
-  return {
-    layers,
-    composed: layers.map((layer) => `${layer.joinBefore}${layer.content}`).join(""),
-  };
+  const composed = layers.map((layer) => `${layer.joinBefore}${layer.content}`).join("");
+  if (contract.stableContent === undefined) return { layers, composed };
+  let stablePrefix = `${layers[0]!.content}${MODULAR_LAYER_SEPARATOR}${contract.stableContent}`;
+  if (contract.stableContent === contract.content) {
+    // Deployment-level directives whose presence follows the agent configuration.
+    for (const layer of layers.slice(2)) {
+      if (layer.id !== "codemode" && layer.id !== "code_search") break;
+      stablePrefix += `${layer.joinBefore}${layer.content}`;
+    }
+  }
+  return composed.startsWith(stablePrefix) && stablePrefix.trim()
+    ? { layers, composed, stablePrefix }
+    : { layers, composed };
 }
