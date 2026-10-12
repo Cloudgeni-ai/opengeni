@@ -382,6 +382,7 @@ import {
   isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   isRoutingMutationOutputRejectedError,
+  withCommandNotStartedCallProof,
   withRoutingMutationOutputRejectionFence,
   renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
@@ -4299,6 +4300,16 @@ function buildAgentCapabilitiesFromComposition(
             withRoutingMutationOutputRejectionFence(() => invoke(context, input, details)),
         };
       });
+    };
+  }
+  // A proven pre-dispatch start failure is rethrown above for same-turn
+  // recovery. Bind that proof to its exact call so settlement can record the
+  // call as not started (replay safe) instead of outcome unknown.
+  for (const capability of caps) {
+    const target = capability as unknown as { tools(): Tool<unknown>[] };
+    const original = target.tools;
+    target.tools = function () {
+      return original.call(this).map((tool) => withCommandNotStartedCallProof(tool as never));
     };
   }
   // Lean non-strict `exec_command` schema (settings.experimentOutputCost, on by

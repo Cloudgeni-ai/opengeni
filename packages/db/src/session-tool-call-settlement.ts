@@ -36,6 +36,13 @@ export function historyItemType(item: Record<string, unknown>): string | null {
   return typeof item.type === "string" ? item.type : null;
 }
 
+/**
+ * Person-facing projection of a call whose command was proven never sent. The
+ * call's model-visible result is written separately into history.
+ */
+export const NOT_STARTED_TOOL_CALL_EVENT_TEXT =
+  "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run again.";
+
 /** Provider-valid result for a started call whose durable outcome is unknown. */
 export function interruptedToolCallResult(input: {
   callType: string;
@@ -120,6 +127,12 @@ export type ClosePendingSessionToolCallsInput = {
   now: Date;
   turnAssociation?: "current" | null;
   preserveInterruptionRows?: boolean;
+  /**
+   * Function calls with call-scoped proof that their command was never
+   * dispatched. Without a durable result they settle as not started (replay
+   * safe) instead of outcome unknown.
+   */
+  notStartedCallIds?: readonly string[];
 };
 
 function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
@@ -222,8 +235,9 @@ export async function consumeSettledPendingToolCallsForCompletedTurnInTransactio
 export async function closePendingSessionToolCallsInTransaction(
   tx: Database,
   input: ClosePendingSessionToolCallsInput,
-): Promise<{ sequence: number; events: SessionEvent[]; closed: number }> {
+): Promise<{ sequence: number; events: SessionEvent[]; closed: number; interrupted: number }> {
   if (!input.preserveInterruptionRows) await settleInterruptedCodemodeCallsInTransaction(tx, input);
+  const notStartedCallIds = new Set(input.notStartedCallIds ?? []);
   const pendingRows = await tx
     .select()
     .from(schema.sessionPendingToolCalls)
@@ -250,7 +264,8 @@ export async function closePendingSessionToolCallsInTransaction(
           ? null
           : fromPostgresLosslessJson(row.eventOutput, row.eventOutputCodecVersion),
     }));
-  if (pending.length === 0) return { sequence: input.sequence, events: [], closed: 0 };
+  if (pending.length === 0)
+    return { sequence: input.sequence, events: [], closed: 0, interrupted: 0 };
 
   const history = await tx
     .select({
@@ -325,6 +340,9 @@ export async function closePendingSessionToolCallsInTransaction(
             historyCallId(item) === call.callId,
         )
       : undefined;
+    const interrupted = !existingResult && !call.resultItem;
+    const notStarted =
+      interrupted && call.callType === "function_call" && notStartedCallIds.has(call.callId);
     const interruptedResult = interruptedToolCallResult({
       callType: call.callType,
       callId: call.callId,
@@ -343,7 +361,8 @@ export async function closePendingSessionToolCallsInTransaction(
       ),
       rawCallIsValid: historyItemType(call.callItem) === call.callType,
       result: existingResult?.item ?? call.resultItem ?? interruptedResult,
-      interrupted: !existingResult && !call.resultItem,
+      interrupted,
+      notStarted,
     };
   });
 
@@ -410,24 +429,33 @@ export async function closePendingSessionToolCallsInTransaction(
       turnAssociation: input.turnAssociation === undefined ? "current" : input.turnAssociation,
       payload: {
         id: resolution.call.callId,
-        output: resolution.interrupted
+        output: resolution.notStarted
           ? {
               isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `Tool execution was interrupted by ${input.reason}; its side-effect outcome is unknown.`,
-                },
-              ],
+              content: [{ type: "text", text: NOT_STARTED_TOOL_CALL_EVENT_TEXT }],
             }
-          : resolution.call.eventOutput !== null
-            ? resolution.call.eventOutput.value
-            : ((resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
-              resolution.existingResult?.item ??
-              resolution.call.resultItem),
+          : resolution.interrupted
+            ? {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `Tool execution was interrupted by ${input.reason}; its side-effect outcome is unknown.`,
+                  },
+                ],
+              }
+            : resolution.call.eventOutput !== null
+              ? resolution.call.eventOutput.value
+              : ((resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
+                resolution.existingResult?.item ??
+                resolution.call.resultItem),
         recovery: {
           interrupted: resolution.interrupted,
-          outcome: resolution.interrupted ? "unknown" : "durable_result_found",
+          outcome: resolution.notStarted
+            ? "not_started"
+            : resolution.interrupted
+              ? "unknown"
+              : "durable_result_found",
           reason: input.reason,
           unsupportedCallShape:
             resolution.interrupted && (!resolution.result || !resolution.rawCallIsValid),
@@ -463,5 +491,10 @@ export async function closePendingSessionToolCallsInTransaction(
       ),
     ),
   );
-  return { sequence, events: inserted.map(mapEvent), closed: pending.length };
+  return {
+    sequence,
+    events: inserted.map(mapEvent),
+    closed: pending.length,
+    interrupted: resolutions.filter((resolution) => resolution.interrupted).length,
+  };
 }

@@ -78859,6 +78859,8 @@ export type ApplySessionTurnSettlementInput = {
     producerSeq?: number | null;
     occurredAt?: Date;
   };
+  /** In-flight calls with call-scoped proof that their command never started. */
+  notStartedToolCallIds?: readonly string[];
 };
 
 export type ApplySessionTurnSettlementResult =
@@ -79648,8 +79650,11 @@ export async function applySessionTurnSettlement(
             reason: `turn_${input.turnStatus}`,
             sequence,
             now,
+            ...(input.notStartedToolCallIds?.length
+              ? { notStartedCallIds: input.notStartedToolCallIds }
+              : {}),
           })
-        : { sequence, events: [] as SessionEvent[], closed: 0 };
+        : { sequence, events: [] as SessionEvent[], closed: 0, interrupted: 0 };
       sequence = closedTools.sequence;
       const compactionRequestEvent: AppendEventInput | null = input.compactionRequestFailure
         ? {
@@ -80152,6 +80157,8 @@ export type RequestSessionTurnRecoveryInput = {
   /** Park proven non-dispatch after the existing five-recovery budget. */
   sandboxSetupRecoveryExhausted?: true;
   providerRecoveryCount?: number;
+  /** In-flight calls with call-scoped proof that their command never started. */
+  notStartedToolCallIds?: readonly string[];
   /** One rejected-token renewal per serving account generation on this turn. */
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
   /**
@@ -80185,6 +80192,67 @@ export type RequestSessionTurnRecoveryResult =
       turnStatus: SessionTurnStatus | null;
       activeTurnId: string | null;
     };
+
+export type SessionTurnToolProgressRecoveryState = {
+  /** The turn has a model tool call whose execution has no recorded result. */
+  toolCallInFlight: boolean;
+  /**
+   * Budgeted recoveries that interrupted a tool call since the turn's last
+   * tool progress (a recorded tool result) or explicit human Retry.
+   */
+  toolInterruptedRecoveries: number;
+};
+
+/**
+ * Evidence for bounding recoveries that interrupt tool execution. Those
+ * recoveries are followed by a successful model response before the tool runs
+ * again, so the model-response reset alone would never exhaust their budget.
+ */
+export async function readSessionTurnToolProgressRecoveryState(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId: string },
+): Promise<SessionTurnToolProgressRecoveryState> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ in_flight: boolean; recoveries: number | string }>(
+      scopedDb as unknown as Database,
+      sql`select
+        exists (
+          select 1 from session_pending_tool_calls pending
+          where pending.workspace_id = ${workspaceId}
+            and pending.session_id = ${input.sessionId}
+            and pending.turn_id = ${input.turnId}
+            and pending.result_item_ordered is null
+            and pending.interruption_kind is null
+        ) as in_flight,
+        (
+          select count(*) from session_events recovery
+          where recovery.workspace_id = ${workspaceId}
+            and recovery.session_id = ${input.sessionId}
+            and recovery.turn_id = ${input.turnId}
+            and recovery.type = 'turn.recovery.requested'
+            and recovery.payload->>'toolCallInterrupted' = 'true'
+            and recovery.sequence > coalesce((
+              select max(progress.sequence) from session_events progress
+              where progress.workspace_id = ${workspaceId}
+                and progress.session_id = ${input.sessionId}
+                and progress.turn_id = ${input.turnId}
+                and (
+                  (progress.type = 'agent.toolCall.output'
+                    and coalesce(progress.payload->'recovery'->>'outcome', 'durable_result_found')
+                      = 'durable_result_found')
+                  or (progress.type = 'turn.recovery.requested'
+                    and progress.payload->>'reason' = 'human_retry')
+                )
+            ), 0)
+        ) as recoveries`,
+    );
+    return {
+      toolCallInFlight: row?.in_flight === true,
+      toolInterruptedRecoveries: Number(row?.recoveries ?? 0),
+    };
+  });
+}
 
 export async function requestSessionTurnRecovery(
   db: Database,
@@ -80397,6 +80465,9 @@ export async function requestSessionTurnRecovery(
           sequence,
           now,
           preserveInterruptionRows: true,
+          ...(input.notStartedToolCallIds?.length
+            ? { notStartedCallIds: input.notStartedToolCallIds }
+            : {}),
         },
       );
       sequence = closedTools.sequence;
@@ -80419,6 +80490,11 @@ export async function requestSessionTurnRecovery(
                   ...(input.detail ?? {}),
                   triggerEventId: input.triggerEventId,
                   reason: input.reason,
+                  // Durable fact for the tool-progress recovery bound: this
+                  // budgeted recovery interrupted an in-flight tool call.
+                  ...(input.providerRecoveryCount !== undefined && closedTools.interrupted > 0
+                    ? { toolCallInterrupted: true }
+                    : {}),
                   ...(providerArtifactsInvalidated > 0 ? { providerArtifactsInvalidated } : {}),
                 },
                 occurredAt: now,
