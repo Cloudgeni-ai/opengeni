@@ -12,6 +12,12 @@ import {
   useCodexAccounts,
   type CodexAccountsClientLike,
 } from "../src/hooks/use-codex-accounts";
+import {
+  invalidateSharedQueries,
+  retainSharedQueries,
+  sharedQueryWriter,
+} from "../src/hooks/shared-query";
+import { recordCodexLiveUsage } from "../src/hooks/use-codex-accounts";
 import type {
   CodexAccount,
   CodexAccountsResponse,
@@ -388,6 +394,336 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
     returned = await actRun(() => hook.result.current.refreshUsage());
     await flush();
     expect(returned).toBe(false);
+    await hook.unmount();
+  });
+});
+
+describe("useCodexAccounts — shared cache across remounts", () => {
+  test("navigating back renders the retained accounts and live usage at once", async () => {
+    let reads = 0;
+    let usageReads = 0;
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        throw new Error("must use session projection");
+      },
+      listSessionCodexAccounts: async () => {
+        reads += 1;
+        return sessionResponse([account("a", { weekly: win(20, 604800) })], {
+          currentSelection: { credentialId: "a", waiting: false },
+          currentAccount: account("a", { weekly: win(20, 604800) }),
+        });
+      },
+      refreshCodexUsage: async () => {
+        usageReads += 1;
+        return {
+          usage: {
+            a: {
+              status: "ok" as const,
+              usage: {
+                status: "ok" as const,
+                planType: "pro",
+                fiveHour: win(10, 18000),
+                weekly: win(30, 604800),
+                limitReached: false,
+                fetchedAt: new Date().toISOString(),
+              },
+            },
+          },
+        };
+      },
+    };
+    // The host opted into keeping reads across mounts for this client.
+    const release = retainSharedQueries(codexClient);
+    const render = () =>
+      renderHook(() => {
+        const result = useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "session",
+          codexClient,
+          events: [],
+          pollIntervalMs: 0,
+        });
+        rendered.push({ loading: result.loading, accounts: result.accounts.length });
+        return result;
+      }, undefined);
+    let rendered: { loading: boolean; accounts: number }[] = [];
+    const first = await render();
+    await flush();
+    expect(await actRun(() => first.result.current.refreshUsage())).toBe(true);
+    await flush();
+    expect(first.result.current.accounts[0]?.weekly?.percent).toBe(30);
+    await first.unmount();
+    const readsBefore = reads;
+
+    rendered = [];
+    const second = await render();
+    // Every render of the revisit already has the rows: no skeleton flash.
+    expect(rendered.every((each) => !each.loading && each.accounts === 1)).toBe(true);
+    expect(second.result.current.accounts[0]?.weekly?.percent).toBe(30);
+    expect(second.result.current.liveUsageUpdatedAt).not.toBeNull();
+    // Reopening within the reuse window does not ask the provider again.
+    expect(await actRun(() => second.result.current.refreshUsage({ maxAgeMs: 30_000 }))).toBe(true);
+    await flush();
+    expect(usageReads).toBe(1);
+    expect(reads).toBe(readsBefore);
+    await second.unmount();
+    release();
+  });
+
+  test("concurrent live usage refreshes share one provider read", async () => {
+    let usageReads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => response([account("a")]),
+      refreshCodexUsage: async () => {
+        usageReads += 1;
+        await gate;
+        return { usage: {} };
+      },
+    };
+    const a = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    const b = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    await flush();
+    let pending!: Promise<boolean[]>;
+    await actRun(async () => {
+      pending = Promise.all([a.result.current.refreshUsage(), b.result.current.refreshUsage()]);
+    });
+    await actRun(async () => release());
+    expect(await actRun(() => pending)).toEqual([true, true]);
+    expect(usageReads).toBe(1);
+    await a.unmount();
+    await b.unmount();
+  });
+
+  test("switching accounts evicts the workspace's other retained Codex reads", async () => {
+    let pinned: string | null = null;
+    let workspaceReads = 0;
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        workspaceReads += 1;
+        return response([account("a"), account("b")]);
+      },
+      listSessionCodexAccounts: async () =>
+        sessionResponse([account("a"), account("b")], { pinnedAccountId: pinned }),
+      pinSessionCodexAccount: async (_workspaceId, _sessionId, target) => {
+        pinned = target;
+        return { pinned: target, appliedTo: "next_turn" };
+      },
+    };
+    const release = retainSharedQueries(codexClient);
+    const workspace = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    await flush();
+    await workspace.unmount();
+    expect(workspaceReads).toBe(1);
+
+    const session = await renderHook(
+      () =>
+        useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "session",
+          codexClient,
+          events: [],
+          pollIntervalMs: 0,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(await actRun(() => session.result.current.pin("b"))).toBe(true);
+    await flush();
+    expect(session.result.current.pinnedAccountId).toBe("b");
+    await session.unmount();
+
+    // The workspace list retained before the switch is re-read, not reused.
+    const again = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    await flush();
+    expect(workspaceReads).toBe(2);
+    await again.unmount();
+    release();
+  });
+});
+
+describe("useCodexAccounts — mutations reach every surface", () => {
+  function pool(initialPinned: string | null = null) {
+    const state = { pinned: initialPinned, workspaceReads: 0, sessionReads: 0 };
+    let gate: Promise<void> | null = null;
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        state.workspaceReads += 1;
+        return response([account("a"), account("b")]);
+      },
+      listSessionCodexAccounts: async () => {
+        state.sessionReads += 1;
+        return sessionResponse([account("a"), account("b")], { pinnedAccountId: state.pinned });
+      },
+      pinSessionCodexAccount: async (_workspaceId, _sessionId, target) => {
+        if (gate) await gate;
+        state.pinned = target;
+        return { pinned: target, appliedTo: "next_turn" };
+      },
+    };
+    return {
+      state,
+      codexClient,
+      hold(): () => void {
+        let open!: () => void;
+        gate = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        return open;
+      },
+    };
+  }
+  const workspaceList = (codexClient: CodexAccountsClientLike) =>
+    renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+  const sessionSwitcher = (codexClient: CodexAccountsClientLike) =>
+    renderHook(
+      () =>
+        useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "session",
+          codexClient,
+          events: [],
+          pollIntervalMs: 0,
+        }),
+      undefined,
+    );
+
+  test("pinning in the session switcher re-reads the workspace list mounted in Settings", async () => {
+    const { state, codexClient } = pool();
+    const settings = await workspaceList(codexClient);
+    const switcher = await sessionSwitcher(codexClient);
+    await flush();
+    expect(state.workspaceReads).toBe(1);
+    expect(await actRun(() => switcher.result.current.pin("b"))).toBe(true);
+    await flush();
+    expect(state.workspaceReads).toBe(2);
+    expect(switcher.result.current.pinnedAccountId).toBe("b");
+    await switcher.unmount();
+    await settings.unmount();
+  });
+
+  test("a pin that settles after the switcher unmounted still invalidates", async () => {
+    const { state, codexClient, hold } = pool();
+    const release = retainSharedQueries(codexClient);
+    const settings = await workspaceList(codexClient);
+    const switcher = await sessionSwitcher(codexClient);
+    await flush();
+    const open = hold();
+    let pinned!: Promise<boolean>;
+    await actRun(async () => {
+      pinned = switcher.result.current.pin("b");
+    });
+    // Navigating away while the switch is still being applied.
+    await switcher.unmount();
+    const sessionReadsBefore = state.sessionReads;
+    await actRun(async () => open());
+    await actRun(() => pinned);
+    await flush();
+    // The mounted Settings list re-read the moment the switch landed ...
+    expect(state.workspaceReads).toBe(2);
+    // ... and the retained session list is not served stale on the next visit.
+    const again = await sessionSwitcher(codexClient);
+    await flush();
+    expect(state.sessionReads).toBe(sessionReadsBefore + 1);
+    expect(again.result.current.pinnedAccountId).toBe("b");
+    await again.unmount();
+    await settings.unmount();
+    release();
+  });
+
+  test("an invalidated workspace list is never shown stale on the next visit", async () => {
+    const { state, codexClient } = pool();
+    const release = retainSharedQueries(codexClient);
+    const first = await workspaceList(codexClient);
+    await flush();
+    await first.unmount();
+    await invalidateSharedQueries(codexClient, ["codex-accounts", WORKSPACE_ID]);
+    const rendered: number[] = [];
+    const again = await renderHook(() => {
+      const result = useCodexAccounts({
+        client,
+        workspaceId: WORKSPACE_ID,
+        codexClient,
+        pollIntervalMs: 0,
+      });
+      rendered.push(result.accounts.length);
+      return result;
+    }, undefined);
+    expect(rendered[0]).toBe(0);
+    await flush();
+    expect(state.workspaceReads).toBe(2);
+    await again.unmount();
+    release();
+  });
+});
+
+describe("useCodexAccounts — live usage freshness is per account", () => {
+  test("one account's recent reading never makes every account count as fresh", async () => {
+    let usageReads = 0;
+    const reading = (id: string) => ({
+      [id]: {
+        status: "ok" as const,
+        usage: {
+          status: "ok" as const,
+          planType: "pro",
+          fiveHour: null,
+          weekly: win(40, 604800),
+          limitReached: false,
+          fetchedAt: new Date().toISOString(),
+        },
+      },
+    });
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => response([account("a"), account("b")]),
+      refreshCodexUsage: async () => {
+        usageReads += 1;
+        return { usage: { ...reading("a"), ...reading("b") } };
+      },
+    };
+    const hook = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    await flush();
+    // Settings re-checked a single account (the per-account retry).
+    await actRun(async () =>
+      recordCodexLiveUsage(
+        sharedQueryWriter(codexClient),
+        codexClient,
+        WORKSPACE_ID,
+        reading("a"),
+        "merge",
+      ),
+    );
+    expect(hook.result.current.liveUsage.a).toBeDefined();
+    // Account b has no live reading: reopening the menu must ask the provider.
+    expect(await actRun(() => hook.result.current.refreshUsage({ maxAgeMs: 30_000 }))).toBe(true);
+    expect(usageReads).toBe(1);
+    // Now every listed account is recent: reuse instead of asking again.
+    expect(await actRun(() => hook.result.current.refreshUsage({ maxAgeMs: 30_000 }))).toBe(true);
+    expect(usageReads).toBe(1);
+    expect(hook.result.current.liveUsageUpdatedAt).not.toBeNull();
     await hook.unmount();
   });
 });

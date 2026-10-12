@@ -248,8 +248,7 @@ const baseComponents: Components = {
   img: MarkdownImage,
 };
 
-const MARKDOWN_LINK_CLASS =
-  "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
+const MARKDOWN_LINK_CLASS = "break-words font-medium og-link";
 
 // Keep renderer component types stable: rebuilding them remounts paragraphs,
 // destroys native selections, and resets embedded media on host updates.

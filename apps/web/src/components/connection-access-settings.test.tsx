@@ -268,6 +268,12 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
+    // The console re-reads retained subscription account lists on this event.
+    let changes = 0;
+    const changed = () => {
+      changes += 1;
+    };
+    window.addEventListener("model-connections-changed", changed);
     const choose = async (text: string) =>
       act(async () => {
         const radio = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
@@ -322,7 +328,9 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper
         },
       ]);
       expect(closed).toBe(1);
+      expect(changes).toBe(1);
     } finally {
+      window.removeEventListener("model-connections-changed", changed);
       await act(async () => root.unmount());
       container.remove();
     }

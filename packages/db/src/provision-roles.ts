@@ -2259,7 +2259,7 @@ BEGIN
       END IF;
     END LOOP;
     -- The drained cutover uses private routines: no previous binary remains.
-    -- Migration 0743 gives the plan-change and auto-assignment trigger
+    -- Migration 0744 gives the plan-change and auto-assignment trigger
     -- functions provider-free names.
     FOREACH routine_signature IN ARRAY ARRAY[
       'subscription_codex_cutover_v1_active()',

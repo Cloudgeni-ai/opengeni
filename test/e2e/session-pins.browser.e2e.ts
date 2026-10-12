@@ -2026,7 +2026,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
   test("retains group rows and leaves unrelated pagination failures retryable", async () => {
     const context = await configuredContext(browser, {
-      viewport: { width: 1280, height: 800 },
+      // This proof counts the rail's four-row Show more steps across page
+      // boundaries. A short rail has no spare height, so it adds no automatic
+      // fill rows and keeps that exact step contract.
+      viewport: { width: 1280, height: 400 },
       extraHTTPHeaders: ownerHeaders,
     });
     const page = await context.newPage();

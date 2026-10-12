@@ -57,7 +57,7 @@ export function KnowledgeIndexNotice({
               to="/workspaces/$workspaceId/organization"
               params={{ workspaceId }}
               search={{ section: "billing" }}
-              className="inline-flex min-h-10 items-center font-medium text-brand underline-offset-2 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+              className="inline-flex min-h-10 items-center font-medium og-link focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
             >
               Add credits
             </Link>
@@ -109,7 +109,7 @@ export function KnowledgeSearchFallback({
             to="/workspaces/$workspaceId/organization"
             params={{ workspaceId }}
             search={{ section: "billing" }}
-            className="font-medium text-brand underline-offset-2 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            className="font-medium og-link focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
           >
             Add credits
           </Link>

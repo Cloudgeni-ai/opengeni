@@ -107,7 +107,7 @@ beforeAll(async () => {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${MIGRATION}), (${API_KEY_CONNECTIONS}),
       (${PERSONAL_CONNECT_FORMAT}),
-      (${PERSONAL_CONNECTION_VERSIONS}), (${RETIREMENT}), ('0738_subscription_failover_readiness_and_request_fence.sql'), ('0741_subscription_shared_personal_choice.sql'), ('0742_subscription_waiter_candidates.sql')`;
+      (${PERSONAL_CONNECTION_VERSIONS}), (${RETIREMENT}), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {

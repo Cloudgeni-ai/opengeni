@@ -477,7 +477,7 @@ function OptionRow({ option }: { option: IntegrationOption }) {
         onClick={option.action.onClick}
         disabled={option.disabled || option.busy}
         aria-describedby={describedBy(option.disclosureId)}
-        className="rounded-sm text-xs font-medium text-brand hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded-sm text-xs font-medium og-link disabled:cursor-not-allowed disabled:opacity-50"
       >
         {option.action.label}
       </button>

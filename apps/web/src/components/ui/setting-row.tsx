@@ -502,7 +502,7 @@ export function SettingRowLink({
   disabled?: boolean;
 }) {
   const classes = cn(
-    "relative inline-flex min-h-6 items-center gap-1 rounded-sm text-xs font-medium text-brand underline-offset-2 hover:underline pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2.5",
+    "relative inline-flex min-h-6 items-center gap-1 rounded-sm text-xs font-medium og-link pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2.5",
     className,
   );
   const content = (

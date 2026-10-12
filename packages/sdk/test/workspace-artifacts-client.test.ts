@@ -90,3 +90,31 @@ test("Site lifecycle uses published artifact routes and preserves actor, version
   ).rejects.toThrow();
   expect(calls).toHaveLength(7);
 });
+
+test("Site audience changes go through the owner's visibility route", async () => {
+  const calls: { url: URL; method: string | undefined; body: unknown; actor: string | null }[] = [];
+  const client = new OpenGeniClient({
+    baseUrl: "https://fixture.invalid",
+    apiKey: "synthetic",
+    fetch: async (url, init) => {
+      calls.push({
+        url: new URL(String(url)),
+        method: init?.method,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+        actor: new Headers(init?.headers).get("x-opengeni-external-actor"),
+      });
+      return Response.json({ artifact: { id: "site/one", visibility: "workspace" } });
+    },
+  }).asUser("site-owner");
+  const response = await client.updateWorkspaceArtifactVisibility("space/one", "site/one", {
+    visibility: "workspace",
+  });
+  expect(response.artifact.visibility).toBe("workspace");
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.method).toBe("PUT");
+  expect(calls[0]!.url.pathname).toBe(
+    "/v1/workspaces/space%2Fone/published-artifacts/site%2Fone/visibility",
+  );
+  expect(calls[0]!.body).toEqual({ visibility: "workspace" });
+  expect(calls[0]!.actor).not.toBeNull();
+});

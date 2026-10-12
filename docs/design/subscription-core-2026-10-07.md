@@ -2397,11 +2397,11 @@ a provider name.
   M6 if that step is merged first, in a migration that runs only once no
   binary older than 0707 can start (a readiness check on the neutral routines
   already prevents an older database from serving a newer binary).
-  R's drained migration 0743 drops the 19 twins with the owner-only writer
+  R's drained migration 0744 drops the 19 twins with the owner-only writer
   context (called by four of them) and connection target. That needs the
   release containing the posture's twin tolerance (#4128) to be the minimum
   running one, which a drained window gives: afterwards only the release
-  carrying 0743 starts, and every older release refuses the retired
+  carrying 0744 starts, and every older release refuses the retired
   database. The drop is one transaction, so a partial drop cannot remain.
 - Genuinely Codex-only, and staying so: the Codex Apps routines and the
   reset-credit authority and fence.
@@ -4037,7 +4037,7 @@ Decisions, each the strictest fail-closed reading of the plan and contract:
   drops their Codex default; none of that can run while a rolling migration
   must stay off the workspace, membership and connection tables and keep
   the names and defaults older binaries use.
-  R (0743) does this; see "R: retirement of the legacy pool routines and the
+  R (0744) does this; see "R: retirement of the legacy pool routines and the
   Codex twins".
   `list_organization_codex_workspace_ids`
   stays while the legacy SuperGrok and Claude organization wakes call it
@@ -4906,11 +4906,11 @@ connect writer gains `credentialFormat` and `personal`.
 
 #### X3: the drained SuperGrok cutover
 
-Migration 0739 (`-- deployment-mode: maintenance`) is the SuperGrok
+Migration 0740 (`-- deployment-mode: maintenance`) is the SuperGrok
 counterpart of 0689 and follows "Data mapping", "Accepted authority across
 the cutover", "Personal authority generations" and "Cutover protocol"
 above. The runbook is `docs/deployment.md`, "SuperGrok on the shared
-subscription core (0739)". Choices made where the plan left room, for
+subscription core (0740)". Choices made where the plan left room, for
 reviewers:
 
 - **One writer for every provider's stage.** The credential stage is
@@ -4941,7 +4941,7 @@ reviewers:
   `personalFallbackAllowed`). `subscription_effective_settings` already
   ignores a workspace override of a locked key, so the effective outcome is
   the one the lock gives, and M5's trigger, which refuses a workspace write
-  of a locked key with `42501`, is never contradicted (0739 disables
+  of a locked key with `42501`, is never contradicted (0740 disables
   non-internal triggers on the relations it moves during the owner window,
   so the trigger would not fire there, but an unseen override would take
   effect if the organization later unlocked the key). The workspace follows
@@ -5000,8 +5000,8 @@ reviewers:
   binds, so they cannot write either. The policies leave deletes open.
   Organization retention deletion removes an offboarded member's migrated
   connection with their Personal workspace; row security hides their legacy
-  `user` rows from it, as before the cutover, and 0739 has blanked those rows'
-  ciphertext. 0739 reduces the legacy disconnect routine to a refusal with
+  `user` rows from it, as before the cutover, and 0740 has blanked those rows'
+  ciphertext. 0740 reduces the legacy disconnect routine to a refusal with
   `55000` (its old body could never run after the receipt), so it can never
   report a revocation while the moved connection keeps serving. Membership lifecycle still revokes, retains and restores the
   existing authorities. The migration asserts FORCE on the five tables.
@@ -5018,16 +5018,16 @@ reviewers:
 - **Quota window.** A SuperGrok connection's quota snapshot has one window,
   id `billing` (`SUBSCRIPTION_CORE_XAI_QUOTA_WINDOW_ID`), the id the core
   adapter writes for SuperGrok usage.
-- **Readiness.** `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai` is 0739, so a
-  binary with 0739 in its ledger refuses to start without the `xai` receipt
+- **Readiness.** `SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai` is 0740, so a
+  binary with 0740 in its ledger refuses to start without the `xai` receipt
   (the provider-keyed readiness function
   `subscription_provider_cutover_committed('xai')`).
 - **Tests of the legacy runtime.** Characterization tests of the legacy
-  SuperGrok runtime run in a database that withholds 0739 (the shared test
+  SuperGrok runtime run in a database that withholds 0740 (the shared test
   harness's `withheldMigrations` option builds a separate template with
   those ledger rows pre-recorded), the state a rolling deployment has
   before the window. X4 deletes them with the legacy runtime.
-- **Temporal seam.** 0739 keeps every live waiter's id (as `waiter_id`),
+- **Temporal seam.** 0740 keeps every live waiter's id (as `waiter_id`),
   generation, wake revisions and blocked-turn generation and moves its
   pending wake to the wake outbox, so a workflow parked on a legacy
   SuperGrok wait reconciles the reference its history recorded (`provider:
@@ -6018,11 +6018,11 @@ designed here and are carried by C2a.
 
 #### C3: the drained Claude cutover
 
-Migration 0740 (`-- deployment-mode: maintenance`) is the Claude counterpart
-of 0739 and follows "Data mapping", "Accepted authority across the
+Migration 0741 (`-- deployment-mode: maintenance`) is the Claude counterpart
+of 0740 and follows "Data mapping", "Accepted authority across the
 cutover", "Personal authority generations" and "Cutover protocol" above.
 The runbook is `docs/deployment.md`, "Claude on the shared subscription core
-(0740)". It reuses X3's machinery rather than forking it: the receipt,
+(0741)". It reuses X3's machinery rather than forking it: the receipt,
 registry row, readiness, `subscription_cutover_report`, compatibility
 records, the neutral planner and `subscription-core/cutover-stage.ts`. C3
 generalizes the pieces X3 had inline: the migrator runs every provider's
@@ -6049,7 +6049,7 @@ Choices made where the plan left room, for reviewers:
   the combined-window ledger test refuses a stack that violates that order.
 - **Format.** The legacy plaintext is copied unchanged; the stage writes
   `claude_oauth_v1` for a secret with `oauth` and `claude_setup_token_v1`
-  otherwise, the formats the adapter derives at runtime (as 0739 writes
+  otherwise, the formats the adapter derives at runtime (as 0740 writes
   `xai_oauth_v1`). The column is informational: no decision reads it, the
   adapter derives the format from the decrypted secret, and the shared
   connect and reconnect writers record the envelope version `v1`, so a
@@ -6123,14 +6123,14 @@ Choices made where the plan left room, for reviewers:
   commands only: a restrictive policy that also covered SELECT would make
   the lifecycle-facts backfill of 0565 refuse the table), and the legacy
   disconnect refuses after the receipt.
-- **Together with SuperGrok.** 0739 and 0740 share no legacy table or key,
+- **Together with SuperGrok.** 0740 and 0741 share no legacy table or key,
   so one migrator run applies both in ledger order, each in its own
   transaction with its own report and readiness gate; a Claude abort leaves
-  0739 committed and a rerun resumes at 0740. The combined-window ledger
+  0740 committed and a rerun resumes at 0741. The combined-window ledger
   test (`subscription-core-combined-cutover-ledger.test.ts`) proves this
   and that only rolling migrations lie between them.
 - **Merge gates as ordinary tests.** The Claude seam integration test's
-  peek and reconcile cases need C1b's Claude core waits, and the 0740 test's
+  peek and reconcile cases need C1b's Claude core waits, and the 0741 test's
   "a newer Claude usage reading that omits a still-exhausted window" case
   needs C2a's `usageReadingsComplete: false`. They are ordinary tests, red
   until those land in the base, so C3 cannot pass its exact-head validation
@@ -6140,14 +6140,14 @@ Choices made where the plan left room, for reviewers:
 #### R: retirement of the legacy pool routines and the Codex twins
 
 R is the last M4 step. Its drained maintenance migration
-`0743_subscription_core_legacy_retirement.sql` runs after both provider
-cutovers (0739, 0740). It drops the legacy decision routines of the 0234 and
+`0744_subscription_core_legacy_retirement.sql` runs after both provider
+cutovers (0740, 0741). It drops the legacy decision routines of the 0234 and
 0598 pool factory, the triggers and policies that call them and the
 Codex-named twins of the 0707 neutral routines, each by exact name and
 signature and never with `CASCADE`, and it finalizes the provider-keyed
 reach rows (0713 note "Kept until retirement"). The whole file is one
 transaction. Runbook:
-[deployment, subscription legacy retirement (0743)](../deployment.md#subscription-legacy-retirement-0743).
+[deployment, subscription legacy retirement (0744)](../deployment.md#subscription-legacy-retirement-0744).
 
 - **Preflight.** It changes nothing and refuses with a content-free `55000`
   unless: the migrator passed the application roles, and neither they nor
@@ -6175,7 +6175,7 @@ transaction. Runbook:
   covers the SQL that X4 and C4 leave deciding on stored v1 values
   (`admit_scheduled_agent_run_execution`,
   `record_scheduled_task_revision_authority` and their peers): none calls,
-  names or builds the name of a dropped routine, and the 0743 suite asserts
+  names or builds the name of a dropped routine, and the 0744 suite asserts
   that they are unchanged.
 - **Drops, dependents first.**
   - 21 policies: each provider's `*_subscription_scope` and four
@@ -6250,7 +6250,7 @@ transaction. Runbook:
     SuperGrok and Claude routine and grant requirements, and
     `claude_subscription_pool_protocol_v1_active` is no longer a readiness
     requirement.
-  - So the R release refuses a database that has not run 0743, and every
+  - So the R release refuses a database that has not run 0744, and every
     older release refuses one that has, because its posture requires the
     dropped routines.
 - **provision-roles** derives conditional owner-only revokes from the shared
@@ -6287,7 +6287,7 @@ transaction. Runbook:
   waiter wake helper remains: it performs bounded invalidation, restores the
   caller's context and grants no authority to run or read another session.
 - **Fresh install.** A fresh database replays every migration. 0689 seeds
-  the Codex receipt, and 0739 and 0740 commit theirs on an empty database,
+  the Codex receipt, and 0740 and 0741 commit theirs on an empty database,
   so the preflight passes unchanged; no fresh-install exception weakens the
   upgrade check.
 - **#4128 notes.** The twins could be dropped only once the release

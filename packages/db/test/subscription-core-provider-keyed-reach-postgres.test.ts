@@ -55,10 +55,10 @@ const LATER_MIGRATIONS = ["0714_subscription_workspace_managed_organization_acco
 // maintenance steps this rolling test never runs: they stay recorded as
 // applied throughout.
 const MAINTENANCE_MIGRATIONS = [
-  "0738_subscription_failover_readiness_and_request_fence.sql",
-  "0739_subscription_core_xai_cutover.sql",
-  "0740_subscription_core_claude_cutover.sql",
-  "0741_subscription_shared_personal_choice.sql",
+  "0739_subscription_failover_readiness_and_request_fence.sql",
+  "0740_subscription_core_xai_cutover.sql",
+  "0741_subscription_core_claude_cutover.sql",
+  "0742_subscription_shared_personal_choice.sql",
   SUBSCRIPTION_RETIREMENT_MIGRATION,
 ];
 // A binary that knows 0719, 0720 and the retirement reports only the objects
@@ -66,8 +66,8 @@ const MAINTENANCE_MIGRATIONS = [
 // the maintenance steps run.
 const BEFORE_XAI_CUTOVER = [
   ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
-  "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
-  "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0740_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0741_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
 // 0715 rewrites routines 0713 and 0714 create, so a deployment before 0713
 // is also before it: held back while 0713 is applied, then applied.
@@ -549,8 +549,8 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
         sql`select current_user as role`,
       );
       expect(current?.role).toBe("opengeni_app");
-      // 0715, and 0728 and 0740 (built on it), are still held back here, so
-      // this binary also reports the routines 0728 and 0740 add as missing.
+      // 0715, and 0728 and 0741 (built on it), are still held back here, so
+      // this binary also reports the routines 0728 and 0741 add as missing.
       expect(staged!.unprovisionedPosture).toEqual([
         ...BEFORE_XAI_CUTOVER,
         "subscription M3 precursor private routine connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text) is missing or unsafe",

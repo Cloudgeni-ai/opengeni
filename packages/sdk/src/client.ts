@@ -52,6 +52,8 @@ import type {
 import type {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  UpdateWorkspaceArtifactVisibilityRequest,
+  UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -8236,6 +8238,22 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "PATCH",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/status`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change who can see a Site: the whole workspace, or only you. Only its owner can. */
+  async updateWorkspaceArtifactVisibility(
+    workspaceId: string,
+    artifactId: string,
+    request: UpdateWorkspaceArtifactVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateWorkspaceArtifactVisibilityResponse> {
+    return await this.requestJson<UpdateWorkspaceArtifactVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/visibility`,
       request,
       undefined,
       options,

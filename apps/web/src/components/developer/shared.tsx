@@ -89,7 +89,7 @@ export function ExternalLink({ href, children }: { href: string; children: React
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center gap-0.5 rounded-sm font-medium text-brand underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand/55"
+      className="inline-flex items-center gap-0.5 rounded-sm font-medium og-link outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
     >
       {children}
       <ArrowUpRightIcon aria-hidden="true" className="size-3.5" />

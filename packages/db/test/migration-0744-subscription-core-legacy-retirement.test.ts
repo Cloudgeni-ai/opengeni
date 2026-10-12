@@ -1,9 +1,9 @@
 /**
- * Migration 0743: the drained M4 retirement (design
+ * Migration 0744: the drained M4 retirement (design
  * docs/design/subscription-core-2026-10-07.md, 5.3 "R. Retirement" and the
  * 0713 note "Kept until retirement"). On a real database whose owner is
- * NOSUPERUSER and NOBYPASSRLS, migrated through the SuperGrok (0739) and
- * Claude (0740) cutovers, the retirement refuses with a content-free error
+ * NOSUPERUSER and NOBYPASSRLS, migrated through the SuperGrok (0740) and
+ * Claude (0741) cutovers, the retirement refuses with a content-free error
  * and changes nothing unless the application sessions are drained, every
  * provider's cutover receipt is committed, every retired object exists
  * exactly as listed and nothing that stays depends on one. It then drops
@@ -63,7 +63,7 @@ const key = Buffer.alloc(32, 83);
 const PENDING_RETIREMENT = retiredSubscriptionObjectDescriptions().map(
   retiredSubscriptionObjectViolation,
 );
-/** The setting 0689's owner-only auto-assignment policies read before 0743. */
+/** The setting 0689's owner-only auto-assignment policies read before 0744. */
 const CODEX_AUTO_ASSIGN_SETTING = "opengeni.subscription_codex_auto_assign";
 const CODEX_REACH = "opengeni_private.subscription_codex_auto_assignments";
 const CORE_REACH = "opengeni_private.subscription_core_auto_assignments";
@@ -77,8 +77,8 @@ const REACH_CONSTRAINTS = [
 const REACH_PROVIDER_KEY = "subscription_core_auto_assignments_connection_provider_fkey";
 const FACTORY_TABLES = Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES).flat().sort();
 /**
- * The X3/C3 restrictive policies the retirement keeps: 0739 closes each
- * SuperGrok table with one policy, 0740 each Claude table with one per write
+ * The X3/C3 restrictive policies the retirement keeps: 0740 closes each
+ * SuperGrok table with one policy, 0741 each Claude table with one per write
  * command, and both close their personal authority kind.
  */
 const CLOSED_POLICIES = [
@@ -433,7 +433,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retirement", () => {
+describe.skipIf(!realDb)("migration 0744: the drained subscription legacy retirement", () => {
   test("the posture of this release reports exactly the pending retirement, as the application role", async () => {
     expect(await receipts()).toEqual(["claude", "codex", "xai"]);
     expect(await appPosture()).toEqual(PENDING_RETIREMENT);
@@ -444,7 +444,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
     const before = await catalog();
     await expect(Promise.resolve(owner!.unsafe(source))).rejects.toMatchObject({
       code: "55000",
-      message: "0743 requires explicit application database roles",
+      message: "0744 requires explicit application database roles",
     });
     expect(diff(before, await catalog())).toEqual(NO_CHANGE);
     expect(await ledger()).toBe(0);
@@ -493,7 +493,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
     const app = postgres(appUrl(), { max: 1, onnotice: () => undefined });
     try {
       await app`select 1`;
-      await refused("55000", "0743 requires drained application sessions");
+      await refused("55000", "0744 requires drained application sessions");
     } finally {
       await app.end();
       await drained();
@@ -519,7 +519,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
       await unlisted`select 1`;
       await refused(
         "55000",
-        "0743 requires drained application sessions (a connected role outside the listed application roles can use a retired object)",
+        "0744 requires drained application sessions (a connected role outside the listed application roles can use a retired object)",
       );
     } finally {
       await unlisted.end();
@@ -581,7 +581,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
           }
           await refused(
             "55000",
-            "0743 requires drained application sessions (a connected role outside the listed application roles can use a retired object)",
+            "0744 requires drained application sessions (a connected role outside the listed application roles can use a retired object)",
           );
         }
         await client`RESET ROLE`;
@@ -612,7 +612,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
       try {
         await refused(
           "55000",
-          `0743 requires the committed cutover receipt of every provider; missing: ${provider}`,
+          `0744 requires the committed cutover receipt of every provider; missing: ${provider}`,
         );
       } finally {
         // Bound as text: the Codex receipt's committed_at is '-infinity',
@@ -633,49 +633,49 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         change: `ALTER FUNCTION resolve_xai_authority_pool(uuid, uuid, text, jsonb) RENAME TO resolve_xai_authority_pool_moved`,
         restore: `ALTER FUNCTION resolve_xai_authority_pool_moved(uuid, uuid, text, jsonb) RENAME TO resolve_xai_authority_pool`,
         message:
-          /^0743 found a retired routine missing or changed: public\.resolve_xai_authority_pool\(/,
+          /^0744 found a retired routine missing or changed: public\.resolve_xai_authority_pool\(/,
       },
       {
         change: `ALTER FUNCTION opengeni_subscription_internal.subscription_codex_writer_context(uuid, uuid, text) RENAME TO subscription_codex_writer_context_moved`,
         restore: `ALTER FUNCTION opengeni_subscription_internal.subscription_codex_writer_context_moved(uuid, uuid, text) RENAME TO subscription_codex_writer_context`,
         message:
-          /^0743 found a retired routine missing or changed: opengeni_subscription_internal\./,
+          /^0744 found a retired routine missing or changed: opengeni_subscription_internal\./,
       },
       {
         change: `CREATE FUNCTION opengeni_private.subscription_codex_reach(uuid) RETURNS boolean LANGUAGE sql AS 'SELECT false'`,
         restore: `DROP FUNCTION opengeni_private.subscription_codex_reach(uuid)`,
         message:
-          "0743 found an unexpected overload of a retired routine: opengeni_private.subscription_codex_reach(uuid); see the runbook",
+          "0744 found an unexpected overload of a retired routine: opengeni_private.subscription_codex_reach(uuid); see the runbook",
       },
       {
         change: `ALTER POLICY claude_usage_account_scope ON claude_subscription_account_usage RENAME TO claude_usage_account_scope_moved`,
         restore: `ALTER POLICY claude_usage_account_scope_moved ON claude_subscription_account_usage RENAME TO claude_usage_account_scope`,
         message:
-          "0743 found a retired policy missing: claude_subscription_account_usage.claude_usage_account_scope; see the runbook",
+          "0744 found a retired policy missing: claude_subscription_account_usage.claude_usage_account_scope; see the runbook",
       },
       {
         change: `ALTER TRIGGER xai_pin_credential_pool_guard ON xai_session_account_pins RENAME TO xai_pin_credential_pool_guard_moved`,
         restore: `ALTER TRIGGER xai_pin_credential_pool_guard_moved ON xai_session_account_pins RENAME TO xai_pin_credential_pool_guard`,
         message:
-          "0743 found a retired trigger missing or changed: xai_session_account_pins.xai_pin_credential_pool_guard.enforce_xai_credential_pool_reference; see the runbook",
+          "0744 found a retired trigger missing or changed: xai_session_account_pins.xai_pin_credential_pool_guard.enforce_xai_credential_pool_reference; see the runbook",
       },
       {
         change: `ALTER TABLE ${CODEX_REACH} ALTER COLUMN provider DROP DEFAULT`,
         restore: `ALTER TABLE ${CODEX_REACH} ALTER COLUMN provider SET DEFAULT 'codex'`,
         message:
-          "0743 found the reach table, its view, its default or the connection key changed; see the runbook",
+          "0744 found the reach table, its view, its default or the connection key changed; see the runbook",
       },
       {
         change: `ALTER TRIGGER workspaces_subscription_codex_auto_assign ON workspaces RENAME TO workspaces_subscription_codex_auto_assign_moved`,
         restore: `ALTER TRIGGER workspaces_subscription_codex_auto_assign_moved ON workspaces RENAME TO workspaces_subscription_codex_auto_assign`,
         message:
-          "0743 found a reach trigger missing, changed or already renamed: workspaces.workspaces_subscription_codex_auto_assign; see the runbook",
+          "0744 found a reach trigger missing, changed or already renamed: workspaces.workspaces_subscription_codex_auto_assign; see the runbook",
       },
       {
         change: `ALTER POLICY subscription_connection_workspaces_codex_auto_assign ON subscription_connection_workspaces RENAME TO subscription_connection_workspaces_core_auto_assign`,
         restore: `ALTER POLICY subscription_connection_workspaces_core_auto_assign ON subscription_connection_workspaces RENAME TO subscription_connection_workspaces_codex_auto_assign`,
         message:
-          "0743 found a reach policy missing, changed or already renamed: subscription_connection_workspaces.subscription_connection_workspaces_codex_auto_assign; see the runbook",
+          "0744 found a reach policy missing, changed or already renamed: subscription_connection_workspaces.subscription_connection_workspaces_codex_auto_assign; see the runbook",
       },
     ];
     for (const { change, restore, message } of cases) {
@@ -698,7 +698,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP FUNCTION public.r0743_atomic_dependent()`,
         code: "2BP01",
         message:
-          /^0743 found a kept object that depends on a retired routine: function r0743_atomic_dependent\(\)/,
+          /^0744 found a kept object that depends on a retired routine: function r0743_atomic_dependent\(\)/,
       },
       {
         change: `CREATE VIEW public.r0743_view_dependent AS
@@ -706,7 +706,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP VIEW public.r0743_view_dependent`,
         code: "2BP01",
         message:
-          /^0743 found a kept object that depends on a retired routine: rule _RETURN on view r0743_view_dependent/,
+          /^0744 found a kept object that depends on a retired routine: rule _RETURN on view r0743_view_dependent/,
       },
       {
         // A PL/pgSQL body is found by name.
@@ -715,7 +715,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP FUNCTION public.r0743_plpgsql_dependent()`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a retired object: routine r0743_plpgsql_dependent()",
+          "0744 found a kept object that names a retired object: routine r0743_plpgsql_dependent()",
       },
       {
         change: `CREATE POLICY r0743_policy_dependent ON xai_rotation_settings AS RESTRICTIVE
@@ -723,7 +723,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP POLICY r0743_policy_dependent ON xai_rotation_settings`,
         code: "2BP01",
         message:
-          /^0743 found a kept object that depends on a retired routine: policy r0743_policy_dependent on table xai_rotation_settings/,
+          /^0744 found a kept object that depends on a retired routine: policy r0743_policy_dependent on table xai_rotation_settings/,
       },
       {
         // Dynamic SQL in a kept routine could reach a retired trigger by name.
@@ -732,7 +732,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP FUNCTION public.r0743_trigger_dependent()`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a retired object: routine r0743_trigger_dependent()",
+          "0744 found a kept object that names a retired object: routine r0743_trigger_dependent()",
       },
       {
         // A string in a SQL-standard body has no catalog dependency.
@@ -741,7 +741,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP FUNCTION public.r0743_atomic_named()`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a retired object: routine r0743_atomic_named()",
+          "0744 found a kept object that names a retired object: routine r0743_atomic_named()",
       },
       {
         // A name built at run time: a format() pattern, a concatenation
@@ -758,7 +758,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
           DROP FUNCTION public.r0743_built_leading(text)`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a retired object: routine r0743_built_concat(text), routine r0743_built_format(text), routine r0743_built_leading(text)",
+          "0744 found a kept object that names a retired object: routine r0743_built_concat(text), routine r0743_built_format(text), routine r0743_built_leading(text)",
       },
       {
         // A CHECK constraint, a default, a trigger's arguments and a view.
@@ -775,7 +775,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
           DROP FUNCTION public.r0743_pass_through()`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a retired object: constraint r0743_named_check, default r0743_named.routine, trigger r0743_named.r0743_named_trigger, view r0743_named_view",
+          "0744 found a kept object that names a retired object: constraint r0743_named_check, default r0743_named.routine, trigger r0743_named.r0743_named_trigger, view r0743_named_view",
       },
       {
         change: `CREATE POLICY r0743_policy_named ON xai_rotation_settings AS RESTRICTIVE
@@ -783,7 +783,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP POLICY r0743_policy_named ON xai_rotation_settings`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a retired object: policy xai_rotation_settings.r0743_policy_named",
+          "0744 found a kept object that names a retired object: policy xai_rotation_settings.r0743_policy_named",
       },
       {
         change: `CREATE FUNCTION public.r0743_reach_dependent() RETURNS bigint LANGUAGE plpgsql AS
@@ -791,7 +791,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP FUNCTION public.r0743_reach_dependent()`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a Codex-named reach object: routine r0743_reach_dependent()",
+          "0744 found a kept object that names a Codex-named reach object: routine r0743_reach_dependent()",
       },
       {
         change: `CREATE FUNCTION public.r0743_reach_built(provider text) RETURNS void LANGUAGE plpgsql AS
@@ -799,7 +799,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         restore: `DROP FUNCTION public.r0743_reach_built(text)`,
         code: "2BP01",
         message:
-          "0743 found a kept object that names a Codex-named reach object: routine r0743_reach_built(text)",
+          "0744 found a kept object that names a Codex-named reach object: routine r0743_reach_built(text)",
       },
     ];
     for (const { change, restore, code, message } of cases) {
@@ -822,7 +822,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
       await database!.admin`select public.r0743_uppercase()`;
       await refused(
         "2BP01",
-        "0743 found a kept object that names a retired object: routine r0743_uppercase()",
+        "0744 found a kept object that names a retired object: routine r0743_uppercase()",
       );
     } finally {
       await database!.admin`DROP FUNCTION public.r0743_uppercase()`;
@@ -845,7 +845,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
         await database!.admin`select public.r0743_dollar_quoted()`;
         await refused(
           "2BP01",
-          "0743 found a kept object that names a retired object: routine r0743_dollar_quoted()",
+          "0744 found a kept object that names a retired object: routine r0743_dollar_quoted()",
         );
       } finally {
         await database!.admin`DROP FUNCTION public.r0743_dollar_quoted()`;
@@ -862,7 +862,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
     try {
       await refused(
         "23503",
-        "0743 found a reach row whose provider is not its connection's; see the runbook",
+        "0744 found a reach row whose provider is not its connection's; see the runbook",
       );
     } finally {
       await database!.admin`
@@ -1028,7 +1028,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
     expect(closed.map(([entry]) => entry).sort()).toEqual(CLOSED_POLICIES);
     for (const [entry, definition] of closed) expect(retired.get(entry)).toBe(definition);
     // The live Codex routines and the neutral core, the owner-only helpers
-    // (provider-free names where 0743 renamed them), the organization wake
+    // (provider-free names where 0744 renamed them), the organization wake
     // inventory the legacy wake still calls, and the runtime-capability tables.
     for (const routine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES)
       present(`routine ${regprocedure("opengeni_private", routine)}`);
@@ -1262,7 +1262,7 @@ describe.skipIf(!realDb)("migration 0743: the drained subscription legacy retire
   }, 300_000);
 });
 
-describe.skipIf(!realDb)("migration 0743 on a fresh install", () => {
+describe.skipIf(!realDb)("migration 0744 on a fresh install", () => {
   let fresh: OwnerMigratedTestDatabase | null = null;
 
   beforeAll(async () => {
@@ -1276,7 +1276,7 @@ describe.skipIf(!realDb)("migration 0743 on a fresh install", () => {
   }, 180_000);
 
   test("an empty database migrates through every cutover and the retirement", async () => {
-    // 0689 seeds the Codex receipt and 0739 and 0740 write theirs on an
+    // 0689 seeds the Codex receipt and 0740 and 0741 write theirs on an
     // empty database, so the retirement's receipt check passes unchanged.
     expect(await receipts(fresh!)).toEqual(["claude", "codex", "xai"]);
     expect(await ledger(fresh!)).toBe(1);

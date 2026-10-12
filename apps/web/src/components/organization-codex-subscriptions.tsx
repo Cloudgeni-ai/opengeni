@@ -12,12 +12,17 @@ import { toast } from "sonner";
 
 import { codexAccountName, planLabel } from "@/components/codex-connection";
 import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
 
 // The organization's shared Codex (ChatGPT) accounts: the data and every
 // mutation. Organization settings > Models presents them with the same rows
 // and account page anatomy as a workspace.
 
 export type OrganizationCodexSubscriptions = ReturnType<typeof useOrganizationCodexSubscriptions>;
+
+/** Shared-cache key for an organization's own Codex accounts. */
+export const organizationCodexAccountsQueryKey = (organizationId: string) =>
+  ["codex-accounts", "organization", organizationId] as const;
 
 export function useOrganizationCodexSubscriptions({
   organizationId,
@@ -29,9 +34,22 @@ export function useOrganizationCodexSubscriptions({
   /** False for people who can't read the organization's accounts: nothing is read. */
   enabled?: boolean;
 }) {
-  const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(enabled);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // Shared, client-scoped: revisiting organization settings renders the
+  // retained accounts at once and re-reads in the background.
+  const query = useSharedQuery<OrganizationCodexAccountsResponse>(
+    client,
+    organizationCodexAccountsQueryKey(organizationId),
+    () =>
+      client.requestJson<OrganizationCodexAccountsResponse>(
+        "GET",
+        `/v1/organizations/${organizationId}/codex/accounts`,
+      ),
+    { enabled },
+  );
+  const data = query.error ? null : query.data;
+  const loading = query.loading;
+  // Shown under "Couldn't load ..." as what to do; never the raw API message.
+  const loadError = query.error ? apiErrorAdvice(query.error) : null;
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<string | null>(null);
   const [pending, setPending] = useState<{
@@ -41,34 +59,20 @@ export function useOrganizationCodexSubscriptions({
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
 
+  // Organization accounts feed every workspace that inherits them, so an
+  // account change invalidates every retained Codex list for this client.
   const refresh = useCallback(async () => {
     if (!enabled) return;
-    setLoadError(null);
-    try {
-      const result = await client.requestJson<OrganizationCodexAccountsResponse>(
-        "GET",
-        `/v1/organizations/${organizationId}/codex/accounts`,
-      );
-      if (!cancelled.current) setData(result);
-    } catch (error) {
-      if (cancelled.current) return;
-      setData(null);
-      // Shown under "Couldn't load ..." as what to do; never the raw API message.
-      setLoadError(apiErrorAdvice(error));
-    } finally {
-      if (!cancelled.current) setLoading(false);
-    }
-  }, [client, organizationId, enabled]);
+    await invalidateSharedQueries(client, ["codex-accounts"]);
+  }, [client, enabled]);
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(enabled);
-    void refresh();
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
     };
-  }, [refresh, enabled]);
+  }, []);
 
   // An access save changes which workspaces list an account as their own.
   useEffect(() => {
@@ -106,7 +110,14 @@ export function useOrganizationCodexSubscriptions({
           signal: controller.signal,
         })
           .then(async (result) => {
-            if (!result || controller.signal.aborted || cancelled.current) return;
+            if (!result) return;
+            // Organization accounts feed every workspace that inherits them, so
+            // a confirmed sign-in invalidates every retained Codex list, also
+            // when the page was left as it was confirmed. (Leaving earlier
+            // stops polling: unmount aborts it and `result` is null.)
+            if (result.status === "connected")
+              void invalidateSharedQueries(client, ["codex-accounts"]);
+            if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
             if (result.status === "expired") {
               recordOutcome("expired");

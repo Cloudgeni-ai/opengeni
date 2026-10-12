@@ -6147,6 +6147,19 @@
       ]
     },
     {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/visibility",
+      "sdk": [
+        "OpenGeniClient.updateWorkspaceArtifactVisibility"
+      ],
+      "request": [
+        "UpdateWorkspaceArtifactVisibilityRequest"
+      ],
+      "response": [
+        "UpdateWorkspaceArtifactVisibilityResponse"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/uploads",
       "sdk": [
@@ -9650,7 +9663,8 @@
         "$.status": "ref(TaskNoteStatus)!",
         "$.title": "string!",
         "$.updatedAt": "string!",
-        "$.versionId": "string?"
+        "$.versionId": "string?",
+        "$.visibility": "ref(SessionVisibility)?"
       }
     },
     "ArtifactCatalogKind": {
@@ -13672,7 +13686,8 @@
         "$.slug": "string?",
         "$.source": "ref(WorkspaceArtifactSourceBundle)?",
         "$.title": "string!",
-        "$.uploadId": "string?"
+        "$.uploadId": "string?",
+        "$.visibility": "ref(SessionVisibility)?"
       }
     },
     "CreateWorkspaceGatewayCustomModelRequest": {
@@ -25931,6 +25946,24 @@
         "$.fundingSource": "ref(VideoGenerationFundingSource)!"
       }
     },
+    "UpdateWorkspaceArtifactVisibilityRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.visibility": "ref(SessionVisibility)!"
+      }
+    },
+    "UpdateWorkspaceArtifactVisibilityResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.artifact": "ref(WorkspaceArtifact)!"
+      }
+    },
     "UpdateWorkspaceMemberRequest": {
       "io": [
         "input"
@@ -26677,10 +26710,12 @@
         "$.currentVersion": "ref(WorkspaceArtifactVersion)! null",
         "$.description": "string! null",
         "$.id": "string!",
+        "$.ownerSubjectId": "string! null",
         "$.slug": "string!",
         "$.status": "ref(TaskNoteStatus)!",
         "$.title": "string!",
         "$.updatedAt": "string!",
+        "$.visibility": "enum!=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]",
         "$.workspaceId": "string!"
       }
     },
@@ -29530,6 +29565,8 @@
       "UpdateSlackChannelRoutesRequest": "type",
       "UpdateVariableSetRequest": "type",
       "UpdateVideoGenerationPolicyRequest": "type",
+      "UpdateWorkspaceArtifactVisibilityRequest": "type",
+      "UpdateWorkspaceArtifactVisibilityResponse": "type",
       "UpdateWorkspaceEnvironmentRequest": "type",
       "UpdateWorkspaceMemberRequest": "type",
       "UpdateWorkspaceModelAccessPolicyRequest": "type",
@@ -29598,6 +29635,7 @@
       "WorkspaceArtifactSourceBundle": "type",
       "WorkspaceArtifactSourceFile": "type",
       "WorkspaceArtifactVersion": "type",
+      "WorkspaceArtifactVisibility": "type",
       "WorkspaceCaptureDegradedReason": "type",
       "WorkspaceCaptureFile": "type",
       "WorkspaceCaptureManifest": "type",
@@ -33545,6 +33583,7 @@
       "updateVariableSet",
       "updateVideoGenerationPolicy",
       "updateWorkspace",
+      "updateWorkspaceArtifactVisibility",
       "updateWorkspaceMember",
       "updateWorkspaceModelAccessPolicy",
       "updateWorkspaceModelAccountSettings",
@@ -34210,6 +34249,7 @@
       "updateVariableSet",
       "updateVideoGenerationPolicy",
       "updateWorkspace",
+      "updateWorkspaceArtifactVisibility",
       "updateWorkspaceMember",
       "updateWorkspaceModelAccessPolicy",
       "updateWorkspaceModelAccountSettings",
@@ -34918,6 +34958,7 @@
       "updateVariableSet",
       "updateVideoGenerationPolicy",
       "updateWorkspace",
+      "updateWorkspaceArtifactVisibility",
       "updateWorkspaceMember",
       "updateWorkspaceModelAccessPolicy",
       "updateWorkspaceModelAccountSettings",
@@ -37451,6 +37492,9 @@
       "updateWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateWorkspaceArtifactVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateWorkspaceMember": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceMember\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -39661,6 +39705,9 @@
       "updateWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateWorkspaceArtifactVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateWorkspaceMember": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceMember\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -41707,6 +41754,9 @@
       ],
       "updateWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateWorkspaceArtifactVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateWorkspaceMember": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceMember\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -43968,6 +44018,9 @@
       "updateWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateWorkspaceArtifactVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateWorkspaceMember": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceMember\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -46046,6 +46099,9 @@
       ],
       "updateWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateWorkspaceArtifactVisibility": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceArtifactVisibilityResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateWorkspaceMember": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceMember\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

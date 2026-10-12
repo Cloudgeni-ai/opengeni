@@ -35,6 +35,8 @@ export async function acquirePreKnowledgeTestDatabase(
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // Resolves knowledge_index_claim from the withheld 0461 migration.
     await admin`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+    // Rewrites the visibility transition installed by the withheld 0501 migration.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
     // The import migration extends the withheld 0499 attachment helper.
     await admin`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
     // The session storage lifecycle extends the withheld import guards.
@@ -43,7 +45,7 @@ export async function acquirePreKnowledgeTestDatabase(
     // The drained SuperGrok cutover reads the withheld 0560 import column; this
     // fixture never runs that maintenance step or the ones after it (the
     // Claude cutover and the retirement), so they stay recorded.
-    await admin`INSERT INTO schema_migrations(name) VALUES('0739_subscription_core_xai_cutover.sql'), ('0740_subscription_core_claude_cutover.sql'), ('0743_subscription_core_legacy_retirement.sql')`;
+    await admin`INSERT INTO schema_migrations(name) VALUES('0740_subscription_core_xai_cutover.sql'), ('0741_subscription_core_claude_cutover.sql'), ('0744_subscription_core_legacy_retirement.sql')`;
     await migrate(blank.databaseUrl);
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.
@@ -64,6 +66,7 @@ export async function acquirePreKnowledgeTestDatabase(
     for (const name of allowanceMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     await admin`DELETE FROM schema_migrations WHERE name='0730_maintenance_work_probes.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name='0738_private_sessions_share_sandboxes.sql'`;
     await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
     for (const name of sessionStorageMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;

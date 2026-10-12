@@ -162,7 +162,7 @@ function InlineChatImageBody({
           to="/workspaces/$workspaceId/artifacts/files/$artifactId"
           params={{ workspaceId, artifactId }}
           search={fromSession ? { fromSession } : {}}
-          className="mt-1 inline-flex min-h-9 shrink-0 items-center text-xs text-fg-muted underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="mt-1 inline-flex min-h-9 shrink-0 items-center text-xs og-link text-fg-muted hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           Open in Artifacts
         </Link>

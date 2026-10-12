@@ -56,7 +56,7 @@ import {
 
 /** Splits the cutover migration into its owner-window prelude and its SQL backfill. */
 export const XAI_SUBSCRIPTION_CORE_CUTOVER_MARKER = "-- opengeni:xai-subscription-core-cutover-v1";
-export const XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0739_subscription_core_xai_cutover.sql";
+export const XAI_SUBSCRIPTION_CORE_CUTOVER_MIGRATION = "0740_subscription_core_xai_cutover.sql";
 
 /** As the legacy fleet read classifies a window. */
 const NEAR_EXHAUSTION_PERCENT = 90;
@@ -409,7 +409,7 @@ async function stageVideoReferences(
     };
     if (parsed.connectionId !== (connectionId ?? UNMAPPED_VIDEO_CONNECTION)) {
       throw new SubscriptionCutoverStageError(
-        "0739 parity mismatch (video_reference_readability)",
+        "0740 parity mismatch (video_reference_readability)",
         "55000",
       );
     }
@@ -441,7 +441,7 @@ async function moveXaiCredentialRows(
     identities: new Map([...decoded].map(([id, value]) => [id, value.identity])),
     ...context,
   });
-  if (plan.conflicts.length > 0) throw subscriptionCutoverConflictError("0739", plan.conflicts);
+  if (plan.conflicts.length > 0) throw subscriptionCutoverConflictError("0740", plan.conflicts);
 
   const personalOwners = [
     ...new Set(

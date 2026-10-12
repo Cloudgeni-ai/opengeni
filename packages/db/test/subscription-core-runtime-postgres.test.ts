@@ -180,7 +180,7 @@ async function fixture(connectionKind: "subscription" | "api_key" = "subscriptio
 
 /**
  * Run work with the refresh seam (the still-live Codex refresh write check
- * and the provider-neutral routines from migration 0707; migration 0743
+ * and the provider-neutral routines from migration 0707; migration 0744
  * dropped the Codex-named begin and persist twins) owned by a NOSUPERUSER,
  * NOBYPASSRLS role, as in production. The shared test database's objects are
  * owned by a superuser, which ignores FORCE RLS and would hide a missing

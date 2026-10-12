@@ -220,6 +220,28 @@ a new API contract revision. The stock Opengeni console opts into that
 stale-tab protection with `reloadOnApiContractChange`; embedded products
 should leave it off.
 
+Subscription account lists and their usage readings (`useCodexAccounts`,
+`useSuperGrokAccounts`) are shared per `client` object: readers mounted at the
+same time share one request and one result, and account changes made through
+these hooks re-read every mounted list (also when the component that made the
+change has already unmounted). By default nothing is kept after the last reader
+unmounts, so a host that reuses one `client` for different people never shows
+one person's accounts to the next, also when it re-keys its tree for the next
+person in a single render: the new reader and its children never render the
+previous rows, and a read still in flight for the previous person is
+discarded. (A reader joining one already on screen shows its rows before the
+browser paints, after one extra render.) Set `retainReadsAcrossMounts` on
+`OpenGeniProvider` to keep them across navigation instead: returning to a page
+renders the last accounts at once and re-reads them in the background once
+they are older than 10 seconds. Failed reads are never kept, and a
+401/403/404 drops what was kept. Retained reads are dropped when `client`
+changes or the provider unmounts.
+
+> **Host action item:** only set `retainReadsAcrossMounts` when every signed-in
+> person gets their own `client` object (create a new client on sign-in,
+> sign-out and account switch), as the stock Opengeni console does. With a
+> shared client, leave it off.
+
 ### Exact conversation search navigation
 
 `useSessionEvents().initialHistoryReady` becomes true when a history window has
@@ -964,6 +986,11 @@ state remains application-owned; durable draft and session state remain in
   plus the `defaultModel` to preselect (from the client config) for a picker.
 - `useCodexAccounts()` — connected Codex (ChatGPT) accounts, the active/next-run
   pointer, and per-session account pinning for multi-account subscriptions.
+  `refreshUsage({ maxAgeMs })` reuses live usage readings only when every
+  listed account was read within `maxAgeMs`; concurrent refreshes share one
+  provider read. `liveUsageUpdatedAt` is the time of the oldest account
+  reading. See `retainReadsAcrossMounts` above for keeping the list and
+  readings across navigation.
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for

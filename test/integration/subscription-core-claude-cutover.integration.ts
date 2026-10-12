@@ -4,7 +4,7 @@
  *
  * A session workflow that parked on a legacy Claude capacity wait recorded the
  * peek activity's result (provider `claude`, waiter id, generation, wake
- * revision) in its history before the drained migration ran. 0740 moves that
+ * revision) in its history before the drained migration ran. 0741 moves that
  * waiter onto the shared core with the same id, generation and revisions, and
  * a wake the workflow had not observed lands in the core wake outbox. The
  * activity and signal names and payload shapes are unchanged, and a recorded
@@ -47,10 +47,10 @@ import { armClaudeCapacityWait } from "../../packages/db/test/fixtures/legacy-co
 import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtures/legacy-codex/peek";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0740_subscription_core_claude_cutover.sql";
+const MIGRATION = "0741_subscription_core_claude_cutover.sql";
 // The drained retirement requires every receipt; this seam fixture records it
 // and never runs it.
-const RETIREMENT = "0743_subscription_core_legacy_retirement.sql";
+const RETIREMENT = "0744_subscription_core_legacy_retirement.sql";
 const PROVIDER = "workspace-claude-subscription";
 const MODEL = `${PROVIDER}/claude-opus-5-5`;
 const key = Buffer.alloc(32, 83);

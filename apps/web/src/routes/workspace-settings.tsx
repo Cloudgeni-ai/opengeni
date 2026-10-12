@@ -390,7 +390,7 @@ function WorkspaceGeneralSettings({
                 <Link
                   to="/workspaces/$workspaceId/organization"
                   params={{ workspaceId: organizationSettingsWorkspaceId }}
-                  className="text-brand underline-offset-2 hover:underline"
+                  className="og-link"
                 >
                   {organizationLabel}
                 </Link>

@@ -131,6 +131,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers private sessions on shared sandboxes as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0738_private_sessions_share_sandboxes.sql",
+      ),
+    ).toMatchObject({
+      path: "0738_private_sessions_share_sandboxes.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers proven built-in default intent as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2265,18 +2277,20 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0734_connected_output_reachable_due.sql",
-      "0738_subscription_failover_readiness_and_request_fence.sql",
-      "0741_subscription_shared_personal_choice.sql",
-      "0742_subscription_waiter_candidates.sql",
+      "0739_subscription_failover_readiness_and_request_fence.sql",
+      "0742_subscription_shared_personal_choice.sql",
+      "0743_subscription_waiter_candidates.sql",
+      "0738_private_sessions_share_sandboxes.sql",
+      "0737_site_audience.sql",
       "0733_subscription_session_bindings_per_provider.sql",
       "0732_sandbox_maintenance_work_probes.sql",
       "0731_published_site_versions_workspace_visible.sql",
       "0730_maintenance_work_probes.sql",
       "0735_subscription_core_owned_connection_usage.sql",
       "0730_subscription_core_personal_connection_versions.sql",
-      "0743_subscription_core_legacy_retirement.sql",
-      "0739_subscription_core_xai_cutover.sql",
-      "0740_subscription_core_claude_cutover.sql",
+      "0744_subscription_core_legacy_retirement.sql",
+      "0740_subscription_core_xai_cutover.sql",
+      "0741_subscription_core_claude_cutover.sql",
       "0729_subscription_person_preferences_owner.sql",
       "0728_subscription_core_personal_connect_format.sql",
       "0727_subscription_core_ownerless_video_operations.sql",

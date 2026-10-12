@@ -1988,7 +1988,7 @@ async function createRlsAppRole(
       `GRANT EXECUTE ON FUNCTION public.claude_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
     ),
   );
-  // RLS policies call this runtime-granted helper (migration 0743 dropped the
+  // RLS policies call this runtime-granted helper (migration 0744 dropped the
   // legacy pool policies and their SuperGrok and Claude predicates).
   await db.execute(
     dbSql.raw(`GRANT EXECUTE ON FUNCTION public.get_workspace_kind(uuid, uuid) TO "${role}"`),

@@ -89,13 +89,15 @@ const withheldMigrations = [
   "0728_subscription_core_personal_connect_format.sql",
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   "0730_subscription_core_personal_connection_versions.sql",
-  "0739_subscription_core_xai_cutover.sql",
-  "0740_subscription_core_claude_cutover.sql",
+  "0740_subscription_core_xai_cutover.sql",
+  "0741_subscription_core_claude_cutover.sql",
   // The drained retirement requires both cutovers; it runs after them.
-  "0743_subscription_core_legacy_retirement.sql",
-  "0738_subscription_failover_readiness_and_request_fence.sql",
-  "0741_subscription_shared_personal_choice.sql",
-  "0742_subscription_waiter_candidates.sql",
+  "0744_subscription_core_legacy_retirement.sql",
+  "0739_subscription_failover_readiness_and_request_fence.sql",
+  "0742_subscription_shared_personal_choice.sql",
+  "0743_subscription_waiter_candidates.sql",
+  // Rewrites the visibility transition installed by withheld 0501; it follows 0501.
+  "0738_private_sessions_share_sandboxes.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

@@ -28,7 +28,7 @@ export function ChildSessionLink({
     <button
       type="button"
       onClick={() => onOpenSession(sourceId)}
-      className="mt-1 rounded-og-sm text-og-xs font-medium text-og-accent underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent"
+      className="mt-1 rounded-og-sm text-og-xs font-medium og-link focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent"
     >
       View session
     </button>

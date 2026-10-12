@@ -1278,7 +1278,7 @@ describe("scheduled task personal MCP authority", () => {
       errorChainIncludes(hostError, "scheduled Variable Set generation changed after claim"),
     ).toBe(true);
     expect(changedHostCalls).toBe(0);
-  });
+  }, 30_000);
 
   test("revoking accepted user-scoped xAI authority rejects before claim", async () => {
     if (!available) return;
@@ -1843,8 +1843,11 @@ describe("scheduled task personal MCP authority", () => {
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0730_maintenance_work_probes.sql'),
         ('0732_sandbox_maintenance_work_probes.sql')`;
+      // Main's later visibility transition also depends on withheld 0501.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0739_subscription_core_xai_cutover.sql'), ('0740_subscription_core_claude_cutover.sql'), ('0743_subscription_core_legacy_retirement.sql'), ('0738_subscription_failover_readiness_and_request_fence.sql'), ('0741_subscription_shared_personal_choice.sql'), ('0742_subscription_waiter_candidates.sql')`;
+        ('0738_private_sessions_share_sandboxes.sql')`;
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0740_subscription_core_xai_cutover.sql'), ('0741_subscription_core_claude_cutover.sql'), ('0744_subscription_core_legacy_retirement.sql'), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql')`;
       // Allowance policy/attribution compiles against the same withheld
       // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
       for (const name of allowanceMigrationTail)

@@ -1,12 +1,16 @@
+import type { AccessGrant } from "@opengeni/contracts";
 import { getWorkspaceSiteSessionOrigin, WorkspaceArtifactNotFoundError } from "@opengeni/db";
-import { withSiteSessionOrigin, type ApiRouteDeps } from "@opengeni/core";
+import { siteViewerForGrant, withSiteSessionOrigin, type ApiRouteDeps } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-/** Validates a caller-asserted Site association, not browser execution or authority. */
+/**
+ * Validates a caller-asserted Site association, not browser execution or
+ * authority. The caller must be able to see the Site.
+ */
 export async function resolveSiteSessionOrigin(
   db: ApiRouteDeps["db"],
-  workspaceId: string,
+  grant: AccessGrant,
   siteId?: string,
   versionId?: string,
 ) {
@@ -19,7 +23,13 @@ export async function resolveSiteSessionOrigin(
   try {
     // Provenance is not a live-version fence: a response-loss retry still belongs
     // to the same Site after it publishes a new version or is archived.
-    return await getWorkspaceSiteSessionOrigin(db, workspaceId, siteId!, versionId!);
+    return await getWorkspaceSiteSessionOrigin(
+      db,
+      grant.workspaceId,
+      await siteViewerForGrant(db, grant),
+      siteId!,
+      versionId!,
+    );
   } catch (error) {
     if (error instanceof WorkspaceArtifactNotFoundError)
       throw new HTTPException(404, { message: "Site origin not found" });
@@ -35,14 +45,12 @@ export async function resolveSiteSessionOrigin(
  */
 export async function withOptionalSiteCommandOrigin<T>(
   db: ApiRouteDeps["db"],
-  workspaceId: string,
+  grant: AccessGrant,
   siteId: string | undefined,
   versionId: string | undefined,
   run: () => Promise<T>,
 ): Promise<T> {
   if (!siteId && !versionId) return await run();
-  const origin = await resolveSiteSessionOrigin(db, workspaceId, siteId, versionId).catch(
-    () => null,
-  );
+  const origin = await resolveSiteSessionOrigin(db, grant, siteId, versionId).catch(() => null);
   return origin ? await withSiteSessionOrigin(origin, run) : await run();
 }

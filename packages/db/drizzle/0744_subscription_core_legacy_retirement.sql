@@ -4,8 +4,8 @@
 -- provider-neutral routines (design docs/design/subscription-core-2026-10-07.md,
 -- 5.3 "R. Retirement" and the 0713 note "Kept until retirement").
 --
--- Run it in a drained maintenance window after the SuperGrok (0739) and
--- Claude (0740) cutovers: stop every API, control-worker and turn-worker,
+-- Run it in a drained maintenance window after the SuperGrok (0740) and
+-- Claude (0741) cutovers: stop every API, control-worker and turn-worker,
 -- pass the complete runtime-login list, apply, then start only a release
 -- that contains this migration. Never roll it back: recovery is fix-forward.
 --
@@ -60,7 +60,7 @@ DECLARE
 BEGIN
   IF coalesce(cardinality(names), 0) = 0 OR EXISTS (SELECT 1 FROM unnest(names) name
       WHERE name IS NULL OR name !~ '^[a-z0-9_]*(xai|claude|codex)[a-z0-9_]*$') THEN
-    RAISE EXCEPTION '0743 received an invalid retired name' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0744 received an invalid retired name' USING ERRCODE = '55000';
   END IF;
   -- One literal and one tail prefilter keep the per-name check to the rare
   -- object that has a tail.
@@ -254,30 +254,30 @@ DECLARE
 BEGIN
   -- 1. Drained: no application session is connected to this database.
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0743 requires explicit application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0744 requires explicit application database roles' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR octet_length(item #>> '{}') NOT BETWEEN 1 AND 63
       OR item #>> '{}' <> btrim(item #>> '{}')
-  ) THEN RAISE EXCEPTION '0743 received invalid application roles' USING ERRCODE = '55000'; END IF;
+  ) THEN RAISE EXCEPTION '0744 received invalid application roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r.value = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0743 requires drained application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0744 requires drained application sessions' USING ERRCODE = '55000';
   END IF;
 
   -- 2. Every provider is on the shared core: the Codex (0689), SuperGrok
-  -- (0739) and Claude (0740) cutover receipts are committed. A fresh install
-  -- has all three: 0689 seeds Codex's, and 0739 and 0740 write theirs on an
+  -- (0740) and Claude (0741) cutover receipts are committed. A fresh install
+  -- has all three: 0689 seeds Codex's, and 0740 and 0741 write theirs on an
   -- empty database too.
   IF to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)') IS NULL THEN
-    RAISE EXCEPTION '0743 requires the provider cutover receipts (0712)' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0744 requires the provider cutover receipts (0712)' USING ERRCODE = '55000';
   END IF;
   SELECT string_agg(provider, ', ' ORDER BY provider) INTO finding
   FROM unnest(ARRAY['codex', 'xai', 'claude']) provider
   WHERE NOT opengeni_private.subscription_provider_cutover_committed(provider);
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 requires the committed cutover receipt of every provider; missing: %', finding
+    RAISE EXCEPTION '0744 requires the committed cutover receipt of every provider; missing: %', finding
       USING ERRCODE = '55000';
   END IF;
 
@@ -290,7 +290,7 @@ BEGIN
   ) expected
   WHERE to_regprocedure(signature) IS NULL;
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 found a retired routine missing or changed: %; see the runbook', finding
+    RAISE EXCEPTION '0744 found a retired routine missing or changed: %; see the runbook', finding
       USING ERRCODE = '55000';
   END IF;
   SELECT array_agg(to_regprocedure(signature)::oid), array_agg(DISTINCT split_part(split_part(signature, '(', 1), '.', -1))
@@ -306,7 +306,7 @@ BEGIN
   WHERE n.nspname IN (data_schema, 'opengeni_private', 'opengeni_subscription_internal')
     AND p.proname = ANY(retired_names) AND NOT (p.oid = ANY(retired_routine_ids));
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 found an unexpected overload of a retired routine: %; see the runbook', finding
+    RAISE EXCEPTION '0744 found an unexpected overload of a retired routine: %; see the runbook', finding
       USING ERRCODE = '55000';
   END IF;
   SELECT string_agg(entry, ', ' ORDER BY entry) INTO finding
@@ -316,7 +316,7 @@ BEGIN
     WHERE relation.relnamespace = data_schema::regnamespace
       AND relation.relname = split_part(entry, '.', 1) AND policy.polname = split_part(entry, '.', 2));
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 found a retired policy missing: %; see the runbook', finding USING ERRCODE = '55000';
+    RAISE EXCEPTION '0744 found a retired policy missing: %; see the runbook', finding USING ERRCODE = '55000';
   END IF;
   SELECT array_agg(policy.oid) INTO retired_policy_ids
   FROM unnest(retired_policies) entry
@@ -333,7 +333,7 @@ BEGIN
       AND relation.relname = split_part(entry, '.', 1) AND trigger_row.tgname = split_part(entry, '.', 2)
       AND trigger_row.tgfoid = ANY(retired_routine_ids) AND routine.proname = split_part(entry, '.', 3));
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 found a retired trigger missing or changed: %; see the runbook', finding
+    RAISE EXCEPTION '0744 found a retired trigger missing or changed: %; see the runbook', finding
       USING ERRCODE = '55000';
   END IF;
   SELECT array_agg(trigger_row.oid) INTO retired_trigger_ids
@@ -371,7 +371,7 @@ BEGIN
               OR has_table_privilege(usable.oid, relation.oid, 'UPDATE')
               OR has_table_privilege(usable.oid, relation.oid, 'DELETE')))))
   ) THEN
-    RAISE EXCEPTION '0743 requires drained application sessions (a connected role outside the listed application roles can use a retired object)'
+    RAISE EXCEPTION '0744 requires drained application sessions (a connected role outside the listed application roles can use a retired object)'
       USING ERRCODE = '55000';
   END IF;
 
@@ -391,7 +391,7 @@ BEGIN
     AND NOT (d.classid = 'pg_policy'::regclass AND d.objid = ANY(retired_policy_ids))
     AND NOT (d.classid = 'pg_trigger'::regclass AND d.objid = ANY(retired_trigger_ids));
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 found a kept object that depends on a retired routine: %', finding
+    RAISE EXCEPTION '0744 found a kept object that depends on a retired routine: %', finding
       USING ERRCODE = '2BP01';
   END IF;
   retired_names := retired_names
@@ -400,7 +400,7 @@ BEGIN
   finding := pg_temp.subscription_retirement_naming_objects(
     retired_names, retired_routine_ids, retired_policy_ids, retired_trigger_ids, '{}');
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 found a kept object that names a retired object: %', finding
+    RAISE EXCEPTION '0744 found a kept object that names a retired object: %', finding
       USING ERRCODE = '2BP01';
   END IF;
 
@@ -425,7 +425,7 @@ BEGIN
         AND i.indnatts = 3 AND ARRAY(SELECT a.attname::text FROM unnest(i.indkey::int2[]) k
           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k ORDER BY a.attname)
           = ARRAY['account_id', 'id', 'provider']) THEN
-    RAISE EXCEPTION '0743 found the reach table, its view, its default or the connection key changed; see the runbook'
+    RAISE EXCEPTION '0744 found the reach table, its view, its default or the connection key changed; see the runbook'
       USING ERRCODE = '55000';
   END IF;
   FOREACH renamed SLICE 1 IN ARRAY renamed_routines LOOP
@@ -436,7 +436,7 @@ BEGIN
         WHERE routine.pronamespace = 'opengeni_private'::regnamespace
           AND routine.proname IN (renamed[1], renamed[2])
           AND routine.oid <> to_regprocedure(format('opengeni_private.%I()', renamed[1]))) THEN
-      RAISE EXCEPTION '0743 found a reach routine missing, changed or already renamed: %; see the runbook',
+      RAISE EXCEPTION '0744 found a reach routine missing, changed or already renamed: %; see the runbook',
         renamed[1] USING ERRCODE = '55000';
     END IF;
     renamed_routine_ids := renamed_routine_ids
@@ -452,7 +452,7 @@ BEGIN
         JOIN pg_class relation ON relation.oid = trigger_row.tgrelid
         WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
           AND trigger_row.tgname = renamed[3]) THEN
-      RAISE EXCEPTION '0743 found a reach trigger missing, changed or already renamed: %.%; see the runbook',
+      RAISE EXCEPTION '0744 found a reach trigger missing, changed or already renamed: %.%; see the runbook',
         renamed[1], renamed[2] USING ERRCODE = '55000';
     END IF;
     renamed_trigger_ids := renamed_trigger_ids || (SELECT trigger_row.oid FROM pg_trigger trigger_row
@@ -473,7 +473,7 @@ BEGIN
         JOIN pg_class relation ON relation.oid = policy.polrelid
         WHERE relation.relnamespace = data_schema::regnamespace AND relation.relname = renamed[1]
           AND policy.polname = renamed[3]) THEN
-      RAISE EXCEPTION '0743 found a reach policy missing, changed or already renamed: %.%; see the runbook',
+      RAISE EXCEPTION '0744 found a reach policy missing, changed or already renamed: %.%; see the runbook',
         renamed[1], renamed[2] USING ERRCODE = '55000';
     END IF;
     renamed_policy_ids := renamed_policy_ids || (SELECT policy.oid FROM pg_policy policy
@@ -493,7 +493,7 @@ BEGIN
     retired_routine_ids || renamed_routine_ids, retired_policy_ids || renamed_policy_ids,
     retired_trigger_ids || renamed_trigger_ids, ARRAY[reach_view]);
   IF finding IS NOT NULL THEN
-    RAISE EXCEPTION '0743 found a kept object that names a Codex-named reach object: %', finding
+    RAISE EXCEPTION '0744 found a kept object that names a Codex-named reach object: %', finding
       USING ERRCODE = '2BP01';
   END IF;
 END
@@ -623,7 +623,7 @@ BEGIN
     VALIDATE CONSTRAINT subscription_core_auto_assignments_connection_provider_fkey;
   ALTER TABLE subscription_connections FORCE ROW LEVEL SECURITY;
 EXCEPTION WHEN foreign_key_violation THEN
-  RAISE EXCEPTION '0743 found a reach row whose provider is not its connection''s; see the runbook'
+  RAISE EXCEPTION '0744 found a reach row whose provider is not its connection''s; see the runbook'
     USING ERRCODE = '23503';
 END
 $reach_key$;

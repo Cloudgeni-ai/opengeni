@@ -45,6 +45,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // Resolves knowledge_index_claim from the withheld 0461 migration.
       await owner`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+      // Rewrites the visibility transition installed by the withheld 0501 migration.
+      await owner`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
       // The import migration extends the withheld 0499 attachment helper.
       await owner`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
       // The session storage lifecycle extends the withheld 0560 import guards.
@@ -57,10 +59,10 @@ describe("pre-knowledge Memory storage compatibility", () => {
         "0657_session_archive_purge_retained_evidence.sql",
         "0660_session_archive_preference_snapshot_export.sql",
         // The drained SuperGrok cutover reads the withheld 0560 import column.
-        "0739_subscription_core_xai_cutover.sql",
-        "0740_subscription_core_claude_cutover.sql",
+        "0740_subscription_core_xai_cutover.sql",
+        "0741_subscription_core_claude_cutover.sql",
         // The retirement requires both cutovers.
-        "0743_subscription_core_legacy_retirement.sql",
+        "0744_subscription_core_legacy_retirement.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);

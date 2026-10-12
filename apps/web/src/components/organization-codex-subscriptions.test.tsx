@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { CodexAccount, OrganizationCodexAccountsResponse } from "@opengeni/sdk";
 import { act, useState, type ReactNode } from "react";
@@ -188,6 +188,10 @@ const { OrgCodexAccountPage, reachesWorkspace } =
   await import("./models/organization-codex-models");
 const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
 const { modelsScopeLabels } = await import("./models/models-ui");
+const { clearSharedQueries } = await import("@/lib/shared-query");
+
+// Account lists are retained per client between mounts; every test starts cold.
+beforeEach(() => clearSharedQueries(context.client));
 
 afterAll(() => {
   mock.restore();

@@ -35,6 +35,9 @@ type SubscriptionScope =
   | { workspaceId: string; organizationId?: never; canManage: boolean }
   | { organizationId: string; workspaceId?: never; canManage: boolean };
 
+// `useSuperGrokAccounts` readers of the same client see account changes too.
+const SUPERGROK_RELATED_QUERIES = [["supergrok-accounts"]] as const;
+
 export type SuperGrokSubscriptions = ReturnType<typeof useSuperGrokSubscriptions>;
 
 export function useSuperGrokSubscriptions({
@@ -92,6 +95,7 @@ export function useSuperGrokSubscriptions({
     workspaceId,
     canManage,
     enabled: readEnabled,
+    relatedQueryPrefixes: SUPERGROK_RELATED_QUERIES,
   });
   const { refresh } = pool;
   const [busy, setBusy] = useState(false);

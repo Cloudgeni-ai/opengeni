@@ -8,6 +8,7 @@ import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redire
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
+import { useConsoleSharedQueries } from "@/lib/shared-query";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -822,6 +823,10 @@ export function RootRouteComponent() {
     void accessKeyVersion;
     return createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
   }, [accessKeyVersion, sessionChannelProjectionAuthority]);
+  // Account lists and usage limits read through this client stay across
+  // navigation and are cleared with it when an identity change replaces it;
+  // "Available in" changes re-read them.
+  useConsoleSharedQueries(client);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =

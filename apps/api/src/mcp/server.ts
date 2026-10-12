@@ -268,6 +268,7 @@ import {
   requireVisibleScheduledTask,
   scheduledTaskAccess,
   scheduledTaskViewerForGrant,
+  siteViewerForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -1087,11 +1088,14 @@ export function buildOpenGeniMcpServer(
       if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
-      return json(
-        redactWorkspaceArtifactListProvenance(
-          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+      const listed = redactWorkspaceArtifactListProvenance(
+        await listWorkspaceArtifacts(
+          deps.db,
+          grant.workspaceId,
+          await siteViewerForGrant(deps.db, grant),
         ),
       );
+      return json({ ...listed, artifacts: listed.artifacts.map(withoutSiteAudience) });
     },
   );
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
@@ -3287,6 +3291,14 @@ async function authorizeFirstPartySession(
   });
 }
 
+/** Agent tool results keep a Site's established shape, without its audience. */
+function withoutSiteAudience<T extends { visibility?: unknown; ownerSubjectId?: unknown }>(
+  artifact: T,
+): Omit<T, "visibility" | "ownerSubjectId"> {
+  const { visibility: _visibility, ownerSubjectId: _ownerSubjectId, ...rest } = artifact;
+  return rest;
+}
+
 function registerWorkspaceArtifactTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3309,8 +3321,13 @@ function registerWorkspaceArtifactTools(
         if (error instanceof SessionAuthorizationDeniedError) return false;
         throw error;
       });
-  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
-    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const mutation = async (response: WorkspaceArtifactMutationResponse) => {
+    const projected = await projectWorkspaceArtifactMutationProvenance(
+      response,
+      canReadProvenanceSession,
+    );
+    return { ...projected, artifact: withoutSiteAudience(projected.artifact) };
+  };
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3379,9 +3396,10 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId }) => {
       await authorize();
       if (!deps.objectStorage) throw new Error("Object storage is not configured");
+      const viewer = await siteViewerForGrant(deps.db, grant);
       const [rawDetail, ref] = await Promise.all([
-        getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
-        getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
+        getWorkspaceArtifact(deps.db, grant.workspaceId, viewer, artifactId),
+        getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, viewer, artifactId, versionId),
       ]);
       const sourceAuthorizations = new Map<string, Promise<boolean>>();
       const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
@@ -3397,7 +3415,7 @@ function registerWorkspaceArtifactTools(
       ]);
       const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
       return json({
-        detail,
+        detail: { ...detail, artifact: withoutSiteAudience(detail.artifact) },
         version: projectedVersion,
         downloads,
       });
@@ -3456,6 +3474,12 @@ function registerWorkspaceArtifactTools(
       uploadId,
     }) => {
       await authorize();
+      // Shared with the workspace, as agent-published Sites always are; the
+      // person it was made for owns it and can limit it from the Site page.
+      const audience = {
+        visibility: "workspace_shared" as const,
+        ownerSubjectId: (await siteViewerForGrant(deps.db, grant)).subjectId,
+      };
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
@@ -3467,6 +3491,7 @@ function registerWorkspaceArtifactTools(
             requestedSlug: slug ?? null,
             title,
             description: description ?? null,
+            ...audience,
             ...(await prepare(html, source, requestedTools, uploadId)),
             ...provenance(idempotencyKey, "artifacts_create"),
           }),
@@ -3529,6 +3554,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await publishWorkspaceArtifactVersion(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             expectedCurrentVersionId,
             ...(title !== undefined ? { title } : {}),
             ...(description !== undefined ? { description } : {}),
@@ -3559,6 +3585,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await rollbackWorkspaceArtifact(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             versionId,
             expectedCurrentVersionId,
             reason,
@@ -3587,6 +3614,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             status: "archived",
             expectedCurrentVersionId,
             reason,
@@ -3615,6 +3643,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             status: "active",
             expectedCurrentVersionId,
             reason,

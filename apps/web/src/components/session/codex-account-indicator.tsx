@@ -14,6 +14,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 // web dependency on the server-only codex package.
 const CODEX_MODEL_ID_PREFIX = "codex/";
 const AUTO = "auto";
+// Reopening the menu reuses live readings this recent instead of asking the
+// provider again; older ones stay on screen while the menu re-checks.
+const LIVE_USAGE_REUSE_MS = 30_000;
 
 function accountLabel(account: CodexAccount | undefined | null): string {
   if (!account) return "—";
@@ -62,6 +65,10 @@ export function CodexAccountIndicator({
   const [checkingUsage, setCheckingUsage] = useState(false);
   const [usageChecked, setUsageChecked] = useState(false);
   const [usageCheckFailed, setUsageCheckFailed] = useState(false);
+  // Live readings from an earlier check (this menu, another session's, or
+  // Settings) stay visible while a new check runs instead of flashing away.
+  const hasLiveUsage = codex.liveUsageUpdatedAt !== null;
+  const awaitingFirstUsage = checkingUsage && !hasLiveUsage;
 
   if (!modelReady) {
     return (
@@ -128,7 +135,7 @@ export function CodexAccountIndicator({
       }
       tone={tone}
       usage={{
-        checking: checkingUsage,
+        checking: awaitingFirstUsage,
         unavailable: usageUnavailable,
         windows: [
           ...(effective?.fiveHour
@@ -148,7 +155,8 @@ export function CodexAccountIndicator({
               ? "relogin"
               : account.status,
         remaining:
-          !checkingUsage &&
+          account.id !== effective?.id &&
+          !awaitingFirstUsage &&
           !usageCheckFailed &&
           (!usageChecked || codex.liveUsage[account.id]) &&
           codex.liveUsage[account.id]?.status !== "error" &&
@@ -182,7 +190,7 @@ export function CodexAccountIndicator({
         setCheckingUsage(true);
         setUsageChecked(false);
         setUsageCheckFailed(false);
-        void codex.refreshUsage().then(
+        void codex.refreshUsage({ maxAgeMs: LIVE_USAGE_REUSE_MS }).then(
           (ok) => {
             setUsageChecked(ok);
             setUsageCheckFailed(!ok);

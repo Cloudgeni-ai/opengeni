@@ -36,8 +36,8 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 const COMPAT = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.
 const FENCES = "0717_subscription_authority_fences.sql";
-const XAI_CUTOVER = "0739_subscription_core_xai_cutover.sql";
-const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
+const XAI_CUTOVER = "0740_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0741_subscription_core_claude_cutover.sql";
 // The drained retirement requires both receipts; held back with them.
 const RETIREMENT = SUBSCRIPTION_RETIREMENT_MIGRATION;
 /**
@@ -46,8 +46,8 @@ const RETIREMENT = SUBSCRIPTION_RETIREMENT_MIGRATION;
  */
 const BEFORE_XAI_CUTOVER = [
   ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
-  "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
-  "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0740_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0741_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -191,7 +191,7 @@ beforeAll(async () => {
   });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${RETIREMENT}), ('0738_subscription_failover_readiness_and_request_fence.sql'), ('0741_subscription_shared_personal_choice.sql'), ('0742_subscription_waiter_candidates.sql')`;
+    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${RETIREMENT}), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,

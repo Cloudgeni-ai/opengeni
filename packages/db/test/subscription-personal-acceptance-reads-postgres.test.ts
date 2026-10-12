@@ -591,8 +591,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     const expected = [
       ...heldBack,
       ...PENDING_RETIREMENT,
-      "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
-      "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
+      "database is missing the xai subscription-core cutover receipt (0740_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the claude subscription-core cutover receipt (0741_subscription_core_claude_cutover.sql); apply the pending migrations first",
     ].sort();
     if (!posture) throw new Error("Expected the staged database posture");
     expect([...posture.unprovisioned].sort()).toEqual(expected);

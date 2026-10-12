@@ -61,8 +61,8 @@ setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const FENCES = "0717_subscription_authority_fences.sql";
-const XAI_CUTOVER = "0739_subscription_core_xai_cutover.sql";
-const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
+const XAI_CUTOVER = "0740_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0741_subscription_core_claude_cutover.sql";
 /**
  * This binary requires the SuperGrok and Claude receipts, which the rolling
  * state lacks, and the absence of everything the drained retirement drops
@@ -70,8 +70,8 @@ const CLAUDE_CUTOVER = "0740_subscription_core_claude_cutover.sql";
  */
 const BEFORE_XAI_CUTOVER = [
   ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
-  "database is missing the xai subscription-core cutover receipt (0739_subscription_core_xai_cutover.sql); apply the pending migrations first",
-  "database is missing the claude subscription-core cutover receipt (0740_subscription_core_claude_cutover.sql); apply the pending migrations first",
+  "database is missing the xai subscription-core cutover receipt (0740_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0741_subscription_core_claude_cutover.sql); apply the pending migrations first",
 ];
 const EMPTY = { version: 2, personal: [] };
 const ORGANIZATION_CLAUDE = { version: 1, scope: "organization" };
@@ -713,7 +713,7 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION}), ('0738_subscription_failover_readiness_and_request_fence.sql'), ('0741_subscription_shared_personal_choice.sql'), ('0742_subscription_waiter_candidates.sql')`;
+    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION}), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     // The legacy pools run before the retirement, under that release's grants.
