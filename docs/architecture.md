@@ -536,6 +536,9 @@ child Codemode authority is transient/attempt-bound.
 
 Foreground output releases once its exact tool-result receipt, output event and
 journal are durable, independently of turn completion. Other owners retain output.
+Background output-release probes and claims park disconnected runners without
+changing custody. Reconnect restores eligibility; proven retirement remains due
+for final settlement.
 [Streaming exec](connected-machines.md#streaming-exec-op-stream).
 
 Machine paths are session-specific. Offline operations fail typed; reasoning continues.
