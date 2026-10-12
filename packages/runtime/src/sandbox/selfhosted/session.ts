@@ -83,6 +83,7 @@ import type { ShellDialect } from "@opengeni/vaults";
 import {
   secretExecCarryFor,
   secretExecEnvironment,
+  secretScopeDirectory,
   shellDialectFor,
   spliceCarry,
 } from "../secret-delivery";
@@ -470,6 +471,8 @@ export class SelfhostedSession {
   readonly controlWorkspaceId: string;
   readonly agentId: string;
   private readonly controlRpc: ControlRpc;
+  /** Attempt scopes this session wrote `{{secretfile:…}}` files under. */
+  private readonly secretScopes = new Set<string>();
   private readonly relay: SelfhostedRelayConfig;
   private readonly terminalScopeId: string;
   private readonly epoch: number;
@@ -976,9 +979,34 @@ export class SelfhostedSession {
     const command = carry.spliced ? args.cmd : args.cmd.split(carry.command).join(spliced.text);
     const env = await secretExecEnvironment(carry, spliced, async (file) => {
       await this.writePlacementPrivate({ ...file, createParents: true });
+      this.secretScopes.add(carry.scope);
     });
     const shell = requestedShell || (dialect === "powershell" ? "powershell" : "/bin/sh");
     return { command, shell, env };
+  }
+
+  /**
+   * Remove this attempt's secret files from the machine (attempt end). Uses the
+   * recursive filesystem control op, not a shell, so it works on any host OS
+   * and runs even when the consuming command never started.
+   */
+  async clearSecretFilesForAttempt(scope?: string): Promise<void> {
+    const scopes = scope === undefined ? [...this.secretScopes] : [scope];
+    for (const entry of scopes) {
+      const path = selfhostedPlacementPrivatePath(secretScopeDirectory(entry));
+      try {
+        const result = await this.call({
+          $case: "fsRemove",
+          fsRemove: { path, recursive: true },
+        });
+        if (result.$case !== "fsRemove") {
+          throw new Error(`selfhosted clearSecretFiles: unexpected result ${result.$case}`);
+        }
+      } catch (error) {
+        if (!(error instanceof SelfhostedControlError && error.osNotFound)) throw error;
+      }
+      this.secretScopes.delete(entry);
+    }
   }
 
   /** Channel-A `exec`: run a command on the machine and return its output. */

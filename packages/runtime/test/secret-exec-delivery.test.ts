@@ -10,7 +10,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 import { testSettings } from "@opengeni/testing";
 import { createSandboxClientForBackend } from "../src/index";
@@ -24,6 +24,7 @@ import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import {
   SECRET_FILE_ROOT,
   prepareSecretExec,
+  runWithSecretCarry,
   secretScopeFor,
 } from "../src/sandbox/secret-delivery";
 
@@ -54,6 +55,12 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 const sessions: LocalSession[] = [];
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map(async (session) => await session.close()));
+  // Tests that never reach attempt-end cleanup leave the stub attempt's
+  // (now empty) scope directory behind on this host.
+  rmSync(`${SECRET_FILE_ROOT}/${secretScopeFor(createStaticSecretResolver({}))}`, {
+    recursive: true,
+    force: true,
+  });
 });
 
 async function harness(options: { enabled?: boolean; kind?: string } = {}) {
@@ -432,5 +439,57 @@ describe("apply_patch and view_image wrappers", () => {
     expect(operations).toEqual([
       { type: "create_file", path: "{{secret:Plain}}", diff: `+v=${VALUES.Plain}\n` },
     ]);
+  });
+});
+
+describe("connected-machine secretfile cleanup through the routing session", () => {
+  test("a selfhosted secretfile scope is remembered and cleared by the backend natively", async () => {
+    const execs: string[] = [];
+    const cleared: Array<string | undefined> = [];
+    const machine = {
+      exec: async (args: { cmd: string }) => {
+        execs.push(args.cmd);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+      clearSecretFilesForAttempt: async (scope?: string) => {
+        cleared.push(scope);
+      },
+    };
+    const routing = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: "machine-1", activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: machine as never,
+        sandboxId: "machine-1",
+        kind: "selfhosted",
+        leaseEpoch: 1,
+        providerInstanceId: "instance",
+        activeEpoch: 0,
+      }),
+      beforeMutation: async () => ({}),
+      afterMutation: async () => undefined,
+    });
+    await routing.prime();
+    const resolver = createStaticSecretResolver(VALUES);
+    const prepare = async (cmd: string) =>
+      (await prepareSecretExec(cmd, {
+        resolver,
+        dialect: null,
+        use: { surface: "shell", toolName: "exec_command" },
+      }))!;
+    // A plain reference needs no files: nothing to clear.
+    const plain = await prepare("true {{secret:Plain}}");
+    await runWithSecretCarry(plain.carry, () => routing.execCommand({ cmd: plain.text }));
+    await routing.clearSecretFilesForAttempt();
+    expect(cleared).toEqual([]);
+    // A secretfile reference: the machine writes the file itself, so the
+    // routing session must still route attempt-end cleanup to it.
+    const file = await prepare("cat {{secretfile:Plain}}");
+    await runWithSecretCarry(file.carry, () => routing.execCommand({ cmd: file.text }));
+    // Selfhosted delivers natively: the provider sees no env-file prefix.
+    expect(execs.every((cmd) => !cmd.includes(SECRET_FILE_ROOT))).toBe(true);
+    await routing.clearSecretFilesForAttempt();
+    expect(cleared).toEqual([file.carry.scope]);
+    await routing.clearSecretFilesForAttempt();
+    expect(cleared).toHaveLength(1);
   });
 });

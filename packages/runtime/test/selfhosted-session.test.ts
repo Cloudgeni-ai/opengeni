@@ -1466,4 +1466,29 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     expect(session.state.environment).toEqual({});
     expect(session.state.manifest.environment).toEqual({});
   });
+
+  test("attempt-end cleanup removes the machine's secretfile scope recursively", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "/home/user/project" });
+    const prepared = await prepareSecretExec("cat {{secretfile:Canary}}", {
+      resolver: createStaticSecretResolver({ Canary: CANARY }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    await runWithSecretCarry(prepared!.carry, () => session.exec({ cmd: prepared!.text }));
+    const write = mock.requests.find((entry) => entry.req.op?.$case === "fsWrite")?.req.op;
+    if (write?.$case !== "fsWrite") throw new Error("expected the secretfile fsWrite");
+    const scopeDir = `/tmp/opengeni-private/secrets/${prepared!.carry.scope}`;
+    expect(write.fsWrite.path.startsWith(`${scopeDir}/`)).toBe(true);
+    expect(write.fsWrite.mode).toBe(0o600);
+
+    await session.clearSecretFilesForAttempt();
+    const removes = mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove");
+    expect(removes.map((entry) => entry.req.op)).toEqual([
+      { $case: "fsRemove", fsRemove: { path: scopeDir, recursive: true } },
+    ]);
+    // Idempotent: the scope is forgotten once removed.
+    await session.clearSecretFilesForAttempt();
+    expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
+  });
 });

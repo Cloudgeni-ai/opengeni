@@ -152,6 +152,8 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   writeFile?(args: unknown): Promise<unknown>;
   writePlacementPrivate?(args: unknown): Promise<unknown>;
   deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
+  /** Backend-native secret-file cleanup (connected machines); else `rm -rf`. */
+  clearSecretFilesForAttempt?(scope?: string): Promise<void>;
   createEditor?(runAs?: string): unknown;
   listDir?(args: unknown, runner?: SynchronousCommandRunner): Promise<unknown>;
   pathExists?(path: string, runAs?: string): Promise<boolean>;
@@ -2622,6 +2624,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           // Secret delivery happens here, below every recorder: connected
           // machines deliver natively in their own session; every other
           // backend gets a sourced-then-deleted env file.
+          if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
           const providerArgs =
             backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
           if (s.execCommand) {
@@ -2698,17 +2701,35 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (scopes.length === 0) return;
     await this.dispatch("clearSecretFiles", false, async (session) => {
       for (const entry of scopes) {
-        await withoutProviderCommandHandle(async () => {
-          const result = await executeSynchronousCommand(session as ChannelASession, {
-            cmd: clearSecretFilesCommand(entry),
-            yieldTimeMs: 30_000,
-            maxOutputTokens: 1_000,
+        if (session.clearSecretFilesForAttempt) {
+          await session.clearSecretFilesForAttempt(entry);
+        } else {
+          await withoutProviderCommandHandle(async () => {
+            const result = await executeSynchronousCommand(session as ChannelASession, {
+              cmd: clearSecretFilesCommand(entry),
+              yieldTimeMs: 30_000,
+              maxOutputTokens: 1_000,
+            });
+            if (result.exitCode !== 0) throw new Error("secret file cleanup failed");
           });
-          if (result.exitCode !== 0) throw new Error("secret file cleanup failed");
-        });
+        }
         this.secretScopes.delete(entry);
       }
     });
+  }
+
+  /** Connected machines deliver natively (their own session writes any
+   * `{{secretfile:…}}`); remember the scope so attempt-end cleanup reaches it. */
+  private noteNativeSecretScope(args: unknown): void {
+    const cmd = args && typeof args === "object" ? (args as { cmd?: unknown }).cmd : undefined;
+    const carry = secretExecCarryFor(cmd);
+    if (
+      carry?.tokens.some(
+        (token) => token.type === "reference" && token.reference.kind === "secretfile",
+      )
+    ) {
+      this.secretScopes.add(carry.scope);
+    }
   }
 
   /** Channel-A control-plane reads must not contend with durable workspace
