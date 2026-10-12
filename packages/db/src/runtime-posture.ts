@@ -568,6 +568,9 @@ export const VAULT_RUNTIME_ROUTINES = [
   "upsert_provider_vault_items(uuid, text, jsonb, jsonb)",
   "set_vault_sync_status(uuid, jsonb, jsonb)",
   "apply_secret_answers(uuid, uuid, jsonb, jsonb)",
+  "link_provider_vault(jsonb, jsonb)",
+  "provider_vault_sync_target(uuid, jsonb)",
+  "provider_vault_item_ref(uuid, uuid, text, jsonb)",
 ] as const;
 /** Vault tables (0738): FORCE row security, no application-role privileges. */
 export const VAULT_TABLES = [

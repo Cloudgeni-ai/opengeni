@@ -4709,56 +4709,6 @@ export type GitCredentials = {
   identity?: { name: string; email: string } | null;
 };
 
-export type SandboxSecretsRequest = {
-  accountId: string;
-  workspaceId: string;
-  // Exact live attempt authority. Hosts MUST revalidate this tuple, the
-  // session's selected resource identity, and any personal-resource grant
-  // immediately before returning plaintext.
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  // Organization/workspace Variable Sets may be materialized by a pure
-  // service turn (for example, the scheduler). Personal Variable Sets still
-  // require this causal human and an exact personal-resource grant.
-  initiator: TurnInitiator;
-  initiatingHumanSubjectId: string | null;
-  variableSetId: string;
-  /**
-   * Exact accepted scheduled-occurrence generation. Present only for scheduled
-   * attempts; ordinary live turns omit it, so hosts that predate this field keep
-   * working unchanged for those.
-   */
-  expectedGeneration?: number | null;
-};
-
-export type SandboxSecrets = {
-  // The decrypted variableSet values the run injects, replacing the local
-  // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
-  // produces (plaintext name→value).
-  values: Record<string, string>;
-  // Exact scope/resource echoes are mandatory so a host routing bug cannot
-  // inject a sibling tenant, resource, or stale attempt's plaintext.
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  variableSetId: string;
-  /** Must echo the request's `expectedGeneration` when one was supplied. */
-  expectedGeneration?: number | null;
-  scope: VariableSetScope;
-  generation: number;
-  // Optional variableSet metadata; when omitted the activity uses the
-  // variableSetId as both id and name (the local decrypt carries the row's
-  // id/name/description, but only `id` is load-bearing downstream).
-  id?: string;
-  name?: string;
-  description?: string | null;
-};
-
 export type CredentialAuthNeededReason =
   | "missing_connection"
   | "expired"
@@ -5279,9 +5229,9 @@ export type ConnectionCredentialPlacement = {
 export type ConnectionCredentialsPort = {
   // Every leg is optional: a host may drive only the credential classes it
   // owns. An unset leg falls through to today's standalone implementation for
-  // that leg only.
+  // that leg only. Host-owned secret stores are supplied through the
+  // `vaultProvider` leg (`VaultConnectionCredentialsPort` in `@opengeni/vaults`).
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
-  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
   /**
    * Resolve host-owned, session-aware sandbox credentials independently of an
    * Opengeni variable set. Opengeni transports and renews the material; the host

@@ -147,7 +147,6 @@ export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   cancellationSignal: AbortSignal | undefined;
-  connectionCredentials: ActivityServices["connectionCredentials"];
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];

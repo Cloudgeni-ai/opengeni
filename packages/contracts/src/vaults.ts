@@ -408,7 +408,8 @@ export type SessionSecretsView = z.infer<typeof SessionSecretsView>;
 
 export const InstallOnePasswordRequest = z
   .object({
-    token: z.string().min(20).max(4_096),
+    // Real service-account tokens are long; the dev fakes (ops_fake_healthy) are 16 chars.
+    token: z.string().trim().min(16).max(4_096),
     ownership: z.enum(["user", "workspace", "organization"]),
     planTier: z.enum(["family", "teams", "business"]).default("teams"),
     label: z.string().max(120).optional(),

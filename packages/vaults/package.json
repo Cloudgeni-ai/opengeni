@@ -26,6 +26,10 @@
     "./testing": {
       "types": "./src/testing/index.ts",
       "default": "./src/testing/index.ts"
+    },
+    "./testing/fake-provider": {
+      "types": "./src/testing/fake-provider.ts",
+      "default": "./src/testing/fake-provider.ts"
     }
   },
   "publishConfig": {

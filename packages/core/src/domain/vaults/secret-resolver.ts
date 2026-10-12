@@ -191,6 +191,7 @@ function providerFailureCode(code: VaultProviderErrorCode): SecretReferenceFailu
     return "provider_auth_expired";
   }
   if (code === "provider_not_found") return "not_found";
+  if (code === "provider_permission_denied") return "denied";
   return "provider_unavailable";
 }
 
@@ -291,7 +292,7 @@ export function createSecretResolver(
           source: first.source,
           providerConnectionId: first.providerConnectionId,
         });
-        budget.take("read");
+        // The provider charges `budget` per call (one readFields per item).
         const values = await provider.readFields(
           { connectionId: first.providerConnectionId, budget },
           first.providerVaultRef ?? "",

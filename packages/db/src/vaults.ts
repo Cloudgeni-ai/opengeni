@@ -784,6 +784,78 @@ export async function setVaultSyncStatus(
   });
 }
 
+/** Link a 1Password or host vault (W5). The mirror is filled by the first sync. */
+export async function linkProviderVault(
+  db: Database,
+  context: VaultDbContext,
+  input: {
+    ownerKind: "user" | "workspace" | "organization";
+    name: string;
+    description?: string | null;
+    source: "onepassword" | "host";
+    providerConnectionId?: string | null;
+    providerVaultRef: string;
+    mode: VaultMode;
+    availability?: { allowedWorkspaceIds: string[] | null; allowPersonalWorkspaces: boolean };
+    /** The caller holds account:admin. */
+    allowOrganization?: boolean;
+  },
+): Promise<VaultRow> {
+  return await inVaultContext(db, context, (scoped, principal) =>
+    one<VaultRow>(
+      scoped,
+      sql`select link_provider_vault(${json(input)}::jsonb, ${principal}::jsonb) as value`,
+    ),
+  );
+}
+
+export type ProviderVaultSyncTargetRow = {
+  vaultId: string;
+  workspaceId: string;
+  source: Exclude<VaultSource, "opengeni">;
+  mode: VaultMode;
+  providerConnectionId: string | null;
+  providerVaultRef: string;
+  providerContentVersion: string | null;
+  rateLimitedUntil: string | null;
+};
+
+/** The provider refs and mirror version of one reachable connected vault. */
+export async function getProviderVaultSyncTarget(
+  db: Database,
+  context: VaultDbContext,
+  vaultId: string,
+): Promise<ProviderVaultSyncTargetRow> {
+  return await inVaultContext(db, context, (scoped, principal) =>
+    one<ProviderVaultSyncTargetRow>(
+      scoped,
+      sql`select provider_vault_sync_target(${vaultId}::uuid, ${principal}::jsonb) as value`,
+    ),
+  );
+}
+
+export type ProviderVaultItemRefRow = {
+  itemId: string;
+  providerItemRef: string;
+  providerVersion: string | null;
+  generation: number;
+};
+
+/** A mirrored item's provider refs, looked up by item id or by provider item ref. */
+export async function getProviderVaultItemRef(
+  db: Database,
+  context: VaultDbContext,
+  input: { vaultId: string; itemId?: string; providerItemRef?: string },
+): Promise<ProviderVaultItemRefRow> {
+  return await inVaultContext(db, context, (scoped, principal) =>
+    one<ProviderVaultItemRefRow>(
+      scoped,
+      sql`select provider_vault_item_ref(${input.vaultId}::uuid, ${input.itemId ?? null}::uuid,
+        ${input.providerItemRef ?? null}, ${principal}::jsonb) as value`,
+    ),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Ask-card answers
 // ---------------------------------------------------------------------------

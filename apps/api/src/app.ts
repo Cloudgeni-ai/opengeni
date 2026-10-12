@@ -280,6 +280,7 @@ import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access"
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerVaultProviderRoutes } from "./routes/vault-providers";
 import { registerConnectRoutes } from "./routes/connect";
 
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
@@ -2179,6 +2180,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalGitHubRoutes(app, routeDeps);
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
 
   registerExternalIdentityLinkRoutes(app, routeDeps);

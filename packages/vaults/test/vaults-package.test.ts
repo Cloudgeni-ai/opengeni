@@ -20,8 +20,35 @@ import {
 } from "../src/testing/index";
 
 runVaultProviderContractSuite("fake", async () => {
-  const provider = createFakeVaultProvider({ vaults: [{ externalVaultId: "rw", name: "RW" }] });
-  return { provider, externalVaultId: "rw" };
+  const provider = createFakeVaultProvider({
+    vaults: [
+      {
+        externalVaultId: "rw",
+        name: "RW",
+        items: [
+          {
+            name: "Test Login",
+            fields: [
+              { name: "username", value: "agent@example.test" },
+              { name: "password", value: "fixture-password" },
+              {
+                name: "one-time password",
+                kind: "totp",
+                value: "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=6&period=30",
+              },
+            ],
+          },
+        ],
+      },
+      { externalVaultId: "ro", name: "RO", readOnly: true },
+    ],
+  });
+  return {
+    provider,
+    externalVaultId: "rw",
+    readOnlyVaultId: "ro",
+    fixtureItemName: "Test Login",
+  };
 });
 
 describe("fake provider", () => {
