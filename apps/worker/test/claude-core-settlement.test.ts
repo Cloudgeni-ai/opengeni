@@ -11,6 +11,7 @@ import {
   joinCoreClaudeObservations,
 } from "../src/activities/agent-turn/claude-core";
 import { SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT } from "../src/activities/agent-turn/subscription-core-failover";
+import { createCoreSubscriptionRequests } from "../src/activities/agent-turn/subscription-core-requests";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 
 // Claude refusal settlement, finalization and waits on the shared core
@@ -260,6 +261,29 @@ function recoveringRecovery() {
   } as never);
 }
 
+/**
+ * The shared request custody with one answered request that still awaits its
+ * history checkpoint; settles are recorded as `<requestId>:<outcome>`.
+ */
+async function answeredLane(settles: string[], options: { continuesAfterResponse: boolean }) {
+  const lane = createCoreSubscriptionRequests({
+    reserve: async (request) => ({ operationId: request.requestId }),
+    settle: async ({ operationId, outcome }) => {
+      settles.push(`${operationId}:${outcome}`);
+    },
+    displayName: "Provider",
+    outcomeUnknown: () =>
+      Object.assign(new Error("unknown"), { code: "subscription_core_request_outcome_unknown" }),
+    isOutcomeUnknown: () => false,
+    continuesAfterResponse: options.continuesAfterResponse,
+  });
+  const first = { requestId: "first", transportAttempt: 1 };
+  await lane.reserve(first);
+  await lane.observe({ ...first, outcome: "response_received" });
+  expect(lane.canRecover()).toBe(false);
+  return lane;
+}
+
 describe("Claude refusal settlement on the core", () => {
   test("a 429 cools the turn's model on the leased connection and the same turn re-places", async () => {
     const runtime = coreRuntime({ refusals: 1 });
@@ -384,8 +408,11 @@ describe("Claude refusal settlement on the core", () => {
     coreRuntime({ refusals: 1 });
     const recovery = recoveringRecovery();
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    let checkpoints = 0;
     const pending = {
-      checkpoint: async () => undefined,
+      checkpoint: async () => {
+        checkpoints += 1;
+      },
       canRecover: () => false,
       hasUnknownOutcome: () => false,
       unknownIsOwnAndSettled: () => false,
@@ -394,12 +421,67 @@ describe("Claude refusal settlement on the core", () => {
       anthropic(529, "overloaded_error"),
       core({ requests: pending, titleRequests: undefined }),
     );
-    await settleTurnFailure(deps as never).catch(() => undefined);
-    expect(recovery).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.objectContaining({ reason: "provider_overloaded" }),
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+    expect(checkpoints).toBe(1);
+    expect(recovery).not.toHaveBeenCalled();
+  });
+
+  test("a real paused lane settles the refused continuation, then checkpoints the answer and recovers", async () => {
+    coreRuntime({ refusals: 1 });
+    const recovery = recoveringRecovery();
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const settles: string[] = [];
+    const lane = await answeredLane(settles, { continuesAfterResponse: true });
+    // The paused search's continuation is refused with a 529.
+    const continuation = { requestId: "continuation", transportAttempt: 1 };
+    await lane.reserve(continuation);
+    await lane.observe({ ...continuation, outcome: "refused" });
+    const { deps } = failureDeps(
+      anthropic(529, "overloaded_error"),
+      core({ requests: lane, titleRequests: undefined }),
     );
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(settles).toEqual(["continuation:refused", "first:response_received"]);
+    expect(recovery.mock.calls[0]![2]).toMatchObject({ reason: "provider_overloaded" });
+  });
+
+  for (const provider of ["Codex", "SuperGrok"] as const) {
+    test(`a ${provider} core lane with an answer awaiting its checkpoint keeps its gate: terminal, no checkpoint`, async () => {
+      coreRuntime({ refusals: 1 });
+      const recovery = recoveringRecovery();
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      const settles: string[] = [];
+      const lane = await answeredLane(settles, { continuesAfterResponse: false });
+      const { deps } = failureDeps(anthropic(529, "overloaded_error"), null);
+      const turn = core({ requests: lane, titleRequests: undefined });
+      Object.assign(deps.billingState, {
+        isClaudeTurn: false,
+        isCodexTurn: provider === "Codex",
+        isXaiTurn: provider === "SuperGrok",
+      });
+      Object.assign(deps.providerTurn, {
+        codexSubscriptionCore: provider === "Codex" ? turn : null,
+        xaiSubscriptionCore: provider === "SuperGrok" ? turn : null,
+      });
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(settles).toEqual([]);
+      expect(recovery).not.toHaveBeenCalled();
+    });
+  }
+
+  test("the same retryable failure and lane recover on Claude (the control for the gate cases)", async () => {
+    coreRuntime({ refusals: 1 });
+    const recovery = recoveringRecovery();
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+    const settles: string[] = [];
+    const lane = await answeredLane(settles, { continuesAfterResponse: false });
+    const { deps } = failureDeps(
+      anthropic(529, "overloaded_error"),
+      core({ requests: lane, titleRequests: undefined }),
+    );
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(settles).toEqual(["first:response_received"]);
+    expect(recovery).toHaveBeenCalledTimes(1);
   });
 
   test("a 403 is fatal: nothing recorded, no rotation, no quarantine", async () => {
@@ -595,9 +677,7 @@ describe("Claude refusal settlement on the core", () => {
       return true;
     });
     await settleTurnFailure(deps as never).catch(() => undefined);
-    expect(order.slice(0, 3)).toEqual(["observation", "wake", "refusal"]);
-    expect(order.indexOf("release")).toBe(order.lastIndexOf("release"));
-    if (order.includes("release")) expect(order.indexOf("release")).toBeGreaterThan(2);
+    expect(order).toEqual(["observation", "wake", "refusal", "release"]);
   });
 
   test("a joined observation chain wakes the account's Claude waiters once", async () => {
@@ -624,7 +704,30 @@ describe("Claude refusal settlement on the core", () => {
       (() => new Promise(() => undefined)) as never,
     );
     const turn = core({ quota: { settled: () => Promise.resolve(true) } });
-    await joinCoreClaudeObservations({ db: {} as db.Database }, turn, 10);
+    await joinCoreClaudeObservations({ db: {} as db.Database }, turn, { wakeTimeoutMs: 10 });
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  test("a cancelled settlement detaches the wake at once, after the queued writes", async () => {
+    const order: string[] = [];
+    const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters").mockImplementation(
+      (() => new Promise(() => undefined)) as never,
+    );
+    const cancelled = new AbortController();
+    const chain = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      order.push("observation");
+      return true;
+    })();
+    const turn = core({ quota: { settled: () => chain } });
+    const joined = joinCoreClaudeObservations({ db: {} as db.Database }, turn, {
+      signal: cancelled.signal,
+      wakeTimeoutMs: 60_000,
+    }).then(() => order.push("joined"));
+    await chain;
+    cancelled.abort();
+    await joined;
+    expect(order).toEqual(["observation", "joined"]);
     expect(wake).toHaveBeenCalledTimes(1);
   });
 

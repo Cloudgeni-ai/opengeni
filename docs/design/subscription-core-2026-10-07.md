@@ -5248,11 +5248,13 @@ like C1a.
   `overloaded` and `fatal` record nothing: a 529 continues in the generic
   provider-overload recovery (the same turn retries, the binding keeps its
   connection) and a 403 fails the turn without a rotation or quarantine.
-  When a retryable failure (such as a 529) hits a paused search's
-  continuation, the answered first request still awaits its checkpoint:
-  settlement commits the history durably and checkpoints the lanes first
-  (as the lease-lost and failover paths do), so the turn recovers; a lane
-  with a request still without its response stays terminal.
+  When a retryable failure arrives while a core Claude lane holds answered
+  requests that still await their checkpoint (a paused search's
+  continuation refused with a 529, or a tool or MCP failure after a
+  complete response), settlement commits the history durably and
+  checkpoints the lanes first (as the lease-lost and failover paths do), so
+  the turn recovers; a lane with a request still without its response stays
+  terminal. Codex and SuperGrok keep their existing gate (tested).
   An unknown request outcome or a lost lease skips the step. The legacy
   Claude receipts, refresh recovery, rotation and wait never run for a core
   turn, and the core never reads the v1 `claudeAuthRecovery` marker (the
@@ -5278,8 +5280,9 @@ like C1a.
   dropped by the moved lease fence. One that ended a stored exhaustion
   wakes the account's Claude waiters (`quota_observed_available`), once per
   joined chain; the queued writes are awaited in full, while the wake
-  delivery is bounded like a finalizer step (the capacity outbox is its
-  backstop), so a stuck signal never holds settlement. This relies on the
+  delivery is bounded like a finalizer step and detached by the turn's
+  cancellation signal (the capacity outbox is its backstop), so a stuck
+  signal never holds settlement. This relies on the
   partial-reading fix of
   `applyQuotaObservation` (#4120), so C1b merges on a base that contains it.
 - Waits. The core waiter accepts `claude` with the legacy Claude wait's

@@ -52,7 +52,11 @@ import {
   type CoreRefusalBinding,
 } from "./subscription-core-settlement";
 import type { SubscriptionCoreTurn } from "./turn-context";
-import { TURN_FINALIZER_STEP_TIMEOUT_MS, waitForTurnFinalizerStep } from "./quiescence";
+import {
+  TURN_FINALIZER_STEP_TIMEOUT_MS,
+  turnFinalizerCancellationSignal,
+  waitForTurnFinalizerStep,
+} from "./quiescence";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
 import { selectClaudeTurnCapacity } from "./xai-capacity";
 import {
@@ -510,6 +514,12 @@ export function claudeCoreRefusal(productModelId: string | undefined): CoreRefus
       joinCoreClaudeObservations(
         { db: deps.db, signalCodexCapacityWorkflow: deps.signalCodexCapacityWorkflow },
         core,
+        {
+          signal: turnFinalizerCancellationSignal(
+            deps.cancellationSignal,
+            deps.control.activityStatus,
+          ),
+        },
       ),
     lease: (deps) => deps.leases.claude,
     isSourceDisconnected: CLAUDE_CORE_TURN_PROVIDER.isSourceDisconnected,
@@ -533,12 +543,13 @@ export function claudeCoreRefusal(productModelId: string | undefined): CoreRefus
  * refusal settlement and finalization may both join it). Never throws. The
  * queued writes are awaited in full (nothing may be released while one is
  * queued); the wake delivery is bounded like a finalizer step, and the
- * capacity outbox remains its backstop.
+ * capacity outbox remains its backstop. A cancellation signal detaches only
+ * the wake, never the queued writes.
  */
 export async function joinCoreClaudeObservations(
   services: CoreCodexWakeServices,
   core: SubscriptionCoreTurn,
-  wakeTimeoutMs = TURN_FINALIZER_STEP_TIMEOUT_MS,
+  options: { signal?: AbortSignal | undefined; wakeTimeoutMs?: number } = {},
 ): Promise<void> {
   const chain = core.quota?.settled();
   if (!chain || wokenObservationChains.get(core) === chain) return;
@@ -550,8 +561,8 @@ export async function joinCoreClaudeObservations(
       accountId: core.identity.accountId,
       reason: "quota_observed_available",
     }).catch(() => undefined),
-    undefined,
-    wakeTimeoutMs,
+    options.signal,
+    options.wakeTimeoutMs ?? TURN_FINALIZER_STEP_TIMEOUT_MS,
   );
 }
 

@@ -1559,11 +1559,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   );
   const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
     !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
-  // A paused Claude response (`pause_turn`) still awaits its history
-  // checkpoint when its continuation fails (for example a 529): commit the
-  // history durably and checkpoint first, as the lease-lost and failover
-  // paths do, so a retryable failure can recover. Nothing is replayed: a
-  // lane without every response stays unrecoverable.
+  // A core Claude lane may hold answered requests that still await their
+  // history checkpoint when a retryable failure arrives (a paused search's
+  // continuation refused with a 529, or a tool or MCP failure after a
+  // complete response): commit the history durably and checkpoint first, as
+  // the lease-lost and failover paths do, so the failure can recover. Nothing
+  // is replayed: a lane without every response stays unrecoverable. Codex and
+  // SuperGrok keep their existing gate.
   if (
     coreClaude &&
     attempt.turnId &&
