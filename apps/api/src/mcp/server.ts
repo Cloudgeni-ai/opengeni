@@ -268,6 +268,8 @@ import {
   requireVisibleScheduledTask,
   scheduledTaskAccess,
   scheduledTaskViewerForGrant,
+  siteViewerForGrant,
+  resolveNewSiteAudience,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -1080,7 +1082,7 @@ export function buildOpenGeniMcpServer(
     "artifacts_list",
     {
       description:
-        "List the generic published artifacts in this workspace and their current versions.",
+        "List the published Sites you can see in this workspace (shared with the workspace, or Only me Sites that belong to the person you act for) and their current versions and audience.",
       inputSchema: {},
     },
     async () => {
@@ -1089,7 +1091,11 @@ export function buildOpenGeniMcpServer(
       }
       return json(
         redactWorkspaceArtifactListProvenance(
-          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+          await listWorkspaceArtifacts(
+            deps.db,
+            grant.workspaceId,
+            await siteViewerForGrant(deps.db, grant),
+          ),
         ),
       );
     },
@@ -3379,9 +3385,10 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId }) => {
       await authorize();
       if (!deps.objectStorage) throw new Error("Object storage is not configured");
+      const viewer = await siteViewerForGrant(deps.db, grant);
       const [rawDetail, ref] = await Promise.all([
-        getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
-        getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
+        getWorkspaceArtifact(deps.db, grant.workspaceId, viewer, artifactId),
+        getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, viewer, artifactId, versionId),
       ]);
       const sourceAuthorizations = new Map<string, Promise<boolean>>();
       const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
@@ -3408,7 +3415,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        "Create and publish a generic workspace artifact from a complete HTML document. Everyone in the workspace who can read artifacts can open it, even when this chat is private; only the chat link stays hidden. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.",
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3442,6 +3449,7 @@ function registerWorkspaceArtifactTools(
           )
           .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
           .optional(),
+        visibility: z4.enum(["private", "workspace"]).optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
@@ -3452,10 +3460,19 @@ function registerWorkspaceArtifactTools(
       html,
       source,
       requestedTools,
+      visibility,
       idempotencyKey,
       uploadId,
     }) => {
       await authorize();
+      const audience = await resolveNewSiteAudience({
+        db: deps.db,
+        settings: deps.settings,
+        grant,
+        viewer: await siteViewerForGrant(deps.db, grant),
+        requested: visibility,
+        sourceSessionId: attempt().sessionId,
+      });
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
@@ -3467,6 +3484,7 @@ function registerWorkspaceArtifactTools(
             requestedSlug: slug ?? null,
             title,
             description: description ?? null,
+            ...audience,
             ...(await prepare(html, source, requestedTools, uploadId)),
             ...provenance(idempotencyKey, "artifacts_create"),
           }),
@@ -3529,6 +3547,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await publishWorkspaceArtifactVersion(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             expectedCurrentVersionId,
             ...(title !== undefined ? { title } : {}),
             ...(description !== undefined ? { description } : {}),
@@ -3559,6 +3578,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await rollbackWorkspaceArtifact(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             versionId,
             expectedCurrentVersionId,
             reason,
@@ -3587,6 +3607,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             status: "archived",
             expectedCurrentVersionId,
             reason,
@@ -3615,6 +3636,7 @@ function registerWorkspaceArtifactTools(
         await mutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
+            viewer: await siteViewerForGrant(deps.db, grant),
             status: "active",
             expectedCurrentVersionId,
             reason,

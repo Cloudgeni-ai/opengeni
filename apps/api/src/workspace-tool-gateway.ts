@@ -46,6 +46,7 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  siteViewerForGrant,
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
@@ -1124,12 +1125,7 @@ export async function callWorkspaceToolGateway(
     transportMeta.approvalConfirmed = approvalConfirmed;
     const origin =
       siteContext && db
-        ? await resolveOrigin(
-            db,
-            grant.workspaceId,
-            siteContext.siteArtifactId,
-            siteContext.siteVersionId,
-          )
+        ? await resolveOrigin(db, grant, siteContext.siteArtifactId, siteContext.siteVersionId)
         : null;
     await prepared.reauthorize?.();
     const result = await (origin
@@ -1280,16 +1276,40 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   throw error;
 }
 
+/** A saved Site version, only when the caller can see the Site. */
+export type WorkspaceSiteVersionResolver = (
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  artifactId: string,
+  versionId: string,
+) => Promise<
+  Pick<Awaited<ReturnType<typeof getWorkspaceArtifactContentRef>>, "status" | "version">
+>;
+
+const resolveVisibleSiteVersion: WorkspaceSiteVersionResolver = async (
+  db,
+  grant,
+  artifactId,
+  versionId,
+) =>
+  await getWorkspaceArtifactContentRef(
+    db,
+    grant.workspaceId,
+    await siteViewerForGrant(db, grant),
+    artifactId,
+    versionId,
+  );
+
 export async function requireWorkspaceSiteToolAuthorization(
   db: ApiRouteDeps["db"],
   grant: AccessGrant,
   context: WorkspaceSiteToolContext,
-  resolveVersion = getWorkspaceArtifactContentRef,
+  resolveVersion: WorkspaceSiteVersionResolver = resolveVisibleSiteVersion,
 ): Promise<void> {
   try {
     const { status, version } = await resolveVersion(
       db,
-      grant.workspaceId,
+      grant,
       context.siteArtifactId,
       context.siteVersionId,
     );

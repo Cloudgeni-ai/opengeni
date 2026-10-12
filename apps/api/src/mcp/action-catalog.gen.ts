@@ -7292,6 +7292,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateWorkspaceArtifactVisibility",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/visibility",
+    "request": [
+      "UpdateWorkspaceArtifactVisibilityRequest"
+    ],
+    "response": [
+      "UpdateWorkspaceArtifactVisibilityResponse"
+    ]
+  },
+  {
     "id": "updateWorkspaceMember",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/members/:subjectId",

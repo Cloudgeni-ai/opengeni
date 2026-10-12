@@ -15,6 +15,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
   withSiteSessionOrigin,
+  siteViewerForGrant,
 } from "@opengeni/core";
 import {
   beginTargetToolGatewayCall,
@@ -79,6 +80,7 @@ async function siteTarget(
       const { status, version } = await getWorkspaceArtifactContentRef(
         deps.db,
         authorization.grant.workspaceId,
+        await siteViewerForGrant(deps.db, authorization.grant),
         request.siteArtifactId,
         request.siteVersionId,
       );
@@ -283,7 +285,7 @@ export async function invokeWorkspaceToolTarget(
         request.siteArtifactId && request.siteVersionId
           ? await resolveSiteSessionOrigin(
               deps.db,
-              authorization.grant.workspaceId,
+              authorization.grant,
               request.siteArtifactId,
               request.siteVersionId,
             )
@@ -389,6 +391,7 @@ export async function resolveWorkspaceToolManifest(
         const { status, version } = await getWorkspaceArtifactContentRef(
           deps.db,
           authorization.grant.workspaceId,
+          await siteViewerForGrant(deps.db, authorization.grant),
           request.siteArtifactId,
           request.siteVersionId,
         );

@@ -188,19 +188,14 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     const [version] = await shared!.admin<{ id: string }[]>`
       insert into workspace_artifact_versions (account_id, workspace_id, artifact_id, revision, content_key, size_bytes, operation_key, created_by_subject_id)
       values (${grant.accountId}, ${grant.workspaceId}, ${site!.id}, 1, 'synthetic.html', 1, ${crypto.randomUUID()}, ${grant.subjectId}) returning id`;
-    const origin = await resolveSiteSessionOrigin(
-      client.db,
-      grant.workspaceId,
-      site!.id,
-      version!.id,
-    );
+    const origin = await resolveSiteSessionOrigin(client.db, grant, site!.id, version!.id);
     expect(origin).toEqual({ siteId: site!.id, title: "Analytics" });
     const other = await freshGrant();
     await expect(
-      resolveSiteSessionOrigin(client.db, other.workspaceId, site!.id, version!.id),
+      resolveSiteSessionOrigin(client.db, other, site!.id, version!.id),
     ).rejects.toMatchObject({ status: 404 });
     await expect(
-      resolveSiteSessionOrigin(client.db, grant.workspaceId, site!.id, crypto.randomUUID()),
+      resolveSiteSessionOrigin(client.db, grant, site!.id, crypto.randomUUID()),
     ).rejects.toMatchObject({ status: 404 });
     const server = buildServer(grant, new FakeWorkflowClient());
     const args = {
@@ -226,7 +221,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     // Follow-up Send/Steer from the Site bridge runs in the validated Site
     // scope; a missing or unverifiable origin leaves the command unscoped.
     const surfaceFor = (siteId: string | undefined, versionId: string | undefined) =>
-      withOptionalSiteCommandOrigin(client.db, grant.workspaceId, siteId, versionId, async () =>
+      withOptionalSiteCommandOrigin(client.db, grant, siteId, versionId, async () =>
         resolveTurnSurface({ grant: { ...grant, principalKind: "human_session" } }),
       );
     expect(await surfaceFor(site!.id, version!.id)).toBe("site");
@@ -238,12 +233,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     ).toBe("web");
     await shared!
       .admin`update workspace_artifacts set status = 'archived', title = 'Renamed' where id = ${site!.id}`;
-    const renamed = await resolveSiteSessionOrigin(
-      client.db,
-      grant.workspaceId,
-      site!.id,
-      version!.id,
-    );
+    const renamed = await resolveSiteSessionOrigin(client.db, grant, site!.id, version!.id);
     const replay = await withSiteSessionOrigin(renamed!, () =>
       callMcpTool<McpMutationReceiptType>(server, "session_create", args),
     );

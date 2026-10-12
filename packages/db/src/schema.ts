@@ -249,6 +249,15 @@ export const workspaceArtifacts = pgTable(
     // that table exists. Keeping this pointer here makes reads inexpensive.
     currentVersionId: uuid("current_version_id"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
+    // Who can see the Site (migration 0734), like a chat or a schedule: the
+    // whole workspace (`workspace_shared`) or only its owner (`user_private`).
+    // The owner is the person it was published for and never changes; only
+    // they can change the audience. An Only me Site needs an owner.
+    visibility: text("visibility")
+      .$type<"workspace_shared" | "user_private">()
+      .notNull()
+      .default("workspace_shared"),
+    ownerSubjectId: text("owner_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -268,6 +277,10 @@ export const workspaceArtifacts = pgTable(
       table.workspaceId,
       table.status,
       table.updatedAt,
+    ),
+    visibilityValid: check(
+      "workspace_artifacts_visibility_check",
+      sql`${table.visibility} in ('workspace_shared', 'user_private') and (${table.visibility} = 'workspace_shared' or ${table.ownerSubjectId} is not null)`,
     ),
   }),
 );
