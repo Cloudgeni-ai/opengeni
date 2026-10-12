@@ -277,6 +277,12 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
 
 export type BrowserSupervisorOptions = {
   ephemeralContextPoolEnabled?: boolean;
+  /** Host a virtual WebAuthn authenticator in every page target (default true
+   * where the transport supports it). Passkey placements bring the acted-on
+   * tab to the front before each action, because Chromium refuses WebAuthn
+   * ceremonies in a background tab; disabling passkeys keeps managed input in
+   * the background. */
+  passkeys?: boolean;
   rootDirectory: string;
   socketRootDirectory?: string;
   maxSessions?: number;
@@ -344,6 +350,7 @@ export class BrowserSupervisor {
   readonly socketRootDirectory: string;
   private readonly maxSessions: number;
   private readonly ephemeralContextPoolEnabled: boolean;
+  private readonly passkeysEnabled: boolean;
   private readonly contextPools = new Map<string, EphemeralChromiumContextPool>();
   private readonly createDriver: (
     context: BrowserSupervisorDriverContext,
@@ -376,6 +383,7 @@ export class BrowserSupervisor {
       });
     }
     this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
+    this.passkeysEnabled = options.passkeys !== false;
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
@@ -1240,7 +1248,7 @@ export class BrowserSupervisor {
       ...(options.linkedComputer ? { linkedComputer: options.linkedComputer } : {}),
       ...(options.launchEnvironment ? { launchEnvironment: options.launchEnvironment } : {}),
       ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
-      ...(supportsPasskeys(options.transport)
+      ...(this.passkeysEnabled && supportsPasskeys(options.transport)
         ? {
             passkeys: new BrowserPasskeyManager({
               browserSessionId: options.browserSessionId,
