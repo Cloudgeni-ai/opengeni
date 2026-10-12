@@ -80,6 +80,20 @@ type NativeBrokerTransportTransaction = Parameters<
   Parameters<NativeBrokerTransportPort["transaction"]>[0]
 >[0];
 type Identity = { brokerId: string; sandboxId: string; taskId: string };
+/** Recovery-only operations remain available after a diagnostic fault. This
+ * is not command authority and never permits skipping unresolved input. */
+export function nativeBrokerRequestAllowsDiagnosticFault(request: NativeBrokerRequest) {
+  const control = Buffer.from(request.payload).toString("utf8");
+  return (
+    ["fence", "ack", "replay"].includes(request.kind) ||
+    (request.kind === "control" &&
+      request.offset === 0 &&
+      (["cancel", "status"].includes(control) ||
+        /^ack\t[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          control,
+        )))
+  );
+}
 export type NativeBrokerTransportState = {
   version: 1;
   input: NativeBrokerInputSnapshot;
@@ -162,16 +176,7 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
   ) => {
     // Preserve exact cancellation, observation and receipt retirement. A fault
     // cannot authorize a replay, clear a pending request, or prove quiescence.
-    const control = Buffer.from(request.payload).toString("utf8");
-    const safe =
-      ["fence", "ack", "replay"].includes(request.kind) ||
-      (request.kind === "control" &&
-        request.offset === 0 &&
-        (["cancel", "status"].includes(control) ||
-          /^ack\t[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
-            control,
-          )));
-    if (safe) return;
+    if (nativeBrokerRequestAllowsDiagnosticFault(request)) return;
     const fault = await diagnosticFault(tx);
     if (fault) throw new NativeBrokerInitialDiagnosticsError(fault);
   };

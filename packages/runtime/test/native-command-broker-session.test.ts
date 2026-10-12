@@ -45,12 +45,21 @@ function fixture() {
     captures = 0,
     cancelled = false;
   const stdin: Array<{ input: unknown; bytes: Uint8Array }> = [];
+  let diagnosticsOwners = 0;
   const journal = {
     read: async () => state,
     controlReply: async () => null,
     framesAfter: async () => ({ frames: [], lastSequence: 0, hasMore: false, providerEof: false }),
   } as unknown as DurableNativeBrokerTransport;
   const coordinator = {
+    retainDiagnostics: () => {
+      diagnosticsOwners++;
+      let released = false;
+      return async () => {
+        if (!released) diagnosticsOwners--;
+        released = true;
+      };
+    },
     send: async () => {
       writes++;
       return { state: "accepted", index: writes };
@@ -110,11 +119,27 @@ function fixture() {
     persistence,
     stdin,
     counts: () => ({ qualifications, writes, captures }),
+    diagnosticsOwners: () => diagnosticsOwners,
     replace: (next: ModalBrokerProviderCommand) => {
       persisted = next;
     },
   };
 }
+
+test("bound sessions own diagnostics once and closing one does not release another session", async () => {
+  const f = fixture();
+  const sibling = new NativeBrokerCommandSession(f.options);
+  expect(f.diagnosticsOwners()).toBe(0);
+  f.session.bindProviderCommand(37, f.command, f.persistence);
+  f.session.bindProviderCommand(37, f.command, f.persistence);
+  sibling.bindProviderCommand(41, f.command, f.persistence);
+  expect(f.diagnosticsOwners()).toBe(2);
+  await Promise.all([f.session.close(), f.session.close()]);
+  expect(f.diagnosticsOwners()).toBe(1);
+  expect(sibling.getProviderCommand(41)).toEqual(f.command);
+  await sibling.close();
+  expect(f.diagnosticsOwners()).toBe(0);
+});
 
 test("broker surface has no unretained setup or router protocol fallback", async () => {
   const f = fixture();

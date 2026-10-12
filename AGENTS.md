@@ -587,6 +587,13 @@ report. Its qualified core composition refuses fresh registration on a warm
 instance and rechecks the live creation after capture. This is not command
 admission or initial-stderr verification; see `docs/design/native-command-broker.md`.
 
+The broker coordinator's diagnostics owner is shared across attached session
+surfaces, not one polling task per command. New work needs a fresh bounded
+query outside the input queue; exact cancellation and output retirement do not
+depend on that query succeeding. Retain definite faults before refusal, never
+turn timeout into fault or exit proof, and abort/join the final owner's actual
+read before replacement. The adapter remains uninstalled in application routing.
+
 Public historical checkpoint consent (0495) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy
 fence before a complete group census; a visible session count is not authority.

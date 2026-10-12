@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { NativeBrokerDriver, type NativeBrokerChannel } from "./native-command-broker-driver";
+import { NativeBrokerDiagnosticsOwner } from "./native-command-broker-diagnostics-owner";
+import type { NativeBrokerDiagnosticsChannel } from "./native-command-broker-diagnostics";
+import { nativeBrokerRequestAllowsDiagnosticFault } from "./native-command-broker-transport";
 import type { NativeBrokerRequest } from "./native-command-broker-input";
 import {
   NativeBrokerFrameDecoder,
@@ -56,6 +59,7 @@ function interested<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
  */
 export class NativeBrokerCoordinator {
   private readonly driver: NativeBrokerDriver;
+  private readonly diagnostics: NativeBrokerDiagnosticsOwner;
   private readonly stopped = new AbortController();
   private tail: Promise<void> = Promise.resolve();
   private queued = 0;
@@ -67,10 +71,18 @@ export class NativeBrokerCoordinator {
 
   constructor(
     private readonly journal: DurableNativeBrokerTransport,
-    private readonly channel: NativeBrokerChannel,
+    private readonly channel: NativeBrokerChannel & NativeBrokerDiagnosticsChannel,
     writerId: string,
   ) {
     this.driver = new NativeBrokerDriver(journal, channel, writerId);
+    this.diagnostics = new NativeBrokerDiagnosticsOwner(journal, channel);
+  }
+
+  /** One reference per attached session surface, independent of output waits.
+   * The returned release joins the final shared diagnostics read. */
+  retainDiagnostics() {
+    this.stopped.signal.throwIfAborted();
+    return this.diagnostics.acquire();
   }
 
   private signal(signal?: AbortSignal) {
@@ -281,6 +293,8 @@ export class NativeBrokerCoordinator {
       throw new Error("Native broker request payload exceeds its bound");
     const copy = { ...request, payload: Uint8Array.from(request.payload) };
     if (copy.kind === "fence") throw new Error("The native broker coordinator owns writer fences");
+    if (!nativeBrokerRequestAllowsDiagnosticFault(copy))
+      await this.diagnostics.check(this.signal(signal));
     return this.exclusive(async (bounded) => {
       await this.ready(bounded, copy.requestId);
       const sent = await this.driver.send(copy, bounded, expectedEpoch);
@@ -302,6 +316,7 @@ export class NativeBrokerCoordinator {
       throw new Error("Native broker stdin payload exceeds its bound");
     const copy = { ...input },
       bytes = Uint8Array.from(payload);
+    await this.diagnostics.check(this.signal(signal));
     return this.exclusive(async (bounded) => {
       await this.ready(bounded, copy.admissionId);
       const sent = await this.driver.sendRetainedStdin(copy, bytes, bounded);
@@ -341,7 +356,6 @@ export class NativeBrokerCoordinator {
   async close() {
     this.stopped.abort(new Error("Native broker coordinator is closed"));
     const pump = this.pump;
-    if (pump) await pump.settled;
-    await this.tail;
+    await Promise.all([pump?.settled, this.tail, this.diagnostics.close()]);
   }
 }

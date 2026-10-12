@@ -406,9 +406,24 @@ does not clear unknown input, undo a committed dispatch intent, prove physical
 quiescence, or allow a different request past a pending one. Retained stdin
 refusal rolls back its byte reservation together with the request. Bootstrap
 composition checks diagnostics and rechecks qualified physical ownership after
-all provider reads. Ongoing application lifecycle observation and physical
-provider qualification remain unimplemented; the application does not select
-this path yet.
+all provider reads. `native-command-broker-diagnostics-owner.ts` shares that
+same durable observer between bootstrap and live coordination. Each attached
+broker session owns one reference, independent of stdout waiters; all sessions
+on the physical coordinator share one initial-stderr query. Periodic reads have
+a one-second gap after each bounded query, including transient failures, and
+stop after a durable fault. New work requires a completed fresh query (no cached
+clean result); overlapping checks share the read. These checks occur before the
+input queue, so a stalled diagnostic query cannot queue ahead of exact cancel,
+status, receipt ACK or output retirement. The journal still checks persisted
+faults under its lock before reservation and dispatch. A late fault never
+retroactively proves that an earlier dispatch did not occur.
+
+Last owner release aborts and joins the actual query; a replacement owner waits
+for that cleanup before reading. Closing one session cannot close a sibling's
+observer. Idle coordinator construction does no provider I/O. This lifecycle
+ownership is implemented in the adapter, not yet installed into application
+routing; physical provider qualification and actual application ownership
+remain activation gates.
 
 Output pages commit before the driver asks for a successor. Restartable bounded
 frame reads verify immutable ciphertext/hash/scope and the numeric sequence
@@ -512,7 +527,7 @@ session surface aborts only its observations and leaves the shared coordinator
 and physical commands owned by their existing lifecycle. Stdin requires its
 exact existing private child admission and currently rejects payloads beyond
 one native frame rather than silently splitting, truncating or reauthorizing.
-Application installation, larger-input framing, continuously owned diagnostics
+Application installation, larger-input framing, physical diagnostics qualification
 and setup-command ownership remain gates. A positive prelaunch cancel reply can
 now settle its exact original reservation; uncertainty still cannot.
 

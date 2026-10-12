@@ -42,6 +42,7 @@ import {
   captureNativeBrokerBootstrap,
   type NativeBrokerArtifactPin,
   type NativeBrokerDiagnosticsChannel,
+  type NativeBrokerDiagnosticsPage,
   type NativeBrokerDiagnosticsFault,
   NativeBrokerInitialDiagnosticsError,
 } from "@opengeni/runtime/sandbox";
@@ -699,9 +700,15 @@ async function coordinatedFixture() {
     maxReaders = 0,
     failNext = false;
   let beforeWrite: (() => Promise<void>) | undefined;
-  const channel: NativeBrokerChannel = {
+  let diagnostics: (
+    signal?: AbortSignal,
+  ) => Promise<NativeBrokerDiagnosticsPage[]> = async () => [];
+  const channel: NativeBrokerChannel & NativeBrokerDiagnosticsChannel = {
     sandboxId: f.binding.sandboxId,
     taskId: f.binding.taskId,
+    async *diagnostics(_cursor, signal) {
+      yield* await diagnostics(signal);
+    },
     async write(input) {
       const decoder = new NativeBrokerFrameDecoder(f.binding.brokerId);
       const [request] = decoder.push(input.input);
@@ -773,6 +780,9 @@ async function coordinatedFixture() {
     writes,
     coordinator: new NativeBrokerCoordinator(f.service(), channel, writerId),
     counters: () => ({ activeReaders, maxReaders }),
+    setDiagnostics: (observe: typeof diagnostics) => {
+      diagnostics = observe;
+    },
     failNext: () => {
       failNext = true;
     },
@@ -782,6 +792,75 @@ async function coordinatedFixture() {
     nextReader: () => new Promise<void>((resolve) => readStarted.add(resolve)),
   };
 }
+
+test("new work cannot bypass live diagnostics; unavailable reads do not queue ahead of cancellation", async () => {
+  const f = await coordinatedFixture();
+  let entered!: () => void, fail!: (error: Error) => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const pending = new Promise<NativeBrokerDiagnosticsPage[]>((_resolve, reject) => {
+    fail = reject;
+  });
+  f.setDiagnostics(async () => {
+    entered();
+    return pending;
+  });
+  const work = { ...fence(), kind: "prepare" as const, commandId: crypto.randomUUID() };
+  const error = new Error("diagnostics unavailable");
+  const waiting = f.coordinator.send(work).catch((cause) => cause);
+  try {
+    await started;
+    const cancel = {
+      ...work,
+      requestId: crypto.randomUUID(),
+      kind: "control" as const,
+      payload: Buffer.from("cancel"),
+    };
+    await expect(f.coordinator.send(cancel)).resolves.toMatchObject({ state: "accepted" });
+    expect(await f.f.service().request(work.requestId)).toBeNull();
+    expect(f.writes.map((write) => write.requestId)).not.toContain(work.requestId);
+    fail(error);
+    expect(await waiting).toBe(error);
+    expect(await f.f.service().diagnosticFault()).toBeNull();
+    f.setDiagnostics(async () => []);
+    await expect(f.coordinator.send(work)).resolves.toMatchObject({ state: "accepted" });
+  } finally {
+    fail(error);
+    await waiting;
+    await f.coordinator.close();
+  }
+});
+
+test("a later live diagnostic is durable before work refusal, while retained status and cancellation remain available", async () => {
+  const f = await coordinatedFixture();
+  const release = f.coordinator.retainDiagnostics();
+  try {
+    const work = { ...fence(), kind: "prepare" as const, commandId: crypto.randomUUID() };
+    await f.coordinator.send(work);
+    const fault = diagnosticFault(f.f);
+    f.setDiagnostics(async () => [JSON.parse(fault.page!.value)]);
+    const next = { ...work, requestId: crypto.randomUUID() };
+    await expect(f.coordinator.send(next)).rejects.toThrow("diagnostics");
+    expect(await f.f.service().request(next.requestId)).toBeNull();
+    expect(
+      await createDurableNativeBrokerTransport(client.db, key, f.f.binding).diagnosticFault(),
+    ).toEqual(fault);
+    for (const action of ["status", "cancel"])
+      await expect(
+        f.coordinator.send({
+          ...work,
+          requestId: crypto.randomUUID(),
+          kind: "control",
+          payload: Buffer.from(action),
+        }),
+      ).resolves.toMatchObject({ state: "accepted" });
+    expect(f.counters().maxReaders).toBe(1);
+  } finally {
+    await release();
+    await f.coordinator.close();
+  }
+});
 
 test("shared coordination serializes native acceptance, preserves request bytes and uses one output collector", async () => {
   const f = await coordinatedFixture();

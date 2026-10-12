@@ -1,3 +1,4 @@
+export { observeDurableNativeBrokerDiagnostics } from "./providers/native-command-broker-diagnostics-owner";
 export type {
   ProviderCommandPersistence,
   ProviderCommandSession,

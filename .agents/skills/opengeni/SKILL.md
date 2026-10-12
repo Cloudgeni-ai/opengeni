@@ -108,7 +108,12 @@ Then open the smallest source files that answer the question:
   in the encrypted append-only journal (migration `0751`), and transport refuses
   new work without clearing uncertain input or blocking exact cancellation and
   output retirement. A completed empty query is not durable health or command
-  authority; live application observation and provider qualification remain open.
+  authority. `native-command-broker-diagnostics-owner.ts` shares one owned live
+  query across attached session surfaces, with paced bounded reads and a fresh
+  check before new work joins the input queue. Exact recovery controls bypass
+  that observation gate, not the canonical input state machine. Last release
+  aborts and joins the read; closing a sibling does not terminate another owner.
+  Application installation and physical provider qualification remain open.
   `native-command-broker-coordinator.ts` shares one demand-driven output reader,
   serializes input through native acceptance and never silently replays uncertain
   dispatch. Explicit global output ACK retires only the committed transport

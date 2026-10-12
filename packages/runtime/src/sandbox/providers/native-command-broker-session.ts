@@ -56,6 +56,7 @@ export class NativeBrokerCommandSession implements ProviderCommandSession {
   private readonly receipts = new Map<string, ProviderCommandOutput>();
   private readonly starts = new Set<AbortController>();
   private readonly stopped = new AbortController();
+  private releaseDiagnostics: (() => Promise<void>) | null = null;
 
   constructor(
     private readonly options: {
@@ -114,6 +115,7 @@ export class NativeBrokerCommandSession implements ProviderCommandSession {
     const current = this.entries.get(handle);
     if (current && !sameCommand(current.command, command))
       throw new Error("Broker handle cannot be rebound to another execution");
+    this.releaseDiagnostics ??= this.options.coordinator.retainDiagnostics();
     this.entries.set(handle, { command, persistence });
   }
 
@@ -323,5 +325,7 @@ export class NativeBrokerCommandSession implements ProviderCommandSession {
     await this.cancelPendingExecCommand();
     this.receipts.clear();
     this.entries.clear();
+    await this.releaseDiagnostics?.();
+    this.releaseDiagnostics = null;
   }
 }

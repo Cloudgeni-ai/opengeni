@@ -76,8 +76,13 @@ journal (migration `0751`); the transport then refuses new work and pending
 work dispatch while preserving exact cancellation, observation and receipt
 retirement. Clean queries cannot erase that fault. Query failure alone is
 unavailability, not a fabricated permanent fault; neither clean observations nor
-bootstrap registration grants command authority. Ongoing application lifecycle
-observation and provider qualification remain separate, incomplete gates.
+bootstrap registration grants command authority. The shared
+`native-command-broker-diagnostics-owner.ts` owns one bounded initial-stderr
+query across attached session surfaces, including periods without stdout
+waiters. New work checks share a fresh query before entering the input queue;
+recovery controls remain independent. Last release aborts and joins the actual
+read before replacement ownership can observe again. This adapter lifecycle
+is not application installation or physical provider qualification.
 `native-command-broker-coordinator.ts` shares one demand-driven collector and
 serializes input through native acceptance. It never automatically replays an
 unknown dispatch. Explicit global output ACK is limited to the committed prefix

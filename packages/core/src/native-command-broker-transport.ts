@@ -14,10 +14,8 @@ import {
   durableNativeBrokerTransport,
   captureNativeBrokerBootstrap,
   readNativeBrokerBootstrap,
-  inspectNativeBrokerInitialDiagnostics,
-  NativeBrokerInitialDiagnosticsError,
+  observeDurableNativeBrokerDiagnostics,
   type NativeBrokerDiagnosticsChannel,
-  type DurableNativeBrokerTransport,
   type NativeBrokerArtifactPin,
   type NativeBrokerChannel,
 } from "@opengeni/runtime/sandbox";
@@ -35,34 +33,9 @@ export function createDurableNativeBrokerTransport(
   );
 }
 
-/** Each query starts at the original stderr origin. Retain a definite
- * diagnostic/protocol fault before reporting it; uncertainty or abort alone
- * remains unavailable, not a fabricated permanent provider failure. A fault
- * wins concurrent clean observations and cannot be cleared by reconnection. */
-export async function observeDurableNativeBrokerDiagnostics(
-  journal: DurableNativeBrokerTransport,
-  channel: NativeBrokerDiagnosticsChannel,
-  signal?: AbortSignal,
-) {
-  signal?.throwIfAborted();
-  const { output } = await journal.read();
-  if (output.sandboxId !== channel.sandboxId || output.taskId !== channel.taskId)
-    throw new Error("Native broker diagnostic channel changed physical identity");
-  const old = await journal.diagnosticFault();
-  if (old) throw new NativeBrokerInitialDiagnosticsError(old);
-  let observation;
-  try {
-    observation = await inspectNativeBrokerInitialDiagnostics(channel, signal);
-  } catch (error) {
-    if (!(error instanceof NativeBrokerInitialDiagnosticsError)) throw error;
-    const retained = await journal.recordDiagnosticFault(error.observation);
-    throw new NativeBrokerInitialDiagnosticsError(retained);
-  }
-  const concurrent = await journal.diagnosticFault();
-  if (concurrent) throw new NativeBrokerInitialDiagnosticsError(concurrent);
-  signal?.throwIfAborted();
-  return observation;
-}
+// Preserve the existing core seam; shared live ownership uses the identical
+// durable observer through the runtime's journal port, not a second policy.
+export { observeDurableNativeBrokerDiagnostics } from "@opengeni/runtime/sandbox";
 
 /** Compose the frozen owner-qualified creation with exact authenticated
  * initial-channel capture and durable diagnostic fencing. This still grants
