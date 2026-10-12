@@ -115,6 +115,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Provider-neutral choice uses the same preference-only event lock as a pin.
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce": {
+    inserts: 1,
+    contract: "canonical",
+  },
   // The shared-core Codex waiter (M3 PR 2a) mirrors the legacy Codex arm,
   // reconcile and supersession lock contracts exactly.
   "packages/db/src/index.ts#armSubscriptionCoreCodexCapacityWait": {
@@ -370,6 +375,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
 const genericControlWriters = new Set([
   // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
   "packages/db/src/index.ts#pinSubscriptionCoreSessionCodexAccount",
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
   "packages/db/src/index.ts#appendSessionEvents",
