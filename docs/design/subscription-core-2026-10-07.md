@@ -5295,6 +5295,12 @@ like C1a.
   (only a Claude core waiter), then the legacy Claude waiter. Compaction
   never parks (C1a). The shared conformance suite runs its session-wait
   scenarios for both Claude subjects.
+  A Claude core waiter sleeps until its stored reset, as Codex's does
+  (`recheckBeforeReset: false`): the Claude adapter reads no usage that can
+  end an exhaustion early (its quota comes from response headers, so it
+  does not declare `usageReadEndsQuotaExhaustion`), and its wait binding has
+  no `refreshBeforeReconcile`. A header observation on another turn still
+  wakes the waiter (`quota_observed_available`).
   Before the receipt a v1 Claude waiter lives in its own table: the exact-id
   core lookup finds nothing, so the v1 reconcile runs unchanged, and a core
   Claude wake fails closed while Claude is unregistered (a real-PostgreSQL
