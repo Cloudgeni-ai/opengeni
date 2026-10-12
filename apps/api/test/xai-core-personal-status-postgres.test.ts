@@ -5,14 +5,16 @@
  *
  * - Status: their own personal connection counts as connected; in their own
  *   Personal workspace, and only for the verified owning person (browser
- *   sign-in, or an agent with their full access), it is the effective
- *   account, validated by a live billing read. A read-only agent, a plain
- *   bearer and the person's API keys get the stored count only. With
- *   personal connections turned off nothing is read live.
+ *   sign-in, a verified external-identity assertion linked to them, or an
+ *   agent with their full access), it is the effective account, validated
+ *   by a live billing read. A read-only agent, a plain bearer and the
+ *   person's own API keys get the stored count only. With personal
+ *   connections turned off nothing is read live.
  * - Re-read: a stored exhaustion is re-read as the owner only for an exact
- *   accepted turn that placement itself would let use the connection (the
- *   owner's own private turn with the frozen entry at the current
- *   generation, personal connections allowed). Nobody else re-reads it.
+ *   accepted turn whose placement personal authorization admits the
+ *   connection (the owner's own private turn with the frozen entry at the
+ *   current generation, personal connections allowed). Nobody else
+ *   re-reads it.
  *
  * SuperGrok stays unregistered in production until its cutover (X3); this
  * file registers the production binding in its own process and admits it on

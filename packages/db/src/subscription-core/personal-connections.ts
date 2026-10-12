@@ -6,9 +6,9 @@
  * - the stored status and quota, through the owner-only reader (0707), in
  *   the workspace the person views (no credential material);
  * - the live re-read of a stored exhaustion before an exact accepted turn
- *   is placed, only for the connections placement's personal authorization admits for that turn, and
- *   through the administered `personal_owner` probe in the owner's own
- *   Personal workspace.
+ *   is placed, only for the connections placement's personal authorization
+ *   admits for that turn, and through the administered `personal_owner`
+ *   probe in the owner's own Personal workspace.
  *
  * The stored read needs the exact person (a `user:` subject with an active
  * membership). The re-read needs everything placement needs for a personal
@@ -75,9 +75,9 @@ export const subscriptionCorePersonalConnections = memoByProvider((provider) => 
   }
 
   /**
-   * The personal connections placement's personal authorization admits for an exact accepted turn:
-   * placement's own authorization (the frozen v2 entry, minted per
-   * connection at its current authority generation by
+   * The personal connections placement's personal authorization admits for
+   * an exact accepted turn: placement's own authorization (the frozen v2
+   * entry, minted per connection at its current authority generation by
    * `authorize_subscription_personal_placement_access`), then the personal
    * rows that transaction can see, which are exactly those it minted.
    * Empty for any turn without that entry for the session owner, and on
@@ -121,9 +121,10 @@ export const subscriptionCorePersonalConnections = memoByProvider((provider) => 
   /**
    * Re-read live usage before a stored personal exhaustion is treated as
    * current for an exact accepted turn (design 5.3, EP-N22 for personal
-   * connections): of the connections placement's personal authorization admits for that turn (see
-   * `turnPersonalConnectionIds`), each active one whose stored quota is
-   * exhausted now and was not observed within `minIntervalMs` is probed on
+   * connections): of the connections placement's personal authorization
+   * admits for that turn (see `turnPersonalConnectionIds`), each active one
+   * whose stored quota is exhausted now and was not observed within
+   * `minIntervalMs` is probed on
    * its own, as the owner in their own Personal workspace. Probe failures
    * keep the stored exhaustion. Returns the connections whose exhaustion
    * ended (the caller wakes waiters).

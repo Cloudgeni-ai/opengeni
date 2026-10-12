@@ -4623,14 +4623,15 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   workspace, only when the shared pool has no effective primary, and only
   for a caller who passes the owner check of a private account
   (`requirePrivateSubscriptionHuman` with the Personal-workspace place, as
-  the Claude core usage route gates a personal connection: the signed-in
-  owning person with `connections:write`, or an agent with their full
+  the Claude core usage route gates a personal connection: the owning
+  person with `connections:write`, by browser sign-in, a verified
+  external-identity assertion linked to them, or an agent with their full
   access), is a personal connection the effective account (the first
   `active` one, scope `user` as on the legacy path), validated by one live
   billing read as its owner through the administered `personal_owner`
   probe, which also applies the organization's personal-connections rule
-  (0729). A caller with only `workspace:read` (a read-only agent, a plain
-  bearer, the person's own API keys) gets the stored count with
+  (0729). Any other caller (a read-only agent, a plain bearer, the
+  person's own API keys, read-only or full) gets the stored count with
   `valid: false`, and nothing is read live, recorded or woken. That reading is
   stored like any usage observation; when it ends an exhaustion the status
   wakes the organization's SuperGrok core waiters (`usage_recovered`, a
@@ -4655,8 +4656,8 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   (`refreshExhaustedSubscriptionCoreTurnPersonalQuota`). Placement's later
   choice can still pass over such an account (outside the Personal workspace
   it needs fallback consent or an explicit binding, and the provider switch
-  applies there); the re-read is then the owner's own billing read under the
-  0729 owner checks, which widens nothing. Inside the
+  applies in every workspace); the re-read is then the owner's own billing
+  read under the 0729 owner checks, which widens nothing. Inside the
   accepted turn, placement's own `authorizeSubscriptionCoreFrozenPersonal`
   (`authorize_subscription_personal_placement_access`) requires the turn's
   initiating human to be the session owner, a private session or the
