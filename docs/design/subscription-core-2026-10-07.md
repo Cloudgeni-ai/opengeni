@@ -46,7 +46,7 @@ independent design review (summarised in [section 9](#9-review-changes)).
    portable compaction whenever a cross-provider fallback is in effect for
    their model; existing Codex remote-compaction sessions convert at their
    next compaction while Codex still has capacity, and until then fail over
-   only within Codex (D-19, see §6.4). D-39 (§5.6.5) proposes converting a
+   only within Codex (D-19, see §6.4). D-40 (§5.7.5) proposes converting a
    remote-compaction session at the failover point instead; it replaces the
    last clause once the owner confirms it (Q-05).
 
@@ -374,7 +374,7 @@ for the new provider, drops provider-specific history items from the request
 copy (`historyCompatibility`), and keeps completed tools and accounting.
 Image and video operations key their idempotency on the turn and call, not
 the credential, so a failover cannot spend twice (SUB-ACCT-02).
-§5.6 designs the cross-provider step and the mid-turn switch in detail.
+§5.7 designs the cross-provider step and the mid-turn switch in detail.
 
 The reference model (`packages/subscriptions/src/reference-model.ts`)
 implements this algorithm independently; conformance compares production
@@ -390,7 +390,7 @@ decisions with `checkDecision`.
 | M2 | New tables, functions and policies, empty. Generic membership-lifecycle kind. Per-organization, per-provider cutover switch stored in the database. | rolling | none |
 | M3 | Codex cutover: drained maintenance migration moves Codex rows (dedupe, aliases, secrets, bindings, leases, live waiters with generation and wake revision, v2 authority backfill) inside the owner window with explicit account-context parity counts; every Codex consumer (chat, compaction, transcription, realtime, image, Apps, reset credits, usage routes) switches in the same release. Workflow activities keep their names and accept both waiter shapes. | maintenance | Codex on the core |
 | M4 | SuperGrok, then Claude, the same way; synthetic pool subjects and per-provider SQL functions retired. | maintenance | per provider |
-| M5 | Product features: scopes and people, personal connections for every provider, settings with overrides and the overview, cache-aware stickiness (6.1, 3.4; migration `0723_subscription_binding_cache_clock.sql`), cross-provider failover (5.6) and portable-compaction defaults. API and UI, previewed before merge. | rolling | product |
+| M5 | Product features: scopes and people, personal connections for every provider, settings with overrides and the overview, cache-aware stickiness (6.1, 3.4; migration `0723_subscription_binding_cache_clock.sql`), cross-provider failover (5.7) and portable-compaction defaults. API and UI, previewed before merge. | rolling | product |
 | M6 | Drop legacy tables, columns, triggers and functions. | maintenance | none |
 
 Each migration declares its `deployment-mode`, opens the owner-only
@@ -5221,17 +5221,21 @@ Fail-closed choices (contract ambiguous; strictest option taken):
 - Writes that could miss a lock under an older snapshot are refused outside
   READ COMMITTED (item 6 above) rather than admitted as dormant overrides.
 
-### 5.6 M5: cross-provider failover
+### 5.7 M5: cross-provider failover
 
 Scope: SUB-FAIL-01 to SUB-FAIL-09, SUB-FAIL-11 and SUB-WAIT-01 for chat
-turns, with contract decisions D-32 to D-44 and open questions Q-02, Q-04
-and Q-05. Voice, transcription and media never cross providers (SUB-FAIL-10,
-§6.5). This section is the design only: every SUB-FAIL requirement stays
-pending until the PRs in §5.6.9 verify it. Names refer to main on
-2026-10-12, after the settings track (§5.5) merged. SuperGrok's chat
-placement is on main, dormant (#4117); its settlement, waits and cutover
-and every Claude step are still open PRs (§5.3), and where this design
-builds on them it names them.
+turns, with contract decisions D-33 to D-46 and open questions Q-02, Q-04,
+Q-05 and Q-06. Voice, transcription and media never cross providers
+(SUB-FAIL-10, §6.5). This section is the design only: every SUB-FAIL
+requirement stays pending until the PRs in §5.7.9 verify it. Names refer to
+main on 2026-10-12, after the settings track (§5.5) merged. Section 5.6 is
+left to the explicit account choice of #4168, which this design relies on.
+SuperGrok's chat placement and its media and quota reads are on main,
+dormant (#4117, #4119); its settlement, waits and cutover and every Claude
+step are still open PRs (§5.3), and where this design builds on them it
+names them. Until those stacks merge, the first PRs of this plan add new
+files and leave the files the stacks change alone, apart from one agreed
+optional `adapter.ts` member and the migration lists (§5.7.9).
 
 The behaviour: when every eligible account of the session's provider is
 exhausted or unusable and the effective setting "cross-provider failover" is
@@ -5241,7 +5245,7 @@ conversation continues from Opengeni's own durable history, never from
 provider state. The session waits only when nothing it may use can serve it
 anywhere, or when a pin or "only this model" forbids moving (SUB-WAIT-01).
 
-#### 5.6.1 Placement today: one provider per turn
+#### 5.7.1 Placement today: one provider per turn
 
 The worker places a chat turn through
 `subscriptionCoreTurns(provider).placeSubscriptionCoreTurn`
@@ -5333,22 +5337,32 @@ every connection in its input (D-22). The reference model
 (`reference-model.ts`) checks the same crossing rule. What is missing is a
 core path that gives the policy more than one provider.
 
-#### 5.6.2 The failover step (D-32, D-33)
+#### 5.7.2 The failover step (D-33, D-34)
 
-A new provider-neutral module, `packages/db/src/subscription-core/failover.ts`,
-holds the step. It sits in a shared directory, so
+The step lives in two new provider-neutral modules:
+`packages/db/src/subscription-core/failover.ts` (the router, the step and
+its evaluation) and `packages/db/src/subscription-core/failover-world.ts`
+(the world across providers). Both sit in a shared directory, so
 `scripts/check-subscription-core-neutral.ts` forbids provider names and
-provider-id conditionals in it. M4's per-provider routines are not edited.
-Two changes in `turns.ts` are needed: the neutral re-selection fix of D-35,
-and a no-behaviour-change extraction of the helpers the step reuses
-(`readAttemptFence`, lease reuse, `commitBinding`, `earliestHealthRetryAt`)
-into functions that take the provider as a parameter.
+provider-id conditionals in them. M4's per-provider routines are not edited,
+and neither are `turns.ts` and `subscription-core-placement-world.ts`, which
+the open M4 stacks still change. The step calls their exported functions
+(`subscriptionCoreTurns(provider).placeSubscriptionCoreTurn`,
+`subscriptionCoreReselectionPoints`, `withSubscriptionCoreAcceptedTurn`) and
+the repository's (`readSubscriptionEffectiveSettings`,
+`readSubscriptionSessionBinding`, `listSubscriptionConnectionsForPlacement`,
+`writeSubscriptionSessionBinding`, `acquireSubscriptionTurnLease`,
+`releaseSubscriptionTurnLease`). Two reads it needs are private functions
+of `turns.ts`, `readAttemptFence` and `readLastContextReplacedAt`. The step
+carries provider-neutral copies with the same SQL, conformance cases run
+the same fenced and compacted scenarios through both paths, and a hook after
+the M4 stacks makes `turns.ts` use the copies (§5.7.9).
 
 **When it runs.** Model failover is allowed for a turn when all of these
-hold: the deployment setting is on (D-42); the session's own provider is on
-the core with its cutover enabled; the binding is neither explicit nor
-"only this model"; the accepted policy has no credential restriction; and
-the work is a chat turn. Its candidates are those of
+hold: the deployment setting is on (D-43); the session's own provider is on
+the core (D-34); the binding row, on whatever provider, is neither explicit
+nor "only this model" (D-46); the accepted policy has no credential
+restriction; and the work is a chat turn. Its candidates are those of
 `failoverCandidateModels`: same-provider entries of the fallback order
 always, and models of other providers only when the effective
 `crossProviderFailover` is on. Core placement ignores same-provider model
@@ -5358,17 +5372,30 @@ model, placement is exactly M4's `placeSubscriptionCoreTurn`, as today.
 
 A provider-neutral entry, `placeSubscriptionCoreTurnWithFailover`, routes:
 
-- If the session is bound to a model other than the accepted one, or the
-  turn's lease row is on another provider, the step runs directly. M4's
-  routine would read the fallback binding as a model change and return to
-  the preferred model while the fallback's cache is warm, and its
-  `readTurnLease` refuses a lease row of another provider.
-- Otherwise M4's routine runs first, and its `run`, `lease_busy`,
+- When failover is allowed and the session is bound to a model other than
+  the accepted one, or the turn's lease row is on another provider, the step
+  runs directly. M4's routine would read the fallback binding as a model
+  change and return to the preferred model while the fallback's cache is
+  warm, and its `readTurnLease` refuses a lease row of another provider ("A
+  core turn lease belongs to another provider").
+- Otherwise M4's routine runs first. Before it, a turn lease row of another
+  provider, which only an earlier failover leaves, is settled by M4's own
+  lease rules: an older attempt's live lease answers `lease_busy`, and this
+  attempt's own or an expired one is released. M4's `run`, `lease_busy`,
   `attempt_fenced`, `not_visible` and `cutover_not_enabled` results are
-  returned unchanged. A wait with reason `no_eligible_capacity`,
-  `model_not_allowed` or `compaction_provider_locked` hands over to the
-  step. `pinned_account_unavailable`, `pinned_account_ineligible` and
+  returned unchanged. When failover is allowed, a wait with reason
+  `no_eligible_capacity`, `model_not_allowed` or
+  `compaction_provider_locked` hands over to the step.
+  `pinned_account_unavailable`, `pinned_account_ineligible` and
   `accepted_authority_unavailable` never move.
+
+When failover stops being allowed for a session that an earlier failover
+left on another provider (a setting was turned off, the workspace now
+restricts the fallback, or a person pinned an account), M4's routine places
+the turn on its own provider. An automatic binding of another provider is
+not in its world, so it is re-selected (`account_unavailable`) and replaced
+by `commitBinding`, which brings the session home. An explicit binding is
+never replaced (D-46).
 
 The step is a second transaction and a full decision, not a patch on the
 first. It evaluates the preferred model again, so capacity that returned in
@@ -5377,14 +5404,15 @@ between still wins.
 **The transaction.** The step runs one transaction per attempt:
 
 1. `withSubscriptionCoreAcceptedTurn` opens the same exact-turn gate.
-2. A new `withSubscriptionCoreFailoverPlacementWorld`, in the shared
-   placement-world module, reads the session, the turn and the effective
-   settings without locks. It evaluates every registered provider's
-   `sessionCompactionLock` in that read.
-3. It builds the candidate models (§5.6.3). Each resolves to a provider
+2. A new `withSubscriptionCoreFailoverPlacementWorld` (`failover-world.ts`)
+   reads the session, the turn and the effective settings without locks. It
+   evaluates every registered provider's `sessionCompactionLock` in that
+   read.
+3. It builds the candidate models (§5.7.3). Each resolves to a provider
    through the registry. A provider without a registry row, or whose route
    for the organization is not `core` (`readSubscriptionCoreProviderRoute`),
-   is dropped with its models (D-33).
+   is dropped with its models (D-34). The session's own provider must be
+   `core` as well, or the step returns M4's wait unchanged.
 4. For each candidate provider that the turn's accepted authority has a
    frozen personal entry for, it authorizes that entry
    (`authorize_subscription_personal_placement_access(..., provider)`),
@@ -5398,9 +5426,10 @@ between still wins.
 6. It merges everything into one `PlacementInput`: every candidate model
    with its reasoning ladder and tier, the union of connections,
    `cacheFacts` and `quotaStaleAfterMs` per provider, the real effective
-   settings, and re-selection points by D-35.
-7. It checks the attempt fence and applies M4's lease-reuse rules to the
-   turn's lease row, whatever its provider.
+   settings, and re-selection points from `subscriptionCoreReselectionPoints`
+   given the binding's preferred model instead of its bound model (D-36).
+7. It checks the attempt fence (its copy of `readAttemptFence`) and applies
+   M4's lease-reuse rules to the turn's lease row, whatever its provider.
 8. One `decidePlacement` call decides. On a run it releases a reused lease
    that is not the chosen connection (`releaseSubscriptionTurnLease` deletes
    the row for its provider), acquires the lease for the chosen connection
@@ -5417,38 +5446,74 @@ connection lock while waiting for another, and none does. Because the
 connection reads are unlocked, the decision can be stale when the lease is
 taken. That is already true of M4 placement, and it is corrected the same
 way: the lease trigger re-checks the connection's admission under its lock,
-and a provider refusal settles and re-places. PR B's concurrency test
-(§5.6.9) races two sessions crossing in opposite directions with a pin of
+and a provider refusal settles and re-places. PR B1's concurrency test
+(§5.7.9) races two sessions crossing in opposite directions with a pin of
 one target, a credential refresh of the other and a disconnect. Releasing
 the old provider's lease takes no connection lock: the admission trigger
 fires only on insert and update (`zz_subscription_lease_disconnect_admission`,
 0691), and the binding's own admission trigger takes the same connection's
 lock the new lease already holds.
 
-**The binding row.** A cross-provider run writes the binding through
-`writeSubscriptionSessionBinding` with the target provider, connection and
-model, `last_switch_reason` `failover_cross_provider` or
-`return_to_preferred` (migration 0642 already allows both), the choice
-unchanged, and the placement time as the new clock. It also records the
-preferred model the binding serves and the session's history position at the
-provider change (D-35). Migration 0723's trigger
+**The binding row.** A session has one binding row, so the step writes it
+only when it is automatic or absent; an explicit row, on any provider, keeps
+the step from running at all (D-46). A cross-provider run of a session with
+an owner writes the row through `writeSubscriptionSessionBinding` with the
+target provider, connection and model, `choice` automatic,
+`only_this_model` false, `last_switch_reason` `failover_cross_provider` or
+`return_to_preferred` (migration 0642 already allows both) and the placement
+time as the new clock. Migration 0723's trigger
 `subscription_session_bindings_cache_clock` clears `last_model_call_at`
 when the provider, model, connection or choice changes without a stated
 clock. The step always states one, so warmth never carries from one provider
-to another (D-31).
+to another (D-31). Ownerless sessions write no binding, as in M4.
 
-**Target not on the core.** Strictest choice (D-33): only providers on the
+The row also records the preferred model it serves, in a new nullable
+column `preferred_model_id` (NULL reads as the bound model). A trigger in
+the same migration clears it whenever a writer changes the provider,
+connection, model or choice, as 0723 does for the clock, so M4's
+`commitBinding`, the pin writers and #4168's choice writer stay correct
+without edits. The step sets it with a second update in the same
+transaction, after its own write.
+
+What the next turn does: its accepted model is the session's preferred
+model, the row names the fallback, so the router runs the step directly.
+The step keeps the fallback while its account can serve it and its cache is
+warm, returns to the preferred model once that model can serve and the
+fallback is cold (`return_to_preferred`), and otherwise moves on. If a
+person pins an account in between, the pin writer locks the same row,
+compares its version and makes it explicit; from then on the step does not
+run for the session.
+
+**Target not on the core.** Strictest choice (D-34): only providers on the
 core are targets. A fallback model of a provider that is not registered, or
 whose route for the organization is `legacy` or `maintenance`
 (`readSubscriptionCoreProviderRoute` in
 `packages/db/src/subscription-core/provider-route.ts`), is skipped as if
-unknown.
-The step never calls a legacy runtime, never counts that provider's
+unknown. The step never calls a legacy runtime, never counts that provider's
 accounts as capacity and never reports its resets. A session whose own
 provider is not on the core does not move at all. #4117 keeps SuperGrok out
 of the registry until its cutover, so until the SuperGrok and Claude
 cutovers land (#4104, #4137), Codex sessions have no production target; the
 shared test provider and the fake API-key connector exercise the step.
+
+The route is stricter than M4's own gate. `cutoverEnabled` in `turns.ts`
+reads only the organization's switch row, and migration 0712 notes that a
+deployment can still hold switch rows and core connection rows written
+before its receipt policies, for a provider without a receipt. The route
+also requires the receipt (`subscription_provider_cutover_committed`), so
+such a provider stays `legacy` and is never a target. The database backs
+this up. Since 0712, a core connection row and an enabled switch row need
+the receipt (`subscription_connections_receipt_insert`,
+`subscription_provider_cutovers_receipt_update`), and a lease must name a
+core connection of its own provider (the
+`(account_id, provider, connection_id)` foreign key of
+`subscription_leases`, 0642). A drained cutover inserts the receipt and the
+registry row before it moves rows, in its migration transaction (#4104's
+cutover migration, 0718 on its branch, whose stage in `cutover-stage.ts`
+takes that transaction), so a concurrent step sees either none of it, and
+skips the provider, or all of it. After the cutover, an operator hold
+(`maintenance`) is read in the step's transaction exactly as M4 reads its own
+gate. A real-PostgreSQL test in PR B1 covers each case (§5.7.9).
 
 **The wait.** `decidePlacement`'s final wait already takes the minimum
 `servableAgainAt` over every permitted candidate model and every connection
@@ -5457,13 +5522,15 @@ reported reset is the earliest across providers (D-22). The health retry is
 the minimum of each candidate provider's quarantine and catalog deadlines
 (`earliestHealthRetryAtAcrossProviders`). It inherits the limit noted under
 PR 0b part 3: the lookup reads as the application role, so a quarantined
-personal account falls back to the waiter's backoff. The waiter row keeps the session's
-own provider and records its candidate providers (D-40). A wake of any
-candidate provider wakes it, and reconciliation is handed the step's
-evaluation (`evaluateSubscriptionCorePlacementWithFailover`, no lock or
-lease) instead of the single-provider one.
+personal account falls back to the waiter's backoff. The waiter row keeps
+the session's own provider and records its candidate providers (D-41). A
+wake of any candidate provider wakes it, and reconciliation is handed the
+step's evaluation (`evaluateSubscriptionCorePlacementWithFailover`, no lock
+or lease) instead of the single-provider one. The wake and arm changes edit
+`waiters.ts` and the worker's waits, so they wait for the M4 stacks
+(§5.7.9).
 
-#### 5.6.3 Model mapping (D-34)
+#### 5.7.3 Model mapping (D-35)
 
 The contract's fallback order is per preferred model: an explicit list of
 model ids in the effective settings, possibly on other providers
@@ -5471,10 +5538,14 @@ model ids in the effective settings, possibly on other providers
 speaks of an adapter-declared equivalence or tier. One rule covers both:
 
 1. An explicit effective entry for the preferred model wins, including an
-   explicit empty list, which means "no fallback model". `fallbackOrderFor`
-   returns `[]` for both a missing and an empty entry, so a new
-   `explicitFallbackOrder(settings, preferred)` in
-   `packages/subscriptions/src/settings.ts` returns `null` for a missing one.
+   explicit empty list, which means "no fallback model" (the settings
+   contract and `fallbackOrderProblem` accept an empty list).
+   `failoverCandidateModels` keeps reading the list through
+   `fallbackOrderFor`, as #4122 intends. That helper returns `[]` for both a
+   missing and an empty entry, so a sibling
+   `hasFallbackOrderEntry(settings, preferred)` in
+   `packages/subscriptions/src/settings.ts` tells them apart, and nothing
+   indexes the map directly.
 2. With no entry, and only when cross-provider failover is on, a default
    order is derived from adapter-declared tiers: the models of other core
    providers that declare the preferred model's tier, never a lower or a
@@ -5485,7 +5556,7 @@ speaks of an adapter-declared equivalence or tier. One rule covers both:
    without a declared tier derives nothing, and a model without one is never
    derived. Same-provider model fallback stays explicit only.
 3. Entries naming unknown models, or models of providers not on the core,
-   are skipped (D-33), as §5.5 already says for unknown models.
+   are skipped (D-34), as §5.5 already says for unknown models.
 4. Workspace restrictions, provider switches and the compaction lock then
    filter the candidates (`modelPermitted`, D-17, D-26), and the reasoning
    level maps by D-16 (`mapReasoningLevel`).
@@ -5496,30 +5567,39 @@ quality. An administrator who wants either lists it explicitly, and so does
 one who wants another provider order. Whether the derived order should also
 step down to lower tiers is open (Q-04).
 
-**The adapter capability.** In `packages/subscriptions/src/adapter.ts`:
+**The adapter capability.** One optional member, the purely additive change
+the M4 owners agreed to, so no adapter needs an edit:
 
-- `ModelTier`: a closed set of tier names declared once in the pure package
-  (for example `"frontier" | "standard" | "fast"`). It names no provider.
-  Equality is the only comparison D-34 needs; an order is added only if the
-  owner allows stepping down (Q-04).
-- `SubscriptionCoreAdapter.modelTier(modelId: ModelId): ModelTier | null`.
-  Each provider's adapter module, outside the shared directories, declares
-  its models. Unknown or new models return `null` until someone declares
-  them.
-- `SubscriptionCoreAdapter.historyCompatibility: HistoryCompatibility`. The
-  type exists, but only on `ModelConnectionAdapter.historyCompatibility()`,
-  which nothing calls in production; it moves to the core adapter that the
-  runtime resolves (`subscriptionCoreAdapter(providerId)`).
+- `ModelTier` (`packages/subscriptions/src/types.ts`): a closed set of tier
+  names declared once in the pure package (for example
+  `"frontier" | "standard" | "fast"`). It names no provider. Equality is the
+  only comparison D-35 needs; an order is added only if the owner allows
+  stepping down (Q-04).
+- `SubscriptionCoreAdapter.modelTier?(modelId: ModelId): ModelTier | null`
+  (`packages/subscriptions/src/adapter.ts`), optional like `fetchUsage`,
+  `decodeQuota` and `liveModels`. An adapter without it, and a model it does
+  not declare, has no tier, so nothing is derived for it or to it and only
+  explicit entries apply. Each provider's adapter module, outside the shared
+  directories, adds its declarations after that provider's M4 stack merges
+  (§5.7.9).
 
-`ModelDescriptor` (`packages/subscriptions/src/types.ts`) gains
-`tier: ModelTier | null`. The worker builds the candidate catalog from the
+No history capability is added. The `historyCompatibility()` member in
+`adapter.ts` belongs to `ModelConnectionAdapter` (§2.1), which no core
+adapter implements, and `SubscriptionCoreAdapter` has none. The request copy
+decides instead from where each history row came from, with the runtime's
+provider-neutral test for opaque artifacts (§5.7.4). This refines the
+request-copy note in §4.
+
+`ModelDescriptor` (`types.ts`) gains an optional `tier`, so the descriptors
+M4's placement builds compile unchanged. The worker builds the candidate
+catalog from the
 deployment's model configuration and each adapter's declarations, and
 passes it in the placement request. The policy picks from it with the
 settings it reads inside the transaction. Shared code compares tiers and
 treats `model.provider` as an opaque key, so it never names a provider, and
 the neutrality guard keeps it that way.
 
-#### 5.6.4 Worker: switching provider and model (D-35 to D-38, D-44)
+#### 5.7.4 Worker: switching provider and model (D-36 to D-39, D-45)
 
 **How a turn's provider and model are chosen today.** At claim
 (`apps/worker/src/activities/agent-turn/claim.ts`), the turn's
@@ -5545,10 +5625,11 @@ another model records a serving revision instead: a new turn metadata key,
 `turnServingPolicyV1`, holding a list of revisions. Each is a full policy
 for the serving model (provider id, upstream model id, wire API, credential
 source, billing and definition version) with the mapped reasoning level, the
-execution generation, the placed connection and the reason. A new fenced
-database function, `recordSubscriptionCoreServingPolicyForTurnAttempt`,
-writes it under the attempt fence. A turn with a credential restriction
-never gets one.
+execution generation, the placed connection, the reason, and the session's
+highest history position when it was recorded. A new fenced database
+function, `recordSubscriptionCoreServingPolicyForTurnAttempt`, writes it
+under the attempt fence. A turn with a credential restriction never gets
+one.
 
 **Between turns.** A new turn's accepted model is the session's preferred
 model, so every turn served by a fallback model has a serving revision,
@@ -5573,7 +5654,7 @@ tools, billing flags and history projection are all built at claim:
   needs no migration). The fresh attempt starts on the new model.
 
 A fallback never moves a subscription turn onto Opengeni credits, because
-only core providers are targets (D-33).
+only core providers are targets (D-34).
 
 **Mid-turn (SUB-FAIL-08).** Exhaustion during a turn already settles through
 a fenced failover. `failOverCoreCodexTurn`
@@ -5609,14 +5690,21 @@ What a switch keeps and drops:
   model. Two providers can share a wire API and still reject each other's
   opaque artifacts; the comment on
   `omitOpaqueArtifactsFromPortableCompactionHistory` cites
-  `invalid_encrypted_content`. So the request copy also drops the kinds the
-  serving adapter declares in `historyCompatibility().dropFromOtherProviders`
-  (encrypted reasoning, thinking signatures, provider tools, remote
-  compaction) from every row at or below the binding's provider-change
-  position (D-35), which placement returns with the run. Rows written after
-  the change keep their artifacts, and the reactive invalidation
-  (`provider_artifact_invalidated_*` markers) stays as the backstop.
-- Unknown outcomes block the switch (D-37). The admission trigger refuses a
+  `invalid_encrypted_content`. So the request copy also drops opaque
+  artifacts from every row another provider produced. History rows carry no
+  provider, but each carries its `turn_id`: the row's provider is that of
+  the turn's latest serving revision recorded below the row's position, or
+  else of the turn's accepted policy. Opaque means what the runtime's
+  provider-neutral `hasOpaqueProviderArtifact` detects (reasoning or
+  compaction items with `encrypted_content`). Those items are projected as
+  the reactive path projects them (`projectRejectedReasoningArtifact`, and
+  compaction items left out). Rows the serving provider produced keep their
+  artifacts. Rows without a turn or a readable policy keep today's
+  projection, and the reactive invalidation
+  (`provider_artifact_invalidated_*` markers) stays as the backstop. This
+  needs no binding column, so it also covers ownerless sessions, which
+  write no binding.
+- Unknown outcomes block the switch (D-38). The admission trigger refuses a
   new model request while an earlier model request of the same turn is
   `unknown`, or `reserved` by another attempt (0691), but it compares only
   requests of the same provider (`prior.provider = NEW.provider` in 0707's
@@ -5629,17 +5717,20 @@ What a switch keeps and drops:
 does this: `bindingStickiness` keeps a fallback binding while its account
 can serve it and its cache is warm, and once the cache is cold
 `decidePlacement` tries the preferred model first and labels the move
-`return_to_preferred`. The core breaks it today.
+`return_to_preferred`. M4's routine would break it.
 `subscriptionCoreReselectionPoints` adds `model_changed` whenever the bound
 model differs from the turn's model, which is always true on a fallback, so
 the session would return at its next turn while the fallback's cache is
-warm. The binding therefore records the preferred model it was placed for
-(`preferred_model_id`; NULL on existing rows, read as the bound model), and
-`model_changed` compares the turn's model with it (D-35). That also fixes
-the same latent issue for same-provider model fallback. A return happens
-only at placement, and a later attempt of the same turn keeps its serving
-model unless its account is forced away, so a turn never bounces back while
-the fallback can serve it.
+warm. The step avoids that without editing `turns.ts`: it passes the
+binding's preferred model (`preferred_model_id`, D-36) to
+`subscriptionCoreReselectionPoints` as the bound model, so `model_changed`
+fires only when the person changed the session's model. The router never
+hands a fallback binding to M4's routine while failover is allowed, and
+when failover is no longer allowed, returning home at once is the intended
+behaviour. The same holds for same-provider model fallback, which the step
+also serves. A return happens only at placement, and a later attempt of the
+same turn keeps its serving model unless its account is forced away, so a
+turn never bounces back while the fallback can serve it.
 
 **Per-turn bound (SUB-FAIL-11).** `countSubscriptionCoreTurnRefusals` sums
 the turn's `subscription_turn_failures` for one provider, and the limit is
@@ -5649,7 +5740,7 @@ four refusals on every provider. The bound becomes one count across all
 providers of the turn (`countSubscriptionCoreTurnRefusalsAcrossProviders`),
 and every serving revision after the turn's first counts as one more, so
 capacity flapping between providers cannot restart a turn indefinitely
-(D-38). Refusals stay recorded per connection. At the bound the turn stops
+(D-39). Refusals stay recorded per connection. At the bound the turn stops
 with the existing exhausted-failover failure
 (`subscriptionCoreFailoverExhaustedFailure`).
 
@@ -5664,11 +5755,11 @@ transaction as the serving revision when there is one.
 for Codex-to-Codex switches (SUB-COMPAT-02). The runtime PRs keep what the
 web shows unchanged: `attempt.modelRoutePresentation` keeps the accepted
 model, and if the timeline would render an unknown event type, the event
-waits for the UI change. PR F (§5.6.9) shows the serving model in the
+waits for the UI change. PR F (§5.7.9) shows the serving model in the
 session indicator and a notice of the switch, previewed with real
-components and approved by the owner before merge (D-08, D-44).
+components and approved by the owner before merge (D-08, D-45).
 
-#### 5.6.5 Codex remote-compaction sessions (D-39, needs owner confirmation)
+#### 5.7.5 Codex remote-compaction sessions (D-40, needs owner confirmation)
 
 **What remote compaction keeps.** `compactContextRemoteV2`
 (`apps/worker/src/activities/context-compaction.ts`) asks Codex for a
@@ -5755,7 +5846,7 @@ summarizer sees only what fits its budget; the event records the dropped
 count. This decision supersedes D-19, the part of SUB-FAIL-09 that keeps an
 unconverted remote-compaction session on Codex, the last clause of §1 item 8
 and §6.4, but only once the owner confirms it (Q-05). Until then those stand
-and PR E does not merge. New sessions keep the portable default of
+and PRs E1 and E2 do not merge. New sessions keep the portable default of
 SUB-FAIL-09, and conversion at the next compaction on Codex stays.
 
 Scheduled sessions are not affected. The generated-session checks that
@@ -5765,14 +5856,43 @@ compare `codex_compaction_mode` with the accepted binding
 before a run's first turn, and the reusable-session check
 (`assertReusableSessionBindingMatches`) does not compare the mode.
 
-#### 5.6.6 Authority does not change (D-41)
+#### 5.7.6 Authority does not change (D-42, D-46)
 
-- Pins and "only this model" never move (SUB-FAIL-05, D-24): the step does
-  not run for an explicit binding or an only-this session, and
-  `failoverCandidateModels` returns only the preferred model for them.
-- Personal fallback keeps D-12: `decidePlacement` tries the same model on
-  the owner's personal account before the next model, so before any model
-  of another provider. A personal account of the target provider needs that
+- Pins and "only this model" never move, and failover never rewrites a
+  person's choice (SUB-SEL-04, SUB-FAIL-05, D-24, D-46). A pin governs the
+  turns of its own provider: such a turn waits
+  (`pinned_account_unavailable` or `pinned_account_ineligible`) instead of
+  failing over. The step never writes, clears or replaces an explicit
+  binding row, including one on a provider other than the turn's, and does
+  not run while the row is explicit. `failoverCandidateModels` already
+  returns only the preferred model for any explicit binding.
+- Compatibility with the M4 fix for a pin on another provider (#4170, a
+  precursor to the SuperGrok cutover #4104, decision D-32 there). A session
+  has one binding row, so on main a pin on one provider's account makes a
+  turn of another provider wait as `pinned_account_ineligible`. #4170 makes
+  `providerPlacementInput` show such a turn no binding, so it places
+  automatically among its own provider's accounts, and `placeOnce` never
+  writes the other provider's explicit row. Under this design that turn
+  uses its own provider's accounts only and waits when they cannot serve
+  it. It does not cross providers, because the step could not record the
+  fallback without overwriting the pin. #4170 leaves explicit rows of
+  another provider alone and replaces automatic ones, the step writes only
+  automatic rows (§5.7.2, "The binding row"), and every writer locks the row
+  and compares its version, so a pin racing a failover serializes and no
+  writer clobbers a pin. Whether such a turn may fail over without
+  recording a binding is open (Q-06).
+- Personal fallback keeps D-12, and this order is decided: with personal
+  fallback on, `decidePlacement` tries the owner's personal account on the
+  chosen model before switching model or provider on a shared account (§4,
+  step 5). D-28 is unchanged: in the owner's Personal workspace their
+  personal account participates automatically, after shared accounts.
+  Failover changes neither. Ownership is split: the failover track owns the
+  model-order loop of `decidePlacement` (`placement.ts`), and the settings
+  and personal track owns personal eligibility (`authorizationIneligibility`
+  and `personalFallbackActive` in `packages/subscriptions/src/eligibility.ts`)
+  and the explicit-choice path (#4168). Any later change to the order is one
+  PR with a conformance test.
+- A personal account of the target provider needs that
   provider's frozen personal entry in the accepted authority (v2 freezes
   personal authority per provider, §3.7), authorized in the same
   transaction; the policy's `authorizationIneligibility` already requires a
@@ -5790,7 +5910,7 @@ before a run's first turn, and the reusable-session check
 - Stickiness checks forced reasons before warmth (D-31), so a warm cache
   never keeps an account the session may no longer use, on any provider.
 
-#### 5.6.7 Default and rollout (D-42, D-43)
+#### 5.7.7 Default and rollout (D-43, D-44)
 
 The default is off everywhere on main. The Codex cutover wrote `false` for
 existing organizations (0689), the generic seed writes `false` for new ones
@@ -5806,10 +5926,10 @@ No PR in this plan changes a default or a stored value. M4's per-provider
 routine keeps forcing the setting off, and only the step reads it. Whether
 new organizations start with it on is the owner's decision (Q-02). Because
 the settings API already lets organizations store `true`, the runtime ships
-dormant behind a deployment setting that is off by default (D-42). It is
+dormant behind a deployment setting that is off by default (D-43). It is
 enabled only after staging verification and after PR F ships.
 
-#### 5.6.8 Temporal
+#### 5.7.8 Temporal
 
 No workflow code changes. The session workflow
 (`apps/worker/src/workflows/session.ts`) already handles both shapes a
@@ -5818,11 +5938,11 @@ switch uses: the `recovering` result, which re-runs the turn, and
 reference's `provider` to the `reconcileCodexCapacityWait` activity.
 `CodexCapacityWaitRef.provider` (`apps/worker/src/activities/types.ts`)
 keeps one of its existing values, because the waiter keeps the session's own
-provider (D-40), and the activity evaluates every candidate itself. The wake
+provider (D-41), and the activity evaluates every candidate itself. The wake
 signal (`codexCapacityChanged`) and the wake revision are unchanged. So no
 `patched()` branch is needed.
 
-Replay tests still guard this. PR C adds a recorded history in which a
+Replay tests still guard this. PR C2 adds a recorded history in which a
 capacity wait resolves into a turn placed on another provider, and PR D one
 in which a mid-turn refusal recovers onto another provider. Both replay with
 `Worker.runReplayHistory` in
@@ -5830,148 +5950,322 @@ in which a mid-turn refusal recovers onto another provider. Both replay with
 `test/integration/temporal-workflow.integration.ts`, next to the existing
 legacy capacity-wait fixture.
 
-#### 5.6.9 Implementation PRs
+#### 5.7.9 Implementation PRs
 
-Each PR is small and stays dormant until D-42's deployment setting is on.
-Migrations take the next free number when they merge: main is at 0726, and
-the open M4 cutover PRs also need numbers. Tests name the SUB-FAIL ids they
-assert, and real-PostgreSQL tests run as the non-owner application role.
+The open M4 stacks and #4170 still change most files this feature needs, so
+the plan has two phases. Phase 1 adds new files plus the one optional
+`adapter.ts` member the M4 owners agreed to, and it can merge while those
+stacks are open. Phase 2 is a set of small hook PRs, and each names the open
+PRs it waits for. Every PR stays dormant until D-43's deployment setting is
+on.
+
+Merge order: A first; then B1 and C1 in either order; E1 once the owner
+answers Q-05. Phase 2 follows the M4 merges: A2 per provider, B2, C2, D,
+E2, H, and F last.
+
+Migrations take the next free number when they merge. Main ends at 0727 and
+open branches already claim 0728 and 0729, so numbers are settled at merge.
+Each migration is added to the three migration lists
+(`scripts/release-schema-contract.test.ts`,
+`packages/db/test/embedding-migration-tail.ts` and
+`packages/db/test/migration-0598-claude-subscription-pools.test.ts`). Tests
+name the SUB-FAIL ids they assert, and real-PostgreSQL tests run as the
+non-owner application role.
+
+**Contended files.** The open PRs that change a file this plan needs,
+scanned on 2026-10-12 at 04:55 UTC. Rescan before each hook PR.
+
+| File | Open PRs that change it | Plan PR that edits it |
+| --- | --- | --- |
+| `packages/db/src/subscription-core/turns.ts` | #4130, #4157, #4159, #4170 | H |
+| `packages/db/src/subscription-core-placement-world.ts` | #4132, #4158 | none |
+| `packages/db/src/subscription-core/waiters.ts` | #4118, #4137 | B2 |
+| `packages/subscriptions/src/adapter.ts` | #4130, #4131, #4132, #4137, #4157, #4158, #4159 | A (one optional member) |
+| `run.ts`, `turn-context.ts` and `failure-settlement.ts` in `apps/worker/src/activities/agent-turn` | #4118, #4129, #4131, #4132, #4139, #4158 | C2, D |
+| `stream-attempt.ts` in the same directory | #4118, #4131, #4139 | C2 |
+| `claim.ts` in the same directory | #4131, #4158 | C2 |
+| `subscription-core-capacity.ts` in the same directory | #4118, #4131 | C2 |
+| `codex-core-capacity.ts` in the same directory (arms the wait) | #4118, #4131, #4132, #4158 | C2 |
+| `apps/worker/src/activities/subscription-core-codex-waits.ts` (reconciles the wait) | #4118 | C2 |
+| `subscription-core-failover.ts` in `agent-turn` | created by #4118 | D |
+| `compaction-prep.ts` in `agent-turn` | #4131 | E2 |
+| `packages/core/src/domain/sessions.ts` | #4129, #4130, #4157, #4158, #4159 | E2 |
+| `packages/contracts/src/index.ts` | #4168 | C1 (one export line), C2 (event type) |
+| `packages/db/src/index.ts` | #4104, #4118, #4121, #4129, #4130, #4131, #4132, #4139, #4157, #4158, #4159, #4168, #4170 | B2, C2, E2 |
+| `packages/db/src/subscription-core-codex-adapter.ts` | #4130, #4157, #4159 | A2 |
+| `packages/db/src/subscription-core-xai-adapter.ts` | #4104, #4130, #4131, #4157, #4159 | A2 |
+| `packages/db/src/subscription-core-claude-adapter.ts` | #4130, #4132, #4137, #4157, #4158, #4159 | A2 |
+| `packages/db/test/helpers/subscription-core-conformance.ts` | #4118, #4130, #4132, #4137, #4157, #4158, #4159, #4168, #4170 | none |
+| `packages/subscriptions/test/policy.test.ts` | #4130, #4137, #4157, #4159 | none |
+| `packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts` and its fixture | #4130, #4157, #4159 | none (B1 imports the fixture) |
+| `packages/db/src/subscription-core/provider-route.ts` and `packages/db/src/subscription-core-providers.ts` | #4104, #4131, #4137 | none (read only) |
+| The three migration lists | #4104, #4121, #4130, #4131, #4137, #4157, #4159, #4168 | B1, B2, E1 (one added line each) |
+
+No open PR changes the other files the plan edits: `types.ts`,
+`placement.ts`, `settings.ts`, `reference-model.ts` and `reference-bridge.ts`
+in `packages/subscriptions/src`, `reference-conformance.test.ts`,
+`packages/db/src/subscription-core-repository.ts`,
+`packages/config/src/index.ts`, `apps/worker/src/activities/run-input.ts`,
+`apps/worker/src/activities/context-compaction.ts`,
+`packages/core/src/goal-admission.ts`, the runtime's compaction module and
+the replay tests in `test/integration`.
+
+**Phase 1: new files, mergeable now.**
 
 **PR A: pure policy and the adapter capability.** No database or worker
 behaviour changes.
 
-- `packages/subscriptions/src/adapter.ts`: `ModelTier`,
-  `SubscriptionCoreAdapter.modelTier` and
-  `SubscriptionCoreAdapter.historyCompatibility`.
-- `packages/subscriptions/src/types.ts`: `ModelDescriptor.tier`.
-- `packages/subscriptions/src/settings.ts`: `explicitFallbackOrder`.
-- `packages/subscriptions/src/placement.ts`: `failoverCandidateModels` uses
-  the explicit entry or `derivedFallbackOrder`.
+- `packages/subscriptions/src/types.ts`: `ModelTier` and the optional
+  `ModelDescriptor.tier`.
+- `packages/subscriptions/src/adapter.ts`: the optional
+  `SubscriptionCoreAdapter.modelTier?`, the one agreed edit. It only adds
+  lines, so it rebases onto the seven open PRs that change the file.
+- `packages/subscriptions/src/settings.ts`: `hasFallbackOrderEntry`, next to
+  `fallbackOrderFor`.
+- `packages/subscriptions/src/placement.ts`: `failoverCandidateModels`
+  derives the same-tier order (a new `derivedFallbackOrder`) when the
+  preferred model has no entry and cross-provider failover is on. The
+  model-order loop of `decidePlacement` is unchanged (D-12, D-42).
 - `packages/subscriptions/src/reference-model.ts` and `reference-bridge.ts`:
-  an independent derived order, and a mutation for it.
-- Declarations in `packages/db/src/subscription-core-codex-adapter.ts`,
-  `packages/db/src/subscription-core-claude-adapter.ts` and
-  `packages/db/src/subscription-core-xai-adapter.ts`.
-- Tests, no network: `packages/subscriptions/test/policy.test.ts` and
-  `reference-conformance.test.ts` under SUB-FAIL-03 (explicit order wins, an
-  explicit empty list, the derived order on the same tier only, D-16
-  mapping); adapter declarations in the shared conformance suite
-  `packages/db/test/helpers/subscription-core-conformance.ts`.
-- Depends on #4122 and #4117, both merged.
+  an independent derived order, and a mutation the conformance must catch.
+- Tests, no network, under SUB-FAIL-03 and SUB-FAIL-04: a new
+  `packages/subscriptions/test/failover-policy.test.ts` (four open PRs change
+  `policy.test.ts`) and cases in `reference-conformance.test.ts`. An explicit
+  entry wins; an explicit empty list derives nothing; the derived order keeps
+  the same tier and skips models without one; nothing is derived when the
+  setting is off, for "only this model" or for an explicit binding; levels
+  map by D-16. The existing D-12 order cases stay unchanged.
+- Waits for nothing open. M4's placement forces the setting off, so nothing
+  reaches the derived order yet.
 
-**PR B: the core step, waits and the request fence.** One rolling
-migration.
+**PR B1: the core step in new modules.** One migration.
 
-- `packages/db/src/subscription-core/failover.ts`:
-  `placeSubscriptionCoreTurnWithFailover`,
+- `packages/db/src/subscription-core/failover.ts`: the router
+  `placeSubscriptionCoreTurnWithFailover`, the step,
   `evaluateSubscriptionCorePlacementWithFailover`,
-  `countSubscriptionCoreTurnRefusalsAcrossProviders` and
-  `earliestHealthRetryAtAcrossProviders`.
-- `packages/db/src/subscription-core-placement-world.ts`:
+  `countSubscriptionCoreTurnRefusalsAcrossProviders`,
+  `earliestHealthRetryAtAcrossProviders`, the target filter over
+  `readSubscriptionCoreProviderRoute` (D-34), and the copies of
+  `readAttemptFence` and `readLastContextReplacedAt`.
+- `packages/db/src/subscription-core/failover-world.ts`:
   `withSubscriptionCoreFailoverPlacementWorld`.
-- `packages/db/src/subscription-core/turns.ts`: the extraction of reused
-  helpers without behaviour change, and `subscriptionCoreReselectionPoints`
-  comparing with the binding's preferred model (D-35).
-- `packages/db/src/subscription-core-repository.ts`: the binding writer and
-  reader carry `preferred_model_id` and `provider_change_position`.
-- `packages/db/src/subscription-core/waiters.ts`: wakes also match
-  `candidate_providers`.
-- Migration: `subscription_session_bindings.preferred_model_id` and
-  `provider_change_position`; `subscription_capacity_waiters.candidate_providers`;
-  the admission trigger's unresolved-outcome test across registered
-  providers, patched by anchored replacement as 0707 does; registered at the
-  three release-schema contract sites.
-- Tests: a new real-PostgreSQL suite for the step (fallback order, a target
-  not on the core, pins and only-this never move, ownerless shared-only, the
-  D-12 order and per-provider personal authority, restrictions and provider
-  switches, the compaction lock wait, earliest reset and health retry across
-  providers, the binding compare-and-swap and the 0723 clock, return only
-  when cold). A concurrency test: two sessions crossing in opposite
-  directions, a pin of one target, a refresh of the other and a disconnect,
-  under a bounded lock timeout, with no deadlock and with lease and binding
-  in agreement. Shared conformance cases under SUB-FAIL ids in
-  `packages/db/test/helpers/subscription-core-conformance.ts`, run by the
-  test provider and by the fake API-key connector
-  (`packages/db/test/subscription-core-fake-api-key-conformance-postgres.test.ts`,
-  SUB-PROV-04). The widened fence: an unknown request on one provider
-  refuses a request on another. Migration replay lists.
-- Depends on #4118 for the generic waits and wakes. #4118, #4132 and #4137
-  also edit `waiters.ts`, so PR B rebases after them; it leaves the
-  per-provider routines alone.
+- `packages/db/src/subscription-core-repository.ts`: the binding reader
+  returns `preferredModelId`, and a setter writes it in the step's
+  transaction, matching the version the step just wrote.
+- Nothing is exported from `packages/db/src/index.ts` until C2 adds the
+  first caller; tests import the modules by relative path.
+- Migration: `subscription_session_bindings.preferred_model_id` with its
+  clearing trigger (§5.7.2), and the admission trigger's unresolved-outcome
+  test widened from `prior.provider = NEW.provider` to every registered
+  provider, patched by anchored replacement as 0707 does. The test still
+  compares model requests only, so media operations never fence a turn. No
+  open PR alters the bindings table or that trigger.
+- Tests, real PostgreSQL as the application role, in a new suite
+  (`packages/db/test/subscription-core-failover-postgres.test.ts`) with its
+  own helper, because nine open PRs change the shared conformance helper. It
+  registers two test providers through `testSubscriptionCoreProviderModules`,
+  and the fake API-key connector runs the same cases from its fixture
+  (SUB-PROV-04):
+  - The hard requirement (D-34, SUB-FAIL-04): a provider with a registry
+    entry, an enabled switch row and core connection rows written by the
+    database owner but no receipt is never a target, and none of its
+    accounts is leased; a cutover whose transaction has not committed is not
+    seen; a provider in `maintenance` is skipped; after the commit it is a
+    target.
+  - Pins and "only this model" never move and are never written, on the
+    turn's provider and on another (D-46, SUB-FAIL-05, SUB-WAIT-01).
+  - The fallback order and tiers end to end (SUB-FAIL-03); ownerless
+    sessions use shared accounts only and write no binding; the D-12 order
+    and per-provider personal authority; workspace restrictions, provider
+    switches and the compaction-lock wait (SUB-FAIL-04, D-42).
+  - The earliest reset and health retry across providers (SUB-WAIT-01,
+    D-41).
+  - The binding compare-and-swap, the 0723 clock and the preferred-model
+    trigger (D-36); a warm fallback is kept and the session returns only when
+    cold (SUB-FAIL-07); a lease row left on another provider (D-33).
+  - The widened fence: an unknown request on one provider refuses a request
+    on the other (D-38, SUB-FAIL-08).
+  - A concurrency test: two sessions crossing in opposite directions, a pin
+    of one target, a credential refresh of the other and a disconnect, under
+    a bounded lock timeout, with no deadlock and with lease and binding in
+    agreement.
+  - The copies give the same result as `turns.ts` for the fenced and
+    compacted scenarios.
+- Waits for A. It edits no contended file except the migration lists, and
+  it reads `provider-route.ts` and the registry, which #4104, #4131 and
+  #4137 change, so it rebases if their signatures move.
 
-**PR C: the worker switch between turns.**
+**PR C1: the serving revision.**
 
-- `packages/contracts/src/index.ts`: `TurnServingPolicyV1` and its reader,
-  and the `subscription.account.switched` event type.
-- `packages/db/src/index.ts`: `recordSubscriptionCoreServingPolicyForTurnAttempt`
-  (fenced; the revision and the event; counts toward D-38).
-- `apps/worker/src/activities/agent-turn/claim.ts`: claim with the serving
-  revision (configuration check, billing flags, `ensureRunAllowed`,
-  `assertSessionAllowsProductModel` with the serving model).
-- `packages/config/src/index.ts`: the serving variant of the policy checks,
-  and the deployment setting (D-42).
-- `apps/worker/src/activities/agent-turn/subscription-core-capacity.ts`
-  and `run.ts`: route through
-  `placeSubscriptionCoreTurnWithFailover`, and record and restart on a
-  change.
-- `apps/worker/src/activities/run-input.ts`: drop the declared kinds at or
-  below the provider-change position.
-- Tests, no network: claim with a serving revision, history projection and
-  routing; the replay test of §5.6.8.
-- Depends on PR A, PR B and #4118; #4132 and #4139 edit the same worker
-  modules. New worker code is provider-neutral, so it passes the extension
+- `packages/contracts/src/turn-serving-policy.ts` (new):
+  `TurnServingPolicyV1`, its metadata key `turnServingPolicyV1` and its
+  reader, re-exported from the contracts index with one line (#4168 adds a
+  line beside it).
+- `packages/db/src/subscription-core/serving-policy.ts` (new):
+  `recordSubscriptionCoreServingPolicyForTurnAttempt` under the attempt
+  fence (`lockTurnAttemptWriteFenceTx`), refusing a turn with a credential
+  restriction, and `readSubscriptionCoreServingPolicyForTurn`.
+- `packages/config/src/index.ts`: the serving variant of
+  `assertTurnExecutionPolicyMatchesConfigV1`, and D-43's deployment setting,
+  off by default.
+- `apps/worker/src/activities/run-input.ts`: the provenance projection of
+  §5.7.4, pure and not yet called.
+- Tests: the schema and the configuration checks, no network; the projection
+  (rows of the serving provider keep their artifacts, rows of another
+  provider lose them, rows without a turn keep today's projection;
+  SUB-FAIL-08); a real-PostgreSQL test of the fenced writer, in which a
+  fenced-out attempt cannot record.
+- Waits for nothing open.
+
+**PR E1: the conversion pieces.** Merges only after the owner confirms D-40
+(Q-05). One migration.
+
+- `packages/subscriptions/src/placement.ts` and the reference model: the
+  convertible compaction lock and `convertsCompaction` (§5.7.5, step 1). The
+  lock converts only when cross-provider failover is allowed and the input
+  says the session has no refusal, so M4's placement, which forces the
+  setting off, never converts.
+- `packages/runtime/src/compaction-conversion.ts` (new): the rebuild of
+  §5.7.5 step 3, pure, refusing any block it cannot attribute.
+- `packages/db/src/context-compaction-conversion.ts` (new): one read of the
+  rows and compaction events since the latest clear marker, the fenced
+  install (the conversion variant of `applyContextCompaction`, the one-way
+  mode change and the event) and the refusal record.
+- Migration: `sessions.compaction_conversion_refused_at`.
+- Tests under SUB-FAIL-09: the rebuild over several remote compactions, a
+  context clear, a fork and a missing event (both refused), no network; real
+  PostgreSQL for the atomic install and mode change, the one-way mode, the
+  refusal record and an archived session.
+- Waits for A, which changes `placement.ts` first, and for nothing open.
+
+**Phase 2: hooks, each after the open PRs it names.**
+
+**PR A2: tier declarations.** One small PR per provider: each adapter module
+declares `modelTier` for its models, outside the shared directories. Codex
+(`subscription-core-codex-adapter.ts`) waits for #4130, #4157 and #4159;
+SuperGrok (`subscription-core-xai-adapter.ts`) for #4104, #4130, #4131,
+#4157 and #4159; Claude (`subscription-core-claude-adapter.ts`) for #4130,
+#4132, #4137, #4157, #4158 and #4159. Tests: the declarations in each
+adapter's tests, and a case in the failover suite that every declared tier
+is a `ModelTier` and undeclared models have none.
+
+**PR B2: waits across providers.** In
+`packages/db/src/subscription-core/waiters.ts`, a capacity wake also matches
+waiters whose `candidate_providers` include its provider, and the generic
+arm that #4118 adds to `packages/db/src/index.ts`
+(`armSubscriptionCoreCapacityWait`) records the candidates.
+Migration: `subscription_capacity_waiters.candidate_providers`. Tests, real
+PostgreSQL: a wake of a candidate provider wakes the waiter and a wake of
+another provider does not (SUB-WAIT-02, D-41). Waits for #4118 and #4137,
+which change `waiters.ts`.
+
+**PR C2: the worker switch between turns.**
+
+- `claim.ts`: claim with the serving revision (the configuration check,
+  `ensureRunAllowed` and `assertSessionAllowsProductModel` with the serving
+  model).
+- `turn-context.ts`: the billing flags and runtime configuration come from
+  the latest serving revision.
+- `run.ts` and `subscription-core-capacity.ts`: core placement goes through
+  `placeSubscriptionCoreTurnWithFailover`; a placement on another model
+  records the revision and restarts the attempt
+  (`requestSessionTurnRecovery`).
+- `stream-attempt.ts`: passes the serving provider and the history
+  provenance to `turnInput`, which applies C1's projection while D-43's
+  setting is on.
+- `codex-core-capacity.ts` and `subscription-core-codex-waits.ts`: arming
+  records the candidate providers, and reconciliation is handed
+  `evaluateSubscriptionCorePlacementWithFailover`.
+- `CoreTurnPlacementProvider.recordSelection` records
+  `subscription.account.switched` with the serving revision, and the event
+  type joins `SessionEventType` in `packages/contracts/src/index.ts`.
+- `packages/db/src/index.ts`: exports the functions of B1 and C1.
+- Tests, no network, under SUB-FAIL-01, SUB-FAIL-03, SUB-FAIL-06 and
+  SUB-FAIL-08: claim with a serving revision, routing and restart, the
+  request copy; the replay test of §5.7.8.
+- Waits for A, B1, C1 and B2, for #4118, #4129, #4131, #4132, #4139 and
+  #4158 (the worker files), and for #4168, which adds an event type in the
+  same enum. New worker code is provider-neutral, so it passes the extension
   of `check:subscription-core-neutral` to the worker that §5.3 (X1a) lists
   as a follow-up.
 
 **PR D: the worker switch mid-turn.**
 
-- `apps/worker/src/activities/agent-turn/subscription-core-failover.ts`
-  (#4118, `failOverCoreSubscriptionTurn`): evaluate, record the revision with
-  the recovery request, the bound across providers, and refusal on any
-  unresolved request.
-- `apps/worker/src/activities/agent-turn/failure-settlement.ts`
-  (`settleTurnFailure`): route core refusals to it.
-- Tests: completed tools and accounting kept without duplicates, unknown
-  outcomes block the switch, the bound across providers; the replay test of
-  §5.6.8.
-- Depends on PR C, #4118 and #4139 (Claude settlement).
+- `subscription-core-failover.ts` (#4118's `failOverCoreSubscriptionTurn`):
+  evaluate before requesting recovery and record the serving revision with
+  the request; apply the bound across providers (B1's refusal count plus the
+  serving revisions after the first, D-39); refuse to switch on any
+  unresolved request of any provider (D-38).
+- `failure-settlement.ts` (`settleTurnFailure`): route core refusals to it.
+- Tests under SUB-FAIL-08 and SUB-FAIL-11: completed tools and accounting
+  kept without duplicates, an unknown outcome blocks the switch, the bound
+  across providers; the replay test of §5.7.8.
+- Waits for C2, and so for the same open PRs.
 
-**PR E: the remote-compaction conversion.** Merges only after the owner
-confirms D-39 (Q-05).
+**PR E2: the conversion hooks.** Merges only after Q-05.
 
-- Pure policy: the convertible lock and `convertsCompaction`.
-- `packages/db/src/index.ts`: the conversion variant of
-  `applyContextCompaction`, and compaction events that record
-  `supersededFrom` and the block length. A migration adds
-  `sessions.compaction_conversion_refused_at`.
-- `apps/worker/src/activities/agent-turn/compaction-prep.ts` and
-  `apps/worker/src/activities/context-compaction.ts`: the rebuild and the
-  conversion.
-- `packages/core/src/domain/sessions.ts` and
-  `packages/core/src/goal-admission.ts`: the gates accept a pending
-  conversion.
-- Tests: a rebuild over several remote compactions, a context clear, a fork
-  (refused) and an archived session; atomic install and mode change; a
-  refusal followed by the `compaction_provider_locked` wait; the one-way
-  mode; `packages/runtime/test/context-compaction.test.ts` and
-  `apps/worker/test/context-compaction-activity.test.ts`.
-- Depends on PR C and PR D.
+- `compaction-prep.ts` and `apps/worker/src/activities/context-compaction.ts`:
+  an attempt whose serving revision carries the conversion runs it before
+  its first model call, through the input preparation of
+  `compactContextPortable`, and `maybeCompactContext` accepts it.
+- `packages/core/src/domain/sessions.ts` (`assertSessionAllowsProductModel`)
+  and `packages/core/src/goal-admission.ts`: accept a pending conversion.
+- `packages/db/src/index.ts`: `applyContextCompaction` records
+  `supersededFrom` and the block length in new events, and E1's functions
+  are exported.
+- The step passes the convertible lock when the session has no refusal.
+- Tests under SUB-FAIL-09: `packages/runtime/test/context-compaction.test.ts`,
+  `apps/worker/test/context-compaction-activity.test.ts`, and a refusal
+  followed by the `compaction_provider_locked` wait.
+- Waits for Q-05, E1, C2 and D, for #4131 (`compaction-prep.ts`), and for
+  #4129, #4130, #4157, #4158 and #4159 (`sessions.ts`).
 
-**PR F: events and UI, preview-gated.**
+**PR H: cleanup.** `turns.ts` uses B1's copies of `readAttemptFence` and
+`readLastContextReplacedAt`, so one version remains. Waits for #4130, #4157,
+#4159 and #4170, and for step R if it changes those reads.
 
-- The web timeline row for `subscription.account.switched`, the session
-  indicator showing the serving model, and a short notice of the switch.
-- Real-component preview screenshots and owner approval before merge (D-08).
-  Enabling D-42's deployment setting waits for this PR.
+**PR F: events and UI, preview-gated.** The web timeline row for
+`subscription.account.switched`, the session indicator showing the serving
+model, and a short notice of the switch. It needs real-component preview
+screenshots and owner approval before merge (D-08, D-45), and it coordinates
+with #4123 (account rules) and #4168 (the account picker). Enabling D-43's
+deployment setting waits for this PR.
 
-**Risks.** The M4 PRs still move `turns.ts`, `waiters.ts` and the worker
-capacity modules, so PR B and later rebase on them. A lock-order mistake
-would deadlock placements; the concurrency test guards it. A switch after
-an unresolved request could spend twice; the widened fence and the worker
-check close that. Waking every candidate provider's waiters widens the wake
-fan-out. Analytics that read the accepted policy (0533) attribute a fallback
-turn to the accepted model. The converted summary of a very long
-remote-compaction session can lose detail.
+**Coordination points.**
+
+- #4170, the X3 fix (decision D-32 there). Its rules and D-46 must stay
+  aligned: no writer replaces an explicit row of another provider, automatic
+  rows are replaceable, and every writer locks the row and compares its
+  version. If #4170 changes `providerPlacementInput` or `commitBinding`
+  again, B1's router and tests are rechecked. Q-06 is the question to settle
+  with its owner.
+- #4168 owns §5.6 and the explicit-choice writer. B1's clearing trigger keeps
+  its writes correct without an edit, and PR F coordinates with its picker.
+- Step R, which retires the per-provider SQL functions, must keep B1's
+  widened unresolved-outcome test. A rewrite of that trigger from an older
+  copy would narrow it again silently, so B1's real-PostgreSQL case must stay
+  in the suites step R runs.
+- Migration numbers are settled at merge, as above.
+
+**Risks.**
+
+- The M4 PRs still move the hook files, so every phase 2 PR rebases on them;
+  the table above is a snapshot.
+- Until PR H, the fence and compaction reads exist twice; B1's copy cases
+  catch drift.
+- A lock-order mistake would deadlock placements; the concurrency test
+  guards it.
+- A switch after an unresolved request could spend twice; the widened fence
+  and the worker check close that.
+- Waking every candidate provider's waiters widens the wake fan-out.
+- Analytics that read the accepted policy (0533) attribute a fallback turn
+  to the accepted model.
+- The converted summary of a very long remote-compaction session can lose
+  detail; the event records what was dropped.
+- A quarantined personal account's health retry falls back to the waiter's
+  backoff, a limit inherited from #4105.
+- A turn whose session is pinned on another provider waits while other
+  providers might serve it, until Q-06 is decided.
 
 ## 6. Specific behaviours
 
@@ -6024,8 +6318,8 @@ fromModel, toModel, reason }` with reason in `initial`, `reselected_cold`,
 `failover_same_provider`, `failover_cross_provider`, `return_to_preferred`,
 `explicit_choice`, `revoked`; and `subscription.capacity.waiting { reason,
 earliestResetAt }`. Existing Codex account-switch events remain as aliases
-for current clients (SUB-COMPAT-02). §5.6.4 says when the switch event is
-written and how the indicator follows it (D-44).
+for current clients (SUB-COMPAT-02). §5.7.4 says when the switch event is
+written and how the indicator follows it (D-45).
 
 ### 6.3 Codex Apps and reset credits (SUB-APPS-01, SUB-APPS-02)
 
@@ -6045,7 +6339,7 @@ remote-compaction sessions convert at their next compaction while Codex has
 capacity; until converted they fail over only within Codex and otherwise
 wait with an explained reason.
 
-Proposed change (D-39, §5.6.5, needs owner confirmation): Opengeni keeps
+Proposed change (D-40, §5.7.5, needs owner confirmation): Opengeni keeps
 every row a remote compaction summarized in cleartext, so a
 remote-compaction session that must cross providers can convert at the
 failover point, by rebuilding its history from those rows and compacting it
