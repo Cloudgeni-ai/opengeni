@@ -1191,6 +1191,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return null;
       }
       try {
+        await this.settleFiniteAnimations(state);
         const currentInfo = await this.requireTargetInfo(
           await this.ensureConnection(),
           info.targetId,
@@ -4175,6 +4176,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return (await this.callOnNode(state, entry.backendDOMNodeId, VISIBLE_FUNCTION, [])) === true;
   }
 
+  /**
+   * Menus, listboxes and dialogs usually animate out before they leave the
+   * DOM. A snapshot taken mid-animation reports UI the action already
+   * dismissed, so briefly wait for finite running animations to finish.
+   * Infinite ones (spinners) are ignored and the wait is bounded. This is a
+   * read in an isolated world: page scripts cannot stall or observe it, and
+   * any failure simply observes the page as it is.
+   */
+  private async settleFiniteAnimations(state: TargetState): Promise<void> {
+    if (this.engine !== "chromium" || state.dialog) return;
+    try {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return;
+      await this.sendTarget(
+        state,
+        "Runtime.evaluate",
+        {
+          expression: SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+          contextId: world.executionContextId,
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        { timeoutMs: ANIMATION_SETTLE_LIMIT_MS + 1_000 },
+      );
+    } catch {
+      // Settling only improves the snapshot; it never decides the outcome.
+    }
+  }
+
   private async evaluate(state: TargetState, expression: string): Promise<unknown> {
     const result = await this.sendTarget<{
       result?: unknown;
@@ -4790,6 +4824,41 @@ const KEY_DEFINITIONS: Record<
   arrowright: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
   space: { key: " ", code: "Space", keyCode: 32, text: " " },
 };
+
+// Typical exit animations take 100-300 ms. Longer finite animations are
+// waited for only this long, so a slow transition cannot stall every action.
+const ANIMATION_SETTLE_LIMIT_MS = 750;
+
+// Waits until no finite animation is running, then lets animationend
+// handlers commit their DOM removal (which can chain another animation).
+const SETTLE_FINITE_ANIMATIONS_EXPRESSION = `(async () => {
+  const deadline = performance.now() + ${ANIMATION_SETTLE_LIMIT_MS};
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+  const remaining = () => deadline - performance.now();
+  const running = () =>
+    document.getAnimations().filter((animation) => {
+      if (animation.playState !== "running") return false;
+      const end = animation.effect?.getComputedTiming().endTime;
+      return typeof end === "number" && Number.isFinite(end);
+    });
+  // Hidden documents do not advance animations, so there is nothing to wait for.
+  if (document.visibilityState === "hidden") return true;
+  let pending = running();
+  if (pending.length === 0) return true;
+  while (pending.length > 0) {
+    if (remaining() <= 0) return false;
+    await Promise.race([
+      Promise.allSettled(pending.map((animation) => animation.finished)),
+      pause(remaining()),
+    ]);
+    await Promise.race([
+      new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))),
+      pause(Math.min(50, remaining())),
+    ]);
+    pending = running();
+  }
+  return true;
+})()`;
 
 // A child frame's scroll can also move its parent documents, which this frame
 // cannot read, so only top-level frames report positions.
