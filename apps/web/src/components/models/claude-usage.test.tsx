@@ -305,3 +305,46 @@ test("recreated connections discard in-flight results even when their versions m
   expect(state.value).toEqual(fresh);
   expect(calls).toBe(2);
 });
+test("a revisit shows the last reading at once and never another credential's", async () => {
+  let release: ((value: ClaudeSubscriptionUsage) => void) | null = null;
+  let reads = 0;
+  const client = {
+    getWorkspaceClaudeSubscriptionUsage: async () => {
+      reads++;
+      if (reads === 1) return usage(1);
+      return await new Promise<ClaudeSubscriptionUsage>((resolve) => (release = resolve));
+    },
+  } as unknown as OpenGeniBrowserClient;
+  const firstFrames: (ClaudeUsageState | null)[] = [];
+  let state!: ClaudeUsageState;
+  function Harness({ version }: { version: number }) {
+    state = useClaudeUsage({
+      client,
+      scope: "workspace",
+      scopeId: "workspace",
+      enabled: true,
+      connected: true,
+      credentialVersion: version,
+      canManage: false,
+    });
+    if (firstFrames.length === 0) firstFrames.push(state);
+    return null;
+  }
+  await act(async () => root.render(<Harness version={1} />));
+  expect(state.value?.credentialVersion).toBe(1);
+  // Leave the page and come back: the first frame already has the reading,
+  // and the page still re-reads it in the background.
+  await act(async () => root.render(<></>));
+  firstFrames.length = 0;
+  await act(async () => root.render(<Harness version={1} />));
+  expect(firstFrames[0]?.loading).toBe(false);
+  expect(firstFrames[0]?.value?.credentialVersion).toBe(1);
+  expect(reads).toBe(2);
+  await act(async () => release?.(usage(1)));
+  // A replaced credential (new version) never starts from the old reading.
+  await act(async () => root.render(<></>));
+  firstFrames.length = 0;
+  await act(async () => root.render(<Harness version={2} />));
+  expect(firstFrames[0]?.value).toBeNull();
+  expect(firstFrames[0]?.loading).toBe(true);
+});

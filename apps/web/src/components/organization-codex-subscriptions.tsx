@@ -7,6 +7,7 @@ import type {
   OrganizationCodexAccountsResponse,
 } from "@opengeni/sdk";
 import { pollDeviceAuthorization } from "@opengeni/connect";
+import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -19,6 +20,10 @@ import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 
 export type OrganizationCodexSubscriptions = ReturnType<typeof useOrganizationCodexSubscriptions>;
 
+/** Shared-cache key for an organization's own Codex accounts. */
+export const organizationCodexAccountsQueryKey = (organizationId: string) =>
+  ["codex-accounts", "organization", organizationId] as const;
+
 export function useOrganizationCodexSubscriptions({
   organizationId,
   client,
@@ -29,9 +34,22 @@ export function useOrganizationCodexSubscriptions({
   /** False for people who can't read the organization's accounts: nothing is read. */
   enabled?: boolean;
 }) {
-  const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(enabled);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // Shared, client-scoped: revisiting organization settings renders the
+  // retained accounts at once and re-reads in the background.
+  const query = useSharedQuery<OrganizationCodexAccountsResponse>(
+    client,
+    organizationCodexAccountsQueryKey(organizationId),
+    () =>
+      client.requestJson<OrganizationCodexAccountsResponse>(
+        "GET",
+        `/v1/organizations/${organizationId}/codex/accounts`,
+      ),
+    { enabled },
+  );
+  const data = query.error ? null : query.data;
+  const loading = query.loading;
+  // Shown under "Couldn't load ..." as what to do; never the raw API message.
+  const loadError = query.error ? apiErrorAdvice(query.error) : null;
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<string | null>(null);
   const [pending, setPending] = useState<{
@@ -41,34 +59,20 @@ export function useOrganizationCodexSubscriptions({
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
 
+  // Organization accounts feed every workspace that inherits them, so an
+  // account change invalidates every retained Codex list for this client.
   const refresh = useCallback(async () => {
     if (!enabled) return;
-    setLoadError(null);
-    try {
-      const result = await client.requestJson<OrganizationCodexAccountsResponse>(
-        "GET",
-        `/v1/organizations/${organizationId}/codex/accounts`,
-      );
-      if (!cancelled.current) setData(result);
-    } catch (error) {
-      if (cancelled.current) return;
-      setData(null);
-      // Shown under "Couldn't load ..." as what to do; never the raw API message.
-      setLoadError(apiErrorAdvice(error));
-    } finally {
-      if (!cancelled.current) setLoading(false);
-    }
-  }, [client, organizationId, enabled]);
+    await invalidateSharedQueries(client, ["codex-accounts"]);
+  }, [client, enabled]);
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(enabled);
-    void refresh();
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
     };
-  }, [refresh, enabled]);
+  }, []);
 
   const connect = useCallback(
     async (options?: { onConnected?: (accountId: string | null) => void }) => {

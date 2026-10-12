@@ -10,7 +10,8 @@ import type {
 let createRoot: typeof import("react-dom/client").createRoot;
 let usePool: typeof import("./use-subscription-account-pool").useSubscriptionAccountPool;
 let root: Root, container: HTMLElement, result: ReturnType<typeof usePool>;
-const client = {};
+// Account lists are retained per client between mounts; every test gets its own.
+let client: object = {};
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -91,6 +92,7 @@ beforeAll(async () => {
   ({ useSubscriptionAccountPool: usePool } = await import("./use-subscription-account-pool"));
 });
 beforeEach(() => {
+  client = {};
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -186,4 +188,38 @@ test("inherited accounts cannot be mutated through the workspace pool", async ()
     await expect(result.rename(result.accounts[0]!, "Name")).rejects.toThrow("owning scope");
   });
   expect(mutations).toBe(0);
+});
+
+test("a revisit renders retained accounts at once and an account change evicts other scopes", async () => {
+  let reads = 0;
+  let label = "Before";
+  const ops = operations(async () => {
+    reads++;
+    return { ...data("account-a"), accounts: [{ ...poolAccount("account-a"), label }] };
+  });
+  await render("scope-a", ops);
+  expect(result.accounts[0]?.label).toBe("Before");
+  // Navigate to another scope's page and back.
+  await render(
+    "scope-b",
+    operations(async () => data("account-b")),
+  );
+  const rendered: { loading: boolean; ids: string[] }[] = [];
+  await render("scope-a", ops);
+  rendered.push({ loading: result.loading, ids: result.accounts.map((account) => account.id) });
+  expect(rendered[0]).toEqual({ loading: false, ids: ["account-a"] });
+  expect(reads).toBe(1);
+
+  // Renaming from scope A's page evicts scope B's retained list too: an
+  // organization change can change what a workspace inherits.
+  label = "After";
+  await act(async () => {
+    await result.rename(result.accounts[0]!, "After");
+  });
+  expect(result.accounts[0]?.label).toBe("After");
+  expect(reads).toBe(2);
+  const { peekSharedQuery } = await import("@opengeni/react");
+  expect(
+    peekSharedQuery(client, ["subscription-pool", "Subscription", "workspace", "scope-b"]),
+  ).toBeNull();
 });

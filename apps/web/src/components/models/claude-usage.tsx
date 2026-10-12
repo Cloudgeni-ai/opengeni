@@ -1,5 +1,6 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { invalidateSharedQueries, peekSharedQuery, setSharedQueryData } from "@opengeni/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
@@ -18,6 +19,18 @@ export type ClaudeUsageState = {
   canRefresh: boolean;
   refresh(): Promise<void>;
 };
+
+// The last successful reading per exact scope + credential + version, retained
+// per client so a revisit renders it at once while the page re-reads it.
+const claudeUsageQueryKey = (key: string) => ["claude-usage", key] as const;
+function retainedClaudeUsage(
+  client: object,
+  key: string,
+  readable: boolean,
+): ClaudeSubscriptionUsage | null {
+  if (!readable) return null;
+  return peekSharedQuery<ClaudeSubscriptionUsage>(client, claudeUsageQueryKey(key))?.data ?? null;
+}
 
 export function useClaudeUsage({
   client,
@@ -56,7 +69,16 @@ export function useClaudeUsage({
     error: boolean;
     loading: boolean;
     refreshing: boolean;
-  }>({ key, value: null, error: false, loading: enabled && connected, refreshing: false });
+  }>(() => {
+    const retained = retainedClaudeUsage(client, key, enabled && connected);
+    return {
+      key,
+      value: retained,
+      error: false,
+      loading: enabled && connected && !retained,
+      refreshing: false,
+    };
+  });
   const load = useCallback(
     async (refresh: boolean) => {
       if (!enabled || !connected || (refresh && !canManage)) return;
@@ -91,10 +113,12 @@ export function useClaudeUsage({
             result.credentialVersion !== credentialVersion)
         ) {
           setState({ key, value: null, error: true, loading: false, refreshing: false });
+          void invalidateSharedQueries(client, claudeUsageQueryKey(key));
           await credentialChanged.current?.();
           return;
         }
         setState({ key, value: result, error: false, loading: false, refreshing: false });
+        setSharedQueryData(client, claudeUsageQueryKey(key), result);
         if (result.refreshStatus === "reconnect") {
           if (reconnectNotified.current !== key) {
             reconnectNotified.current = key;
@@ -128,7 +152,14 @@ export function useClaudeUsage({
     ],
   );
   useEffect(() => {
-    setState({ key, value: null, error: false, loading: enabled && connected, refreshing: false });
+    const retained = retainedClaudeUsage(client, key, enabled && connected);
+    setState({
+      key,
+      value: retained,
+      error: false,
+      loading: enabled && connected && !retained,
+      refreshing: false,
+    });
     void load(false);
     const poll = () => {
       if (document.visibilityState !== "hidden") void load(false);
@@ -141,7 +172,7 @@ export function useClaudeUsage({
       if (timer) clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [key, load, enabled, connected]);
+  }, [client, key, load, enabled, connected]);
   return {
     value: state.key === key ? state.value : null,
     error: state.key === key && state.error,

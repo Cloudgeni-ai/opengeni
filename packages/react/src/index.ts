@@ -714,18 +714,39 @@ export type {
 // here for back-compat (#144).
 export * from "./machines";
 // Multi-account Codex (P1): accounts list + active-switch hook.
-export { useCodexAccounts, isCodexAccountEvent } from "./hooks/use-codex-accounts";
+export {
+  useCodexAccounts,
+  isCodexAccountEvent,
+  codexAccountsQueryKey,
+  codexLiveUsageQueryKey,
+} from "./hooks/use-codex-accounts";
 export type {
   CodexAccountsClientLike,
+  CodexLiveUsageSnapshot,
   UseCodexAccountsOptions,
   UseCodexAccountsResult,
 } from "./hooks/use-codex-accounts";
-export { useSuperGrokAccounts } from "./hooks/use-supergrok-accounts";
+export { useSuperGrokAccounts, superGrokAccountsQueryKey } from "./hooks/use-supergrok-accounts";
 export type {
   SuperGrokAccountsClientLike,
   UseSuperGrokAccountsOptions,
   UseSuperGrokAccountsResult,
 } from "./hooks/use-supergrok-accounts";
+// Client-scoped stale-while-revalidate cache shared by account/usage surfaces.
+export {
+  clearSharedQueries,
+  invalidateSharedQueries,
+  isSharedQueryAccessRefusal,
+  peekSharedQuery,
+  setSharedQueryData,
+  useSharedQuery,
+} from "./hooks/shared-query";
+export type {
+  SharedQueryKey,
+  SharedQueryOptions,
+  SharedQueryResult,
+  SharedQuerySnapshot,
+} from "./hooks/shared-query";
 
 // Sandbox helpers
 export { gitFileDiffToPatch } from "./lib/git-patch";

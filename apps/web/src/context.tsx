@@ -23,7 +23,11 @@ import type {
   SessionEvent,
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
+import {
+  clearSharedQueries,
+  composerSubmissionErrorMessage,
+  type SessionEventsConnectionState,
+} from "@opengeni/react";
 import type { BrowserAccountTransition } from "@opengeni/react/accounts";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -822,6 +826,9 @@ export function RootRouteComponent() {
     void accessKeyVersion;
     return createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
   }, [accessKeyVersion, sessionChannelProjectionAuthority]);
+  // Account lists and usage limits are retained per client (see useSharedQuery).
+  // A retired client's identity is gone: drop what it read right away.
+  useEffect(() => () => clearSharedQueries(client), [client]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =

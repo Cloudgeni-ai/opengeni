@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "@opengeni/react";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SubscriptionPoolSettings } from "@opengeni/sdk";
 import { ApiError } from "@/api";
@@ -32,7 +33,17 @@ export function subscriptionAccountName(account: SubscriptionPoolAccount) {
   return account.label ?? account.email ?? account.subject;
 }
 
-/** The same list, mutations and scope-epoch fencing for every subscription provider. */
+/** Shared-cache key prefix for one provider's subscription pools (every scope). */
+export const subscriptionPoolQueryPrefix = (providerName: string) =>
+  ["subscription-pool", providerName] as SharedQueryKey;
+
+/**
+ * The same list, mutations and scope-epoch fencing for every subscription provider.
+ * The list is read through the client-scoped shared cache: revisiting a page
+ * renders the retained accounts at once and re-reads in the background, and
+ * every account change invalidates the provider's pools in every scope
+ * (organization changes can change what a workspace inherits).
+ */
 export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccount>(input: {
   operations: SubscriptionAccountPoolOperations<Account>;
   identity: string;
@@ -42,6 +53,8 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   workspaceId?: string | undefined;
   canManage: boolean;
   enabled?: boolean | undefined;
+  /** Other shared-cache prefixes an account change makes wrong. */
+  relatedQueryPrefixes?: readonly SharedQueryKey[] | undefined;
 }) {
   const enabled = input.enabled ?? true;
   type Epoch = { identity: string; client: object; enabled: boolean; active: boolean };
@@ -60,53 +73,38 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
     epoch.current = { identity: input.identity, client: input.client, enabled, active: true };
   }
   const current = epoch.current;
-  const [state, setState] = useState<{
-    epoch: Epoch;
-    data: SubscriptionAccountPoolData<Account> | null;
-    loading: boolean;
-    loadError: string | null;
-    unavailable: boolean;
-  }>(() => ({ epoch: current, data: null, loading: enabled, loadError: null, unavailable: false }));
+  const query = useSharedQuery(
+    input.client,
+    [
+      ...subscriptionPoolQueryPrefix(input.providerName),
+      input.organizationId ? "organization" : "workspace",
+      input.organizationId ?? input.workspaceId ?? input.identity,
+    ],
+    () => input.operations.load(),
+    { enabled },
+  );
   const [mutation, setMutation] = useState<{ epoch: Epoch; working: string | null }>({
     epoch: current,
     working: null,
   });
-  const loadSequence = useRef(0);
   const pendingMutation = useRef<{ epoch: Epoch; token: object } | null>(null);
+  const relatedQueryPrefixes = input.relatedQueryPrefixes;
+  // Retry, sign-in completion and every account change re-read this list and
+  // make every other retained list of this provider re-read on its next mount.
   const refresh = useCallback(async () => {
     if (!current.enabled || !current.active) return;
-    const sequence = ++loadSequence.current;
-    try {
-      const data = await input.operations.load();
-      if (current.active && sequence === loadSequence.current)
-        setState({ epoch: current, data, loading: false, loadError: null, unavailable: false });
-    } catch (error) {
-      if (!current.active || sequence !== loadSequence.current) return;
-      const unavailable =
-        (error instanceof OpenGeniApiError || error instanceof ApiError) && error.status === 404;
-      setState({
-        epoch: current,
-        data: null,
-        loading: false,
-        loadError: unavailable ? null : apiErrorAdvice(error),
-        unavailable,
-      });
-    }
-  }, [current, input.operations]);
+    await Promise.all(
+      [subscriptionPoolQueryPrefix(input.providerName), ...(relatedQueryPrefixes ?? [])].map(
+        (prefix) => invalidateSharedQueries(input.client, prefix),
+      ),
+    );
+  }, [current, input.client, input.providerName, relatedQueryPrefixes]);
   useEffect(() => {
     current.active = true;
-    setState({
-      epoch: current,
-      data: null,
-      loading: current.enabled,
-      loadError: null,
-      unavailable: false,
-    });
-    void refresh();
     return () => {
       current.active = false;
     };
-  }, [current, refresh]);
+  }, [current]);
   const mutate = useCallback(
     async (key: string, operation: () => Promise<unknown>, success: string, propagate = false) => {
       if (!current.active || !input.canManage) {
@@ -142,7 +140,12 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
     },
     [current, input.canManage, input.providerName, refresh],
   );
-  const data = state.epoch === current ? state.data : null;
+  // A failed read shows its error, never the rows retained from before it.
+  const unavailable =
+    (query.error instanceof OpenGeniApiError || query.error instanceof ApiError) &&
+    query.error.status === 404;
+  const loadError = query.error && !unavailable ? apiErrorAdvice(query.error) : null;
+  const data = query.error ? null : (query.data as SubscriptionAccountPoolData<Account> | null);
   const inherited = !input.organizationId && data?.source === "organization";
   const canManageAccounts = input.canManage && !inherited;
   return {
@@ -152,9 +155,9 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
     canManageAccounts,
     activeAccountId: data?.activeAccountId ?? null,
     rotationEnabled: data?.settings.rotationEnabled ?? false,
-    loading: state.epoch === current ? state.loading : enabled,
-    loadError: state.epoch === current ? state.loadError : null,
-    unavailable: state.epoch === current ? state.unavailable : false,
+    loading: query.loading,
+    loadError,
+    unavailable,
     busy: mutation.epoch === current && mutation.working !== null,
     working: mutation.epoch === current ? mutation.working : null,
     refresh,

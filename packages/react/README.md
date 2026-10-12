@@ -953,6 +953,17 @@ state remains application-owned; durable draft and session state remain in
   plus the `defaultModel` to preselect (from the client config) for a picker.
 - `useCodexAccounts()` — connected Codex (ChatGPT) accounts, the active/next-run
   pointer, and per-session account pinning for multi-account subscriptions.
+  `refreshUsage({ maxAgeMs })` reuses live usage readings younger than
+  `maxAgeMs`; concurrent refreshes share one provider read.
+- `useSharedQuery(client, key, load, options?)` — the client-scoped
+  stale-while-revalidate cache behind `useCodexAccounts` and
+  `useSuperGrokAccounts`. A remount renders retained data at once and re-reads
+  it in the background once older than `staleTimeMs` (default 10 seconds);
+  readers of one key share one request; failures are never served as fresh
+  data and a 401/403/404 drops retained data. `invalidateSharedQueries(client,
+  keyPrefix)` re-reads mounted entries and evicts unmounted ones after a
+  mutation. Entries live under the exact client object, so give a new client
+  to a different signed-in person (or call `clearSharedQueries(client)`).
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for

@@ -18,6 +18,15 @@ import type {
   WorkspaceCodexSubscriptionMode,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import {
+  codexAccountsQueryKey,
+  codexLiveUsageQueryKey,
+  invalidateSharedQueries,
+  peekSharedQuery,
+  setSharedQueryData,
+  useSharedQuery,
+  type CodexLiveUsageSnapshot,
+} from "@opengeni/react";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -685,6 +694,11 @@ export type CodexWorking =
 
 export type CodexSubscriptions = ReturnType<typeof useCodexSubscriptions>;
 
+const EMPTY_CODEX_USAGE: CodexUsageMap = {};
+async function neverReadLiveUsage(): Promise<CodexLiveUsageSnapshot> {
+  throw new Error("Live Codex usage is only written by a live provider read");
+}
+
 export function useCodexSubscriptions({
   client,
   workspaceId,
@@ -694,20 +708,39 @@ export function useCodexSubscriptions({
   workspaceId: string;
   canManage: boolean;
 }) {
-  const [data, setData] = useState<CodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // The account list is the same shared entry the session account switcher
+  // reads: a revisit renders the retained rows at once and re-reads quietly.
+  const accountsQuery = useSharedQuery<CodexAccountsResponse>(
+    client,
+    codexAccountsQueryKey(workspaceId),
+    () => client.listCodexAccounts(workspaceId),
+  );
+  const data = accountsQuery.error ? null : accountsQuery.data;
+  const loading = accountsQuery.loading;
+  // Shown under "Couldn't load ..." as what to do; never the raw API message.
+  const loadError = accountsQuery.error ? apiErrorAdvice(accountsQuery.error) : null;
+  // The latest LIVE usage per account (carries the explicit ok/limit/error/no-data
+  // status the cached columns can't). Never merged with cached account windows.
+  // Shared with the session switcher; only live provider reads ever write it.
+  const liveUsageQuery = useSharedQuery<CodexLiveUsageSnapshot>(
+    client,
+    codexLiveUsageQueryKey(workspaceId),
+    neverReadLiveUsage,
+    { enabled: false },
+  );
+  const usageMap = liveUsageQuery.data?.usage ?? EMPTY_CODEX_USAGE;
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<CodexWorking | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
   } | null>(null);
-  // True while a LIVE batched usage refresh is in flight (drives the meter skeleton).
-  const [refreshingUsage, setRefreshingUsage] = useState(true);
-  // The latest LIVE usage per account (carries the explicit ok/limit/error/no-data
-  // status the cached columns can't). Never merge it with cached account windows.
-  const [usageMap, setUsageMap] = useState<CodexUsageMap>({});
+  // True while a LIVE batched usage refresh is in flight with no earlier live
+  // reading to show (drives the meter skeleton). Earlier live readings stay on
+  // screen while this mount's read runs.
+  const [refreshingUsage, setRefreshingUsage] = useState(
+    () => !peekSharedQuery(client, codexLiveUsageQueryKey(workspaceId))?.data,
+  );
   const [overviewMap, setOverviewMap] = useState<CodexOverviewResponse["accounts"]>({});
   // The last live overview read failed as a whole (not one account's usage).
   const [usageError, setUsageError] = useState(false);
@@ -722,37 +755,42 @@ export function useCodexSubscriptions({
     return () => clearInterval(timer);
   }, []);
 
-  const refreshAccounts = useCallback(async () => {
-    try {
-      setData(await client.listCodexAccounts(workspaceId));
-      setLoadError(null);
-    } catch (error) {
-      setData(null);
-      // Shown under "Couldn't load ..." as what to do; never the raw API message.
-      setLoadError(apiErrorAdvice(error));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, workspaceId]);
+  // Re-read this list only (after a live usage read wrote the cached columns).
+  const { refresh: reloadAccounts } = accountsQuery;
+  // After an account change: every retained Codex list for this workspace,
+  // including session account choices, may now be wrong.
+  const refreshAccounts = useCallback(
+    () => invalidateSharedQueries(client, codexAccountsQueryKey(workspaceId)),
+    [client, workspaceId],
+  );
+  const writeUsage = useCallback(
+    (update: (previous: CodexUsageMap) => CodexUsageMap) => {
+      const key = codexLiveUsageQueryKey(workspaceId);
+      const previous = peekSharedQuery<CodexLiveUsageSnapshot>(client, key)?.data?.usage ?? {};
+      setSharedQueryData<CodexLiveUsageSnapshot>(client, key, { usage: update(previous) });
+    },
+    [client, workspaceId],
+  );
 
   // LIVE batched overview refresh: usage + reset-credit details settle
   // independently per account under the server's max-four provider-call cap.
   const refreshUsage = useCallback(async () => {
-    setRefreshingUsage(true);
+    setRefreshingUsage(!peekSharedQuery(client, codexLiveUsageQueryKey(workspaceId))?.data);
     try {
       const result = await client.codexOverview(workspaceId);
       if (!cancelled.current) {
         setOverviewMap(result.accounts);
-        setUsageMap(
-          Object.fromEntries(
-            Object.entries(result.accounts).map(([id, overview]) => [
-              id,
-              {
-                status: overview.usage.value?.status ?? "no-data",
-                usage: overview.usage.value ?? null,
-              },
-            ]),
-          ) as CodexUsageMap,
+        writeUsage(
+          () =>
+            Object.fromEntries(
+              Object.entries(result.accounts).map(([id, overview]) => [
+                id,
+                {
+                  status: overview.usage.value?.status ?? "no-data",
+                  usage: overview.usage.value ?? null,
+                },
+              ]),
+            ) as CodexUsageMap,
         );
         setNow(Date.now());
         setUsageError(false);
@@ -761,10 +799,10 @@ export function useCodexSubscriptions({
       // Per-account errors are each account's own "usage unavailable" state.
       if (!cancelled.current) setUsageError(true);
     } finally {
-      await refreshAccounts();
+      await reloadAccounts();
       if (!cancelled.current) setRefreshingUsage(false);
     }
-  }, [client, workspaceId, refreshAccounts]);
+  }, [client, workspaceId, reloadAccounts, writeUsage]);
 
   // Explicit retry still uses the independently-settled batch so reset detail
   // authority and usage can never drift.
@@ -776,7 +814,7 @@ export function useCodexSubscriptions({
         if (!cancelled.current) {
           setOverviewMap(result.accounts);
           const usage = result.accounts[accountId]?.usage.value;
-          setUsageMap((prev) => ({
+          writeUsage((prev) => ({
             ...prev,
             [accountId]: { status: usage?.status ?? "no-data", usage: usage ?? null },
           }));
@@ -785,26 +823,26 @@ export function useCodexSubscriptions({
       } catch {
         /* surfaced as the account's "usage unavailable" state */
       } finally {
-        await refreshAccounts();
+        await reloadAccounts();
         if (!cancelled.current) setRefreshingRow(null);
       }
     },
-    [client, workspaceId, refreshAccounts],
+    [client, workspaceId, reloadAccounts, writeUsage],
   );
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(true);
-    void refreshAccounts();
     return () => {
       cancelled.current = true;
     };
-  }, [refreshAccounts]);
+  }, []);
 
   // Detailed reset rows are deliberately never cached as redemption authority, so
   // every mount performs exactly ONE independently-settled live overview read. The
   // account identity renders immediately, but usage waits for this read rather
-  // than flashing cached limits. Navigation/explicit refresh only, never an interval.
+  // than flashing the server's cached limit columns; only earlier LIVE readings
+  // (shared with the session switcher) may show meanwhile. Navigation/explicit
+  // refresh only, never an interval.
   useEffect(() => {
     if (loading || !data || usageRefreshedRef.current) return;
     if (data.accounts.length > 0) {

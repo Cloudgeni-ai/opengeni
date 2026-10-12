@@ -416,7 +416,10 @@ test.each([false, true])(
 
 beforeAll(() => undefined);
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Account lists are retained per client between mounts; every test starts cold.
+  const { clearSharedQueries } = await import("@opengeni/react");
+  clearSharedQueries(client);
   organizationAdmin = false;
   organizationList = false;
   organizationWorkspaces = [];
@@ -614,6 +617,55 @@ describe("Codex rows", () => {
       expect(button(view.container, /Connect account/)).toBeDefined();
     } finally {
       await cleanup(view);
+    }
+  });
+
+  test("a revisit shows the last accounts and live usage at once while re-reading", async () => {
+    const first = await render();
+    try {
+      expect(first.container.textContent).toContain("75% left");
+    } finally {
+      await cleanup(first);
+    }
+    expect(client.listCodexAccounts).toHaveBeenCalled();
+    let resolve!: (value: CodexOverviewResponse) => void;
+    client.codexOverview.mockImplementation(
+      () =>
+        new Promise<CodexOverviewResponse>((yes) => {
+          resolve = yes;
+        }),
+    );
+    const overviewReads = client.codexOverview.mock.calls.length;
+    const second = await render();
+    try {
+      // Back on Models: the account and its last LIVE reading render at once
+      // (never the server's cached 10% column) while this visit's read runs.
+      expect(second.container.textContent).toContain("Team plan");
+      expect(second.container.textContent).toContain("75% left");
+      expect(second.container.textContent).not.toContain("10% left");
+      expect(client.codexOverview.mock.calls.length).toBe(overviewReads + 1);
+      await act(async () => resolve(overviewFor("acct-1", 40)));
+      await flush();
+      expect(second.container.textContent).toContain("40% left");
+    } finally {
+      await cleanup(second);
+    }
+  });
+
+  test("an account change elsewhere is never shown stale on the next visit", async () => {
+    const first = await render();
+    await cleanup(first);
+    const reads = client.listCodexAccounts.mock.calls.length;
+    const { invalidateSharedQueries, peekSharedQuery } = await import("@opengeni/react");
+    // e.g. the session switcher pinned another account for this workspace.
+    await invalidateSharedQueries(client, ["codex-accounts", "workspace-a"]);
+    expect(peekSharedQuery(client, ["codex-accounts", "workspace-a"])).toBeNull();
+    const second = await render();
+    try {
+      // A cold read on mount, then the usual re-read after the live usage read.
+      expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 2);
+    } finally {
+      await cleanup(second);
     }
   });
 

@@ -2,7 +2,12 @@ import type { SuperGrokAccount, SuperGrokAccountsResponse } from "@opengeni/sdk"
 import { useCallback } from "react";
 
 import { useOpenGeni, type ClientOverride } from "../provider";
-import { useMutationRunner, usePolledValue } from "./internal";
+import { useMutationRunner } from "./internal";
+import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "./shared-query";
+
+/** Shared-cache key for a workspace's SuperGrok accounts (see `useSharedQuery`). */
+export const superGrokAccountsQueryKey = (workspaceId: string) =>
+  ["supergrok-accounts", workspaceId] as SharedQueryKey;
 
 export type SuperGrokAccountsClientLike = {
   listSuperGrokAccounts: (workspaceId: string) => Promise<SuperGrokAccountsResponse>;
@@ -39,7 +44,10 @@ const EMPTY: SuperGrokAccountsResponse = {
   },
 };
 
-/** Workspace-visible xAI accounts. Workspace scope is the connection default. */
+/**
+ * Workspace-visible xAI accounts. Workspace scope is the connection default.
+ * Reads share the client-scoped cache, so a remount renders retained rows at once.
+ */
 export function useSuperGrokAccounts(
   options: UseSuperGrokAccountsOptions = {},
 ): UseSuperGrokAccountsResult {
@@ -50,10 +58,12 @@ export function useSuperGrokAccounts(
     async () => await supergrokClient.listSuperGrokAccounts(workspaceId),
     [supergrokClient, workspaceId],
   );
-  const { data, loading, refresh } = usePolledValue(load, {
-    enabled: options.enabled,
-    pollIntervalMs: options.pollIntervalMs,
-  });
+  const { data, loading, refresh } = useSharedQuery(
+    supergrokClient,
+    superGrokAccountsQueryKey(workspaceId),
+    load,
+    { enabled: options.enabled, pollIntervalMs: options.pollIntervalMs },
+  );
   const { run, mutating: activating, mutationError } = useMutationRunner();
   const activate = useCallback(
     async (accountId: string): Promise<boolean> => {
@@ -62,10 +72,10 @@ export function useSuperGrokAccounts(
         await supergrokClient.activateSuperGrokAccount!(workspaceId, accountId);
         return true;
       });
-      if (result) await refresh();
+      if (result) await invalidateSharedQueries(supergrokClient, ["supergrok-accounts"]);
       return result === true;
     },
-    [refresh, run, supergrokClient, workspaceId],
+    [run, supergrokClient, workspaceId],
   );
   const state = data ?? EMPTY;
   return {

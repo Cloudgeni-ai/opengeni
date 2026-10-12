@@ -1,0 +1,5 @@
+---
+"@opengeni/react": minor
+---
+
+Subscription accounts and their usage limits no longer reload from scratch every time you come back to them. `useCodexAccounts` and `useSuperGrokAccounts` now read through a new client-scoped stale-while-revalidate cache (`useSharedQuery`): a remount renders the last accounts at once and re-reads them in the background, concurrent readers share one request, account switches invalidate the workspace's retained Codex reads, and failed reads are never served as cached data. `useCodexAccounts().refreshUsage({ maxAgeMs })` reuses recent live usage readings and shares one provider read between concurrent callers, and the result exposes `liveUsageUpdatedAt`. The cache is keyed by the exact client object; hosts that reuse one client for a different signed-in person should call `clearSharedQueries(client)`. New exports: `useSharedQuery`, `invalidateSharedQueries`, `setSharedQueryData`, `peekSharedQuery`, `clearSharedQueries`, `isSharedQueryAccessRefusal`, `codexAccountsQueryKey`, `codexLiveUsageQueryKey`, `superGrokAccountsQueryKey` and their types.

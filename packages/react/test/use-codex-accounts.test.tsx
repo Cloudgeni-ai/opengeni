@@ -391,3 +391,159 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
     await hook.unmount();
   });
 });
+
+describe("useCodexAccounts — shared cache across remounts", () => {
+  test("navigating back renders the retained accounts and live usage at once", async () => {
+    let reads = 0;
+    let usageReads = 0;
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        throw new Error("must use session projection");
+      },
+      listSessionCodexAccounts: async () => {
+        reads += 1;
+        return sessionResponse([account("a", { weekly: win(20, 604800) })], {
+          currentSelection: { credentialId: "a", waiting: false },
+          currentAccount: account("a", { weekly: win(20, 604800) }),
+        });
+      },
+      refreshCodexUsage: async () => {
+        usageReads += 1;
+        return {
+          usage: {
+            a: {
+              status: "ok" as const,
+              usage: {
+                status: "ok" as const,
+                planType: "pro",
+                fiveHour: win(10, 18000),
+                weekly: win(30, 604800),
+                limitReached: false,
+                fetchedAt: new Date().toISOString(),
+              },
+            },
+          },
+        };
+      },
+    };
+    const render = () =>
+      renderHook(() => {
+        const result = useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "session",
+          codexClient,
+          events: [],
+          pollIntervalMs: 0,
+        });
+        rendered.push({ loading: result.loading, accounts: result.accounts.length });
+        return result;
+      }, undefined);
+    let rendered: { loading: boolean; accounts: number }[] = [];
+    const first = await render();
+    await flush();
+    expect(await actRun(() => first.result.current.refreshUsage())).toBe(true);
+    await flush();
+    expect(first.result.current.accounts[0]?.weekly?.percent).toBe(30);
+    await first.unmount();
+    const readsBefore = reads;
+
+    rendered = [];
+    const second = await render();
+    // Every render of the revisit already has the rows: no skeleton flash.
+    expect(rendered.every((each) => !each.loading && each.accounts === 1)).toBe(true);
+    expect(second.result.current.accounts[0]?.weekly?.percent).toBe(30);
+    expect(second.result.current.liveUsageUpdatedAt).not.toBeNull();
+    // Reopening within the reuse window does not ask the provider again.
+    expect(await actRun(() => second.result.current.refreshUsage({ maxAgeMs: 30_000 }))).toBe(true);
+    await flush();
+    expect(usageReads).toBe(1);
+    expect(reads).toBe(readsBefore);
+    await second.unmount();
+  });
+
+  test("concurrent live usage refreshes share one provider read", async () => {
+    let usageReads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => response([account("a")]),
+      refreshCodexUsage: async () => {
+        usageReads += 1;
+        await gate;
+        return { usage: {} };
+      },
+    };
+    const a = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    const b = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    await flush();
+    let pending!: Promise<boolean[]>;
+    await actRun(async () => {
+      pending = Promise.all([a.result.current.refreshUsage(), b.result.current.refreshUsage()]);
+    });
+    await actRun(async () => release());
+    expect(await actRun(() => pending)).toEqual([true, true]);
+    expect(usageReads).toBe(1);
+    await a.unmount();
+    await b.unmount();
+  });
+
+  test("switching accounts evicts the workspace's other retained Codex reads", async () => {
+    let pinned: string | null = null;
+    let workspaceReads = 0;
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        workspaceReads += 1;
+        return response([account("a"), account("b")]);
+      },
+      listSessionCodexAccounts: async () =>
+        sessionResponse([account("a"), account("b")], { pinnedAccountId: pinned }),
+      pinSessionCodexAccount: async (_workspaceId, _sessionId, target) => {
+        pinned = target;
+        return { pinned: target, appliedTo: "next_turn" };
+      },
+    };
+    const workspace = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    await flush();
+    await workspace.unmount();
+    expect(workspaceReads).toBe(1);
+
+    const session = await renderHook(
+      () =>
+        useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "session",
+          codexClient,
+          events: [],
+          pollIntervalMs: 0,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(await actRun(() => session.result.current.pin("b"))).toBe(true);
+    await flush();
+    expect(session.result.current.pinnedAccountId).toBe("b");
+    await session.unmount();
+
+    // The workspace list retained before the switch is re-read, not reused.
+    const again = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    await flush();
+    expect(workspaceReads).toBe(2);
+    await again.unmount();
+  });
+});

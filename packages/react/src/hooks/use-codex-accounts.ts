@@ -10,10 +10,60 @@ import type {
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
   useMutationRunner,
-  usePolledValue,
   useSessionEventTrigger,
   type SessionEventFeedOptions,
 } from "./internal";
+import {
+  invalidateSharedQueries,
+  peekSharedQuery,
+  setSharedQueryData,
+  useSharedQuery,
+  type SharedQueryKey,
+} from "./shared-query";
+
+/**
+ * Shared-cache keys for Codex reads. Every surface that reads the same thing
+ * through the same client (the session switcher, Settings > Models) shares one
+ * entry, so a revisit renders the last rows at once and re-reads quietly.
+ */
+export const codexAccountsQueryKey = (workspaceId: string, sessionId?: string | null) =>
+  (sessionId
+    ? ["codex-accounts", workspaceId, "session", sessionId]
+    : ["codex-accounts", workspaceId]) as SharedQueryKey;
+/** The last LIVE provider usage per account, written by every live usage read. */
+export const codexLiveUsageQueryKey = (workspaceId: string) =>
+  ["codex-live-usage", workspaceId] as SharedQueryKey;
+
+export type CodexLiveUsageSnapshot = { usage: CodexUsageMap };
+
+const liveUsageReads = new WeakMap<object, Map<string, Promise<CodexUsageMap>>>();
+
+/** One live usage refresh per client + workspace at a time; joiners share it. */
+function sharedLiveUsageRead(
+  scope: object,
+  workspaceId: string,
+  read: () => Promise<{ usage: CodexUsageMap }>,
+): Promise<CodexUsageMap> {
+  let reads = liveUsageReads.get(scope);
+  if (!reads) {
+    reads = new Map();
+    liveUsageReads.set(scope, reads);
+  }
+  const existing = reads.get(workspaceId);
+  if (existing) return existing;
+  const request = read().then((fresh) => {
+    setSharedQueryData<CodexLiveUsageSnapshot>(scope, codexLiveUsageQueryKey(workspaceId), {
+      usage: fresh.usage,
+    });
+    return fresh.usage;
+  });
+  const settle = () => {
+    if (reads!.get(workspaceId) === request) reads!.delete(workspaceId);
+  };
+  request.then(settle, settle);
+  reads.set(workspaceId, request);
+  return request;
+}
 
 /** Events that change which Codex account a session runs on (or just ran). */
 export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean {
@@ -96,10 +146,13 @@ export type UseCodexAccountsResult = {
    * Trigger a LIVE batched /wham/usage refresh across all accounts, then re-read
    * the cached metadata so the new windows land on `accounts`. Modeled on `pin`.
    * No-op (resolves false) when the client can't refresh usage.
+   * With `maxAgeMs`, live readings younger than that are reused instead.
    */
-  refreshUsage: () => Promise<boolean>;
+  refreshUsage: (options?: { maxAgeMs?: number | undefined }) => Promise<boolean>;
   /** Live provider readings override stale cached labels after refreshUsage. */
   liveUsage: CodexUsageMap;
+  /** When the live readings in `liveUsage` were taken (epoch ms), or null. */
+  liveUsageUpdatedAt: number | null;
   /** True while a live usage refresh is in flight (drives the bar skeleton). */
   refreshingUsage: boolean;
   /** Pin (or unpin via "auto") the session's account; returns true on success. */
@@ -109,6 +162,8 @@ export type UseCodexAccountsResult = {
   pinningTarget: string | null;
   mutationError: Error | null;
 };
+
+const EMPTY_USAGE: CodexUsageMap = {};
 
 const EMPTY_SETTINGS: CodexRotationSettings = {
   rotationEnabled: false,
@@ -138,9 +193,10 @@ const EMPTY_STATE: CodexAccountsState = {
 
 /**
  * The workspace's Codex accounts, or session-authorized retry/next-turn choices
- * and accepted current account. Composed like
- * `useMachines`: slow polling (the realtime work is done by the
- * `codex.account.switched` event trigger) + a `pin` mutation.
+ * and accepted current account. Reads go through the client-scoped shared cache
+ * (`useSharedQuery`): a remount renders the retained rows at once and re-reads
+ * in the background; slow polling plus the `codex.account.switched` event
+ * trigger keep them current, and `pin` invalidates the workspace's entries.
  * Dual-consumer safe via the structural `CodexAccountsClientLike` surface.
  */
 export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCodexAccountsResult {
@@ -149,36 +205,51 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   const sessionId = options.sessionId;
   const sharedEvents = options.events;
 
-  const load = useCallback(async (): Promise<CodexAccountsState> => {
+  const load = useCallback(async (): Promise<
+    CodexAccountsResponse | SessionCodexAccountsResponse
+  > => {
     if (sessionId) {
       if (!codexClient.listSessionCodexAccounts)
         throw new Error("Session Codex account projection is unavailable");
       return await codexClient.listSessionCodexAccounts(workspaceId, sessionId);
     }
-    const acc = await codexClient.listCodexAccounts(workspaceId);
-    return {
-      currentSelection: null,
-      currentAccount: null,
-      accounts: acc.accounts,
-      activeAccountId: acc.activeAccountId,
-      settings: acc.settings,
-      pinnedAccountId: null,
-      lastAccountId: null,
-    };
+    return await codexClient.listCodexAccounts(workspaceId);
   }, [codexClient, workspaceId, sessionId]);
 
   const {
-    data: loadedData,
+    data: response,
     loading,
     error,
     refresh,
-  } = usePolledValue(load, {
+  } = useSharedQuery(codexClient, codexAccountsQueryKey(workspaceId, sessionId), load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
+  const liveUsageQuery = useSharedQuery<CodexLiveUsageSnapshot>(
+    codexClient,
+    codexLiveUsageQueryKey(workspaceId),
+    async () => {
+      throw new Error("Live Codex usage is only written by a live refresh");
+    },
+    // Never read on mount: only an explicit live refresh writes this entry.
+    { enabled: false },
+  );
+  const loadedData: CodexAccountsState | null = !response
+    ? null
+    : sessionId
+      ? (response as SessionCodexAccountsResponse)
+      : {
+          currentSelection: null,
+          currentAccount: null,
+          accounts: response.accounts,
+          activeAccountId: response.activeAccountId,
+          settings: response.settings,
+          pinnedAccountId: null,
+          lastAccountId: null,
+        };
   const { run: runMutation, mutating: pinning, mutationError } = useMutationRunner();
   const { run: runUsageMutation, mutating: refreshingUsage } = useMutationRunner();
-  const [liveUsage, setLiveUsage] = useState<CodexUsageMap>({});
+  const liveUsage = liveUsageQuery.data?.usage ?? EMPTY_USAGE;
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
   const [switchReceipt, setSwitchReceipt] = useState<{
     sessionId: string;
@@ -212,27 +283,46 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
         return true;
       });
       setPinningTarget(null);
-      if (result) await refresh();
+      // Every retained Codex read for this workspace may now be wrong.
+      if (result) await invalidateSharedQueries(codexClient, codexAccountsQueryKey(workspaceId));
       return result === true;
     },
-    [codexClient, workspaceId, sessionId, runMutation, refresh],
+    [codexClient, workspaceId, sessionId, runMutation],
   );
 
   // Live usage refresh: hit the batched provider read, then re-read cached
   // metadata so the fresh windows land on `accounts`. The provider read writes the
-  // cache columns server-side; state.refresh() pulls them back.
-  const refreshUsage = useCallback(async (): Promise<boolean> => {
-    if (!codexClient.refreshCodexUsage) {
-      return false;
-    }
-    const result = await runUsageMutation(async () => {
-      const fresh = await codexClient.refreshCodexUsage!(workspaceId);
-      setLiveUsage(fresh.usage);
-      return true;
-    });
-    if (result) await refresh();
-    return result === true;
-  }, [codexClient, workspaceId, runUsageMutation, refresh]);
+  // cache columns server-side; refresh() pulls them back. Concurrent callers share
+  // one provider read, and `maxAgeMs` reuses readings that are recent enough.
+  const refreshUsage = useCallback(
+    async (refreshOptions: { maxAgeMs?: number | undefined } = {}): Promise<boolean> => {
+      if (!codexClient.refreshCodexUsage) {
+        return false;
+      }
+      const maxAgeMs = refreshOptions.maxAgeMs;
+      const retained = peekSharedQuery<CodexLiveUsageSnapshot>(
+        codexClient,
+        codexLiveUsageQueryKey(workspaceId),
+      );
+      if (
+        maxAgeMs !== undefined &&
+        retained?.data &&
+        retained.updatedAt !== null &&
+        Date.now() - retained.updatedAt < maxAgeMs
+      ) {
+        return true;
+      }
+      const result = await runUsageMutation(async () => {
+        await sharedLiveUsageRead(codexClient, workspaceId, () =>
+          codexClient.refreshCodexUsage!(workspaceId),
+        );
+        return true;
+      });
+      if (result) await refresh();
+      return result === true;
+    },
+    [codexClient, workspaceId, runUsageMutation, refresh],
+  );
 
   // Reauthorization failure must remove a previously visible session pool.
   const data = (sessionId && error ? null : loadedData) ?? EMPTY_STATE;
@@ -258,6 +348,7 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     refresh,
     refreshUsage,
     liveUsage,
+    liveUsageUpdatedAt: liveUsageQuery.data ? liveUsageQuery.updatedAt : null,
     refreshingUsage,
     pin,
     pinning,
