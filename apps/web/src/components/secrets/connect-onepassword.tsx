@@ -83,7 +83,9 @@ export function ConnectOnePasswordPage({
   actions: ConnectOnePasswordActions;
 }) {
   const [connection, setConnection] = useState<InstallOnePasswordResponse | null>(null);
-  const [owner, setOwner] = useState<Owner>(owners[0] ?? "user");
+  const [owner, setOwner] = useState<Owner>(
+    owners.includes("workspace") ? "workspace" : (owners[0] ?? "user"),
+  );
   const [linked, setLinked] = useState<VaultSummary[] | null>(null);
 
   if (!connection) {

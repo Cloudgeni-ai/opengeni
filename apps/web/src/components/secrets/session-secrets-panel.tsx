@@ -155,7 +155,13 @@ export function SessionSecretsMenuBody({
             </ConnectorAction>
           }
         />
-        <div className="min-h-0 overflow-y-auto overscroll-contain pb-1">
+        <div
+          role="group"
+          aria-label={"Save to"}
+          // Focusable so keyboard users can scroll it even when every row is disabled.
+          tabIndex={0}
+          className="min-h-0 overflow-y-auto overscroll-contain pb-1 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55"
+        >
           <p className={cn(MENU_NOTE_CLASS, "pt-0")}>
             A copy is kept after this task ends. Agents in later chats can use it.
           </p>
@@ -207,7 +213,13 @@ export function SessionSecretsMenuBody({
   return (
     <>
       <ComposerMenuHeader title="Secrets" leading={leading} />
-      <div className="min-h-0 overflow-y-auto overscroll-contain pb-1">
+      <div
+        role="group"
+        aria-label={"Secrets"}
+        // Focusable so keyboard users can scroll it even when every row is disabled.
+        tabIndex={0}
+        className="min-h-0 overflow-y-auto overscroll-contain pb-1 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55"
+      >
         {loading && !vaults ? (
           <ComposerMenuRowsSkeleton rows={4} label="Loading secrets" />
         ) : error && !vaults ? (

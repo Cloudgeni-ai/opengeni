@@ -33,6 +33,7 @@ export function AvailabilityEditor({
   workspaces,
   organizationName,
   error,
+  labelHidden = false,
 }: {
   value: VaultAvailability;
   onChange: (value: VaultAvailability) => void;
@@ -40,6 +41,8 @@ export function AvailabilityEditor({
   workspaces: AvailabilityWorkspace[];
   organizationName: string;
   error?: string | undefined;
+  /** On the Available in page the title already says it; name the group for screen readers only. */
+  labelHidden?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const selected = new Set(value.allowedWorkspaceIds ?? []);
@@ -57,7 +60,7 @@ export function AvailabilityEditor({
     <div className="flex min-w-0 flex-col gap-4">
       <ChoiceCards
         variant="radio"
-        label="Available in"
+        {...(labelHidden ? { "aria-label": "Available in" } : { label: "Available in" })}
         value={mode}
         error={error}
         onValueChange={(next) =>

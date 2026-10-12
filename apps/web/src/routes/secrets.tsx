@@ -169,9 +169,10 @@ export function SecretsRoute({
 
   /* ------------------------------------------------------------ pages */
 
+  // The same order as New vault; Connect 1Password starts on This workspace when allowed.
   const owners: ("user" | "workspace" | "organization")[] = [
-    ...(canWriteWorkspace ? (["workspace"] as const) : []),
     "user",
+    ...(canWriteWorkspace ? (["workspace"] as const) : []),
     ...(canManageOrganization ? (["organization"] as const) : []),
   ];
 

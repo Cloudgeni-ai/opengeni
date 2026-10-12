@@ -294,7 +294,10 @@ const action = (name: string | RegExp) => async (page: Page) => {
 /** The composer's "+" menu, then its Secrets row (the session Secrets panel). */
 const openComposerSecrets = async (page: Page) => {
   await page.getByRole("button", { name: "More composer actions" }).first().click();
-  await page.getByRole("menuitem", { name: /^Secrets/u }).first().click();
+  await page
+    .getByRole("menuitem", { name: /^Secrets/u })
+    .first()
+    .click();
   await page.waitForTimeout(600);
 };
 const delayApi = (pattern: RegExp) => async (context: BrowserContext) => {
@@ -434,13 +437,26 @@ export const CAPTURE_STATES: CaptureState[] = [
     user: "member",
     steps: click("New vault"),
   }),
-  s("S5", "admin", "New vault dialog as admin (three owner options)", (ids) => secrets(ids), {
-    user: "admin",
-    steps: click("New vault"),
-  }),
+  s(
+    "S5",
+    "admin",
+    "New vault as an organization admin (bendik: three owner options)",
+    (ids) => secrets(ids),
+    {
+      user: "owner",
+      steps: click("New vault"),
+    },
+  ),
   s("S6", "selected", "Available in editor (Org tooling)", (ids) => vault(ids, "Org tooling"), {
     user: "admin",
-    steps: action(/Available in/u),
+    steps: async (page) => {
+      await action(/Available in/u)(page);
+      await page
+        .getByRole("radio", { name: /Selected workspaces/u })
+        .first()
+        .click();
+      await page.waitForTimeout(400);
+    },
   }),
   s("S7", "step-1-empty", "Connect 1Password, token step", (ids) => secrets(ids), {
     steps: action(/Connect 1Password/u),
@@ -461,10 +477,14 @@ export const CAPTURE_STATES: CaptureState[] = [
     { requires: "none" },
   ),
   // S10 / S11 session Secrets panel (the composer's "+" menu > Secrets), composer
-  s("S10", "task-items", "Session Secrets panel with This task items", (ids) =>
-    ids.sessions["Seeded task session"]
-      ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Seeded task session"]}`
-      : null,
+  s(
+    "S10",
+    "task-items",
+    "Session Secrets panel with This task items",
+    (ids) =>
+      ids.sessions["Seeded task session"]
+        ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Seeded task session"]}`
+        : null,
     { steps: openComposerSecrets },
   ),
   s(
@@ -505,6 +525,18 @@ export const CAPTURE_STATES: CaptureState[] = [
     (ids) => `/workspaces/${ids.ws}/schedules/new`,
     {
       requires: "none",
+      steps: async (page) => {
+        await page
+          .getByRole("button", { name: /^Advanced/u })
+          .first()
+          .click();
+        await page
+          .getByText(/^Secrets$/u)
+          .first()
+          .scrollIntoViewIfNeeded()
+          .catch(() => undefined);
+        await page.waitForTimeout(400);
+      },
       expect: async (page) => {
         const row = await page.getByText(/^Secrets$/u).count();
         return {

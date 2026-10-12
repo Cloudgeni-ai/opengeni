@@ -210,6 +210,7 @@ export function AvailabilityPage({
         workspaces={workspaces}
         organizationName={organizationName}
         error={error}
+        labelHidden
       />
     </FlushFormPage>
   );
