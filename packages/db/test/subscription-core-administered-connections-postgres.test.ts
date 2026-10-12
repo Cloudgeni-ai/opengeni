@@ -2,7 +2,7 @@
  * Live usage reads outside a workspace pool (design 5.3, C2c), for any
  * provider: an organization administrator's read of an organization-pool
  * connection, and an owner's read of their own personal connection in their
- * own Personal workspace (migration 0721's owner-only routines). Driven
+ * own Personal workspace (migration 0729's owner-only routines). Driven
  * through the test-only API-key connector with a scripted usage endpoint, on
  * real PostgreSQL as the application role; no provider name of production
  * appears here, and production registers nothing (asserted below).

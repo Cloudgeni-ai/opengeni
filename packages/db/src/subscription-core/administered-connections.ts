@@ -18,7 +18,7 @@
  *   inspection of the first core provider does.
  * - `personal_owner`: the owner's own Personal workspace context and subject;
  *   every read and write goes through the owner-only routines of migration
- *   0721 (exact owner membership whose Personal workspace this is, current
+ *   0729 (exact owner membership whose Personal workspace this is, current
  *   authority generation, writer context and enabled cutover), and a refresh
  *   persists through the 0707 refresh writers on the capability that
  *   routine mints. A shared workspace, another member and an ownerless

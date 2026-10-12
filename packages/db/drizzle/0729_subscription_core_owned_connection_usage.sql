@@ -201,7 +201,7 @@ END
 $owned_connection_usage$;
 
 -- PUBLIC loses the default EXECUTE; every configured application role gets
--- it (0713's and 0720's pattern), so the previous release's readiness, which
+-- it (0713's and 0728's pattern), so the previous release's readiness, which
 -- rejects an opengeni_private routine the runtime role cannot execute,
 -- passes before provision-roles runs.
 DO $owned_connection_usage_grants$
