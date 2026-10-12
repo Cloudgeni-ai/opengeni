@@ -127,11 +127,15 @@ export async function requireSubscriptionScopeMutation(
 
 /**
  * The mutation gate of a pool whose legacy repository is deleted (Claude,
- * C4). The account's scope can no longer be read, so the strictest gate of
- * `requireSubscriptionScopeMutation` applies to every caller (a browser
- * request must be same-origin, and the caller needs `workspace:admin`) before
- * the route fails closed: a caller refused before the deletion is still
- * refused with the same 403.
+ * C4). The account's scope can no longer be read, so every caller gets the
+ * workspace-scope gate of `requireSubscriptionScopeMutation` (a browser
+ * request must be same-origin, and the caller needs `workspace:admin`)
+ * before the route fails closed; nothing is read or written either way.
+ * For a former private (user-scope) account this changes two outcomes: an
+ * ordinary bearer with `workspace:admin` now reaches the 503 where it got
+ * 403 (no verified owning user), and the owner without `workspace:admin` now
+ * gets 403 where it passed. C2b restores the per-scope check, including the
+ * owner's path, when the core serves these routes.
  */
 export async function requireDeletedSubscriptionPoolMutation(
   c: Context,

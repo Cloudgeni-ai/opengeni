@@ -4822,7 +4822,10 @@ rows.
   only, no acting subject). Without the receipt (`legacy`), under an
   operator hold (`maintenance`) or without a serving connection, admission
   fails closed. The frozen v1 authority parameters of the admission fences
-  are removed.
+  are removed. The catalog still offers no workspace-scoped Claude model for
+  new selections on the core (`withCoreRoutedClaudeRestriction`), so in
+  practice the admission check admits organization models; for a
+  workspace-scoped one it only narrows the fence.
 - **Fail closed until C2a and C2b.** A single Claude model call (API
   model-calls) has no core operation path yet and fails with capacity
   unavailable unconditionally, before and after the cutover. Claude
@@ -4833,8 +4836,14 @@ rows.
   pre-deletion permission checks, then answer a typed 503 ("served only by
   the shared subscription core") without reading or writing the legacy
   pool. Where a check depended on the account's legacy scope (workspace or
-  private), which can no longer be read, the strictest applies: a
-  same-origin browser request and `workspace:admin`. Setup-token still
+  private), which can no longer be read, every caller gets the
+  workspace-scope gate: a same-origin browser request and
+  `workspace:admin`. For a former private account this changes two
+  outcomes, neither of which reads or writes anything: an ordinary bearer
+  with `workspace:admin` now reaches the 503 where it got 403 (no verified
+  owning user), and the account owner without `workspace:admin` now gets
+  403 where it passed. C2b restores the per-scope check, including the
+  owner's path. Setup-token still
   always requires a same-origin browser request, and OAuth start still
   checks the requested scope's mutation authority. The account pool routes
   use the shared `deletedLegacyRepository` (X4). The db access-policy
@@ -4845,6 +4854,10 @@ rows.
   (`subscription-core-claude-copy-paths-postgres`) must be in the tree and
   green. `subscription-core-claude-copy-paths-gate.test.ts` stays red until
   that suite is present.
+  The gate checks presence only (the file exists and names the
+  `dependent_sources_without_record` requirement): at merge time C2b's
+  suite runs at C4's exact head on real PostgreSQL, and the gate test is
+  then deleted.
 - **Test fixture.** The legacy pool repository's accounts module moves to
   `packages/db/test/fixtures/legacy-claude/accounts.ts` (marked test only;
   the usage and token modules are deleted outright), so the

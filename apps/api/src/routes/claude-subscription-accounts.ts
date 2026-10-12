@@ -49,8 +49,9 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     new HTTPException(503, {
       message: "Claude subscriptions are served only by the shared subscription core",
     });
-  // Each route keeps its pre-deletion permission checks ahead of the 503, so a
-  // caller refused before the deletion still gets the same refusal.
+  // Each route keeps its pre-deletion permission checks ahead of the 503;
+  // where a check depended on the account's unreadable legacy scope, the
+  // workspace-scope gate applies (see requireDeletedSubscriptionPoolMutation).
   async function deletedLegacyRoute(c: Context, organization: boolean, mutation: boolean) {
     c.header("cache-control", "private, no-store");
     if (!deps.settings.claudeSubscriptionEnabled)
