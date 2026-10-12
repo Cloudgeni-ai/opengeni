@@ -31,11 +31,24 @@ import { syncLinkedProviderVault } from "./provider-sync";
  * refreshed. Values never touch OpenGeni storage.
  */
 
+/** One field change; the REST `VaultFieldInput` and the agent `secret_save` field both fit. */
+export interface ProviderFieldChange {
+  fieldId?: string | undefined;
+  name: string;
+  kind?: VaultFieldKind | undefined;
+  value?: string | undefined;
+  generate?: VaultFieldInput["generate"] | undefined;
+  fromReference?: string | undefined;
+  fileBase64?: string | undefined;
+  restoreVersion?: number | undefined;
+  remove?: true | undefined;
+}
+
 export interface ProviderItemChange {
   name?: string | undefined;
   type?: VaultItemType | undefined;
   websites?: string[] | undefined;
-  fields?: VaultFieldInput[] | undefined;
+  fields?: readonly ProviderFieldChange[] | undefined;
 }
 
 export interface ProviderWriteDeps {
@@ -67,9 +80,10 @@ export function assertProviderVaultWritable(vault: VaultRow): void {
 }
 
 async function providerFieldWrites(
-  fields: readonly VaultFieldInput[],
+  fields: readonly ProviderFieldChange[],
   existing: readonly VaultFieldRow[],
   resolveReference: (raw: string) => Promise<string>,
+  generated: string[],
 ): Promise<ProviderWriteField[]> {
   const writes: ProviderWriteField[] = [];
   for (const input of fields) {
@@ -103,8 +117,11 @@ async function providerFieldWrites(
       );
     }
     let value: string;
-    if (input.generate !== undefined) value = generatePassword(input.generate);
-    else if (input.fromReference !== undefined) value = await resolveReference(input.fromReference);
+    if (input.generate !== undefined) {
+      value = generatePassword(input.generate);
+      generated.push(input.name);
+    } else if (input.fromReference !== undefined)
+      value = await resolveReference(input.fromReference);
     else value = input.value ?? "";
     if (kind === "totp") {
       if (!isValidTotpInput(value)) {
@@ -186,6 +203,8 @@ export async function writeProviderVaultItem(
       expectedGeneration?: number | undefined;
     } | null;
     change: ProviderItemChange;
+    /** Receives the names of fields whose values were generated. */
+    generated?: string[];
   },
 ): Promise<string> {
   const { vault, existing, change } = input;
@@ -216,6 +235,7 @@ export async function writeProviderVaultItem(
     change.fields ?? [],
     existing?.fields ?? [],
     deps.resolveReference,
+    input.generated ?? [],
   );
   const provider = await providerFor(deps, vault);
   let written;

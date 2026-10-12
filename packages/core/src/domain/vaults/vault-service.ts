@@ -929,6 +929,41 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         fields.unshift({ name: "username", kind: "text", value: input.username });
       }
       const generated: string[] = [];
+      if (vault.source !== "opengeni") {
+        // W5: secret_save into a read-write connected vault writes through its provider.
+        const itemId = await writeProviderVaultItem(
+          {
+            db: deps.db,
+            context,
+            providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+            resolveReference: (raw) => resolveTextReference(principal, raw, "secret_save"),
+          },
+          {
+            vault,
+            existing: fullExisting
+              ? {
+                  itemId: fullExisting.id,
+                  name: fullExisting.name,
+                  type: fullExisting.type,
+                  websites: fullExisting.websites,
+                  fields: fullExisting.fields,
+                }
+              : null,
+            change: {
+              ...(existing ? {} : { type: input.type, name: input.item }),
+              ...(input.websites !== undefined ? { websites: input.websites } : {}),
+              fields,
+            },
+            generated,
+          },
+        );
+        const saved = await getVaultItem(deps.db, context, { itemId });
+        return {
+          item: toVaultItemSummary(saved, key()),
+          references: vaultItemReferences(saved),
+          generatedFields: generated,
+        };
+      }
       const write = await itemWrite(
         {
           ...(existing ? {} : { type: input.type, name: input.item }),
@@ -966,7 +1001,25 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
     async archiveForAgent(principal, input) {
       const target = await agentItemByReference(principal, input.reference);
-      const row = await archiveVaultItem(deps.db, principalContext(principal), {
+      const context = principalContext(principal);
+      const current = await getVaultItem(deps.db, context, { itemId: target.itemId });
+      if (current.vaultSource !== "opengeni") {
+        const vault = await getVault(deps.db, context, { vaultId: current.vaultId });
+        await archiveProviderVaultItem(
+          {
+            db: deps.db,
+            context,
+            providers: deps.providers ?? EMPTY_VAULT_PROVIDER_REGISTRY,
+            resolveReference: (raw) => resolveTextReference(principal, raw, "secret_delete"),
+          },
+          { vault, itemId: target.itemId },
+        );
+        return {
+          archived: true,
+          restoreHint: `A person can restore ${current.name} from the provider's archive.`,
+        };
+      }
+      const row = await archiveVaultItem(deps.db, context, {
         itemId: target.itemId,
       });
       return {
