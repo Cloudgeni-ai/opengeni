@@ -20,7 +20,7 @@ const assert = (value: unknown, message: string) => {
 
 try {
   for (const width of [1100, 390]) {
-    const page = await browser.newPage({ viewport: { width, height: 560 } });
+    const page = await browser.newPage({ viewport: { width, height: 640 } });
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const theme = width === 390 ? "dark" : "light";
@@ -49,8 +49,13 @@ try {
     await page.getByRole("menu").getByTestId("billing-class-icon-claude_subscription").waitFor();
     await page.getByText("team-a@example.test", { exact: true }).waitFor();
     await page.getByText("Max · Organization", { exact: true }).waitFor();
-    await page.getByText("Usage unavailable", { exact: true }).waitFor();
-    assert((await page.getByRole("progressbar").count()) === 0, "neutral quota fabricated");
+    await page.getByText(/Cached observation/).waitFor();
+    assert((await page.getByRole("progressbar").count()) === 2, "stored quota not rendered");
+    assert(
+      (await page.getByRole("progressbar", { name: "5h used" }).getAttribute("aria-valuenow")) ===
+        "36",
+      "stored percentage changed",
+    );
     await shot("private-open");
 
     // Choosing their own account retains the provider mark and shows ownership.
@@ -61,6 +66,7 @@ try {
       .waitFor();
     await assertAccountActionsOnly();
     await page.getByText("Pro · Your account", { exact: true }).waitFor();
+    await page.getByText("No stored usage", { exact: true }).waitFor();
     assert(
       JSON.stringify(await receipts()) === '[{"choose":"mine"}]',
       "unexpected personal action",
@@ -109,6 +115,48 @@ try {
       JSON.stringify(await receipts()) === '[{"choose":"mine"}]',
       "keyboard selection did not skip refused accounts",
     );
+
+    // Nullable/partial/stale data stays historical and unknown, without
+    // fabricated 0% utilization, 100% replenishment or an aggregate capacity.
+    await open("private", "&usage=partial");
+    await page.getByText("Unknown", { exact: true }).waitFor();
+    assert((await page.getByRole("progressbar").count()) === 1, "unknown percent given a bar");
+    assert(
+      (await page
+        .getByRole("progressbar", { name: "Overage used" })
+        .getAttribute("aria-valuetext")) === "125% used",
+      "overage value truncated",
+    );
+    await assertAccountActionsOnly();
+    await shot("partial-unknown");
+    await open("private", "&usage=stale");
+    await page.getByText(/Reset time passed; current usage unknown/).waitFor();
+    assert(
+      (await page.getByRole("progressbar", { name: "5h used" }).getAttribute("aria-valuenow")) ===
+        "100",
+      "past reset invented replenishment",
+    );
+    await shot("stale-snapshot");
+    await open("private", "&usage=missing");
+    await page.getByText("Usage not reported", { exact: true }).waitFor();
+    assert(
+      (await page.getByRole("progressbar").count()) === 0,
+      "missing projection manufactured usage",
+    );
+    await shot("omitted-usage");
+    await open("private", "&state=redacted");
+    await page.getByText("Account usage hidden", { exact: true }).waitFor();
+    assert((await page.getByRole("progressbar").count()) === 0, "redacted account borrowed usage");
+    await shot("redacted-binding");
+    await open("private", "&provider=xai");
+    await page.getByRole("menu").getByTestId("billing-class-icon-supergrok_subscription").waitFor();
+    assert(
+      (await page
+        .getByRole("progressbar", { name: "Billing used" })
+        .getAttribute("aria-valuenow")) === "42",
+      "xai billing reading changed",
+    );
+    await shot("xai-account");
 
     // The actual Codex component uses the same extracted view with its real
     // adapter's usage/freshness path (synthetic readings, not production quotas).

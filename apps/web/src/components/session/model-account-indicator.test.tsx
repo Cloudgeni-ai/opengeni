@@ -183,7 +183,7 @@ test("choosing sends the account and shows where it applies; a refused account i
   }
 });
 
-test.each(["claude", "supergrok", "codex"])(
+test.each(["claude", "xai", "codex"])(
   "uses the subscription provider mark for %s",
   async (provider) => {
     const client = Object.assign(fakeClient({}), {
@@ -195,21 +195,117 @@ test.each(["claude", "supergrok", "codex"])(
     const view = await render(client, provider);
     try {
       expect(
-        view.container.querySelector(`[data-testid="billing-class-icon-${provider}_subscription"]`),
+        view.container.querySelector(
+          `[data-testid="billing-class-icon-${provider === "xai" ? "supergrok" : provider}_subscription"]`,
+        ),
       ).not.toBeNull();
       await view.open();
       expect(
         document
           .querySelector('[role="menu"]')
-          ?.querySelector(`[data-testid="billing-class-icon-${provider}_subscription"]`),
+          ?.querySelector(
+            `[data-testid="billing-class-icon-${provider === "xai" ? "supergrok" : provider}_subscription"]`,
+          ),
       ).not.toBeNull();
-      expect(document.body.textContent).toContain("Usage unavailable");
+      expect(document.body.textContent).toContain("Choose an account to view usage");
       expect(document.querySelector('[role="progressbar"]')).toBeNull();
     } finally {
       await view.cleanup();
     }
   },
 );
+
+test("renders the API's cached windows without an aggregate remaining estimate or refresh", async () => {
+  let refreshes = 0;
+  const client = Object.assign(fakeClient({}), {
+    getSessionModelAccount: async () =>
+      choiceResponse({
+        binding: { provider: "claude", connectionId: "team", choice: "explicit" },
+        accounts: [
+          option("team", "Team Claude", {
+            usage: {
+              observedAt: "2020-01-01T00:00:00Z",
+              source: "response_headers",
+              windows: [
+                {
+                  id: "five_hour",
+                  usedPercent: 36,
+                  resetsAt: "2020-01-01T01:00:00Z",
+                  status: "ok",
+                },
+                { id: "seven_day", usedPercent: null, resetsAt: null, status: "unknown" },
+                { id: "overage", usedPercent: 125, resetsAt: null, status: "unknown" },
+              ],
+              exhaustedKind: null,
+              exhaustedUntil: null,
+            },
+          }),
+        ],
+      }),
+    refreshCodexUsage: async () => {
+      refreshes += 1;
+      throw new Error("No legacy refresh");
+    },
+  });
+  const view = await render(client);
+  try {
+    await view.open();
+    expect(document.querySelector('[aria-label="5h used"]')?.getAttribute("aria-valuenow")).toBe(
+      "36",
+    );
+    expect(
+      document.querySelector('[aria-label="Overage used"]')?.getAttribute("aria-valuetext"),
+    ).toBe("125% used");
+    expect(document.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
+    expect(document.body.textContent).toContain("Cached observation");
+    expect(document.body.textContent).toContain("Reset time passed; current usage unknown");
+    expect(document.body.textContent).toContain("Unknown");
+    expect(document.body.textContent).not.toContain("% remaining");
+    expect(refreshes).toBe(0);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test.each([
+  { usage: null, expected: "No stored usage" },
+  { usage: undefined, expected: "Usage not reported" },
+])(
+  "distinguishes absent snapshots from omitted projection: $expected",
+  async ({ usage, expected }) => {
+    const client = Object.assign(fakeClient({}), {
+      getSessionModelAccount: async () =>
+        choiceResponse({
+          binding: { provider: "claude", connectionId: "team", choice: "explicit" },
+          accounts: [option("team", "Team Claude", { usage })],
+        }),
+    });
+    const view = await render(client);
+    try {
+      await view.open();
+      expect(document.body.textContent).toContain(expected);
+      expect(document.querySelector('[role="progressbar"]')).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  },
+);
+
+test("a redacted binding does not borrow another visible account's usage", async () => {
+  const client = Object.assign(fakeClient({}), {
+    getSessionModelAccount: async () =>
+      choiceResponse({ binding: { provider: "claude", connectionId: null, choice: "explicit" } }),
+  });
+  const view = await render(client);
+  try {
+    await view.open();
+    expect(document.body.textContent).toContain("Account unavailable");
+    expect(document.body.textContent).toContain("Account usage hidden");
+    expect(document.querySelector('[role="progressbar"]')).toBeNull();
+  } finally {
+    await view.cleanup();
+  }
+});
 
 test("retains account identity, plan, source, and the reason an inactive account is refused", async () => {
   let choices = 0;

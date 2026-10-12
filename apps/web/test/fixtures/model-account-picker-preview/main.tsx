@@ -1,6 +1,7 @@
 import { OpenGeniProvider } from "@opengeni/react";
 import type {
   ModelAccountChoiceOption,
+  ModelAccountUsageSnapshot,
   SessionModelAccountChoiceResponse,
   SetSessionModelAccountChoiceRequest,
 } from "@opengeni/sdk";
@@ -19,6 +20,42 @@ document.documentElement.dataset.ogTheme = params.get("theme") === "dark" ? "dar
 const privateChat = params.get("session") !== "shared";
 const statuses = params.get("state") === "statuses";
 const codexReference = params.get("provider") === "codex";
+const neutralProvider = params.get("provider") === "xai" ? "xai" : "claude";
+const brand = neutralProvider === "xai" ? "SuperGrok" : "Claude";
+const usageState = params.get("usage");
+const reading: ModelAccountUsageSnapshot = {
+  observedAt: new Date(Date.now() - 120_000).toISOString(),
+  source: "response_headers",
+  windows: [
+    {
+      id: "five_hour",
+      usedPercent: 36,
+      resetsAt: new Date(Date.now() + 3_600_000).toISOString(),
+      status: "ok",
+    },
+    {
+      id: "seven_day",
+      usedPercent: 62,
+      resetsAt: new Date(Date.now() + 172_800_000).toISOString(),
+      status: "ok",
+    },
+  ],
+  exhaustedUntil: null,
+  exhaustedKind: null,
+};
+if (usageState === "partial")
+  reading.windows = [
+    { id: "seven_day", usedPercent: null, resetsAt: null, status: "unknown" },
+    { id: "overage", usedPercent: 125, resetsAt: null, status: "unknown" },
+  ];
+if (usageState === "stale") {
+  reading.observedAt = "2020-01-01T09:00:00Z";
+  reading.windows = [
+    { id: "five_hour", usedPercent: 100, resetsAt: "2020-01-01T14:00:00Z", status: "exhausted" },
+  ];
+}
+if (neutralProvider === "xai")
+  reading.windows = [{ id: "billing", usedPercent: 42, resetsAt: null, status: "ok" }];
 
 function option(
   connectionId: string,
@@ -26,7 +63,7 @@ function option(
   extra: Partial<ModelAccountChoiceOption> = {},
 ): ModelAccountChoiceOption {
   return {
-    provider: "claude",
+    provider: neutralProvider,
     connectionId,
     label,
     accountEmail: `${connectionId}@example.test`,
@@ -42,28 +79,34 @@ function option(
 }
 
 let state: SessionModelAccountChoiceResponse = {
-  binding: { provider: "claude", connectionId: "team-a", choice: "automatic" },
+  binding: {
+    provider: neutralProvider,
+    connectionId: params.get("state") === "redacted" ? null : "team-a",
+    choice: params.get("state") === "redacted" ? "explicit" : "automatic",
+  },
   accounts: [
     option(
       "team-a",
-      "Acme Claude 1",
+      `Acme ${brand} 1`,
       statuses
         ? {
             status: "needs_relogin",
             choosable: false,
             refusal: "inactive",
+            usage: null,
           }
-        : {},
+        : { usage: usageState === "missing" ? undefined : usageState === "null" ? null : reading },
     ),
-    option("team-b", "Acme Claude 2", {
+    option("team-b", `Acme ${brand} 2`, {
       source: "workspace",
       planType: "Team",
       ...(statuses ? { status: "error", choosable: false, refusal: "inactive" as const } : {}),
     }),
-    option("mine", "My Claude", {
+    option("mine", `My ${brand}`, {
       personal: true,
       source: "personal",
       planType: "Pro",
+      usage: null,
       ...(privateChat ? {} : { choosable: false, refusal: "personal_not_owner_work" as const }),
     }),
   ],
@@ -72,8 +115,8 @@ let state: SessionModelAccountChoiceResponse = {
 const receipts: unknown[] = [];
 (window as unknown as { pickerReceipts: unknown[] }).pickerReceipts = receipts;
 
-// Quotas exist only in this Codex reference fixture, whose production adapter
-// actually supplies them. The neutral fixture above has no quota fields.
+// The neutral fixture uses the landed API snapshot shape. All readings in both
+// fixtures are synthetic, not live provider measurements.
 const usageWindow = (remaining: number) => ({
   used: 100 - remaining,
   limit: 100,
@@ -121,27 +164,30 @@ const client = Object.assign(fakeClient({}), {
     activeAccountId: "codex-a",
     settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: "codex-a" },
   }),
-  refreshCodexUsage: async () => ({
-    usage: Object.fromEntries(
-      codexAccounts.map((account) => [
-        account.id,
-        {
-          status: account.status === "active" ? "ok" : "no-data",
-          usage:
-            account.status === "active"
-              ? {
-                  status: "ok",
-                  planType: account.plan,
-                  fiveHour: account.fiveHour,
-                  weekly: account.weekly,
-                  limitReached: false,
-                  fetchedAt: "2026-10-12T09:00:00Z",
-                }
-              : null,
-        },
-      ]),
-    ),
-  }),
+  refreshCodexUsage: async () => {
+    if (!codexReference) throw new Error("Neutral picker invoked a legacy refresh");
+    return {
+      usage: Object.fromEntries(
+        codexAccounts.map((account) => [
+          account.id,
+          {
+            status: account.status === "active" ? "ok" : "no-data",
+            usage:
+              account.status === "active"
+                ? {
+                    status: "ok",
+                    planType: account.plan,
+                    fiveHour: account.fiveHour,
+                    weekly: account.weekly,
+                    limitReached: false,
+                    fetchedAt: "2026-10-12T09:00:00Z",
+                  }
+                : null,
+          },
+        ]),
+      ),
+    };
+  },
   pinSessionCodexAccount: async (_workspaceId: string, _sessionId: string, id: string) => {
     receipts.push({ choose: id });
     return { pinned: id, appliedTo: "next_turn" };
@@ -164,7 +210,7 @@ const client = Object.assign(fakeClient({}), {
     state = {
       ...state,
       binding: {
-        provider: "claude",
+        provider: neutralProvider,
         connectionId: request.connectionId ?? "team-a",
         choice: request.connectionId ? "explicit" : "automatic",
       },
@@ -172,7 +218,7 @@ const client = Object.assign(fakeClient({}), {
     return {
       changed: true,
       appliedTo: "next_turn" as const,
-      provider: "claude",
+      provider: neutralProvider,
       connectionId: request.connectionId,
       choice: request.connectionId ? ("explicit" as const) : ("automatic" as const),
     };
@@ -189,7 +235,11 @@ createRoot(document.getElementById("root")!).render(
       <header className="flex h-11 items-center gap-2 border-b border-border px-3">
         <span className="truncate text-sm font-medium">Quarterly planning notes</span>
         <span className="text-2xs text-fg-subtle">
-          {codexReference ? "GPT-6 Astra" : "Claude Opus 5.5"}
+          {codexReference
+            ? "GPT-6 Astra"
+            : neutralProvider === "xai"
+              ? "SuperGrok"
+              : "Claude Opus 5.5"}
         </span>
         {codexReference ? (
           <CodexAccountIndicator
@@ -203,13 +253,13 @@ createRoot(document.getElementById("root")!).render(
             workspaceId={WORKSPACE_ID}
             sessionId="preview-session"
             organizationId="acme"
-            provider="claude"
+            provider={neutralProvider}
             events={[]}
           />
         )}
       </header>
       <p className="fixed right-3 bottom-3 left-3 text-xs text-fg-subtle">
-        Preview · Synthetic account data · Production components
+        Preview · Synthetic stored snapshots · Production UI/API contract · No live provider probe
       </p>
     </main>
   </OpenGeniProvider>,

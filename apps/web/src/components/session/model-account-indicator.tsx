@@ -6,6 +6,7 @@ import { useSessionModelAccount } from "@opengeni/react";
 import type { ModelAccountChoiceOption, SessionEvent } from "@opengeni/sdk";
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { SubscriptionAccountMenu } from "@/components/session/subscription-account-menu";
+import { modelAccountUsage } from "./model-account-usage";
 
 function accountLabel(account: ModelAccountChoiceOption): string {
   return account.label ?? account.accountEmail ?? account.planType ?? "Account";
@@ -48,7 +49,7 @@ function accountSource(account: ModelAccountChoiceOption): string {
 const PROVIDER_MARK: Record<string, BillingClass> = {
   codex: "codex_subscription",
   claude: "claude_subscription",
-  supergrok: "supergrok_subscription",
+  xai: "supergrok_subscription",
 };
 
 export function ModelAccountIndicator({
@@ -118,9 +119,13 @@ export function ModelAccountIndicator({
             : "warn"
           : "ok"
       }
-      // The neutral endpoint has no usage windows or refresh API. Do not borrow
-      // a provider's legacy inventory/selection path to manufacture readings.
-      usage={{ unavailable: true }}
+      // Consume only the authorized stored response; opening this menu never
+      // borrows a provider-specific refresh or selection path.
+      usage={
+        current
+          ? modelAccountUsage(current.usage)
+          : { message: explicit ? "Account usage hidden" : "Choose an account to view usage" }
+      }
       accounts={accounts.map((each) => ({
         id: each.connectionId,
         label: accountLabel(each),
@@ -137,6 +142,7 @@ export function ModelAccountIndicator({
           .join(" · "),
         personal: each.personal,
         disabled: !each.choosable,
+        usageSummary: modelAccountUsage(each.usage).summary,
       }))}
       selectedId={explicit ? binding.connectionId : null}
       automaticSelected={!explicit}
