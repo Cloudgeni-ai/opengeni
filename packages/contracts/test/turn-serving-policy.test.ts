@@ -10,7 +10,7 @@ import { acceptedPolicy, servingRevision } from "./fixtures/turn-serving-policy"
 
 test("D-37 pending validation: proposals are strict, separate from serving provenance", () => {
   const revision = servingRevision();
-  const pending = {
+  const pending: TurnPendingServingPolicyV1 = {
     schemaVersion: 1,
     sourceExecutionGeneration: 1,
     sourceAttemptId: crypto.randomUUID(),
