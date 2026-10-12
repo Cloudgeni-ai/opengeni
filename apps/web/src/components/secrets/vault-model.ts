@@ -55,7 +55,7 @@ export const OWNER_LABEL: Record<VaultSummary["ownerKind"], string> = {
 };
 
 export const SOURCE_LABEL: Record<VaultSummary["source"], string> = {
-  opengeni: "OpenGeni",
+  opengeni: "Opengeni",
   onepassword: "1Password",
   host: "Host",
 };
@@ -190,7 +190,7 @@ const ERROR_COPY: Partial<Record<VaultErrorCode, string>> = {
   vault_policy_outside_parent:
     "The parent task doesn't allow these vaults. Pick from the vaults it allows.",
   encryption_key_missing:
-    "Secrets can't be stored or read until the server's encryption key is set. Ask whoever runs this OpenGeni server.",
+    "Secrets can't be stored or read until the server's encryption key is set. Ask whoever runs this Opengeni server.",
   provider_auth_invalid:
     "1Password rejected this token. Check it's a service account token, then paste it again.",
   provider_auth_expired:

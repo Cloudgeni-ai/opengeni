@@ -229,7 +229,7 @@ function TokenStep({
         </Field>
         <Field
           label="1Password plan"
-          hint="Sets how often OpenGeni asks 1Password for changes. Business allows the most requests."
+          hint="Sets how often Opengeni asks 1Password for changes. Business allows the most requests."
           group
         >
           <SegmentedControl options={PLAN_OPTIONS} value={plan} onValueChange={setPlan} fullWidth />
@@ -366,7 +366,7 @@ function VaultsStep({
         )}
         <Section
           title="Managed vault"
-          description="OpenGeni creates a new vault in 1Password and saves the items agents create there."
+          description="Opengeni creates a new vault in 1Password and saves the items agents create there."
           action={
             <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
               <PlusIcon aria-hidden="true" />
@@ -409,7 +409,7 @@ function ManagedVaultDialog({
   onOpenChange: (open: boolean) => void;
   onCreate: (name: string) => Promise<void>;
 }) {
-  const [name, setName] = useState("OpenGeni");
+  const [name, setName] = useState("Opengeni");
   const [error, setError] = useState<string | undefined>();
   return (
     <FormDialog

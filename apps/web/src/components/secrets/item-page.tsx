@@ -266,7 +266,7 @@ const CREATED_BY: Record<VaultFieldVersionMeta["createdByKind"], string> = {
   api_key: "by an API key",
   migration: "from a variable set",
   provider: "in 1Password",
-  system: "by OpenGeni",
+  system: "by Opengeni",
 };
 
 function FieldHistory({

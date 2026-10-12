@@ -291,6 +291,12 @@ const action = (name: string | RegExp) => async (page: Page) => {
   }
   await page.waitForTimeout(500);
 };
+/** The composer's "+" menu, then its Secrets row (the session Secrets panel). */
+const openComposerSecrets = async (page: Page) => {
+  await page.getByRole("button", { name: "More composer actions" }).first().click();
+  await page.getByRole("menuitem", { name: /^Secrets/u }).first().click();
+  await page.waitForTimeout(600);
+};
 const delayApi = (pattern: RegExp) => async (context: BrowserContext) => {
   await context.route(pattern, async () => {
     await new Promise(() => {});
@@ -446,35 +452,48 @@ export const CAPTURE_STATES: CaptureState[] = [
       ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Seeded ask card"]}`
       : null,
   ),
-  // S10 / S11 session chip and panel, composer
+  // Until the ask card is seeded: the same component in the UI kit (light and dark side by side).
+  s(
+    "S9",
+    "kit",
+    "Ask card secret field states in the UI kit",
+    () => "/dev/ui-kit?section=secret-ask-card&theme=split&chrome=0",
+    { requires: "none" },
+  ),
+  // S10 / S11 session Secrets panel (the composer's "+" menu > Secrets), composer
   s("S10", "task-items", "Session Secrets panel with This task items", (ids) =>
     ids.sessions["Seeded task session"]
       ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Seeded task session"]}`
       : null,
+    { steps: openComposerSecrets },
   ),
   s(
     "S10",
     "narrowed",
-    "Narrowed session chip (Secrets: 2 vaults)",
+    "Narrowed session Secrets panel (2 vaults)",
     (ids) =>
       ids.sessions["Narrowed session"]
         ? `/workspaces/${ids.ws}/sessions/${ids.sessions["Narrowed session"]}`
         : null,
-    { mock: { scenario: "narrowed" } },
+    { mock: { scenario: "narrowed" }, steps: openComposerSecrets },
   ),
   // Anchors that exist today (captured now; they gain the Secrets UI as W3 lands).
   s(
     "S11",
     "default",
-    "New-session composer (S10 chip appears in its toolbar)",
+    "New-session composer, its + menu with the Secrets row",
     (ids) => `/workspaces/${ids.ws}`,
     {
       requires: "none",
+      steps: async (page) => {
+        await page.getByRole("button", { name: "More composer actions" }).first().click();
+        await page.waitForTimeout(500);
+      },
       expect: async (page) => {
-        const chip = await page.getByText(/^Secrets:/u).count();
+        const row = await page.getByRole("menuitem", { name: /^Secrets/u }).count();
         return {
-          ok: chip > 0,
-          detail: chip > 0 ? "Secrets chip present" : "Secrets chip not present yet (W3)",
+          ok: row > 0,
+          detail: row > 0 ? "Secrets row present" : "Secrets row missing from the + menu",
         };
       },
     },
@@ -498,15 +517,23 @@ export const CAPTURE_STATES: CaptureState[] = [
   s(
     "S13",
     "capabilities",
-    "Agent capability list (Secrets toggle)",
-    (ids) => `/workspaces/${ids.ws}/capabilities`,
+    "Agent defaults capability list (Secrets toggle)",
+    (ids) => `/workspaces/${ids.ws}/settings?section=general&view=agent-defaults`,
     {
       requires: "none",
+      steps: async (page) => {
+        await page
+          .getByText(/^Secrets$/u)
+          .last()
+          .scrollIntoViewIfNeeded()
+          .catch(() => undefined);
+        await page.waitForTimeout(300);
+      },
       expect: async (page) => {
-        const toggle = await page.getByText(/^Secrets$/u).count();
+        const toggle = await page.getByRole("checkbox", { name: /^Secrets/u }).count();
         return {
           ok: toggle > 0,
-          detail: toggle > 0 ? "Secrets toggle present" : "Secrets toggle not present yet (W2/W3)",
+          detail: toggle > 0 ? "Secrets toggle present" : "Secrets toggle missing",
         };
       },
     },

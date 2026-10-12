@@ -1,5 +1,5 @@
 import type { VaultSummary } from "@opengeni/react";
-import { KeyRoundIcon, PlusIcon, ShieldOffIcon } from "lucide-react";
+import { KeyRoundIcon, PlusIcon, RotateCcwIcon, ShieldOffIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -124,9 +124,10 @@ export function SecretsListPage({
         tone="danger"
         icon={<ShieldOffIcon />}
         title="Secrets aren't set up on this server"
-        description="The server's encryption key is missing, so secrets can't be stored or read. Ask whoever runs this OpenGeni server to set it."
+        description="The server's encryption key is missing, so secrets can't be stored or read. Ask whoever runs this Opengeni server to set it."
         action={
-          <Button type="button" variant="outline" onClick={onRetry}>
+          <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+            <RotateCcwIcon aria-hidden="true" />
             Try again
           </Button>
         }
