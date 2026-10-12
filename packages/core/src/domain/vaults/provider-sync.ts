@@ -7,12 +7,20 @@ import {
   type VaultSyncStatus,
 } from "@opengeni/contracts";
 import {
+  getProviderVaultSyncTarget,
+  setVaultSyncStatus,
+  upsertProviderVaultItems,
+  type Database,
+  type VaultDbContext,
+} from "@opengeni/db";
+import {
   isVaultProviderError,
   VaultProviderError,
   type ProviderItemMeta,
   type VaultProvider,
   type VaultProviderContext,
   type VaultProviderErrorCode,
+  type VaultProviderRegistry,
 } from "@opengeni/vaults";
 
 /**
@@ -327,4 +335,92 @@ export async function syncProviderVault(input: {
       rateLimitedUntil: failure.rateLimitedUntil,
     };
   }
+}
+
+/** Binds the mirror store to the 0738 routines for one connected vault. */
+export function databaseProviderMirrorStore(
+  db: Database,
+  context: VaultDbContext,
+  vaultId: string,
+): ProviderMirrorStore {
+  return {
+    async replaceMirror(plan) {
+      await upsertProviderVaultItems(db, context, {
+        vaultId,
+        contentVersion: plan.contentVersion,
+        items: plan.items.map((item) => ({
+          providerItemRef: item.externalItemId,
+          providerVersion: item.version,
+          // Passkeys live only in hosted vaults (D20); providers never mirror them.
+          type: item.type === "passkey" ? "login" : item.type,
+          name: item.name,
+          websites: item.websites,
+          primaryFieldRef: item.primaryExternalFieldId,
+          fields: item.fields.map((field) => ({
+            providerFieldRef: field.externalFieldId,
+            name: field.name,
+            kind: field.kind,
+          })),
+        })),
+      });
+    },
+    async setSyncStatus(update) {
+      await setVaultSyncStatus(db, context, {
+        vaultId,
+        status: update.syncStatus,
+        errorCode: update.syncErrorCode,
+        errorMessage: update.syncErrorMessage,
+        rateLimitedUntil: update.rateLimitedUntil?.toISOString() ?? null,
+      });
+    },
+  };
+}
+
+/**
+ * Sync one linked vault the caller reaches: load its provider refs and mirror
+ * version, resolve its provider, refresh the mirror and record sync status.
+ */
+export async function syncLinkedProviderVault(input: {
+  db: Database;
+  context: VaultDbContext;
+  vaultId: string;
+  providers: VaultProviderRegistry;
+  budget?: VaultProviderContext["budget"];
+  force?: boolean;
+  now?: () => Date;
+}): Promise<ProviderVaultSyncResult> {
+  const target = await getProviderVaultSyncTarget(input.db, input.context, input.vaultId);
+  const store = databaseProviderMirrorStore(input.db, input.context, input.vaultId);
+  let provider: VaultProvider;
+  try {
+    provider = await input.providers.forVault({
+      source: target.source,
+      providerConnectionId: target.providerConnectionId,
+    });
+  } catch (error) {
+    if (!isVaultProviderError(error)) throw error;
+    const failure = providerSyncFailure(error, (input.now ?? (() => new Date()))());
+    await store.setSyncStatus(failure);
+    return {
+      status: "failed",
+      syncStatus: failure.syncStatus,
+      code: failure.syncErrorCode,
+      rateLimitedUntil: failure.rateLimitedUntil,
+    };
+  }
+  return await syncProviderVault({
+    provider,
+    ctx: {
+      connectionId: target.providerConnectionId,
+      budget: input.budget ?? { take() {} },
+    },
+    target: {
+      externalVaultId: target.providerVaultRef,
+      mirroredContentVersion: target.providerContentVersion,
+      rateLimitedUntil: target.rateLimitedUntil ? new Date(target.rateLimitedUntil) : null,
+    },
+    store,
+    ...(input.now ? { now: input.now } : {}),
+    ...(input.force ? { force: true } : {}),
+  });
 }
