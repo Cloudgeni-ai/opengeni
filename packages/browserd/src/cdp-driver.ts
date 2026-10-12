@@ -3692,7 +3692,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeScroll;
     let point = await this.centerPoint(state, backendDOMNodeId);
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
-      const revealed = await this.revealFromStickyCover(state, backendDOMNodeId, frameId);
+      const revealed =
+        (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
+        (await this.revealByHover(state, backendDOMNodeId, frameId, point));
       if (!revealed) {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -3739,6 +3741,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async hitsAtCenter(state: TargetState, backendDOMNodeId: number): Promise<boolean> {
     return (await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [])) === true;
+  }
+
+  /**
+   * Row actions and toolbar buttons are often hidden and pointer-transparent
+   * until the pointer is over their row or card (CSS :hover). The hit test
+   * then lands on the target's own ancestor. A person moves the pointer onto
+   * the spot first, so do the same and test again. The move is real input, so
+   * a refusal after it is an unknown outcome. Returns the action point, or
+   * null when the target is not hover-revealed or stays unreachable.
+   */
+  private async revealByHover(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+    point: { x: number; y: number },
+  ): Promise<{ x: number; y: number } | null> {
+    if (frameId === undefined) return null;
+    const transparent = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      POINTER_TRANSPARENT_FUNCTION,
+      [],
+      { isolatedFrameId: frameId },
+    ).catch(() => false);
+    if (transparent !== true) return null;
+    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: point.x,
+      y: point.y,
+    });
+    if (!(await this.hitsAtCenter(state, backendDOMNodeId))) return null;
+    return await this.centerPoint(state, backendDOMNodeId);
   }
 
   /**
@@ -4959,6 +4993,20 @@ const HIT_TEST_FUNCTION = `function() {
   const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
   const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
   return Boolean(hit && (element === hit || element.contains?.(hit)));
+}`;
+
+// Whether pointer input at the target's centre falls through it to one of its
+// own ancestors: the target (or a wrapper) is pointer-transparent there, as a
+// hover-revealed control is before the pointer arrives, rather than covered.
+const POINTER_TRANSPARENT_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && hit !== element && !element.contains(hit) && hit.contains(element));
 }`;
 
 // Whether the element at the target's centre belongs to a sticky element, or
