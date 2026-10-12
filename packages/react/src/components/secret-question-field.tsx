@@ -130,7 +130,7 @@ export function SecretQuestionField({
       const input = inputRef.current;
       if (!input) return;
       try {
-        input.value = ui.generatePassword(spec.generate);
+        input.value = ui.generatePassword(spec.generate ?? undefined);
         setRevealed(true);
         setTouched(true);
         checkPattern();
