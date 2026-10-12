@@ -522,7 +522,8 @@ async function chooseOnce(
       }
       // The binding guard requires an initiating subject for every binding
       // write and uses it only to match a personal account's owner, so the
-      // choosing subject is recorded whoever it is (as the Codex pin does):
+      // choosing subject is recorded whoever it is (as the existing provider
+      // pin does):
       // an API key or service may choose a shared account, and never matches
       // a personal owner.
       await setSubjectRlsContext(tx, input.subjectId);

@@ -4671,20 +4671,22 @@ export function describeSubscriptionCoreConformance<Credential>(
       test("SUB-SEL-04: an API key or service may choose a shared account for a person's shared session, never a personal one", async () => {
         const org = await organization();
         const pooled = await sharedConnection(org, `key-shared-${crypto.randomUUID()}`);
-        await personalConnection(org, `key-personal-${crypto.randomUUID()}`);
-        const shared = await runningTurn(org, { visibility: "workspace_shared" });
+        const personal = await personalConnection(org, `key-personal-${crypto.randomUUID()}`);
+        const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
         for (const caller of [`api_key:${crypto.randomUUID()}`, `service:${crypto.randomUUID()}`]) {
           // The caller sees only the pool: never someone's personal account.
-          expect(await offered(shared, caller)).toEqual({ [pooled]: "choosable" });
-          expect(await choose(shared, caller, pooled)).toMatchObject({
+          expect(await offered(sharedTurn, caller)).toEqual({ [pooled]: "choosable" });
+          // Naming the owner's personal account finds nothing for this caller.
+          expect((await choose(sharedTurn, caller, personal)).outcome).toBe("not_found");
+          expect(await choose(sharedTurn, caller, pooled)).toMatchObject({
             outcome: "changed",
             connectionId: pooled,
           });
-          expect(await bindingOf(shared)).toMatchObject({
+          expect(await bindingOf(sharedTurn)).toMatchObject({
             connectionId: pooled,
             choice: "explicit",
           });
-          expect((await choose(shared, caller, null)).outcome).toBe("changed");
+          expect((await choose(sharedTurn, caller, null)).outcome).toBe("changed");
         }
       });
 
