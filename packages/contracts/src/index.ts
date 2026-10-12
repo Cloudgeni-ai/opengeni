@@ -17237,6 +17237,12 @@ export const SessionTenancyCreateCapabilities = z.object({
   activated: z.boolean(),
   canCreatePrivate: z.boolean(),
   reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
+  /**
+   * Who sees a new chat or schedule unless the person picks otherwise: the
+   * organization's default, and always "workspace" when Only me isn't
+   * available here.
+   */
+  defaultVisibility: z.enum(["private", "workspace"]).default("workspace"),
 });
 export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;
 

@@ -4553,6 +4553,23 @@ export const organizationAgentAdminAccess = pgTable("organization_agent_admin_ac
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// An organization's privacy choices (0723): whether new chats and schedules
+// start as Workspace or Only me, and whether admins see that other people's
+// Only me schedules exist. No row means Workspace and on.
+export const organizationPrivacyPreferences = pgTable("organization_privacy_preferences", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  defaultVisibility: text("default_visibility")
+    .$type<"workspace_shared" | "user_private">()
+    .notNull()
+    .default("workspace_shared"),
+  adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // A session an owner or admin gave admin access; the row ends when it is removed.
 export const sessionAdminAccess = pgTable(
   "session_admin_access",

@@ -1473,6 +1473,11 @@ export type SessionTenancyCreateCapabilities = {
   activated: boolean;
   canCreatePrivate: boolean;
   reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
+  /**
+   * Who sees a new chat or schedule unless the person picks otherwise. Absent
+   * from older servers, which means "workspace".
+   */
+  defaultVisibility?: SessionVisibility;
 };
 
 export type SessionTenancyPublicProjection = {
@@ -4189,6 +4194,32 @@ export type OrganizationAgentAdminAccess = {
 
 export type UpdateOrganizationAgentAdminAccessRequest = {
   sessionAdminAccessAllowed: boolean;
+};
+
+/**
+ * An organization's privacy choices, after the deployment's limits. A product
+ * that embeds Opengeni can only narrow these; `limits` says which are fixed.
+ */
+export type OrganizationPrivacySettings = {
+  organizationId: string;
+  /** Who sees new chats and schedules unless the person picks otherwise. */
+  defaultVisibility: "private" | "workspace";
+  /** Whether admins see that other people's Only me schedules exist, and can pause them. */
+  adminsSeePrivateSchedules: boolean;
+  limits: {
+    /** False when this deployment turns Only me off in shared workspaces. */
+    onlyMeAllowed: boolean;
+    /** True when new chats and schedules always start as Workspace. */
+    defaultVisibilityLocked: boolean;
+    /** True when admins always see that other people's Only me schedules exist. */
+    adminsSeePrivateSchedulesLocked: boolean;
+  };
+  updatedAt: string | null;
+};
+
+export type UpdateOrganizationPrivacySettingsRequest = {
+  defaultVisibility?: "private" | "workspace";
+  adminsSeePrivateSchedules?: boolean;
 };
 
 /**

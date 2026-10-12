@@ -126,6 +126,44 @@ export type UpdateOrganizationPrivateSessionSettingsRequest = z.infer<
   typeof UpdateOrganizationPrivateSessionSettingsRequest
 >;
 
+/**
+ * An organization's privacy choices, after the deployment's limits. A product
+ * that embeds Opengeni can only narrow these: `limits` says which choices are
+ * fixed for every organization on this deployment.
+ */
+export const OrganizationPrivacySettings = z.object({
+  organizationId: z.string().uuid(),
+  /** Who can see new chats and schedules unless the person picks otherwise. */
+  defaultVisibility: z.enum(["private", "workspace"]),
+  /** Whether admins see that other people's Only me schedules exist, and can pause them. */
+  adminsSeePrivateSchedules: z.boolean(),
+  limits: z.object({
+    /** False when this deployment turns Only me off in shared workspaces. */
+    onlyMeAllowed: z.boolean(),
+    /** True when new chats and schedules always start as Workspace. */
+    defaultVisibilityLocked: z.boolean(),
+    /** True when admins always see that other people's Only me schedules exist. */
+    adminsSeePrivateSchedulesLocked: z.boolean(),
+  }),
+  updatedAt: z.string().datetime({ offset: true }).nullable(),
+});
+export type OrganizationPrivacySettings = z.infer<typeof OrganizationPrivacySettings>;
+
+export const UpdateOrganizationPrivacySettingsRequest = z
+  .object({
+    defaultVisibility: z.enum(["private", "workspace"]).optional(),
+    adminsSeePrivateSchedules: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.defaultVisibility !== undefined || value.adminsSeePrivateSchedules !== undefined,
+    { message: "Change at least one setting." },
+  );
+export type UpdateOrganizationPrivacySettingsRequest = z.infer<
+  typeof UpdateOrganizationPrivacySettingsRequest
+>;
+
 export const OrganizationWorkspaceAccessMember = z.object({
   membershipId: z.string().uuid(),
   organizationMembershipId: z.string().uuid().nullable(),

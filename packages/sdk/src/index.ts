@@ -811,6 +811,8 @@ export type {
   UpdateWorkspaceModelAccountSettingsRequest,
   OrganizationAgentAdminAccess,
   UpdateOrganizationAgentAdminAccessRequest,
+  OrganizationPrivacySettings,
+  UpdateOrganizationPrivacySettingsRequest,
   SessionAdminAccess,
   GrantSessionAdminAccessRequest,
   WorkspaceRealtimeModelCatalogItem,

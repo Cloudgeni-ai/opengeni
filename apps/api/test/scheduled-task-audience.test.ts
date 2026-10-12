@@ -327,6 +327,28 @@ test("a schedule that posts into an Only me chat is Only me", async () => {
       1250000, 400000, 'configured_list_price', ${firedAt}, ${task.id}
     )`;
   expect((await f.app.request(f.base, { headers: f.admin.headers })).status).toBe(200);
+  // Insights leaves the schedule out of the per-schedule list and counts its
+  // usage only in the owner's private total, with no schedule or chat named.
+  const insights = await f.app.request(`/v1/workspaces/${f.workspace.id}/insights?range=week`, {
+    headers: f.admin.headers,
+  });
+  expect(insights.status).toBe(200);
+  const insightsBody = (
+    (await insights.json()) as {
+      snapshot: {
+        schedules: Array<{ id: string }>;
+        privateChats: Array<{ you: boolean; calls: number; tokens: number; creditUsd: number }>;
+      };
+    }
+  ).snapshot;
+  expect(insightsBody.schedules.map((row) => row.id)).not.toContain(task.id);
+  expect(insightsBody.privateChats).toEqual([
+    expect.objectContaining({ you: false, calls: 1, tokens: 100, creditUsd: 1.25 }),
+  ]);
+  const insightsText = JSON.stringify(insightsBody);
+  for (const hidden of [task.id, chat.id, "Morning check-in", "Private work", "Check in"]) {
+    expect(insightsText).not.toContain(hidden);
+  }
   const adminSummaries = (await (
     await f.app.request(`${f.base}/private-summaries`, { headers: f.admin.headers })
   ).json()) as { schedules: Array<Record<string, unknown>> };
@@ -383,6 +405,58 @@ test("Only me schedules follow the organization's Only me setting", async () => 
   expect(((await refused.json()) as { error: { message: string } }).error.message).toBe(
     "Only me schedules are turned off for this organization.",
   );
+  expect((await f.create(f.owner.headers, {})).status).toBe(201);
+});
+
+test("the organization decides whether admins see Only me schedules; a deployment can require it", async () => {
+  const hideFromAdmins = async (accountId: string) =>
+    await shared.admin`insert into organization_privacy_preferences (account_id, admins_see_private_schedules)
+      values (${accountId}, false)
+      on conflict (account_id) do update set admins_see_private_schedules = false`;
+  const summariesFor = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const response = await f.app.request(`${f.base}/private-summaries`, {
+      headers: f.admin.headers,
+    });
+    expect(response.status).toBe(200);
+    return ((await response.json()) as { schedules: Array<{ id: string }> }).schedules;
+  };
+
+  const f = await fixture();
+  const created = await f.create(f.owner.headers, { visibility: "private" });
+  expect(created.status).toBe(201);
+  const task = (await created.json()) as { id: string };
+  expect((await summariesFor(f)).map((row) => row.id)).toEqual([task.id]);
+
+  // Turned off: fully hidden from admins, like an Only me chat.
+  await hideFromAdmins(f.accountId);
+  expect(await summariesFor(f)).toEqual([]);
+  for (const path of [
+    `${f.base}/private-summaries/${task.id}/pause`,
+    `${f.base}/${task.id}/pause`,
+  ]) {
+    expect((await f.app.request(path, { method: "POST", headers: f.admin.headers })).status).toBe(
+      404,
+    );
+  }
+  const [stored] = await shared.admin`select status from scheduled_tasks where id = ${task.id}`;
+  expect(stored?.status).toBe("active");
+  // The owner is unaffected.
+  expect((await f.app.request(`${f.base}/${task.id}`, { headers: f.owner.headers })).status).toBe(
+    200,
+  );
+
+  // A deployment that requires admins to see them overrides the organization.
+  const locked = await fixture({ privacyAdminScheduleSummariesRequired: true });
+  const lockedCreated = await locked.create(locked.owner.headers, { visibility: "private" });
+  const lockedTask = (await lockedCreated.json()) as { id: string };
+  await hideFromAdmins(locked.accountId);
+  expect((await summariesFor(locked)).map((row) => row.id)).toEqual([lockedTask.id]);
+});
+
+test("a deployment that turns Only me off refuses new Only me schedules", async () => {
+  const f = await fixture({ privacyOnlyMeAllowed: false });
+  const refused = await f.create(f.owner.headers, { visibility: "private" });
+  expect(refused.status).toBe(403);
   expect((await f.create(f.owner.headers, {})).status).toBe(201);
 });
 

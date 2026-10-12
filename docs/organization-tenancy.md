@@ -776,6 +776,15 @@ receipt is evidence only and Only me is on by default without it. The applicatio
 can execute only the public creation capability and has no direct DML on either
 receipt table or access to the owner-only activation helper.
 
+Beyond that switch, owners and admins choose the default audience for new chats
+and schedules and whether admins see Only me schedule summaries
+(`organization_privacy_preferences`, migration 0725,
+`/v1/organizations/:organizationId/privacy-settings`). Deployment settings can
+only narrow these: `OPENGENI_PRIVACY_ONLY_ME_ALLOWED`,
+`OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED` and
+`OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED`. See
+[the audience design](design/privacy-audiences-2026-10-11.md#settings).
+
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
 the shared managed-auth email transport. The delivery freezes the invited
