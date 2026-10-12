@@ -1794,6 +1794,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   taskTools,
                   task.id,
                   run.id,
+                  degradedAccounts,
                 ),
                 lineage: {
                   scheduledTaskId: task.id,
@@ -1927,6 +1928,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   taskTools,
                   task.id,
                   run.id,
+                  degradedAccounts,
                 ),
                 lineage: {
                   scheduledTaskId: task.id,
@@ -2917,6 +2919,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         input.acceptedExecution.resolvedTools,
         task.id,
         input.run.id,
+        input.acceptedExecution.degradedAccounts ?? [],
       ),
       lineage: {
         scheduledTaskId: task.id,

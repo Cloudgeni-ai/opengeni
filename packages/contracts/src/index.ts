@@ -9246,6 +9246,11 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       scheduledTaskRunId: z.string().uuid(),
       resources: z.array(ResourceRef).optional(),
       tools: z.array(ToolRef).optional(),
+      /**
+       * Connectors this occurrence runs without because every account a
+       * person pinned for them can no longer be used.
+       */
+      unavailableConnectors: z.array(z.string().min(1).max(256)).max(128).optional(),
     })
     .passthrough(),
   z
@@ -9501,6 +9506,11 @@ function renderScheduledOccurrenceTaskBatch(
         `Update ID: ${occurrence.update.id}`,
         ...(occurrence.update.createdAt
           ? [`Created: ${formatModelContextTimestamp(occurrence.update.createdAt)}`]
+          : []),
+        ...(occurrence.payload.unavailableConnectors?.length
+          ? [
+              `Unavailable in this occurrence: ${occurrence.payload.unavailableConnectors.join(", ")}. The accounts a person pinned for these connectors can no longer be used, so their tools are absent and the schedule owner is told. Do not reach them another way; if the instructions need them, say so in your result.`,
+            ]
           : []),
         "Instructions:",
         occurrence.payload.text,

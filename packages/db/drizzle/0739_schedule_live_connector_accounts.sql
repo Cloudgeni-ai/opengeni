@@ -165,3 +165,41 @@ ALTER TABLE scheduled_task_connection_authority_snapshots FORCE ROW LEVEL SECURI
 ALTER TABLE scheduled_task_personal_resource_authorities FORCE ROW LEVEL SECURITY;
 ALTER TABLE scheduled_task_revision_authorities FORCE ROW LEVEL SECURITY;
 ALTER TABLE scheduled_tasks FORCE ROW LEVEL SECURITY;
+
+-- A run that goes without a connector whose pinned account is unusable names
+-- that connector in its occurrence (`unavailableConnectors`), so the agent
+-- knows the tools are absent on purpose. The accepted-execution fence derives
+-- the same list from the accepted snapshot's `degradedAccounts`: distinct
+-- connector ids in code-point order, minus connectors that still resolved
+-- tools through another pin. Snapshots without degraded accounts expect the
+-- payload they always did, so a previous release's occurrences still match.
+DO $schedule_occurrence_unavailable_connectors$
+DECLARE definition text; anchor text; replacement text;
+BEGIN
+  definition := pg_get_functiondef('validate_scheduled_occurrence_accepted_execution()'::regprocedure);
+  anchor := $old$  IF NEW.source_id IS DISTINCT FROM run_row.id::text
+$old$;
+  replacement := $new$  expected_payload := expected_payload || coalesce((
+    SELECT jsonb_build_object('unavailableConnectors',
+      jsonb_agg(degraded.server_id ORDER BY degraded.server_id COLLATE "C"))
+    FROM (
+      SELECT DISTINCT account ->> 'serverId' AS server_id
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(accepted -> 'degradedAccounts') = 'array'
+        THEN accepted -> 'degradedAccounts' ELSE '[]'::jsonb END) account
+    ) degraded
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(accepted -> 'resolvedTools') = 'array'
+        THEN accepted -> 'resolvedTools' ELSE '[]'::jsonb END) tool
+      WHERE tool ->> 'kind' = 'mcp' AND tool ->> 'id' = degraded.server_id
+    )
+    HAVING count(*) > 0
+  ), '{}'::jsonb);
+  IF NEW.source_id IS DISTINCT FROM run_row.id::text
+$new$;
+  IF length(definition) - length(replace(definition, anchor, '')) <> length(anchor) THEN
+    RAISE EXCEPTION 'validate_scheduled_occurrence_accepted_execution anchor changed';
+  END IF;
+  EXECUTE replace(definition, anchor, replacement);
+END
+$schedule_occurrence_unavailable_connectors$;

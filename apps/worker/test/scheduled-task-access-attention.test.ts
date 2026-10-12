@@ -236,8 +236,10 @@ async function startRun(workspace: Fixture, taskId: string) {
     triggerType: "scheduled",
     producerKey: `scheduled-access-attention:${crypto.randomUUID()}`,
   });
-  if (dispatched.action !== "start") throw new Error(`dispatch ${JSON.stringify(dispatched)}`);
   const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, taskId, 1);
+  if (dispatched.action !== "start") {
+    throw new Error(`dispatch ${JSON.stringify(dispatched)}; run error ${run?.error ?? "none"}`);
+  }
   return { dispatched, runId: run!.id };
 }
 
@@ -325,6 +327,11 @@ describe("the owner is told when a schedule cannot use a connector", () => {
     expect(degradedExecution?.mcpAccountBindings ?? []).toEqual([]);
     expect(degradedExecution?.resolvedTools.some((tool) => tool.id === "mail")).toBe(false);
     expect(JSON.stringify(degradedExecution)).not.toContain(otherAccount);
+    // The occurrence the agent receives names the connector it runs without.
+    const [occurrence] = await admin<{ payload: { unavailableConnectors?: string[] } }[]>`
+      select payload from session_system_updates
+      where scheduled_task_run_id = ${degraded.runId} and kind = 'scheduled_occurrence'`;
+    expect(occurrence?.payload.unavailableConnectors).toEqual(["mail"]);
     await runTurn(workspace, degraded.dispatched, degraded.runId, []);
     const told = await attentionFor(workspace, person(workspace, workspace.owner));
     expect(told.items).toMatchObject([
