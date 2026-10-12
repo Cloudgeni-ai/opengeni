@@ -91,6 +91,16 @@ int main(int argc, char **argv) {
     if (argc < 2) return 80;
     const char *mode = argv[1];
     if (!strcmp(mode, "stale-pidfd")) return stale_pidfd();
+    if (!strcmp(mode, "run-unprivileged")) {
+        if (argc < 3) return 80;
+        /* Open in the fixture before dropping identity. This lets the test
+         * exercise the binary's UID check without widening checkout modes. */
+        int executable = open(argv[2], O_RDONLY | O_CLOEXEC);
+        if (executable < 0 || setgid(65534) || setuid(65534)) return 81;
+        extern char **environ;
+        (void)syscall(SYS_execveat, executable, "", &argv[2], environ, AT_EMPTY_PATH);
+        return 83;
+    }
     if (!strcmp(mode, "sigchld-inherit")) {
         struct sigaction action = {.sa_handler = SIG_IGN, .sa_flags = SA_NOCLDWAIT};
         sigemptyset(&action.sa_mask);
@@ -113,6 +123,7 @@ int main(int argc, char **argv) {
             !strcmp(mode, "deny-tty") ? SYS_ioctl :
             !strcmp(mode, "deny-setpgid") ? SYS_setpgid :
             !strcmp(mode, "deny-memfd") ? SYS_memfd_create :
+            !strcmp(mode, "deny-execveat") ? SYS_execveat :
             !strcmp(mode, "deny-seals") ? SYS_fcntl : SYS_prctl;
         deny_syscall(nr);
         execvp(argv[2], &argv[2]);

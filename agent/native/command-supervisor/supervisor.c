@@ -789,7 +789,219 @@ static int service(char **command) {
     }
 }
 
+/* Bounded bootstrap qualification for the separately versioned broker route.
+ * It runs only this sealed ELF's fixed inspection/capability modes, never a
+ * caller command. The existing keeper and provider-path protocol are unchanged.
+ * A successful probe is not a command receipt or permission to activate a broker.
+ */
+#define BROKER_PREFLIGHT_PROTOCOL "native-command-broker-preflight-v1"
+#define BROKER_PROBE_MAX_BYTES (((ARTIFACT_MAX_BYTES + 2) / 3) * 4)
+#define BROKER_CHUNK_BYTES 8192
+
+static size_t broker_base64(const unsigned char *input, size_t size, char *output) {
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t written = 0;
+    for (size_t offset = 0; offset < size; offset += 3) {
+        unsigned int a = input[offset];
+        unsigned int b = offset + 1 < size ? input[offset + 1] : 0;
+        unsigned int c = offset + 2 < size ? input[offset + 2] : 0;
+        output[written++] = alphabet[a >> 2];
+        output[written++] = alphabet[((a & 3) << 4) | (b >> 4)];
+        output[written++] = offset + 1 < size ? alphabet[((b & 15) << 2) | (c >> 6)] : '=';
+        output[written++] = offset + 2 < size ? alphabet[c & 63] : '=';
+    }
+    output[written] = 0;
+    return written;
+}
+
+static void broker_probe_frame(const char *id, unsigned int sequence, const char *kind,
+                               size_t offset, const unsigned char *payload, size_t size) {
+    if (size > BROKER_CHUNK_BYTES) fail("broker probe frame exceeds bound");
+    char encoded[((BROKER_CHUNK_BYTES + 2) / 3) * 4 + 1];
+    (void)broker_base64(payload, size, encoded);
+    if (printf("OGB1\tresponse\t%s\t1\t%u\t%s\t-\t%s\t%zu\t%zu\tbase64\t%s\n",
+               id, sequence, id, kind, offset, size, encoded) < 0 || fflush(stdout))
+        fail("broker probe output unavailable");
+}
+
+/* Child identity is pinned before it may exec. stdout/stderr are private and
+ * bounded; nothing inherited from a provider TaskExec can impersonate proof.
+ * The PTY case owns a NEW session and controlling terminal. This does not
+ * modify launch's existing inherited-foreground-terminal contract.
+ */
+static size_t broker_probe_exec(int artifact, const char *mode, const char *argument,
+                                bool pty, unsigned char *output, size_t capacity) {
+    int channel[2] = {-1, -1}, barrier[2] = {-1, -1}, master = -1, slave = -1;
+    if (pipe2(barrier, O_CLOEXEC)) fail("broker probe barrier unavailable");
+    if (pty) {
+        master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (master < 0 || grantpt(master) || unlockpt(master)) fail("broker probe PTY unavailable");
+        char *name = ptsname(master);
+        if (!name) fail("broker probe PTY identity unavailable");
+        slave = open(name, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NOFOLLOW);
+        if (slave < 0) fail("broker probe PTY slave unavailable");
+        channel[0] = master;
+    } else if (pipe2(channel, O_CLOEXEC)) fail("broker probe output pipe unavailable");
+    pid_t parent = getpid();
+    pid_t child = fork();
+    if (child < 0) fail("broker probe fork failed");
+    if (!child) {
+        close(barrier[1]);
+        close(channel[0]);
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != parent) _exit(125);
+        child_signals();
+        char released;
+        ssize_t received;
+        do { received = read(barrier[0], &released, 1); } while (received < 0 && errno == EINTR);
+        close(barrier[0]);
+        if (received != 1 || released != '+') _exit(125);
+        if (pty) {
+            if (setsid() < 0 || ioctl(slave, TIOCSCTTY, 0) ||
+                dup2(slave, STDIN_FILENO) < 0 || dup2(slave, STDOUT_FILENO) < 0 ||
+                dup2(slave, STDERR_FILENO) < 0) _exit(125);
+            if (slave > STDERR_FILENO) close(slave);
+        } else {
+            int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            if (input < 0 || dup2(input, STDIN_FILENO) < 0 ||
+                dup2(channel[1], STDOUT_FILENO) < 0 || dup2(channel[1], STDERR_FILENO) < 0)
+                _exit(125);
+            if (input > STDERR_FILENO) close(input);
+            if (channel[1] > STDERR_FILENO) close(channel[1]);
+        }
+        char *arguments[] = {"opengeni-command-supervisor", (char *)mode, (char *)argument, NULL};
+        char *environment[] = {"PATH=/usr/bin:/bin", NULL};
+        /* Explicitly selected syscall, no proc-path, loader, copied artifact,
+         * chmod, or policy-denial fallback. CLOEXEC is valid for this static ELF. */
+        (void)syscall(SYS_execveat, artifact, "", arguments, environment, AT_EMPTY_PATH);
+        _exit(125);
+    }
+    close(barrier[0]);
+    if (pty) close(slave); else close(channel[1]);
+    int handle = (int)syscall(SYS_pidfd_open, child, 0);
+    if (handle < 0) {
+        /* EOF releases no code; the child exits at its barrier. */
+        close(barrier[1]);
+        close(channel[0]);
+        long long deadline = milliseconds() + 2000;
+        while (milliseconds() < deadline) {
+            pid_t observed = waitpid(child, NULL, WNOHANG);
+            if (observed == child || (observed < 0 && errno != EINTR)) break;
+            (void)poll(NULL, 0, 10);
+        }
+        fail("broker probe pidfd unavailable");
+    }
+    signal_handle(handle, 0);
+    barrier_write(barrier[1]);
+    close(barrier[1]);
+    int flags = fcntl(channel[0], F_GETFL);
+    if (flags < 0 || fcntl(channel[0], F_SETFL, flags | O_NONBLOCK))
+        fail("broker probe nonblocking output unavailable");
+    long long deadline = milliseconds() + 5000;
+    size_t filled = 0;
+    bool eof = false, exited = false, rejected = false;
+    int status = 0;
+    while (!eof || !exited) {
+        unsigned char buffer[4096];
+        ssize_t count = read(channel[0], buffer, sizeof(buffer));
+        if (count > 0) {
+            if ((size_t)count > capacity - filled) { rejected = true; break; }
+            memcpy(output + filled, buffer, (size_t)count);
+            filled += (size_t)count;
+        } else if (count == 0 || (pty && count < 0 && errno == EIO)) eof = true;
+        else if (errno != EINTR && errno != EAGAIN) { rejected = true; break; }
+        if (!exited) {
+            pid_t observed = waitpid(child, &status, WNOHANG);
+            if (observed == child) exited = true;
+            else if (observed < 0 && errno != EINTR) { rejected = true; break; }
+        }
+        if (milliseconds() >= deadline) { rejected = true; break; }
+        if (!eof || !exited) {
+            struct pollfd descriptors[2] = {{.fd = channel[0], .events = POLLIN},
+                                           {.fd = handle, .events = POLLIN}};
+            if (poll(descriptors, 2, 10) < 0 && errno != EINTR) { rejected = true; break; }
+        }
+    }
+    if (rejected && !exited) {
+        signal_handle(handle, SIGKILL);
+        long long stop_deadline = milliseconds() + 2000;
+        while (!exited && milliseconds() < stop_deadline) {
+            pid_t observed = waitpid(child, &status, WNOHANG);
+            if (observed == child) exited = true;
+            else if (observed < 0 && errno != EINTR) break;
+            struct pollfd descriptor = {.fd = handle, .events = POLLIN};
+            (void)poll(&descriptor, 1, 10);
+        }
+    }
+    close(handle);
+    close(channel[0]);
+    if (rejected || !exited || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        fail("sealed broker probe did not complete");
+    return filled;
+}
+
+static int broker_preflight(int argc, char **argv) {
+    if (argc != 4 || strcmp(argv[2], "--broker-id") || !uuid(argv[3]) ||
+        argv[3][14] < '1' || argv[3][14] > '8' || !strchr("89ab", argv[3][19]))
+        fail("invalid broker probe identity");
+    /* Reset inherited no-wait dispositions before creating proof children. */
+    struct sigaction action = {.sa_handler = SIG_DFL};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGCHLD, &action, NULL)) fail("broker probe SIGCHLD reset failed");
+    sigset_t mask;
+    sigemptyset(&mask);
+    if (sigprocmask(SIG_SETMASK, &mask, NULL)) fail("broker probe signal reset failed");
+    struct artifact facts;
+    int artifact = sealed_artifact(&facts);
+    unsigned char *captured = malloc(BROKER_PROBE_MAX_BYTES + 1);
+    unsigned char *raw = malloc(facts.size);
+    char *encoded = malloc(BROKER_PROBE_MAX_BYTES + 1);
+    if (!captured || !raw || !encoded) fail("broker probe memory unavailable");
+    char expected[512];
+    int length = snprintf(expected, sizeof(expected),
+        "{\"protocol\":\"%s\",\"byteSize\":%zu,\"seals\":%d,\"target\":\"%s\",\"static\":true,"
+        "\"device\":\"%ju\",\"inode\":\"%ju\"}", KEEPER_PROTOCOL, facts.size, facts.seals,
+        facts.target, facts.device, facts.inode);
+    if (length <= 0 || (size_t)length >= sizeof(expected)) fail("broker probe facts overflow");
+    size_t size = broker_probe_exec(artifact, "artifact-capabilities", NULL, false,
+                                    captured, BROKER_PROBE_MAX_BYTES);
+    if (size != (size_t)length || memcmp(captured, expected, size))
+        fail("broker probe sealed identity mismatch");
+    read_exact_at(artifact, raw, facts.size, 0);
+    size_t encoded_size = broker_base64(raw, facts.size, encoded);
+    size = broker_probe_exec(artifact, "artifact-bytes", "--base64", false,
+                             captured, BROKER_PROBE_MAX_BYTES);
+    if (size != encoded_size || memcmp(captured, encoded, size))
+        fail("broker probe sealed bytes mismatch");
+    size = broker_probe_exec(artifact, "capabilities", NULL, false, captured, BROKER_PROBE_MAX_BYTES);
+    if (size != strlen(PROTOCOL) || memcmp(captured, PROTOCOL, size))
+        fail("broker probe pipe capability unavailable");
+    size = broker_probe_exec(artifact, "capabilities", "--pty", true, captured, BROKER_PROBE_MAX_BYTES);
+    if (size != strlen(PTY_PROTOCOL) || memcmp(captured, PTY_PROTOCOL, size))
+        fail("broker probe PTY capability unavailable");
+    char hello[768];
+    length = snprintf(hello, sizeof(hello),
+        "{\"protocol\":\"%s\",\"state\":\"preflight_only\",\"sealedExec\":\"execveat\","
+        "\"pipeCapability\":\"%s\",\"ptyCapability\":\"%s\",\"artifact\":%s}",
+        BROKER_PREFLIGHT_PROTOCOL, PROTOCOL, PTY_PROTOCOL, expected);
+    if (length <= 0 || (size_t)length >= sizeof(hello)) fail("broker probe hello overflow");
+    unsigned int sequence = 1;
+    broker_probe_frame(argv[3], sequence++, "hello", 0, (unsigned char *)hello, (size_t)length);
+    for (size_t offset = 0; offset < facts.size; offset += BROKER_CHUNK_BYTES) {
+        size_t count = facts.size - offset;
+        if (count > BROKER_CHUNK_BYTES) count = BROKER_CHUNK_BYTES;
+        broker_probe_frame(argv[3], sequence++, "artifact", offset, raw + offset, count);
+    }
+    static const unsigned char done[] = "{\"preflightComplete\":true,\"commandAdmission\":false}";
+    broker_probe_frame(argv[3], sequence, "exit", 0, done, sizeof(done) - 1);
+    free(encoded);
+    free(raw);
+    free(captured);
+    close(artifact);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "broker-preflight")) return broker_preflight(argc, argv);
     if (argc >= 2 && !strcmp(argv[1], "keeper")) return keeper(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "artifact-capabilities")) return artifact_capability(false);
     if (argc == 3 && !strcmp(argv[1], "artifact-bytes") && !strcmp(argv[2], "--base64"))

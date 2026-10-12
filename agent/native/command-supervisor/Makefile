@@ -31,6 +31,7 @@ test-static: static $(BUILD)/fixture $(BUILD)/kernel
 	$(BUILD)/kernel
 	python3 tests/test_supervisor.py $(abspath $(BUILD))
 	python3 tests/test_keeper.py $(abspath $(BUILD))
+	python3 tests/test_broker_preflight.py $(abspath $(BUILD))
 
 clean:
 	rm -f $(BUILD)/opengeni-command-supervisor $(BUILD)/fixture $(BUILD)/kernel

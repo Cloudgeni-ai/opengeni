@@ -127,6 +127,17 @@ natural leader-exit semantics while descendants remain.
 
 ## Sealed artifact keeper
 
+The proposed keeper-owned broker is a separately versioned implementation in
+progress, described in [its design](../../../docs/design/native-command-broker.md).
+Its bounded host-side framing codec and native `broker-preflight --broker-id UUID`
+probe do not activate a broker, change the existing keeper behavior, or qualify
+any runtime command. The explicit preflight runs fixed sealed-ELF inspection and
+pipe/PTY capability children with `execveat(AT_EMPTY_PATH)` under the initial
+process, emits bounded artifact frames only after exact-byte/identity and
+independent-exit checks, and reports `commandAdmission: false`. It accepts no
+user command and makes no provider, cancellation or snapshot-preservation claim.
+The static test target includes its positive and denied-syscall regressions.
+
 The keeper is a separate initializer for a newly created physical sandbox. It
 must be the trusted initial executable before any user setup. It requires UID 0
 and a static ELF, creates no child, installs no subreaper, and changes no session,
