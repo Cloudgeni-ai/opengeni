@@ -2262,6 +2262,8 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         label: live.capacityWait.label,
         since: live.occurredAt,
         detail: live.capacityWait.detail,
+        // Its span is not work and may last until a quota resets: no clock.
+        untimed: true,
       };
     }
     const pausedMs = (capacityPauses.get(key) ?? []).reduce((total, pause) => {
@@ -3589,8 +3591,11 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
 const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
 
 /**
- * A capacity wait reads as "Limit reached" with one plain secondary line. Only
- * a wait that time alone will not end keeps its recorded, actionable reason.
+ * A quota or capacity wait reads as "Usage limit reached" with one plain line
+ * of guidance. It never promises that the work continues by itself: the
+ * reader decides whether to wait for the quota to reset or to switch. Only a
+ * wait that a person must resolve (reconnect, re-enable, choose another
+ * account) keeps its recorded, actionable reason and is not labelled a limit.
  */
 function capacityWaitPresentation(
   type: string,
@@ -3610,12 +3615,17 @@ function capacityWaitPresentation(
     const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
     return { turnId, label: "Waiting", detail, text: detail };
   }
-  const detail =
-    payload.waitReason === "pinned_account_unavailable"
-      ? "Continues automatically when the chosen account is available."
-      : "Continues automatically when capacity is available.";
-  return { turnId, label: "Limit reached", detail, text: `Limit reached. ${detail}` };
+  return {
+    turnId,
+    label: CAPACITY_LIMIT_LABEL,
+    detail: CAPACITY_LIMIT_DETAIL,
+    text: `${CAPACITY_LIMIT_LABEL}. ${CAPACITY_LIMIT_DETAIL}`,
+  };
 }
+
+const CAPACITY_LIMIT_LABEL = "Usage limit reached";
+const CAPACITY_LIMIT_DETAIL =
+  "Try again after your quota resets, or switch to another model or provider.";
 
 /** Lifecycle evidence that a capacity wait is over. */
 function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {

@@ -8,6 +8,7 @@ import {
   flattenActivityItems,
   isPreparingWork,
   readableWorkDefaultOpen,
+  readableWorkHasDetails,
   readableWorkShowsPreview,
   readableWorkStatus,
 } from "../timeline/work-presentation";
@@ -3521,12 +3522,13 @@ const TimelineGroupView = memo(function TimelineGroupView({
                   kind: "waiting",
                   label: workStatus.label,
                   since: workStatus.since,
-                  // One quiet line under the row, e.g. that a limit wait
-                  // continues by itself; never a second warning banner.
-                  preview: workStatus.detail ? (
+                  // One quiet line under the row saying what the wait needs,
+                  // kept visible when the work is expanded; never a second
+                  // warning banner.
+                  guidance: workStatus.detail ? (
                     <span
                       data-og-exchange-wait-detail=""
-                      className="block truncate text-og-sm text-og-fg-subtle"
+                      className="block text-og-sm text-og-fg-subtle"
                     >
                       {workStatus.detail}
                     </span>
@@ -3556,6 +3558,11 @@ const TimelineGroupView = memo(function TimelineGroupView({
               items={group.items}
               bare={insideTurn || undefined}
               status={status}
+              // A wait before any visible work has nothing to reveal.
+              expandable={readableWorkHasDetails(
+                { ...group, work: group.work },
+                { startupDetails },
+              )}
               outcome={group.outcome}
               failureText={group.failureText}
               foldKey={group.id}
