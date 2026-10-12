@@ -498,6 +498,30 @@ describe("session control surface architecture", () => {
     expect(list).toContain("Show ${revealCount} more");
   });
 
+  test("fills spare rail height before offering Show more", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    // The window is the manual step plus a measured fill, and fill loads stay quiet.
+    expect(list).toContain("baseCountForGroup(key) + fillCountForGroup(key)");
+    expect(list).toContain(
+      "planSessionGroupFill(fillTargetsRef.current, counts, freeRows, shrink)",
+    );
+    expect(list).toContain('list?.closest<HTMLElement>("[data-rail-scroll-viewport]")');
+    expect(list).toContain(
+      "void loadMoreInGroup(target.group, false, visible - target.loaded, false);",
+    );
+  });
+
+  test("restores manual Show more windows when the rail remounts", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("readSessionGroupWindows(groupWindowMemoryId, paginationKey)");
+    expect(list).toContain(
+      "writeSessionGroupWindows(groupWindowMemoryId, paginationKey, groupWindows.counts)",
+    );
+    expect(list).toContain("sessionGroupWindowMemoryId(\n    context.accessContext.subjectId,");
+    // Restored windows load their rows even with no spare height to fill.
+    expect(list).toContain("const restored = target.base > SESSION_GROUP_VISIBLE_STEP;");
+  });
+
   test("separates archive browsing and hydrates sparse creator groups", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain("browseSessions.filter((session) => !session.archived)");
