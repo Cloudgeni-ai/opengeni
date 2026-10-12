@@ -23,7 +23,16 @@
  * Run this file in its own process: the registration replaces module
  * bindings for the whole process.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  mock,
+  setDefaultTimeout,
+  spyOn,
+  test,
+} from "bun:test";
 import { sql } from "drizzle-orm";
 import {
   organizationAccessPresetPermissions,
@@ -55,6 +64,7 @@ for (const [specifier, factory] of testSubscriptionCoreProviderModules(XAI))
   mock.module(specifier, factory);
 
 const {
+  armSubscriptionCoreCapacityWait,
   claimSessionWorkForAttempt,
   createDb,
   createManagedOrganization,
@@ -69,6 +79,11 @@ const {
 const { stampDelegatedHumanAuthorization } = await import("@opengeni/core");
 const { readXaiCoreStatus } = await import("../src/xai-subscription-core");
 const { createApp } = await import("../src/app");
+const { reconcileCoreCapacityWait } =
+  await import("../../worker/src/activities/subscription-core-codex-waits");
+const { XAI_CORE_WAIT_BINDING } =
+  await import("../../worker/src/activities/subscription-core-xai-waits");
+const workerQuota = await import("../../worker/src/activities/subscription-core-xai-quota");
 type DbClient = Awaited<ReturnType<typeof createDb>>;
 type TurnIdentity = NonNullable<Awaited<ReturnType<typeof readSubscriptionCoreTurnIdentity>>>;
 
@@ -456,6 +471,76 @@ describe("a personal-only SuperGrok user's status on the core", () => {
 });
 
 describe("the pre-placement re-read of a stored personal exhaustion", () => {
+  test("the worker resumes a real parked personal turn after billing recovers, before its stored reset", async () => {
+    const org = await organization();
+    const connectionId = await personalConnection(org, "parked");
+    const upstream = billing();
+    await exhaust(org, connectionId, upstream);
+    const turn = await acceptedTurn(org);
+    const [attempt] = await shared.admin<{ active_attempt_id: string }[]>`
+      select active_attempt_id::text from session_turns where id = ${turn.turnId}::uuid`;
+    const armed = await armSubscriptionCoreCapacityWait(client.db, "xai", {
+      ...turn,
+      attemptId: attempt!.active_attempt_id,
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: new Date(Date.now() + 86_400_000),
+      failurePayload: {},
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("fixture failed to park the turn");
+    const input = {
+      accountId: org.accountId,
+      workspaceId: turn.workspaceId,
+      sessionId: turn.sessionId,
+      waiterId: armed.waiter.waiterId,
+      generation: armed.waiter.generation,
+    };
+    const ageReading = async () => {
+      await shared.admin`update subscription_connection_quota
+        set updated_at = clock_timestamp() - interval '31 seconds'
+        where connection_id = ${connectionId}::uuid`;
+    };
+    const refresh = workerQuota.refreshExhaustedXaiCoreQuota;
+    // Inject only the existing transport seam; keep the real worker hook,
+    // exact-turn authorization, owner read, wake, placement and reconcile.
+    const transport = spyOn(workerQuota, "refreshExhaustedXaiCoreQuota").mockImplementation(
+      (quotaInput) => refresh({ ...quotaInput, fetch: upstream.fetchImpl }),
+    );
+    try {
+      const reconcile = () =>
+        reconcileCoreCapacityWait(
+          { db: client.db, settings, bus: { publish: async () => undefined } as never },
+          XAI_CORE_WAIT_BINDING,
+          input,
+        );
+      upstream.state.usedPercent = 100;
+      await ageReading();
+      expect(await reconcile()).toMatchObject({ action: "waiting" });
+      expect(upstream.state.calls).toEqual(["Bearer access-parked"]);
+      expect((await storedQuota(connectionId))?.exhausted_kind).toBe("quota");
+      upstream.state.fail = true;
+      await ageReading();
+      expect(await reconcile()).toMatchObject({ action: "waiting" });
+      expect((await storedQuota(connectionId))?.exhausted_kind).toBe("quota");
+      upstream.state.fail = false;
+      upstream.state.usedPercent = 40;
+      upstream.state.calls.length = 0;
+      await ageReading();
+      expect(await reconcile()).toEqual({ action: "resumed" });
+      expect(upstream.state.calls).toEqual(["Bearer access-parked"]);
+      expect(await storedQuota(connectionId)).toMatchObject({ exhausted_kind: null, used: 40 });
+      const [stored] = await shared.admin<{ status: string }[]>`
+        select status from session_turns where id = ${turn.turnId}::uuid`;
+      expect(stored!.status).toBe("recovering");
+      const [remaining] = await shared.admin<{ count: number }[]>`
+        select count(*)::int as count from subscription_capacity_waiters
+        where waiter_id = ${armed.waiter.waiterId}::uuid`;
+      expect(remaining!.count).toBe(0);
+    } finally {
+      transport.mockRestore();
+    }
+  });
+
   test("the owner's own private turn re-reads it as the owner", async () => {
     const org = await organization();
     const connectionId = await personalConnection(org, "exhausted");

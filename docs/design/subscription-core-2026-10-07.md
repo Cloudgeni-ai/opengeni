@@ -4517,14 +4517,16 @@ SuperGrok on the core:
   capped at the reset and at a sooner quarantine end
   (`reset_kind = bounded_refresh`). Its reconcile
   (`CoreWaitBinding.refreshBeforeReconcile`) re-reads billing for the
-  workspace's exhausted shared connections before placement evaluates,
+  workspace's exhausted shared connections and the personal connections
+  placement's personal authorization admits before placement evaluates,
   under the parked turn's exact accepted identity
   (`readSubscriptionCoreTurnIdentity`, never a synthetic one; without it the
   evaluation revokes and nothing is read), as the legacy waiter re-read
   billing. Without this, a parked turn in a quiet
   organization would sleep until the end of the credit period after credits
-  were back. A personal connection is never probed out of turn (X2a, shared
-  only); its exhaustion stands until its stored deadline (X2a). Codex
+  were back. The personal probe receives that exact identity as
+  `personalTurn`; ownerless or shared-only accepted work cannot borrow a
+  person's connection. Codex
   waiters are unchanged: they sleep until an authoritative reset. The waiter
   vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
   conformance suite checks that the two agree.
@@ -4683,12 +4685,12 @@ until X3. SuperGrok-specific code is the adapter's `fetchUsage`,
   whose only SuperGrok connection is personal saw `connected: false` and
   kept a stored exhaustion until its deadline. The status and quota rules
   above close that on the provider-neutral owner-only reads (#4159).
-  Still open: the core waiter reconcile (X1b) must call
+  The core waiter reconcile (X1b's `refreshBeforeReconcile` hook) calls
   `refreshExhaustedXaiCoreQuota` with the waiting turn's exact accepted
   identity (`personalTurn`) before it reconciles, so a personal connection
   is re-read only under placement's personal check for that turn, never as
-  background work on its own; otherwise a parked turn waits until the
-  stored deadline even after billing recovers. SuperGrok
+  background work on its own. A parked personal turn can therefore resume
+  before the stored deadline once billing recovers. SuperGrok
   has no organization-level status or usage route, so nothing else is
   affected.
 - **Image** (EP-N09/N10). A core-placed SuperGrok turn generates images on

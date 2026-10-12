@@ -17,9 +17,14 @@ let wakes: Array<{ provider: string; wake: unknown }>;
 let recovered: string[] | Error;
 let personalRecovered: string[] | Error;
 let unregistered: boolean;
+let parkedIdentity: realDb.SubscriptionCoreTurnIdentity | null;
+let billingUsedPercent: number | null;
+let personalExhausted: boolean;
+let wakeRevision: number;
 
 mock.module("@opengeni/db", () => ({
   ...realDb,
+  readSubscriptionCoreTurnIdentity: async () => parkedIdentity,
   subscriptionCoreOperationConnections: (provider: { adapter: { provider: string } }) => {
     if (unregistered) throw new Error("No subscription-core provider is registered for this id");
     return {
@@ -44,16 +49,26 @@ mock.module("@opengeni/db", () => ({
       ) => {
         personalProbes.push({ provider: provider.adapter.provider, turn });
         if (personalRecovered instanceof Error) throw personalRecovered;
+        // Script the billing reader for the worker orchestration case below.
+        // The real owner-scoped SQL/read path is covered by the PG suite.
+        if (billingUsedPercent !== null && personalExhausted && billingUsedPercent < 100) {
+          personalExhausted = false;
+          return ["personal-connection"];
+        }
         return personalRecovered;
       },
     };
   },
   deliverSubscriptionCoreProviderWake: async (_db: unknown, provider: string, wake: unknown) => {
     wakes.push({ provider, wake });
+    wakeRevision += 1;
   },
 }));
 
 const { XAI_CORE_TURN_PROVIDER } = await import("../src/activities/agent-turn/xai-core");
+const { XAI_CORE_WAIT_BINDING } = await import("../src/activities/subscription-core-xai-waits");
+const { reconcileCoreCapacityWait } =
+  await import("../src/activities/subscription-core-codex-waits");
 
 const OWNER_MEMBERSHIP = "66666666-6666-4666-8666-666666666666";
 const identity = {
@@ -86,6 +101,10 @@ beforeEach(() => {
   recovered = [];
   personalRecovered = [];
   unregistered = false;
+  parkedIdentity = null;
+  billingUsedPercent = null;
+  personalExhausted = true;
+  wakeRevision = 1;
 });
 
 test("placement probes exhausted shared connections as the core's service subject", async () => {
@@ -138,5 +157,89 @@ test("the personal re-read gets the exact turn, and its recovery wakes the waite
   await before(turn);
   expect(wakes).toEqual([
     { provider: "xai", wake: { accountId: identity.accountId, reason: "usage_recovered" } },
+  ]);
+});
+
+test("a parked personal turn resumes when its billing re-read recovers before the stored reset", async () => {
+  const turn = personalAuthority("xai");
+  parkedIdentity = turn;
+  billingUsedPercent = 100;
+  const reset = new Date(Date.now() + 86_400_000);
+  const waiter = (): realDb.SubscriptionCoreCodexCapacityWait => ({
+    waiterId: "waiter-1",
+    provider: "xai",
+    accountId: turn.accountId,
+    workspaceId: turn.workspaceId,
+    sessionId: turn.sessionId,
+    blockedTurnId: turn.turnId,
+    blockedTurnGeneration: 1,
+    generation: 1,
+    wakeRevision,
+    observedWakeRevision: 1,
+    waitReason: "no_eligible_capacity",
+    resetKind: "bounded_refresh",
+    refreshAttempt: 0,
+    earliestResetAt: reset,
+    nextCheckAt: reset,
+    goalId: null,
+    goalVersion: null,
+    lastWakeReason: null,
+  });
+  const evaluated: unknown[] = [];
+  const binding: typeof XAI_CORE_WAIT_BINDING = {
+    ...XAI_CORE_WAIT_BINDING,
+    getWaiterById: async () => waiter(),
+    readTurnModel: async () => ({ productModelId: "supergrok/grok-4.7", reasoningLevel: "medium" }),
+    recoverHealth: async () => 0,
+    evaluatePlacement: async (_db, request) => {
+      expect(request.identity).toBe(turn);
+      return personalExhausted
+        ? {
+            kind: "wait",
+            reason: "no_eligible_capacity",
+            earliestResetAt: reset,
+            healthRetryAt: null,
+          }
+        : { kind: "run" };
+    },
+    reconcileWaiter: async (_db, input) => {
+      evaluated.push({ revision: input.evaluatedWakeRevision, evaluation: input.evaluation });
+      return input.evaluation.kind === "run"
+        ? { action: "resumed", events: [] }
+        : { action: "waiting", waiter: waiter(), events: [] };
+    },
+  };
+  const reconcile = () =>
+    reconcileCoreCapacityWait(
+      {
+        db: {} as realDb.Database,
+        settings: testSettings(),
+        bus: { publish: async () => undefined } as never,
+      },
+      binding,
+      {
+        accountId: turn.accountId,
+        workspaceId: turn.workspaceId,
+        sessionId: turn.sessionId,
+        waiterId: "waiter-1",
+        generation: 1,
+      },
+    );
+
+  expect(await reconcile()).toMatchObject({ action: "waiting" });
+  expect(personalExhausted).toBe(true);
+  expect(wakes).toEqual([]);
+  personalRecovered = new Error("billing unavailable");
+  expect(await reconcile()).toMatchObject({ action: "waiting" });
+  expect(personalExhausted).toBe(true);
+  personalRecovered = [];
+  billingUsedPercent = 40;
+  expect(await reconcile()).toEqual({ action: "resumed" });
+  expect(personalExhausted).toBe(false);
+  expect(evaluated.at(-1)).toEqual({ revision: 2, evaluation: { kind: "run" } });
+  expect(personalProbes).toHaveLength(3);
+  for (const probe of personalProbes) expect(probe.turn).toBe(turn);
+  expect(wakes).toEqual([
+    { provider: "xai", wake: { accountId: turn.accountId, reason: "usage_recovered" } },
   ]);
 });
