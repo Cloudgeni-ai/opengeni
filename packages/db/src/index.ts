@@ -399,6 +399,13 @@ export * from "./subscription-core-xai-compat";
 export * from "./subscription-core-claude-adapter";
 export * from "./subscription-core-claude";
 export * from "./subscription-core-claude-compat";
+// Live usage reads outside a workspace pool: an organization administrator's
+// and a personal connection owner's (design 5.3).
+export {
+  subscriptionCoreAdministeredConnections,
+  type SubscriptionCoreAdministeredProbeDeps,
+  type SubscriptionCoreAdministeredScope,
+} from "./subscription-core/administered-connections";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,

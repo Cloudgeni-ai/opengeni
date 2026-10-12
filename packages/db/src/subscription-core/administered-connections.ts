@@ -1,6 +1,6 @@
 /**
  * Live usage reads of one connection outside a workspace pool, for any
- * provider (design 5.3, C2c): an organization administrator's read of an
+ * provider (design 5.3, "Administered usage reads"): an organization administrator's read of an
  * organization-pool connection on the
  * organization route, and an owner's read of their own personal connection
  * in their own Personal workspace. The workspace connection seam

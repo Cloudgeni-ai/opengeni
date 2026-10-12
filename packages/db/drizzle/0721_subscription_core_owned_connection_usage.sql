@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- The owner's live usage read of their own personal connection (design
--- docs/design/subscription-core-2026-10-07.md, 5.3 "Claude track", C2c).
+-- docs/design/subscription-core-2026-10-07.md, 5.3 "Administered usage reads").
 -- A personal connection is invisible outside an exact accepted turn: the
 -- 0707 credential seam refuses it in a workspace context, and its owner sees
 -- it only through the 0707 owner reader, which returns no credential. A
