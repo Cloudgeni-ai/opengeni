@@ -444,7 +444,7 @@ function LightboxStepButton({
         "absolute top-1/2 z-10 inline-flex size-11 -translate-y-1/2 items-center justify-center rounded-full",
         "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
         "transition-colors hover:border-white/30 hover:text-white",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50",
+        "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50",
         direction === "previous" ? "left-3 sm:left-6" : "right-3 sm:right-6",
       )}
     >

@@ -4284,7 +4284,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
                 onClick={() => setDetailsOpen((open) => !open)}
                 className={cn(
                   "inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-og-sm align-baseline font-medium underline-offset-2",
-                  "hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current/40",
+                  "hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-current/40",
                   "pointer-coarse:-my-2 pointer-coarse:px-1 pointer-coarse:py-2",
                 )}
               >
