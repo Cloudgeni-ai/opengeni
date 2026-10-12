@@ -290,6 +290,28 @@ describe("SuperGrok refusal settlement on the core", () => {
     for (const legacy of runtime.legacy) expect(legacy).not.toHaveBeenCalled();
   });
 
+  test("an unsettled title does not fence SuperGrok refusal failover", async () => {
+    coreRuntime({ refusals: 1 });
+    const recovery = spy(db, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    const titleRecoverable = mock(() => false);
+    const { deps } = failureDeps(
+      marked(429),
+      core({
+        titleRequests: {
+          hasUnknownOutcome: () => true,
+          canRecover: titleRecoverable,
+        } as unknown as SubscriptionCoreTurn["titleRequests"],
+      }),
+    );
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(recovery).toHaveBeenCalledTimes(1);
+    expect(titleRecoverable).not.toHaveBeenCalled();
+  });
+
   test("without a resolver report the plan is fenced on the placed generation", async () => {
     const runtime = coreRuntime({ refusals: 1 });
     spy(db, "requestSessionTurnRecovery").mockResolvedValue({
