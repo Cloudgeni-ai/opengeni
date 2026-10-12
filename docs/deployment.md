@@ -5028,9 +5028,10 @@ superuser nor `BYPASSRLS` (the documented posture):
 
 To see whether a database is affected, and which owners' new acceptances
 0725 will freeze the personal entry for, run as a role that bypasses row
-security. Placement still applies the organization's
-`personalConnectionsAllowed` setting, so where it is off these owners' work
-keeps using shared capacity:
+security. Placement still applies the effective `personalConnectionsAllowed`
+of the session's workspace (the workspace's own value unless the organization
+has locked the setting, otherwise the organization's), so where it is off
+these owners' work keeps using shared capacity:
 
 ```sql
 SELECT rolname, rolsuper, rolbypassrls

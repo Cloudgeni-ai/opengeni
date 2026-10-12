@@ -3612,8 +3612,11 @@ rows. Choices:
   quarantined personal row, so a waiter on a personal-only quarantine falls
   back to its 1 to 15 minute backoff instead of waking at the retry time.
   Recovery is delayed by at most one backoff interval, never skipped.
-- **Personal connections allowed.** The writers do not read the
-  organization's `personalConnectionsAllowed`; placement applies it. The
+- **Personal connections allowed.** The writers read neither the
+  organization's nor the workspace's `personalConnectionsAllowed`; placement
+  applies the effective value for the session's workspace (the workspace's own
+  value unless the organization has locked the setting, otherwise the
+  organization's). The
   runbook's inventory therefore lists owners whose new acceptances will
   freeze the personal entry, not owners whose work will run on it.
 
