@@ -44,6 +44,7 @@ import {
   SEEDANCE_2_5_MODEL_ID,
   StaticUsageLimits,
   TurnExecutionPolicyV1,
+  TurnServingPolicyV1,
   UsageLimitsMode,
   type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
@@ -917,6 +918,8 @@ const SettingsSchema = z.object({
   // the timeout; it never changes placement.
   // OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED, OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS
   subscriptionCoreShadowEnabled: EnvBoolean.default(true),
+  // D-43: dormant until the failover hooks and serving-model notice ship.
+  subscriptionCrossProviderFailoverEnabled: EnvBoolean.default(false),
   subscriptionCoreShadowTimeoutMs: z.coerce.number().int().min(10).max(1_000).default(250),
   // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
   // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
@@ -4631,6 +4634,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
+    subscriptionCrossProviderFailoverEnabled: optional(
+      "OPENGENI_SUBSCRIPTION_CROSS_PROVIDER_FAILOVER_ENABLED",
+    ),
     subscriptionCoreShadowTimeoutMs: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     reasoningConfigurationUpdatesEnabled: optional(
@@ -7714,7 +7720,30 @@ export class TurnExecutionPolicyDefinitionMismatchError extends Error {
 
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
- * present snapshot to the current executable definition and exact turn row.
+ * serving snapshot to its executable definition and mapped reasoning. This
+ * does not activate placement or replace the immutable accepted-turn policy.
+ */
+export function assertTurnServingPolicyMatchesConfigV1(
+  settings: Settings,
+  revision: TurnServingPolicyV1,
+  acceptedPolicy: TurnExecutionPolicyV1,
+): ReturnType<typeof assertTurnExecutionPolicyMatchesConfigV1> {
+  if (!settings.subscriptionCrossProviderFailoverEnabled)
+    throw new Error("Subscription model failover is disabled");
+  if (TurnExecutionPolicyV1.parse(acceptedPolicy).credentialRestriction !== undefined) {
+    throw new Error("Restricted accepted policies cannot switch");
+  }
+  const { policy } = TurnServingPolicyV1.parse(revision);
+  // Verify the SERVING definition and mapped level, never compare with the
+  // accepted model or mutate that immutable admission/authority snapshot.
+  return assertTurnExecutionPolicyMatchesConfigV1(settings, policy, {
+    modelId: policy.productModelId,
+    reasoningEffort: policy.reasoningEffort,
+    latencyMode: policy.latencyMode,
+  });
+}
+
+/** Bind an accepted snapshot to the current definition and exact turn row.
  * Non-additive executable drift fails before a provider or compaction call.
  */
 export function assertTurnExecutionPolicyMatchesConfigV1(

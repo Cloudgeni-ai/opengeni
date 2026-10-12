@@ -229,6 +229,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     // Off by default in tests so existing suites keep their exact database
     // work; the shadow's own tests enable it.
     subscriptionCoreShadowEnabled: false,
+    subscriptionCrossProviderFailoverEnabled: false,
     subscriptionCoreShadowTimeoutMs: 250,
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,
