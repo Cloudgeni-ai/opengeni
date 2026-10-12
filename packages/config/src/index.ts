@@ -8826,6 +8826,36 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
 
 const DEFAULT_SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/** Platform-owned manifest env names that are not `OPENGENI_*` pointers. */
+const PLATFORM_SANDBOX_ENVIRONMENT_NAMES = new Set([
+  "HOME",
+  "PATH",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+]);
+
+/**
+ * The manifest-env constants predicate (W1 secrets delivery, RM-3). A sandbox
+ * manifest may carry only deployment constants: HOME, PATH, git identity and
+ * askpass pointers, `OPENGENI_*` pointers, and the deployment allowlist
+ * (`sandboxEnvironmentVariableNames`). User secrets never qualify: they are
+ * resolved per command from `{{secret:…}}` references. Used by `buildManifest`
+ * and the persisted-envelope strip as a defensive filter.
+ */
+export function sandboxManifestEnvironmentNamePredicate(
+  settings: Settings,
+): (name: string) => boolean {
+  const deployment = new Set(sandboxEnvironmentVariableNames(settings));
+  return (name) =>
+    PLATFORM_SANDBOX_ENVIRONMENT_NAMES.has(name) ||
+    name.startsWith("OPENGENI_") ||
+    deployment.has(name);
+}
+
 function prependPathEntry(pathValue: string | undefined, entry: string): string {
   const parts = (pathValue ?? DEFAULT_SANDBOX_PATH).split(":").filter(Boolean);
   return [entry, ...parts.filter((part) => part !== entry)].join(":");

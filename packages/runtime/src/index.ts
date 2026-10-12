@@ -79,6 +79,7 @@ import {
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
+  sandboxManifestEnvironmentNamePredicate,
   configuredProviders,
   McpOperationRecoverySchema,
   firstPartyMcpInternalBaseUrl,
@@ -9715,13 +9716,11 @@ export function withManifestRefreshOnResume(
 // OWNED-RESUME manifest refresh. This path runs ONLY for SDK-owned sessions
 // (withManifestRefreshOnResume wraps client.resume, which the SDK never calls
 // when handed a live provided session — the ownedSandbox branch bypasses this
-// entirely). Owned applyManifest MERGES env safely with no guard, and this
-// refresh is a FEATURE: it is how a workspace-env edit reaches a long-lived
-// owned local/docker box that rarely recycles. The provided-session env pin
-// (pinProvidedSessionManifestEnvironment below) — NOT this function — is the
-// fix for the SDK's validateNoEnvironmentDelta session-fatal guard. Drift is
-// additionally REPORTED here (key names only, never values) so any env
-// recompute change stays attributable from the DB alone.
+// entirely). Owned applyManifest MERGES env safely with no guard. Since W1
+// (secrets delivery) the manifest env is deployment constants only, so the
+// refresh only carries constant/pointer changes to a long-lived owned box (and
+// drops any legacy user keys from its state). There is no drift reporting:
+// user secrets are resolved per command and never ride the manifest.
 export async function applyMissingManifestEntries(
   session: SandboxSessionLike,
   targetManifest: Manifest,
@@ -9750,10 +9749,7 @@ export async function applyMissingManifestEntries(
       "Resumed sandbox session cannot apply new manifest entries because current manifest state is unavailable",
     );
   }
-  // Drift detection runs on EVERY resume (even no-op ones): the durable trace
-  // that makes an env-recompute regression attributable from the DB instead of
-  // from rotated worker logs.
-  await reportManifestEnvironmentDrift(currentManifest, target, context);
+  void context;
   if (!session.applyManifest && !session.materializeEntry) {
     if (Object.keys(target.entries).length === 0) {
       return;
@@ -9818,73 +9814,14 @@ export async function applyMissingManifestEntries(
 }
 
 /**
- * Key-level diff of the live box's baked manifest env vs the freshly recomputed
- * target env. Returns null when identical. Key NAMES only — values are secrets
- * and must never leave this function's comparison.
- */
-export function manifestEnvironmentDrift(
-  current: Manifest,
-  target: Manifest,
-): { added: string[]; removed: string[]; changed: string[] } | null {
-  const currentEnv = (current.environment ?? {}) as Record<string, unknown>;
-  const targetEnv = (target.environment ?? {}) as Record<string, unknown>;
-  const added: string[] = [];
-  const removed: string[] = [];
-  const changed: string[] = [];
-  for (const key of Object.keys(targetEnv)) {
-    if (!(key in currentEnv)) {
-      added.push(key);
-    } else if (stableJson(currentEnv[key]) !== stableJson(targetEnv[key])) {
-      changed.push(key);
-    }
-  }
-  for (const key of Object.keys(currentEnv)) {
-    if (!(key in targetEnv)) {
-      removed.push(key);
-    }
-  }
-  if (added.length === 0 && removed.length === 0 && changed.length === 0) {
-    return null;
-  }
-  return {
-    added: added.sort(),
-    removed: removed.sort(),
-    changed: changed.sort(),
-  };
-}
-
-async function reportManifestEnvironmentDrift(
-  current: Manifest,
-  target: Manifest,
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent">,
-): Promise<ReturnType<typeof manifestEnvironmentDrift>> {
-  const drift = manifestEnvironmentDrift(current, target);
-  if (!drift) {
-    return null;
-  }
-  // Reporting must never break a resume: the drift itself is benign under the
-  // env pin (the box keeps running on its baked env); only the SIGNAL matters.
-  try {
-    await context.onRuntimeEvent?.({
-      type: "sandbox.env.drift",
-      payload: drift,
-    });
-  } catch {
-    // Swallow: a failed emit must not fail the turn.
-  }
-  return drift;
-}
-
-/**
  * ENV PIN for provided sessions (the ownership-inversion turn path). The SDK
  * validates the FULL target manifest environment against a live provided
  * session's baked env BEFORE reducing to its entry-only delta
  * (validateNoEnvironmentDelta -> session-fatal UserError on ANY difference).
- * So a turn resuming an existing box must declare the box's OWN env,
- * byte-identical — never the fresh recompute. This replaces the agent's
- * defaultManifest environment with the baked one and reports the drift (key
- * names only) instead of letting it kill the session. Fresh env lands at the
- * next cold-create; rotating values ride OFF-manifest (TOKEN-BROKER B1/B2).
+ * Since W1 the manifest env is deployment constants only and nothing compares
+ * or reports it: a turn resuming an existing box always declares the box's OWN
+ * env, so per-deploy constant changes can never kill a warm box. Fresh
+ * constants land at the next cold-create; user secrets ride per command.
  */
 export async function pinProvidedSessionManifestEnvironment(
   agent: Agent<any, any>,
@@ -9908,10 +9845,10 @@ export async function pinProvidedSessionManifestEnvironment(
   if (!holder.defaultManifest || !currentManifestValue) {
     return;
   }
+  void context;
   const current = ensureManifest(currentManifestValue);
   const target = ensureManifest(holder.defaultManifest);
-  const drift = await reportManifestEnvironmentDrift(current, target, context);
-  if (!drift) {
+  if (stableJson(current.environment ?? {}) === stableJson(target.environment ?? {})) {
     return;
   }
   holder.defaultManifest = new Manifest({
@@ -9972,9 +9909,8 @@ export async function runOwnedSandboxSetup(
   const { settings, environment } = opts;
   // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
   // env against the live box's baked env before applying its entry-only delta
-  // (validateNoEnvironmentDelta — session-fatal on ANY drift; killed a 4-day
-  // prod manager session 2026-07-06). Align the turn's manifest to the box's
-  // own env and REPORT the drift instead of dying on it.
+  // (validateNoEnvironmentDelta — session-fatal on ANY difference). Adopt the
+  // box's own env; constants only since W1, so there is nothing to report.
   await pinProvidedSessionManifestEnvironment(agent, session, {
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
   });
@@ -10396,10 +10332,15 @@ export function buildManifest(
 
   // sandbox-safe in-memory or staged local-dir sources, so no host path grant
   // is required here.
+  // RM-3: the manifest env holds deployment constants only. Any other key is a
+  // regression (user secrets are delivered per command), so drop it here.
+  const keepEnvironmentName = sandboxManifestEnvironmentNamePredicate(settings);
   return new Manifest({
     root: options.root ?? "/workspace",
     entries,
-    environment,
+    environment: Object.fromEntries(
+      Object.entries(environment).filter(([name]) => keepEnvironmentName(name)),
+    ),
   });
 }
 
