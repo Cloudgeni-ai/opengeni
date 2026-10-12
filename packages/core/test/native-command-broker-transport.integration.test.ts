@@ -6,7 +6,16 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
+import { ModalBrokerProviderCommand } from "@opengeni/contracts";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  getRetainedProcess,
+  settleRetainedProcess,
+  type DbClient,
+} from "@opengeni/db";
+import { retainedProviderCommandPersistence } from "../../db/src/retained-provider-commands";
 import { withRlsContext, rawRows } from "../../db/src/database";
 import {
   registerNativeBrokerTransport,
@@ -21,6 +30,8 @@ import {
   readNativeBrokerBootstrap,
   initialNativeBrokerCommandSnapshot,
   projectNativeBrokerCommand,
+  retainedNativeBrokerCommandSnapshot,
+  nativeBrokerCommandFromSnapshot,
 } from "@opengeni/runtime/sandbox";
 import { encodeNativeBrokerCommandDefinition } from "../../runtime/src/sandbox/providers/native-command-broker-definition";
 import { createDurableNativeBrokerTransport } from "../src/native-command-broker-transport";
@@ -112,9 +123,90 @@ async function fixture(register = true) {
   if (register) await registerNativeBrokerTransport(client.db, key, binding, initial);
   const store = nativeBrokerTransportStore(client.db, key, binding);
   const service = () => createDurableNativeBrokerTransport(client.db, key, binding);
-  return { binding, initial, store, service };
+  return { binding, initial, store, service, sessionId: session.id };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+/** Test-only admission/holder seed. Physical bootstrap/qualification is not
+ * inferred from these rows; this exercises the canonical receipt/output/exit
+ * custody using the actual native process rather than a synthetic terminal. */
+async function retainNativeFixture(f: Fixture, command: ModalBrokerProviderCommand) {
+  const b = f.binding,
+    processId = crypto.randomUUID(),
+    admissionId = crypto.randomUUID(),
+    actorId = crypto.randomUUID();
+  const scope = {
+    accountId: b.accountId,
+    workspaceId: b.workspaceId,
+    sessionId: f.sessionId,
+    processId,
+  };
+  await database.admin`insert into sandbox_lease_holders ${database.admin({
+    account_id: b.accountId,
+    workspace_id: b.workspaceId,
+    lease_id: b.leaseId,
+    kind: "process",
+    holder_id: `process:${processId}`,
+    subject_id: f.sessionId,
+  })}`;
+  await database.admin`insert into sandbox_workspace_mutation_admissions ${database.admin({
+    id: admissionId,
+    account_id: b.accountId,
+    workspace_id: b.workspaceId,
+    lease_id: b.leaseId,
+    sandbox_group_id: b.sandboxGroupId,
+    session_id: f.sessionId,
+    actor_kind: "direct",
+    actor_id: actorId,
+    holder_kind: "direct",
+    holder_id: `direct:${actorId}`,
+    lease_epoch: b.createEpoch,
+    provider_backend: "modal",
+    provider_instance_id: b.sandboxId,
+    route_kind: "active",
+    route_epoch: 0,
+    workspace_generation: 1,
+    operation: "terminalExec",
+    provider_outcome: "retained",
+  })}`;
+  await database.admin`insert into sandbox_retained_processes ${database.admin({
+    id: processId,
+    account_id: b.accountId,
+    workspace_id: b.workspaceId,
+    session_id: f.sessionId,
+    lease_id: b.leaseId,
+    sandbox_group_id: b.sandboxGroupId,
+    parent_admission_id: admissionId,
+    holder_id: `process:${processId}`,
+    owner_actor_kind: "direct",
+    owner_actor_id: actorId,
+    lease_epoch: b.createEpoch,
+    provider_backend: "modal",
+    provider_instance_id: b.sandboxId,
+    route_kind: "active",
+    route_epoch: 0,
+    provider_session_id: 1,
+    provider_binding_key: b.providerBindingKey,
+    provider_binding: database.admin.json(JSON.parse(b.providerBindingKey)),
+    provider_command: database.admin.json(command),
+  })}`;
+  return {
+    scope,
+    persistence: retainedProviderCommandPersistence(client.db, scope),
+    settle: async () => {
+      const expected = await getRetainedProcess(client.db, scope);
+      if (!expected) throw new Error("Native retained fixture missing");
+      return settleRetainedProcess(client.db, {
+        ...scope,
+        expected,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "provider_exit_banner",
+        idleGraceMs: 1000,
+      });
+    },
+  };
+}
 function fence() {
   return {
     requestId: crypto.randomUUID(),
@@ -729,8 +821,8 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       commandId: string | null = null,
       payload = new Uint8Array(),
       offset = 0,
+      requestId = crypto.randomUUID(),
     ) {
-      const requestId = crypto.randomUUID();
       await driver.send({ requestId, commandId, kind, payload, offset });
       await observeUntil(async () => (await f.service().request(requestId))?.accepted === true);
       if (kind === "ack") return null;
@@ -777,9 +869,33 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       });
       const size = Buffer.alloc(4);
       size.writeUInt32BE(definition.length);
+      const launchRequestId = crypto.randomUUID();
+      let retained = ModalBrokerProviderCommand.parse({
+        kind: "modal-broker-v1",
+        sandboxId: f.binding.sandboxId,
+        taskId: f.binding.taskId,
+        execId: id,
+        pty: false,
+        supervision: {
+          protocol: "native-subreaper-broker-channel-v1",
+          invocationId: id,
+          brokerId: f.binding.brokerId,
+          launchRequestId,
+          launchEpoch: 1,
+        },
+        capture: { sequence: bootstrap.lastSequence, receiptAckObserved: false },
+        streams: {
+          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        },
+      });
+      const custody = await retainNativeFixture(f, retained);
       await request("prepare", id, size);
       await request("definition", id, definition);
-      expect(await request("launch", id)).toEqual({ state: "supervisor_started", released: false });
+      expect(await request("launch", id, new Uint8Array(), 0, launchRequestId)).toEqual({
+        state: "supervisor_started",
+        released: false,
+      });
       uncertain = true;
       const release = {
         requestId: crypto.randomUUID(),
@@ -827,6 +943,34 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
           Buffer.from(frame.payload).toString().includes(receipt!.receiptId),
         ),
       ).toBe(true);
+      const beforeAck = await projectNativeBrokerCommand(
+        f.service(),
+        retainedNativeBrokerCommandSnapshot(retained, null),
+        128,
+      );
+      expect(beforeAck.receipts).toHaveLength(1);
+      await custody.persistence.recordSupervisionReceipt(beforeAck.receipts[0]!);
+      const capture = async (
+        projection: Awaited<ReturnType<typeof projectNativeBrokerCommand>>,
+      ) => {
+        const next = nativeBrokerCommandFromSnapshot(retained, projection.snapshot);
+        const result = await custody.persistence.captureBrokerPage({
+          expected: retained,
+          command: next,
+          stdout: projection.chunks
+            .filter((chunk) => chunk.stream === "stdout")
+            .map((chunk) => chunk.text)
+            .join(""),
+          stderr: projection.chunks
+            .filter((chunk) => chunk.stream === "stderr")
+            .map((chunk) => chunk.text)
+            .join(""),
+        });
+        expect(result.captured).toBe(true);
+        retained = result.command;
+      };
+      await capture(beforeAck);
+      await expect(custody.settle()).rejects.toThrow();
       await request("control", id, Buffer.from(`ack\t${receipt!.receiptId}`));
       await observeUntil(async () =>
         (await frames()).some((frame) => frame.commandId === id && frame.kind === "exit"),
@@ -871,6 +1015,17 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
       expect(projection.chunks.map((chunk) => chunk.text).join("")).toBe(
         Buffer.from(binary).toString("utf8"),
       );
+      const afterAck = await projectNativeBrokerCommand(
+        f.service(),
+        retainedNativeBrokerCommandSnapshot(
+          retained,
+          await custody.persistence.loadSupervisionReceipt(),
+        ),
+        128,
+      );
+      await capture(afterAck);
+      expect((await custody.settle()).settled).toBe(true);
+      expect((await getRetainedProcess(client.db, custody.scope))?.state).toBe("exited");
     } finally {
       child.stdin.end();
       const stopped = await Promise.race([

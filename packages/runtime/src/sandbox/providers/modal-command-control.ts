@@ -682,6 +682,8 @@ export class ModalCommandControl {
     signal?: AbortSignal,
   ): Promise<ModalProviderOutputPage> {
     SandboxProviderCommand.parse(command);
+    if (command.kind === "modal-broker-v1")
+      throw new Error("Initial-process broker commands cannot use TaskExec observation");
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
     if (command.kind === "modal-control-v1") return await this.legacy.read(command, waitMs, signal);
@@ -924,6 +926,8 @@ export class ModalCommandControl {
 
   async write(command: ModalProviderCommand, chars: string, index: number): Promise<void> {
     SandboxProviderCommand.parse(command);
+    if (command.kind === "modal-broker-v1")
+      throw new Error("Initial-process broker commands cannot use TaskExec stdin");
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
     if (command.kind === "modal-control-v1") return await this.legacy.write(command, chars, index);

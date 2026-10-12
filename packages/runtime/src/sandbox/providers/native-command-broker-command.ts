@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isDeepStrictEqual } from "node:util";
+import { ModalBrokerProviderCommand, type CommandSupervisionReceipt } from "@opengeni/contracts";
 import { decodePage } from "./modal-legacy-command-control";
 import type { DurableNativeBrokerTransport } from "./native-command-broker-transport";
 
@@ -49,7 +50,7 @@ export type NativeBrokerCommandReceipt = z.infer<typeof receiptSchema>;
 function invalid(): never {
   throw new Error("Native broker command evidence is incomplete, conflicting or out of scope");
 }
-function parse(raw: NativeBrokerCommandSnapshot) {
+function parse(raw: unknown) {
   const value = snapshotSchema.safeParse(raw);
   if (!value.success) invalid();
   const state = value.data;
@@ -97,6 +98,69 @@ export function initialNativeBrokerCommandSnapshot(
     receipt: null,
     receiptAckObserved: false,
     supervisorExitCode: null,
+  });
+}
+
+/** Rehydrate the projection only from the retained locator and independently
+ * persisted native receipt. A descriptor is not launch or release authority. */
+export function retainedNativeBrokerCommandSnapshot(
+  input: ModalBrokerProviderCommand,
+  receipt: CommandSupervisionReceipt | null,
+): NativeBrokerCommandSnapshot {
+  const command = ModalBrokerProviderCommand.parse(input);
+  return parse({
+    version: 1,
+    binding: {
+      brokerId: command.supervision.brokerId,
+      commandId: command.execId,
+      launchRequestId: command.supervision.launchRequestId,
+      launchEpoch: command.supervision.launchEpoch,
+      mode: command.pty ? "pty" : "pipe",
+    },
+    lastSequence: command.capture.sequence,
+    streams: Object.fromEntries(
+      Object.entries(command.streams).map(([name, stream]) => [
+        name,
+        {
+          byteOffset: stream.byteOffset,
+          utf8Remainder: stream.utf8Remainder,
+          eof: stream.eof,
+        },
+      ]),
+    ),
+    receipt,
+    receiptAckObserved: command.capture.receiptAckObserved,
+    supervisorExitCode: command.streams.stdout.exitCode,
+  });
+}
+
+/** The same immutable execution, with only its committed-frame projection
+ * advanced. The caller atomically captures this locator with the output text;
+ * native receipt persistence and physical ACK remain separate operations. */
+export function nativeBrokerCommandFromSnapshot(
+  input: ModalBrokerProviderCommand,
+  value: NativeBrokerCommandSnapshot,
+): ModalBrokerProviderCommand {
+  const command = ModalBrokerProviderCommand.parse(input);
+  const snapshot = parse(value);
+  const original = retainedNativeBrokerCommandSnapshot(command, snapshot.receipt);
+  if (
+    !isDeepStrictEqual(original.binding, snapshot.binding) ||
+    snapshot.lastSequence < original.lastSequence
+  )
+    invalid();
+  return ModalBrokerProviderCommand.parse({
+    ...command,
+    capture: { sequence: snapshot.lastSequence, receiptAckObserved: snapshot.receiptAckObserved },
+    streams: Object.fromEntries(
+      Object.entries(snapshot.streams).map(([name, stream]) => [
+        name,
+        {
+          ...stream,
+          exitCode: snapshot.supervisorExitCode,
+        },
+      ]),
+    ),
   });
 }
 

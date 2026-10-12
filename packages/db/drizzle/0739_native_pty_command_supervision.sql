@@ -1,9 +1,22 @@
 -- deployment-mode: maintenance
--- Extend initial native ownership to PTYs. Existing v1 rows and all immutable
+-- Extend initial native ownership to PTYs and initial-process broker locators.
+-- This unpublished candidate follows the additive 0738 transport journal.
+-- Existing v1 rows and all immutable
 -- receipt/output, cancellation, loss and holder fences remain unchanged.
 -- No legacy row is upgraded. Drain old writers before this readiness marker
 -- permits mandatory PTY launches; old contract readers cannot parse that protocol.
 SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE sandbox_retained_processes DROP CONSTRAINT sandbox_retained_processes_provider_command_chk;
+ALTER TABLE sandbox_retained_processes ADD CONSTRAINT sandbox_retained_processes_provider_command_chk CHECK (
+  provider_command IS NULL OR ((provider_backend = 'modal'
+    AND jsonb_typeof(provider_command) = 'object'
+    AND provider_command->>'kind' IN ('modal-control-v1', 'modal-router-v1', 'modal-broker-v1')
+    AND provider_command->>'sandboxId' = provider_instance_id
+    AND length(provider_command->>'taskId') > 0
+    AND length(provider_command->>'execId') > 0
+  ) IS TRUE)
+);
 
 CREATE OR REPLACE FUNCTION opengeni_private.supervised_command_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $guard$
@@ -13,6 +26,8 @@ DECLARE
   stream text;
   loss_binding jsonb;
   capture_lease sandbox_leases%ROWTYPE;
+  broker_binding jsonb;
+  broker_command boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     IF OLD.provider_command ? 'supervision' AND (
@@ -23,13 +38,16 @@ BEGIN
     RETURN OLD;
   END IF;
   descriptor := NEW.provider_command->'supervision';
+  broker_command := NEW.provider_command->>'kind' = 'modal-broker-v1';
   IF TG_OP = 'UPDATE' THEN
     IF NEW.supervision_retention_xid IS DISTINCT FROM OLD.supervision_retention_xid THEN
       RAISE EXCEPTION 'Retention transaction identity is immutable' USING ERRCODE = '55000';
     END IF;
     IF OLD.provider_command ? 'supervision' AND (
       descriptor IS DISTINCT FROM OLD.provider_command->'supervision'
-      OR (NEW.provider_command - 'streams') IS DISTINCT FROM (OLD.provider_command - 'streams')
+      OR CASE WHEN OLD.provider_command->>'kind' = 'modal-broker-v1' THEN
+        (NEW.provider_command - ARRAY['streams', 'capture']) IS DISTINCT FROM (OLD.provider_command - ARRAY['streams', 'capture'])
+      ELSE (NEW.provider_command - 'streams') IS DISTINCT FROM (OLD.provider_command - 'streams') END
       OR ROW(NEW.lease_id, NEW.lease_epoch, NEW.provider_backend, NEW.provider_instance_id,
         NEW.provider_binding_key, NEW.provider_binding, NEW.parent_admission_id, NEW.holder_id,
         NEW.account_id, NEW.workspace_id, NEW.session_id, NEW.sandbox_group_id, NEW.id,
@@ -85,9 +103,10 @@ BEGIN
     IF OLD.provider_command ? 'supervision' THEN
       -- Old JSON writers must not skip output bytes that a newer reader would
       -- otherwise mistake for captured output. This transaction-local protocol
-      -- marker is set only around captureRetainedRouterOutput's atomic event +
-      -- cursor update. It is not an authentication boundary against DB owners.
+      -- marker is set only around the router/broker atomic event + cursor
+      -- capture update. It is not an authentication boundary against DB owners.
       IF ((NEW.provider_command->'streams') IS DISTINCT FROM (OLD.provider_command->'streams')
+        OR (broker_command AND NEW.provider_command->'capture' IS DISTINCT FROM OLD.provider_command->'capture')
         OR NEW.supervision_output_captured IS DISTINCT FROM OLD.supervision_output_captured)
         AND current_setting('opengeni.supervised_output_capture_process_id', true) IS DISTINCT FROM NEW.id::text THEN
         RAISE EXCEPTION 'Supervised output requires atomic capture protocol' USING ERRCODE = '55000';
@@ -102,6 +121,16 @@ BEGIN
           RAISE EXCEPTION 'Supervised output proof cannot regress' USING ERRCODE = '55000';
         END IF;
       END LOOP;
+      IF broker_command AND (
+        (NEW.provider_command->'capture'->>'sequence')::numeric < (OLD.provider_command->'capture'->>'sequence')::numeric
+        OR (OLD.provider_command->'capture'->>'receiptAckObserved' = 'true'
+          AND NEW.provider_command->'capture'->>'receiptAckObserved' IS DISTINCT FROM 'true')
+        OR (NEW.provider_command->'capture'->>'sequence' = OLD.provider_command->'capture'->>'sequence'
+          AND ROW(NEW.provider_command->'streams', NEW.provider_command->'capture') IS DISTINCT FROM
+              ROW(OLD.provider_command->'streams', OLD.provider_command->'capture'))
+      ) THEN
+        RAISE EXCEPTION 'Broker frame capture cannot regress or rewrite evidence' USING ERRCODE = '55000';
+      END IF;
     END IF;
   END IF;
   IF (NEW.cancellation_requested_at IS NULL) <> (NEW.cancellation_reason IS NULL)
@@ -109,6 +138,9 @@ BEGIN
     RAISE EXCEPTION 'Invalid cancellation intent' USING ERRCODE = '23514';
   END IF;
   IF descriptor IS NULL THEN
+    IF broker_command THEN
+      RAISE EXCEPTION 'Broker command always requires initial native ownership' USING ERRCODE = '23514';
+    END IF;
     IF NEW.supervision_receipt IS NOT NULL OR NEW.supervision_output_captured THEN
       RAISE EXCEPTION 'Legacy command cannot acquire supervision proof' USING ERRCODE = '23514';
     END IF;
@@ -123,7 +155,73 @@ BEGIN
       RAISE EXCEPTION 'Supervised launch cannot join checkpoint containment' USING ERRCODE = '55000';
     END IF;
   END IF;
-  IF NOT ((jsonb_typeof(descriptor) = 'object'
+  IF broker_command THEN
+    IF NOT ((jsonb_typeof(descriptor) = 'object'
+      AND descriptor->>'invocationId' = NEW.provider_command->>'execId'
+      AND descriptor->>'invocationId' ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+      AND descriptor->>'brokerId' ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+      AND descriptor->>'launchRequestId' ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+      AND jsonb_typeof(descriptor->'launchEpoch') = 'number'
+      AND descriptor->>'launchEpoch' ~ '^[1-9][0-9]*$'
+      AND (descriptor->>'launchEpoch')::numeric <= 9007199254740991
+      AND ((descriptor->>'protocol' = 'native-subreaper-broker-channel-v1' AND NEW.provider_command->'pty' = 'false'::jsonb)
+        OR (descriptor->>'protocol' = 'native-subreaper-broker-channel-pty-v1' AND NEW.provider_command->'pty' = 'true'::jsonb))
+      AND descriptor - ARRAY['protocol','invocationId','brokerId','launchRequestId','launchEpoch'] = '{}'::jsonb
+      AND NEW.provider_command - ARRAY['kind','sandboxId','taskId','execId','pty','supervision','capture','streams'] = '{}'::jsonb
+      AND jsonb_typeof(NEW.provider_command->'capture') = 'object'
+      AND (NEW.provider_command->'capture') - ARRAY['sequence','receiptAckObserved'] = '{}'::jsonb
+      AND jsonb_typeof(NEW.provider_command->'capture'->'sequence') = 'number'
+      AND NEW.provider_command->'capture'->>'sequence' ~ '^(0|[1-9][0-9]*)$'
+      AND (NEW.provider_command->'capture'->>'sequence')::numeric <= 9007199254740991
+      AND jsonb_typeof(NEW.provider_command->'capture'->'receiptAckObserved') = 'boolean'
+      AND jsonb_typeof(NEW.provider_command->'streams') = 'object'
+      AND (NEW.provider_command->'streams') - ARRAY['stdout','stderr'] = '{}'::jsonb
+    ) IS TRUE) THEN
+      RAISE EXCEPTION 'Invalid broker command descriptor' USING ERRCODE = '23514';
+    END IF;
+    SELECT binding INTO broker_binding FROM native_command_broker_transports
+      WHERE id = (descriptor->>'brokerId')::uuid
+        AND account_id = NEW.account_id AND workspace_id = NEW.workspace_id
+        AND lease_id = NEW.lease_id AND sandbox_group_id = NEW.sandbox_group_id;
+    IF NOT ((broker_binding->>'sandboxId' = NEW.provider_instance_id
+      AND broker_binding->>'sandboxId' = NEW.provider_command->>'sandboxId'
+      AND broker_binding->>'taskId' = NEW.provider_command->>'taskId'
+      AND broker_binding->>'providerBindingKey' = NEW.provider_binding_key
+      AND (broker_binding->>'createEpoch')::bigint = NEW.lease_epoch
+    ) IS TRUE) THEN
+      RAISE EXCEPTION 'Broker command requires its exact registered physical scope' USING ERRCODE = '55000';
+    END IF;
+    IF (NEW.provider_command->'capture'->>'sequence')::bigint > coalesce((
+      SELECT max(sequence) FROM native_command_broker_entries
+      WHERE broker_id = (descriptor->>'brokerId')::uuid AND kind = 'frame'
+        AND account_id = NEW.account_id AND workspace_id = NEW.workspace_id
+    ), 0) THEN
+      RAISE EXCEPTION 'Broker output cannot advance beyond committed initial frames' USING ERRCODE = '55000';
+    END IF;
+    FOREACH stream IN ARRAY ARRAY['stdout','stderr'] LOOP
+      IF NOT ((jsonb_typeof(NEW.provider_command->'streams'->stream) = 'object'
+        AND (NEW.provider_command->'streams'->stream) - ARRAY['byteOffset','utf8Remainder','eof','exitCode'] = '{}'::jsonb
+        AND jsonb_typeof(NEW.provider_command->'streams'->stream->'byteOffset') = 'number'
+        AND NEW.provider_command->'streams'->stream->>'byteOffset' ~ '^(0|[1-9][0-9]*)$'
+        AND (NEW.provider_command->'streams'->stream->>'byteOffset')::numeric <= 9007199254740991
+        AND jsonb_typeof(NEW.provider_command->'streams'->stream->'eof') = 'boolean'
+        AND jsonb_typeof(NEW.provider_command->'streams'->stream->'utf8Remainder') = 'string'
+        AND NEW.provider_command->'streams'->stream->>'utf8Remainder' ~ '^[A-Za-z0-9+/]{0,6}={0,2}$'
+        AND (NEW.provider_command->'streams'->stream->>'eof' = 'false' OR NEW.provider_command->'streams'->stream->>'utf8Remainder' = '')
+        AND NEW.provider_command->'streams'->stream->'exitCode' IN ('null'::jsonb, '0'::jsonb)
+      ) IS TRUE) THEN
+        RAISE EXCEPTION 'Invalid broker stream evidence' USING ERRCODE = '23514';
+      END IF;
+    END LOOP;
+    IF NEW.provider_command->'streams'->'stdout'->'exitCode' IS DISTINCT FROM NEW.provider_command->'streams'->'stderr'->'exitCode'
+      OR (NEW.provider_command->'capture'->>'receiptAckObserved' = 'true' AND NEW.supervision_receipt IS NULL)
+      OR (NEW.provider_command->'streams'->'stdout'->>'exitCode' = '0' AND NOT ((
+        NEW.provider_command->'capture'->>'receiptAckObserved' = 'true'
+        AND NEW.provider_command->'streams'->'stdout'->>'eof' = 'true'
+        AND NEW.provider_command->'streams'->'stderr'->>'eof' = 'true') IS TRUE)) THEN
+      RAISE EXCEPTION 'Broker exit requires receipt ACK and both captured EOFs' USING ERRCODE = '55000';
+    END IF;
+  ELSIF NOT ((jsonb_typeof(descriptor) = 'object'
     AND NEW.provider_command->>'kind' = 'modal-router-v1'
     AND ((descriptor->>'protocol' = 'native-subreaper-v1'
           AND NOT coalesce((NEW.provider_command->>'pty')::boolean, false))
@@ -143,6 +241,7 @@ BEGIN
     AND jsonb_typeof(receipt->'leaderExitCode') = 'number'
     AND receipt->>'leaderExitCode' ~ '^-?[0-9]+$'
     AND (receipt->>'leaderExitCode')::numeric BETWEEN -2147483648 AND 2147483647
+    AND (NOT broker_command OR (receipt->>'leaderExitCode')::numeric BETWEEN 0 AND 255)
     AND receipt - ARRAY['protocol', 'invocationId', 'receiptId', 'leaderExitCode'] = '{}'::jsonb) IS TRUE) THEN
     RAISE EXCEPTION 'Invalid invocation-bound supervision receipt' USING ERRCODE = '23514';
   END IF;
@@ -226,4 +325,9 @@ $guard$;
 -- Protocol-specific readiness must distinguish this definition from 0496's
 -- five identically named triggers, which intentionally reject PTY descriptors.
 COMMENT ON FUNCTION opengeni_private.supervised_command_guard()
-  IS 'native-subreaper-pty-v1';
+  IS 'native-command-broker-retention-v1';
+
+-- One native birth cannot be adopted as two independently settleable processes.
+CREATE UNIQUE INDEX native_broker_retained_command_identity
+  ON sandbox_retained_processes ((provider_command->'supervision'->>'brokerId'), (provider_command->>'execId'))
+  WHERE provider_command->>'kind' = 'modal-broker-v1';

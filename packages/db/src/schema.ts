@@ -10725,7 +10725,7 @@ export const sandboxRetainedProcesses = pgTable(
       sql`${table.providerCommand} IS NULL OR ((
         ${table.providerBackend} = 'modal'
         AND jsonb_typeof(${table.providerCommand}) = 'object'
-        AND ${table.providerCommand}->>'kind' IN ('modal-control-v1', 'modal-router-v1')
+        AND ${table.providerCommand}->>'kind' IN ('modal-control-v1', 'modal-router-v1', 'modal-broker-v1')
         AND ${table.providerCommand}->>'sandboxId' = ${table.providerInstanceId}
         AND length(${table.providerCommand}->>'taskId') > 0
         AND length(${table.providerCommand}->>'execId') > 0
@@ -10735,6 +10735,12 @@ export const sandboxRetainedProcesses = pgTable(
       "sandbox_retained_processes_provider_input_index_chk",
       sql`${table.providerCommandInputIndex} BETWEEN 0 AND 9007199254740991`,
     ),
+    nativeBrokerCommandIdentity: uniqueIndex("native_broker_retained_command_identity")
+      .on(
+        sql`(${table.providerCommand}->'supervision'->>'brokerId')`,
+        sql`(${table.providerCommand}->>'execId')`,
+      )
+      .where(sql`${table.providerCommand}->>'kind' = 'modal-broker-v1'`),
     holder: uniqueIndex("sandbox_retained_processes_holder_uq").on(table.leaseId, table.holderId),
     active: index("sandbox_retained_processes_active_idx")
       .on(table.workspaceId, table.sessionId, table.startedAt)

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   SandboxProviderCommand,
   ModalRouterProviderCommand,
+  ModalBrokerProviderCommand,
   CommandSupervisionReceipt,
   CommandSupervisionProtocol,
 } from "@opengeni/contracts";
@@ -9,7 +10,7 @@ import type {
 export type ProviderCommandOutput = {
   command: SandboxProviderCommand;
   /** Exact read baseline for atomic byte-offset capture; absent for legacy pages. */
-  expected?: ModalRouterProviderCommand;
+  expected?: ModalRouterProviderCommand | ModalBrokerProviderCommand;
   chunks: Array<{ stream: "stdout" | "stderr"; chunkId: string; text: string }>;
   exitCode: number | null;
   /** The provider reports the process exited; only unread output may remain. */
@@ -34,6 +35,12 @@ export type ProviderCommandPersistence = {
     stdout: string;
     stderr: string;
   }): Promise<{ command: ModalRouterProviderCommand; captured: boolean }>;
+  captureBrokerPage?(page: {
+    expected: ModalBrokerProviderCommand;
+    command: ModalBrokerProviderCommand;
+    stdout: string;
+    stderr: string;
+  }): Promise<{ command: ModalBrokerProviderCommand; captured: boolean }>;
 };
 
 export class ProviderCommandStartRejectedError extends Error {

@@ -4,7 +4,8 @@ Status: implementation in progress; not an admitted runtime capability. The
 current increments provide bounded framing, a native bootstrap preflight,
 input/output custody state machines, encrypted atomic transport storage, a
 private inherited supervisor channel, strict command-definition codec, native
-initial-process command multiplexer and journal-backed host transport driver.
+initial-process command multiplexer, journal-backed host transport driver and
+canonical retained-command descriptor/output fences.
 The native `broker` mode and host driver can launch fixture commands, but no
 application command-admission route selects this protocol.
 These increments do not change a production protocol tuple or qualify an
@@ -287,9 +288,9 @@ input without converting it into a command exit. The current PostgreSQL
 integration tests exercise races, rollback, restart replay, exact scopes and
 partial-frame capture with the non-owner app role. The host driver invokes this
 journal in explicit fixtures, not application sessions. Canonical command
-admissions, creation/bootstrap binding, retention/purge lifecycle and fully
-qualified physical control remain required
-before activation; an unresolved journal must not be deleted to unblock a lease
+admission routing, creation/bootstrap binding, journal retention/purge lifecycle
+and fully qualified physical control remain required before activation; an
+unresolved journal must not be deleted to unblock a lease
 or workspace teardown.
 
 ### Host transport and command evidence
@@ -325,16 +326,44 @@ The snapshot keeps UTF-8 suffixes and offsets separately for each stream. Native
 receipt, its exact ACK response, both stream EOFs and independently observed zero
 supervisor exit are distinct requirements. User output is always text; neither
 protocol-looking output nor initial-process EOF can settle a command. The caller
-must still atomically capture this projection and persist the receipt in
-canonical retained-process custody before ACK and holder/admission settlement.
+must atomically capture this projection and persist the receipt in canonical
+retained-process custody before ACK and holder/admission settlement.
+
+`ModalBrokerProviderCommand` is a distinct contract, not a task-router locator.
+Its command UUID, launch request/epoch and original broker binding are immutable;
+frame capture, per-stream bytes/EOFs and the observed receipt ACK advance
+separately. `retainedNativeBrokerCommandSnapshot` reconstructs the projection from
+that locator and the independently persisted native receipt. The existing
+TaskExec/session adapter explicitly rejects this descriptor, rather than treating
+its UUID as a provider execution ID.
+
+The maintenance-only candidate migration `0739` extends the canonical retained
+process guard without changing legacy descriptor/path rules. A broker command
+must match its registered account/workspace/group/lease/physical task and provider
+namespace. One native birth cannot own two retained process rows. Its shared
+frame cursor cannot pass committed transport frames, regress or advance outside
+atomic output capture. `captureRetainedBrokerOutput` commits session output and
+the projection cursor together; a losing reader discards its page. An ACK cannot
+precede a durable native receipt, and both output EOFs plus an independently
+observed zero supervisor exit are still required before the ordinary retained
+process, holder and parent admission can settle. Initial-process EOF is not an
+input to that settlement. The existing bounded session-output recording policy
+remains unchanged; the encrypted transport journal is separate custody.
+
+These retention guards are not bootstrap authentication, cohort qualification or
+permission to launch. No application route selects broker execution yet. New
+creation/restore selection, release authority, the runtime command-session
+adapter and journal retirement remain separate integration requirements.
 
 The opt-in local static-ELF/real-PostgreSQL test in
 `packages/core/test/native-command-broker-transport.integration.test.ts` runs
 with `OPENGENI_NATIVE_BROKER_LOCAL=1` after building the static artifact with
 `make -C agent/native/command-supervisor test-static`. It checks unknown
 dispatch, exact replay, writer takeover, duplicate-release refusal, binary I/O,
-receipt-before-ACK and independent exit using the actual broker. Ordinary CI
-does not require that local native build; the deterministic provider boundary
+canonical receipt-before-ACK, atomic retained output and independent exit using
+the actual broker. Its admission/holder rows are explicitly test-seeded, not
+evidence of product-reachable command admission. Ordinary CI does not require
+that local native build; the deterministic provider boundary
 and real database transport cases remain separate. This fixture does not
 establish Modal admission, image provenance, old-warm compatibility or release
 qualification. No runtime application session currently constructs the driver.

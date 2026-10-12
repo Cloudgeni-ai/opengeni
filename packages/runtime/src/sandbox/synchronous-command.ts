@@ -72,7 +72,7 @@ export function synchronousCommandPage(
   const banner = typeof raw === "string" ? parseExecResponseBanner(raw) : null;
   const command = page?.command;
   const streamsComplete =
-    command?.kind !== "modal-router-v1" ||
+    (command?.kind !== "modal-router-v1" && command?.kind !== "modal-broker-v1") ||
     (command.streams.stdout.eof && command.streams.stderr.eof);
   return {
     stdout: page
@@ -118,7 +118,7 @@ export function synchronousCommandPage(
           typeof raw.sessionId === "number"
         ? { collectionUnavailable: true }
         : {}),
-    ...(command?.kind === "modal-router-v1"
+    ...(command?.kind === "modal-router-v1" || command?.kind === "modal-broker-v1"
       ? {
           outputCursor: {
             identity: JSON.stringify([command.sandboxId, command.taskId, command.execId]),

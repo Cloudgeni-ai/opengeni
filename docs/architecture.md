@@ -62,10 +62,13 @@ coordinator applies framing/replay rules and core composes the two packages.
 `native-command-broker-driver.ts` joins committed intent/capture with the
 separately owned Modal initial-process channel; broker bootstrap and per-command
 projection readers verify distinct artifact, receipt, output and exit facts.
+`retained-provider-commands.ts` atomically captures the versioned broker locator
+and session output under the canonical native receipt/holder/settlement guards;
+the task-router adapter explicitly refuses that separate locator.
 The native supervisor's distinct `broker` mode multiplexes initial-process
 input/output and launches sealed per-command supervisors through its private
 `launch-channel` primitive, not a guest-path authentication fallback. Its native
-implementation and host driver are still separate from canonical command admission;
+implementation and host driver are still separate from application command admission;
 it is not wired into application command execution. See
 [`native-command-broker.md`](design/native-command-broker.md) for its remaining
 qualification, lifecycle and activation requirements.
@@ -648,7 +651,7 @@ Those groups require native ownership for every new turn command while the
 global flag stays false. Read-only scoped RPCs inspect the owner-only ledger;
 existing groups never gain retrospective qualification. Canonical source:
 `packages/db/src/native-command-qualification.ts` and maintenance migrations
-`0730`/`0731`.
+`0739`/`0740`.
 Exact-instance capability verification precedes admission; durable invocation
 retention precedes dispatch. The supervisor starts idle. Only original launch
 releases user code; reconstructed observers never release abandoned reservations.

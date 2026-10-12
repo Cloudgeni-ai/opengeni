@@ -3,8 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 import {
   SandboxProviderCommand,
   ModalRouterProviderCommand,
+  ModalBrokerProviderCommand,
   CommandSupervisionReceipt,
   type CommandSupervisionProtocol,
+  type NativeBrokerCommandProtocol,
   type SessionEvent,
 } from "@opengeni/contracts";
 import { withRlsContext, withSessionActivityRlsContext, type Database } from "./database";
@@ -39,6 +41,11 @@ export function retainedProviderCommandPersistence(
     captureRouterPage: async (page: RetainedRouterOutputPage) => {
       const result = await captureRetainedRouterOutput(db, scope, page);
       // A committed capture is authoritative even if live fanout fails.
+      if (result.events.length && publish) await publish(result.events).catch(() => undefined);
+      return { command: result.command, captured: result.captured };
+    },
+    captureBrokerPage: async (page: RetainedBrokerOutputPage) => {
+      const result = await captureRetainedBrokerOutput(db, scope, page);
       if (result.events.length && publish) await publish(result.events).catch(() => undefined);
       return { command: result.command, captured: result.captured };
     },
@@ -330,36 +337,158 @@ export async function reserveRetainedProviderInput(
       throw new Error("Active retained provider command is unavailable");
     if (row.cancellationRequestedAt || row.supervisionReceipt)
       throw new Error("Retained command input is closed");
-    const router = row.providerCommand.kind === "modal-router-v1";
-    if (router && (!Number.isSafeInteger(byteLength) || byteLength! <= 0))
+    const byteAddressed =
+      row.providerCommand.kind === "modal-router-v1" ||
+      row.providerCommand.kind === "modal-broker-v1";
+    if (byteAddressed && (!Number.isSafeInteger(byteLength) || byteLength! <= 0))
       throw new Error("Byte-offset stdin requires a positive byte reservation");
-    const index = row.providerCommandInputIndex + (router ? byteLength! : 1);
+    const index = row.providerCommandInputIndex + (byteAddressed ? byteLength! : 1);
     if (!Number.isSafeInteger(index)) throw new Error("Provider stdin sequence exhausted");
     await tx
       .update(schema.sandboxRetainedProcesses)
       .set({ providerCommandInputIndex: index })
       .where(processWhere(scope));
-    return router ? row.providerCommandInputIndex : index;
+    return byteAddressed ? row.providerCommandInputIndex : index;
   });
 }
 
 export type SupervisionReceipt = CommandSupervisionReceipt;
 
 function supervisionDescriptor(command: SandboxProviderCommand) {
-  return command.kind === "modal-router-v1" ? command.supervision : undefined;
+  return command.kind !== "modal-control-v1" ? command.supervision : undefined;
+}
+
+export type RetainedBrokerOutputPage = {
+  expected: ModalBrokerProviderCommand;
+  command: ModalBrokerProviderCommand;
+  stdout: string;
+  stderr: string;
+};
+
+/** Shape/monotonicity only. The runtime must build this page from committed
+ * initial-channel frames, not child text. Capture below separately requires the
+ * exact process/broker scope and an already persisted receipt before ACK. */
+export function validateBrokerOutputAdvance(page: RetainedBrokerOutputPage): void {
+  const before = ModalBrokerProviderCommand.parse(page.expected);
+  const after = ModalBrokerProviderCommand.parse(page.command);
+  if (!sameExecution(before, after)) throw new Error("Broker output changed execution identity");
+  if (
+    after.capture.sequence < before.capture.sequence ||
+    (before.capture.receiptAckObserved && !after.capture.receiptAckObserved) ||
+    (after.capture.sequence === before.capture.sequence &&
+      (!isDeepStrictEqual(before, after) || page.stdout || page.stderr))
+  )
+    throw new Error("Broker output cannot regress or rewrite captured frames");
+  for (const stream of ["stdout", "stderr"] as const) {
+    const oldCursor = before.streams[stream],
+      cursor = after.streams[stream];
+    if (
+      cursor.byteOffset < oldCursor.byteOffset ||
+      (oldCursor.eof && (!cursor.eof || cursor.byteOffset !== oldCursor.byteOffset)) ||
+      (oldCursor.exitCode !== null && !isDeepStrictEqual(oldCursor, cursor))
+    )
+      throw new Error("Broker output cannot regress or rewrite terminal evidence");
+    if (
+      cursor.byteOffset === oldCursor.byteOffset &&
+      !(!oldCursor.eof && cursor.eof) &&
+      (page[stream].length || cursor.utf8Remainder !== oldCursor.utf8Remainder)
+    )
+      throw new Error("Broker output without byte advancement requires the first EOF");
+    if (Buffer.byteLength(page[stream]) > 4 * 1024 * 1024)
+      throw new Error("Broker command output page exceeds its capture bound");
+  }
+}
+
+/** Retained output, event append and shared-frame projection cursor commit
+ * together. A losing reader discards its page; no stale cursor settles custody.
+ * Initial-process EOF is intentionally absent from this interface. */
+export async function captureRetainedBrokerOutput(
+  db: Database,
+  scope: ProcessScope,
+  page: RetainedBrokerOutputPage,
+): Promise<{ command: ModalBrokerProviderCommand; events: SessionEvent[]; captured: boolean }> {
+  validateBrokerOutputAdvance(page);
+  return withSessionActivityRlsContext(db, scope, async (tx) => {
+    const locks = await lockSessionEventWriteRows(tx, {
+      workspaceId: scope.workspaceId,
+      sessionIds: [scope.sessionId],
+      controlLock: "share",
+    });
+    if (locks.sessions[0]?.accountId !== scope.accountId)
+      throw new Error("Broker command output session not found");
+    const [row] = await tx
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(processWhere(scope))
+      .for("update")
+      .limit(1);
+    if (!row?.providerCommand || row.providerBackend !== "modal")
+      throw new Error("Retained broker command is unavailable");
+    const current = ModalBrokerProviderCommand.parse(row.providerCommand);
+    if (!sameExecution(current, page.expected))
+      throw new Error("Broker capture does not own this execution");
+    if (!isDeepStrictEqual(current, page.expected))
+      return { command: current, events: [], captured: false };
+    if (page.command.capture.receiptAckObserved && !row.supervisionReceipt)
+      throw new Error("Broker ACK cannot precede durable native receipt");
+    const events: SessionEvent[] = [];
+    for (const stream of ["stdout", "stderr"] as const) {
+      const before = current.streams[stream],
+        after = page.command.streams[stream];
+      const chunk = recordedCommandOutput(
+        stream,
+        before.byteOffset,
+        after.byteOffset,
+        after.eof,
+        page[stream],
+      );
+      if (chunk)
+        events.push(
+          ...(await appendSessionCommandOutput(tx, {
+            ...scope,
+            commandId: scope.processId,
+            stream,
+            streamFidelity: current.pty ? "merged" : "separate",
+            chunkId: `modal-broker:${current.supervision.brokerId}:${current.execId}:${stream}:${current.capture.sequence}:${page.command.capture.sequence}`,
+            chunk,
+          })),
+        );
+    }
+    await tx.execute(
+      sql`select set_config('opengeni.supervised_output_capture_process_id', ${scope.processId}, true)`,
+    );
+    await tx
+      .update(schema.sandboxRetainedProcesses)
+      .set({
+        providerCommand: page.command,
+        ...(page.command.streams.stdout.exitCode === 0 ? { supervisionOutputCaptured: true } : {}),
+      })
+      .where(processWhere(scope));
+    await tx.execute(
+      sql`select set_config('opengeni.supervised_output_capture_process_id', '', true)`,
+    );
+    return { command: page.command, events, captured: true };
+  });
 }
 
 /** Fail before provider start, not after discovering an unprotected DB at retention. */
 export async function supervisedCommandProtocolReady(
   db: Database,
-  protocol: CommandSupervisionProtocol = "native-subreaper-v1",
+  protocol: CommandSupervisionProtocol | NativeBrokerCommandProtocol = "native-subreaper-v1",
 ): Promise<boolean> {
   const [row] = await db.execute<{ ready: boolean }>(sql`
     select count(*) = 5 and (
       ${protocol} = 'native-subreaper-v1' or
-      pg_catalog.obj_description(
+      (${protocol} = 'native-subreaper-pty-v1' and pg_catalog.obj_description(
         pg_catalog.to_regprocedure('opengeni_private.supervised_command_guard()'), 'pg_proc'
-      ) = 'native-subreaper-pty-v1'
+      ) in ('native-subreaper-pty-v1', 'native-command-broker-retention-v1')) or
+      (${protocol} in ('native-subreaper-broker-channel-v1','native-subreaper-broker-channel-pty-v1')
+        and pg_catalog.obj_description(
+          pg_catalog.to_regprocedure('opengeni_private.supervised_command_guard()'), 'pg_proc'
+        ) = 'native-command-broker-retention-v1'
+        and exists (select 1 from pg_catalog.pg_index i
+          where i.indexrelid = pg_catalog.to_regclass('native_broker_retained_command_identity')
+            and i.indrelid = 'sandbox_retained_processes'::regclass and i.indisvalid and i.indisunique))
     ) as ready from pg_catalog.pg_trigger
     where (tgrelid, tgname) in (
       ('sandbox_retained_processes'::regclass, 'supervised_command_guard'),

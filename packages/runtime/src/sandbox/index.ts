@@ -25,6 +25,8 @@ export type { NativeBrokerArtifactPin } from "./providers/native-command-broker-
 export {
   initialNativeBrokerCommandSnapshot,
   projectNativeBrokerCommand,
+  retainedNativeBrokerCommandSnapshot,
+  nativeBrokerCommandFromSnapshot,
 } from "./providers/native-command-broker-command";
 export type {
   NativeBrokerCommandBinding,

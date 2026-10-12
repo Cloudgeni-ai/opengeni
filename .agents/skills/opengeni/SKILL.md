@@ -96,6 +96,10 @@ Then open the smallest source files that answer the question:
   The in-progress native initial-process broker is a separate versioned path:
   inspect `sandbox/providers/native-command-broker-driver.ts`, its bootstrap and
   per-command projection readers, and `packages/db/src/native-command-broker-transport.ts`.
+  Its distinct broker command locator and atomic retained output live in
+  `packages/contracts/src/sandbox-provider-command.ts` and
+  `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse
+  that locator. Canonical retention is not bootstrap or release authority.
   Journal capture/dispatch and a passing native fixture do not imply canonical
   application admission or old-group enrollment. Follow the remaining gates in
   `docs/design/native-command-broker.md` before enabling that path.

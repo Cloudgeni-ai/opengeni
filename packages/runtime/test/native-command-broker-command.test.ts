@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import {
   initialNativeBrokerCommandSnapshot,
   projectNativeBrokerCommand,
+  retainedNativeBrokerCommandSnapshot,
+  nativeBrokerCommandFromSnapshot,
 } from "../src/sandbox/providers/native-command-broker-command";
+import { ModalBrokerProviderCommand } from "@opengeni/contracts";
 import type { DurableNativeBrokerTransport } from "../src/sandbox/providers/native-command-broker-transport";
 import type { NativeBrokerFrame } from "../src/sandbox/providers/native-command-broker-wire";
 
@@ -89,6 +92,55 @@ function journal(values = frames(), eof = false) {
   } as unknown as DurableNativeBrokerTransport;
   return { source, requests };
 }
+
+function locator() {
+  return ModalBrokerProviderCommand.parse({
+    kind: "modal-broker-v1",
+    sandboxId: "sb-test",
+    taskId: "ta-test",
+    execId: commandId,
+    pty: false,
+    supervision: {
+      protocol: receipt.protocol,
+      invocationId: commandId,
+      brokerId,
+      launchRequestId,
+      launchEpoch: 1,
+    },
+    capture: { sequence: 0, receiptAckObserved: false },
+    streams: {
+      stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    },
+  });
+}
+
+test("retained broker projection round-trips exact identity, separate receipt and independent exit", async () => {
+  const command = locator();
+  const snapshot = retainedNativeBrokerCommandSnapshot(command, null);
+  expect(snapshot).toEqual(initialNativeBrokerCommandSnapshot(binding, 0));
+  const projected = await projectNativeBrokerCommand(journal().source, snapshot);
+  const end = nativeBrokerCommandFromSnapshot(command, projected.snapshot);
+  expect(end.capture).toEqual({ sequence: 6, receiptAckObserved: true });
+  expect(end.streams.stdout.exitCode).toBe(0);
+  expect(end.supervision).toEqual(command.supervision);
+  expect(retainedNativeBrokerCommandSnapshot(end, projected.snapshot.receipt)).toEqual(
+    projected.snapshot,
+  );
+  expect(() => retainedNativeBrokerCommandSnapshot(end, null)).toThrow();
+  expect(() =>
+    nativeBrokerCommandFromSnapshot(command, {
+      ...projected.snapshot,
+      binding: { ...binding, launchEpoch: 2 },
+    }),
+  ).toThrow();
+  expect(() =>
+    retainedNativeBrokerCommandSnapshot(end, {
+      ...projected.snapshot.receipt!,
+      protocol: "native-subreaper-v1",
+    }),
+  ).toThrow();
+});
 
 test("receipt, exact ACK, both output EOFs and independent supervisor exit are separate requirements", async () => {
   const f = journal();

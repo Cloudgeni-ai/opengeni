@@ -57194,7 +57194,8 @@ async function settleRetainedProcessWithAuthority(
       }
       const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
       if (
-        process.providerCommand?.kind === "modal-router-v1" &&
+        (process.providerCommand?.kind === "modal-router-v1" ||
+          process.providerCommand?.kind === "modal-broker-v1") &&
         process.providerCommand.supervision &&
         !rejectedLaunch &&
         (input.outcome !== "exited" ||

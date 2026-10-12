@@ -223,7 +223,7 @@ test("PTY readiness distinguishes the forward guard from the five legacy trigger
     expect(await supervisedCommandProtocolReady(client.db)).toBe(true);
     expect(await supervisedCommandProtocolReady(client.db, "native-subreaper-pty-v1")).toBe(false);
   } finally {
-    await shared.admin`comment on function opengeni_private.supervised_command_guard() is 'native-subreaper-pty-v1'`;
+    await shared.admin`comment on function opengeni_private.supervised_command_guard() is 'native-command-broker-retention-v1'`;
   }
 });
 

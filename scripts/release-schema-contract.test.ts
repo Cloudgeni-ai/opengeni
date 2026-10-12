@@ -205,10 +205,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0730_native_pty_command_supervision.sql",
+        (migration) => migration.path === "0739_native_pty_command_supervision.sql",
       ),
     ).toMatchObject({
-      path: "0730_native_pty_command_supervision.sql",
+      path: "0739_native_pty_command_supervision.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -217,10 +217,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0731_native_command_qualification.sql",
+        (migration) => migration.path === "0740_native_command_qualification.sql",
       ),
     ).toMatchObject({
-      path: "0731_native_command_qualification.sql",
+      path: "0740_native_command_qualification.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -2728,8 +2728,8 @@ describe("release schema contract", () => {
       "0684_claude_haiku_5_5_default_model.sql",
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
-      "0730_native_pty_command_supervision.sql",
-      "0731_native_command_qualification.sql",
+      "0739_native_pty_command_supervision.sql",
+      "0740_native_command_qualification.sql",
       "0738_native_command_broker_transport.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
