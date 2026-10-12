@@ -706,7 +706,7 @@ function Instructions({ text }: { text: string }) {
           aria-expanded={expanded}
           aria-controls={id}
           onClick={() => setExpanded((value) => !value)}
-          className="mt-1.5 inline-flex rounded-[6px] text-xs leading-4.5 font-medium text-brand underline-offset-4 hover:underline pointer-coarse:min-h-11 pointer-coarse:items-center"
+          className="mt-1.5 inline-flex rounded-[6px] text-xs leading-4.5 font-medium og-link pointer-coarse:min-h-11 pointer-coarse:items-center"
         >
           {expanded ? "Show less" : "Show more"}
         </button>
@@ -799,7 +799,7 @@ function Setup({
             <button
               type="button"
               onClick={() => onOpenSession(targetId)}
-              className="rounded-[6px] text-left font-medium text-brand underline-offset-4 hover:underline"
+              className="rounded-[6px] text-left font-medium og-link"
             >
               {chat ? sessionDisplayTitle(chat) : "Open the chat"}
             </button>
@@ -816,7 +816,7 @@ function Setup({
           <Link
             to="/workspaces/$workspaceId/variable-sets/$variableSetId"
             params={{ workspaceId, variableSetId: task.variableSetId }}
-            className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
+            className="rounded-[6px] font-medium og-link"
           >
             {setName ?? (variableSets.loading ? "Loading…" : "Attached variable set")}
           </Link>
@@ -839,7 +839,7 @@ function Setup({
           <Link
             to="/workspaces/$workspaceId/rigs/$rigId"
             params={{ workspaceId, rigId: task.rigId }}
-            className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
+            className="rounded-[6px] font-medium og-link"
           >
             {rigName ?? (rigs.loading ? "Loading…" : "Attached sandbox environment")}
           </Link>

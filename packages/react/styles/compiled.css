@@ -1664,6 +1664,9 @@
 :where(.og-root).left-2,:where(.og-root) .left-2 {
     left: calc(var(--spacing) * 2);
   }
+:where(.og-root).left-3,:where(.og-root) .left-3 {
+    left: calc(var(--spacing) * 3);
+  }
 :where(.og-root).isolate,:where(.og-root) .isolate {
     isolation: isolate;
   }
@@ -2826,6 +2829,32 @@
   }
 :where(.og-root).overscroll-contain,:where(.og-root) .overscroll-contain {
     overscroll-behavior: contain;
+  }
+:where(.og-root).og-link,:where(.og-root) .og-link {
+    color: var(--og-color-accent-strong);
+    text-decoration-line: underline;
+    text-decoration-thickness: 1px;
+    text-decoration-color: currentColor;
+    @supports (color: color-mix(in lab, red, red)) {
+      text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
+    }
+    text-underline-offset: 0.18em;
+    text-decoration-skip-ink: auto;
+    transition: text-decoration-color var(--_og-duration-fast) var(--og-ease-out);
+    @media (hover: hover) {
+      &:hover {
+        text-decoration-color: currentColor;
+      }
+    }
+    &:focus-visible {
+      text-decoration-color: currentColor;
+      outline: 2px solid var(--og-color-accent);
+      @supports (color: color-mix(in lab, red, red)) {
+        outline: 2px solid color-mix(in oklch, var(--og-color-accent) 70%, transparent);
+      }
+      outline-offset: 2px;
+      border-radius: var(--og-radius-xs);
+    }
   }
 :where(.og-root).rounded,:where(.og-root) .rounded {
     border-radius: 0.25rem;
@@ -5528,6 +5557,14 @@
       }
     }
   }
+:where(.og-root).focus-visible\:ring-white\/50,:where(.og-root) .focus-visible\:ring-white\/50 {
+    &:focus-visible {
+      --tw-ring-color: color-mix(in srgb, #fff 50%, transparent);
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, var(--color-white) 50%, transparent);
+      }
+    }
+  }
 :where(.og-root).focus-visible\:ring-offset-0,:where(.og-root) .focus-visible\:ring-offset-0 {
     &:focus-visible {
       --tw-ring-offset-width: 0px;
@@ -5930,6 +5967,16 @@
 :where(.og-root).min-\[400px\]\:inline,:where(.og-root) .min-\[400px\]\:inline {
     @media (width >= 400px) {
       display: inline;
+    }
+  }
+:where(.og-root).sm\:right-6,:where(.og-root) .sm\:right-6 {
+    @media (width >= 40rem) {
+      right: calc(var(--spacing) * 6);
+    }
+  }
+:where(.og-root).sm\:left-6,:where(.og-root) .sm\:left-6 {
+    @media (width >= 40rem) {
+      left: calc(var(--spacing) * 6);
     }
   }
 :where(.og-root).sm\:col-span-1,:where(.og-root) .sm\:col-span-1 {

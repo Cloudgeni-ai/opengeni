@@ -61,7 +61,7 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 | `fg-label` | Things you act on in navigation and lists: rail and settings-rail items, session titles, their icons. A hair under `fg`, never muted |
 | `fg-muted` | Descriptions, meta lines, secondary button text, section labels in a rail |
 | `fg-subtle` | Quiet meta, placeholders, separators |
-| `brand` | Neutral grey: icon, link, focus, active tab bar, selected ring. Never blue |
+| `brand` | Neutral grey: icon, focus, active tab bar, selected ring. Never blue. Text links use `og-link`, not `text-brand` |
 | `primary` | The filled primary button only ("teal wash": `primary` fill, `primary-foreground` ink, `primary-border` edge, `primary-hover`) |
 | `switch-track` / `switch-thumb` | A switch that is off |
 | `status-idle` | Green: Connected, Active, Succeeded, Installed |
@@ -73,6 +73,14 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 **Titles are never grey.** Every title, heading, row title, notice title, empty-state title,
 card title, form label and legend is `fg`. `fg-muted` and `fg-subtle` are only for descriptions,
 meta, placeholders and counts.
+
+**Links are underlined.** The palette is grey, so colour alone cannot mark a link. Every text
+link (an anchor, or a button that reads as a link: "Learn more", "Use default", "Reset to
+Member", a link in chat) uses the `og-link` utility from `@opengeni/react`: `accent-strong` ink
+with a resting underline at 45% of the link's own colour, which turns full ink on hover and on
+keyboard focus (plus the focus outline). Never a hover-only underline. A meta link may set
+`text-fg-muted` next to `og-link` and the underline follows it. Row titles that open a page,
+nav items, menu rows, tabs and ghost buttons are not text links and stay un-underlined.
 
 The palette is neutral grey everywhere (no blue or slate tint). Color appears only in the
 primary button's teal wash, the soft teal/peach glow, the status hues, and the

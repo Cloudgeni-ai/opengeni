@@ -635,7 +635,7 @@ function ArtifactDetailPage({
                                 workspaceId,
                                 sessionId: version.sourceSessionId,
                               }}
-                              className="relative z-10 font-medium text-fg-muted underline-offset-2 hover:text-fg hover:underline"
+                              className="relative z-10 font-medium og-link text-fg-muted hover:text-fg"
                             >
                               {version.revision === 1 ? "Creation session" : "Publishing session"}
                             </Link>

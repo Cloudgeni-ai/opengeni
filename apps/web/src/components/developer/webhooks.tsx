@@ -180,7 +180,7 @@ function InheritedWebhooksLine({
             <button
               type="button"
               onClick={organizationSettingsHref}
-              className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+              className="rounded-sm font-medium og-link"
             >
               Organization settings
             </button>

@@ -132,7 +132,7 @@ export function DirectModelProviderForm({
         />
         {provider === "openai" ? (
           <a
-            className="text-xs text-brand hover:underline"
+            className="text-xs og-link"
             href="https://platform.openai.com/api-keys"
             target="_blank"
             rel="noreferrer"
