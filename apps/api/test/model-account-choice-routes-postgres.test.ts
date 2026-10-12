@@ -3,6 +3,7 @@ import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@o
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
+  appendSessionEvents,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -350,6 +351,33 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     expect([403, 404]).toContain(
       (await call(stranger, "PUT", path, { connectionId: null })).status,
     );
+  });
+
+  test("SUB-FAIL-06 legacy or malformed selection payloads cannot manufacture a serving snapshot", async () => {
+    const path = `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sessionId}/model-account`;
+    for (const payload of [
+      { provider: "codex", connectionId: crypto.randomUUID(), modelId: "codex/legacy" },
+      {
+        turnId: crypto.randomUUID(),
+        provider: "codex",
+        connectionId: crypto.randomUUID(),
+        modelId: "codex/uncommitted",
+        preferredModelId: "codex/preferred",
+        reasoningEffort: "high",
+        latencyMode: "standard",
+      },
+    ]) {
+      await appendSessionEvents(client!.db, owner.defaultWorkspaceId, sessionId, [
+        {
+          type: "subscription.account.selected",
+          payload,
+        },
+      ]);
+      const result = await call(owner, "GET", path);
+      expect(result.status).toBe(200);
+      expect(result.json.serving).toBeNull();
+      expect((await call(colleague, "GET", path)).status).toBe(404);
+    }
   });
 
   test("SUB-SEL-02: a person reads and changes only their own personal-fallback opt-in", async () => {

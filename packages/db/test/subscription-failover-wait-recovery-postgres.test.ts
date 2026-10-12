@@ -22,6 +22,7 @@ import {
   servingPolicyForSelection,
 } from "../../../apps/worker/src/activities/agent-turn/subscription-serving-claim";
 import { acceptedPolicy } from "../../contracts/test/fixtures/turn-serving-policy";
+import { readSubscriptionCoreSessionAccountChoice } from "../src/subscription-core/session-choice";
 
 const rawSettings = getSettings({
   OPENGENI_ENV: "test",
@@ -75,7 +76,7 @@ describe.skipIf(!realDb)(
   "integrated portable waiter recovery using the restricted app role",
   () => {
     test.each([false, true])(
-      "raw control settings resolve a real fallback for private=%s and preserve accepted model",
+      "SUB-FAIL-06 raw control settings resolve a real fallback for private=%s and preserve accepted model",
       async (isPrivate) => {
         const { org, targetId, work } = await setup(isPrivate);
         // Unlike claim, control services have no injected subscription providers.
@@ -124,6 +125,18 @@ describe.skipIf(!realDb)(
         expect(serving?.revision?.policy.productModelId).toBe(target.id);
         expect(serving?.acceptedPolicy.productModelId).toBe(home.id);
         expect(serving?.revision?.connectionId).toBe(targetId);
+        const readChoice = () =>
+          readSubscriptionCoreSessionAccountChoice(
+            fixture.client.db,
+            {
+              ...work.identity,
+              subjectId: org.subjectId,
+            },
+            [SUBSCRIPTION_CORE_CODEX, SUBSCRIPTION_CORE_CLAUDE],
+          );
+        // The claimed revision is not a dispatch receipt: neither it nor the
+        // selected binding may be presented as serving before a leased attempt.
+        expect((await readChoice())?.serving).toBeNull();
         const selection = {
           ...work.identity,
           attemptId: attempt.attemptId,
@@ -159,6 +172,35 @@ describe.skipIf(!realDb)(
           toModelId: target.id,
           toAccountId: targetId,
         });
+        expect((await readChoice())?.serving).toEqual({
+          turnId: work.identity.turnId,
+          provider: "claude",
+          connectionId: targetId,
+          modelId: target.id,
+          preferredModelId: home.id,
+          reasoningEffort: serving!.revision!.policy.reasoningEffort,
+          latencyMode: serving!.revision!.policy.latencyMode,
+        });
+        if (isPrivate) {
+          expect(
+            await readSubscriptionCoreSessionAccountChoice(
+              fixture.client.db,
+              {
+                ...work.identity,
+                subjectId: "user:unrelated-reader",
+              },
+              [SUBSCRIPTION_CORE_CODEX, SUBSCRIPTION_CORE_CLAUDE],
+            ),
+          ).toBeNull();
+        }
+        // Redaction follows current visibility without rewriting past events.
+        await shared.admin`update subscription_provider_cutovers set enabled=false
+          where account_id=${org.accountId}::uuid and provider='claude'`;
+        const hidden = (await readChoice())?.serving;
+        expect(hidden).toMatchObject({ modelId: target.id, connectionId: null });
+        expect(JSON.stringify(hidden)).not.toContain(targetId);
+        await shared.admin`update subscription_provider_cutovers set enabled=true
+          where account_id=${org.accountId}::uuid and provider='claude'`;
         const retried = await recordSubscriptionCoreServingSelectionForTurnAttempt(
           fixture.client.db,
           selection,

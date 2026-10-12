@@ -493,11 +493,13 @@ export function SettingRowLink({
   onClick,
   children,
   className,
+  disabled = false,
 }: {
   href?: string;
   onClick?: () => void;
   children: ReactNode;
   className?: string;
+  disabled?: boolean;
 }) {
   const classes = cn(
     "relative inline-flex min-h-6 items-center gap-1 rounded-sm text-xs font-medium text-brand underline-offset-2 hover:underline pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2.5",
@@ -510,11 +512,11 @@ export function SettingRowLink({
     </>
   );
   return href ? (
-    <a href={href} className={classes}>
+    <a href={disabled ? undefined : href} aria-disabled={disabled || undefined} className={classes}>
       {content}
     </a>
   ) : (
-    <button type="button" onClick={onClick} className={classes}>
+    <button type="button" onClick={onClick} disabled={disabled} className={classes}>
       {content}
     </button>
   );

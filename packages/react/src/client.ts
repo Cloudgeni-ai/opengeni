@@ -188,6 +188,7 @@ type SessionClientMethods = Pick<
       | "listSessionBackgroundCommands"
       | "cancelSessionBackgroundCommand"
       | "getComputerInputPosture"
+      | "getSessionModelAccount"
     >
   >;
 

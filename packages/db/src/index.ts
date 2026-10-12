@@ -27857,6 +27857,9 @@ export async function recordSubscriptionCoreServingSelectionForTurnAttempt(
       executionGeneration: input.executionGeneration,
       servingHistoryPosition: revision.historyPosition,
       reason: input.reason,
+      preferredModelId: accepted.kind === "valid" ? accepted.policy.productModelId : input.modelId,
+      reasoningEffort: revision.policy.reasoningEffort,
+      latencyMode: revision.policy.latencyMode,
     };
     const events: AppendEventInput[] = [];
     if (

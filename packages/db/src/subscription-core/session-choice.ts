@@ -26,8 +26,12 @@
  * Nothing here returns credential material, and no provider is named: the
  * registry supplies every provider binding as data.
  */
-import { and, eq, sql } from "drizzle-orm";
-import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
+import { and, desc, eq, sql } from "drizzle-orm";
+import {
+  SessionModelAccountServing,
+  type SessionEvent,
+  type SessionEventType,
+} from "@opengeni/contracts";
 import * as schema from "../schema";
 import {
   rawRows,
@@ -99,6 +103,7 @@ export type SubscriptionCoreChoosableConnection = {
 };
 
 export type SubscriptionCoreSessionAccountChoice = {
+  serving: SessionModelAccountServing | null;
   /**
    * The session's binding when it has exactly one: `explicit` after a
    * person's choice, else the account automatic placement last used. Null
@@ -340,6 +345,42 @@ export async function readSubscriptionCoreSessionAccountChoice(
           order by provider`,
       );
       const optIn = await readOwnOptIn(tx, input);
+      const [selection] = await tx
+        .select({
+          payload: schema.sessionEvents.payload,
+          payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+          turnId: schema.sessionEvents.turnId,
+        })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.type, "subscription.account.selected"),
+          ),
+        )
+        .orderBy(desc(schema.sessionEvents.sequence))
+        .limit(1);
+      const payload = selection
+        ? fromPostgresLosslessJson(selection.payload, selection.payloadCodecVersion)
+        : null;
+      const selected =
+        typeof payload === "object" && payload !== null && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>)
+          : null;
+      const serving = selected
+        ? SessionModelAccountServing.safeParse({
+            ...selected,
+            turnId: selection!.turnId,
+            connectionId: connections.some(
+              (connection) =>
+                connection.provider === selected.provider &&
+                connection.connectionId === selected.connectionId,
+            )
+              ? selected.connectionId
+              : null,
+          })
+        : null;
       const bindings = stored.map(
         (binding): SubscriptionCoreSessionChoiceBinding => ({
           provider: binding.provider,
@@ -354,6 +395,7 @@ export async function readSubscriptionCoreSessionAccountChoice(
         }),
       );
       return {
+        serving: serving?.success ? serving.data : null,
         binding: bindings.length === 1 ? bindings[0]! : null,
         bindings,
         connections,

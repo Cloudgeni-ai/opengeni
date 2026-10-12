@@ -317,8 +317,9 @@ export async function listSubscriptionCoreCodexPersonalAccountsInTransaction(
 }
 
 /**
- * The organization's own Codex accounts (shared connections no workspace
- * manages) and its rotation, for an organization administrator. A
+ * The organization's Codex accounts (every shared connection it
+ * administers, including ones a shared workspace manages) and its rotation,
+ * for an organization administrator. A
  * non-administrator sees nothing: the connection policy hides every row.
  */
 export async function getSubscriptionCoreOrganizationCodexProjection(
@@ -328,13 +329,14 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
   const pool = await readSubscriptionCoreOrganizationPool(db, SUBSCRIPTION_CORE_CODEX, input);
   if (!pool) return { accounts: [], rotation: rotationSettings(null, false) };
   return {
-    accounts: pool.rows.map((row) =>
-      projectAccount(row, {
+    accounts: pool.rows.map((row) => ({
+      ...projectAccount(row, {
         source: "organization",
         primaryConnectionId: pool.primaryConnectionId,
         poolAllocatorEnabled: true,
       }),
-    ),
+      ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+    })),
     rotation: rotationSettings(pool.primaryConnectionId, pool.rotationMode === "spread"),
   };
 }
@@ -352,11 +354,14 @@ export async function getSubscriptionCoreOrganizationCodexAccount(
   const pool = await readSubscriptionCoreOrganizationPool(db, SUBSCRIPTION_CORE_CODEX, input);
   const row = pool?.rows[0];
   if (!pool || !row) return null;
-  return projectAccount(row, {
-    source: "organization",
-    primaryConnectionId: pool.primaryConnectionId,
-    poolAllocatorEnabled: true,
-  });
+  return {
+    ...projectAccount(row, {
+      source: "organization",
+      primaryConnectionId: pool.primaryConnectionId,
+      poolAllocatorEnabled: true,
+    }),
+    ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+  };
 }
 
 type Administration = SubscriptionCoreAdministration;

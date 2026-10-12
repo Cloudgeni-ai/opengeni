@@ -720,6 +720,13 @@ export type {
   UseCodexAccountsOptions,
   UseCodexAccountsResult,
 } from "./hooks/use-codex-accounts";
+// Model-account choice for every provider on the shared subscription core.
+export { useSessionModelAccount, isModelAccountEvent } from "./hooks/use-session-model-account";
+export type {
+  ModelAccountClientLike,
+  UseSessionModelAccountOptions,
+  UseSessionModelAccountResult,
+} from "./hooks/use-session-model-account";
 export { useSuperGrokAccounts } from "./hooks/use-supergrok-accounts";
 export type {
   SuperGrokAccountsClientLike,

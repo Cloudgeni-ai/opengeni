@@ -651,6 +651,19 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
       reach: false,
     });
     expect(await served()).toEqual({ own: [id], other: [] });
+    // The organization's account list shows the organization's switch and
+    // list, not the manager's.
+    const listedForOrganization = async () =>
+      (
+        await getSubscriptionCoreOrganizationCodexProjection(client!.db, {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+        })
+      ).accounts.find((account) => account.id === id);
+    expect(await listedForOrganization()).toMatchObject({
+      allocatorEnabled: false,
+      allowedModelIds: [MODEL],
+    });
     expect(await servedLater()).toEqual([]);
     // Under the organization's pool the organization's copy, off, decides:
     // the managing workspace's page reads off, and its own "on" (already on)

@@ -22986,7 +22986,23 @@
         "$.personal": "object!",
         "$.personal.connectionsAllowed": "boolean!",
         "$.personal.fallbackAllowed": "boolean!",
-        "$.personal.fallbackOptIn": "boolean!"
+        "$.personal.fallbackOptIn": "boolean!",
+        "$.serving": "ref(SessionModelAccountServing)? null"
+      }
+    },
+    "SessionModelAccountServing": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectionId": "string! null",
+        "$.latencyMode": "ref(LatencyMode)!",
+        "$.modelId": "string!",
+        "$.preferredModelId": "string!",
+        "$.provider": "string!",
+        "$.reasoningEffort": "ref(ReasoningEffort)!",
+        "$.turnId": "string!"
       }
     },
     "SessionModelContextResponse": {
@@ -30932,6 +30948,7 @@
       "isHumanInputEvent": "value",
       "isLastStartedTurnPolicyEvent": "value",
       "isLineageRefreshEvent": "value",
+      "isModelAccountEvent": "value",
       "isModelUnavailableSubmissionError": "value",
       "isRawModelLabel": "value",
       "isSessionMcpApprovalPolicyEvent": "value",
@@ -31003,6 +31020,7 @@
       "MetricSparkline": "value",
       "MetricSparklineProps": "type",
       "MetricWindow": "type",
+      "ModelAccountClientLike": "type",
       "ModelDisplayInput": "type",
       "modelDisplayName": "value",
       "modelHasMark": "value",
@@ -31328,6 +31346,9 @@
       "useSessionMcpApprovalPolicy": "value",
       "UseSessionMcpApprovalPolicyOptions": "type",
       "UseSessionMcpApprovalPolicyResult": "type",
+      "useSessionModelAccount": "value",
+      "UseSessionModelAccountOptions": "type",
+      "UseSessionModelAccountResult": "type",
       "UseSessionOptions": "type",
       "UseSessionResult": "type",
       "useSlashCommands": "value",
