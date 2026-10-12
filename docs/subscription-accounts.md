@@ -163,8 +163,12 @@ for it until the matching requirement below is implemented:
   Reconnecting restores health without silently changing allocator
   eligibility. Verification: pending (shared-core).
 - **SUB-ELIG-05** A personal connection serves only its owner's own work in
-  their private sessions and Personal workspace. Shared team work is funded by
-  organization connections. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
+  their private sessions and Personal workspace, or their own newly accepted
+  work after an explicit choice in a shared session they participate in. The
+  account owner need not be the session creator. Shared consent is restricted
+  to the exact session and connection; another sender never inherits it.
+  Live membership, resource generation and effective personal-account policy
+  still apply. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
   manufactures exhaustion: an account with unknown quota is eligible and
   counts as able to serve. Ordinary primary/spread ordering applies equally
@@ -179,7 +183,10 @@ for it until the matching requirement below is implemented:
   its owner's Personal workspace. In other workspaces, private sessions need
   an explicit account choice or permitted, per-person fallback opt-in (off by
   default). Live ownership, organization permission and accepted-turn personal
-  authority remain required in every case (D-28).
+  authority remain required in every case (D-28). In a shared session a person
+  may explicitly choose their own personal account, but shared visibility
+  never permits automatic personal fallback. Already accepted work keeps its
+  frozen pool; a new choice cannot grant it missing authority.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
 - **SUB-SEL-03** Primary first places new work on the primary account while
   it can serve the work (unknown quota counts as able to serve,
@@ -226,8 +233,10 @@ for it until the matching requirement below is implemented:
 - **SUB-STICK-07** A session that was started on a personal account and is
   later shared stops using that account at once, even while its cache is
   warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
-  is out of scope for the shared session (SUB-STICK-03). Its next turn moves
-  to an eligible organization account, or waits if none can serve.
+  is out of scope for previously accepted private work (SUB-STICK-03). A new
+  human acceptance may capture the owner's explicit shared-session choice
+  under SUB-ELIG-05; merely sharing a session never rewrites an accepted pool.
+  Otherwise it moves to an eligible organization account, or waits if none can serve.
   Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 
 ### Exhaustion and failover

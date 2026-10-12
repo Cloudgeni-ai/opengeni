@@ -358,6 +358,51 @@ request; it marks the lease for failover at the next model-call boundary.
 - Membership removal (0263) learns the `subscription_connection` resource
   kind and revokes personal connections on leave (SUB-ACCESS-06).
 
+#### Owner decision: explicit personal choice in a shared chat (2026-10-12)
+
+The private-work rule above remains the meaning of existing v2 entries and
+compatibility records. Its only new exception is an authenticated participant
+explicitly choosing **their own** personal account in a shared session, subject
+to live organization/workspace personal-account policy. The participant need
+not be the session creator. Shared `people` scopes still mean the session
+owner; do not substitute the choosing person for the session identity.
+
+Fresh human acceptance can add `sharedSessionChoice: { sessionId, connectionId }`
+to that provider's v2 entry. Both UUIDs are required, canonical and strictly
+validated; unknown fields and malformed restrictions fail closed. The entry
+still carries the account owner's membership and exact resource generation.
+The authenticated accepting human must own the explicit provider binding's
+connection and participate in the session. A service, API key, ownerless
+context, automatic binding or different sender grants no such entry. No
+creator fallback is available for this new branch. Existing private entries
+and compatibility `connectionIds` keep their original interpretation.
+
+Readers must support the restricted shape before any writer emits it. This
+is not a rolling-writer-compatible extension: old strict readers reject the
+extra field. Activation must fence incompatible readers; no backfill,
+generation rotation or rewriting of already accepted work is permitted.
+SQL access and placement consume the stored exact restriction, never a live
+binding as a substitute for consent. Live account-owner membership, workspace
+participation, resource generation, effective policy, provider receipt and
+cutover checks remain mandatory. The genuine session owner and initiating
+human remain separate fields in every runtime capability.
+
+Background, replay, recovery, schedules and causal copies retain the original
+entry verbatim. It cannot authorize a different session or a same-generation
+sibling connection. A later choice affects only the next acceptance unless
+the waiting turn's frozen authority already admits the exact target under
+live checks; the choice response must not claim `waiting_turn` otherwise.
+Shared visibility never activates automatic personal fallback. Administered
+credential/version/refresh/quota routes remain exact-owner Personal-workspace
+only: an inference capability does not open them.
+
+The forward implementation preserves 0716 receipt/compatibility gates, 0717
+immutability and copy fences, 0726 lifecycle marker bracketing and 0728
+inserted-now replay protection. Provider-qualified binding keys, placement
+commits and cache clocks remain the independent 0733 contract. Real PostgreSQL
+verification must run as a non-owner, non-superuser, non-BYPASSRLS application
+role and include a non-superuser owner-migrated database.
+
 ## 4. Placement
 
 One transaction per placement. No provider call happens inside it. It reads

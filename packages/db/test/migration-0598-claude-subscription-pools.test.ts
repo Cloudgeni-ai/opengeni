@@ -76,6 +76,8 @@ const subscriptionCoreMigrations = [
   "0730_subscription_core_personal_connection_versions.sql",
   // Rekeys the session bindings table from withheld 0642.
   "0733_subscription_session_bindings_per_provider.sql",
+  // Reads and narrows the personal authority routines withheld with 0642/0667.
+  "0736_subscription_shared_personal_choice.sql",
   // Previews the system-update claim rewritten by withheld core migrations.
   "0732_sandbox_maintenance_work_probes.sql",
 ] as const;
