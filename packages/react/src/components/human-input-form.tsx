@@ -1071,7 +1071,8 @@ function QuestionControls({
           ) : null}
         </div>
       )}
-      {error ? (
+      {/* A secret field shows its error under the input, above Save to. */}
+      {error && !(question.kind === "secret" && question.secret) ? (
         <p id={errorId} role="alert" className="text-og-xs text-og-status-failed">
           {error}
         </p>
