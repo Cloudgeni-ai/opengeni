@@ -2114,6 +2114,21 @@ export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
+  /**
+   * Secret facts for this attempt. `referencesEnabled` is true when the host
+   * resolves `{{secret:…}}` references (the secrets prompt module renders
+   * only then). `hasActingHuman` admits Only-me secret questions;
+   * `validateQuestionVault` rejects a named vault that cannot take the answer
+   * (for example a connected 1Password vault, Q-05) with a model-facing reason.
+   */
+  secrets?: {
+    referencesEnabled: boolean;
+    hasActingHuman: boolean;
+    validateQuestionVault?: (input: {
+      vault: string;
+      saveTo: "user" | "task" | "workspace";
+    }) => Promise<string | null>;
+  };
   /** Settled response for the one internal human-input interruption resumed by this run. */
   humanInputResponse?: {
     requestId: string;
@@ -2506,6 +2521,7 @@ export function agentPromptResourcesFor(
     | "gitTokenSeeds"
     | "workspaceEnvironment"
     | "rig"
+    | "secrets"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2528,6 +2544,7 @@ export function agentPromptResourcesFor(
         (options.fileResourceDownloads?.length ?? 0) > 0),
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
+    ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
   };
 }
 
@@ -2781,6 +2798,50 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * identical call would be rejected again. It names the missing or mistyped
  * properties and asks the model to correct them instead of "Please try again".
  */
+const HUMAN_INPUT_TOOL_DESCRIPTION =
+  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.";
+
+const HUMAN_INPUT_SECRET_DESCRIPTION =
+  'For a password, API key, token or one-time setup key, ask with a question of kind "secret" and a secret spec (item, field, saveTo); never use a text question or chat for secrets. The answer is saved to a vault and you receive a reference such as {{secret:GitHub/password}} plus the plain username, never the value; use the reference right away.';
+
+/**
+ * Secret-question rules the schema cannot express (AC-1): the capability is
+ * on, Only-me saves have an acting human, and a named vault can take the answer.
+ * Returns a model-facing reason, or null when the request may proceed.
+ */
+export async function secretQuestionRejection(
+  input: RequestHumanInputToolInput,
+  context: {
+    enabled: boolean;
+    hasActingHuman: boolean;
+    validateQuestionVault?: (input: {
+      vault: string;
+      saveTo: "user" | "task" | "workspace";
+    }) => Promise<string | null>;
+  },
+): Promise<string | null> {
+  const secretQuestions = input.questions.filter((question) => question.kind === "secret");
+  if (secretQuestions.length === 0) return null;
+  if (!context.enabled) {
+    return 'Secrets are turned off for this agent, so questions of kind "secret" are not available. Ask for something else or continue without the secret.';
+  }
+  for (const question of secretQuestions) {
+    const spec = question.secret;
+    if (!spec) continue;
+    const saveTo = spec.saveTo ?? "user";
+    if (saveTo === "user" && !context.hasActingHuman) {
+      return `Question "${question.id}" saves to "Only me", but no person is acting in this run. Use saveTo "task" or "workspace" and call request_human_input again.`;
+    }
+    if (spec.vault && context.validateQuestionVault) {
+      const reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      if (reason) {
+        return `Question "${question.id}" names vault "${spec.vault}": ${reason} Omit vault to use the default vault for saveTo, then call request_human_input again.`;
+      }
+    }
+  }
+  return null;
+}
+
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
@@ -3017,8 +3078,9 @@ export function buildOpenGeniAgent(
     ? null
     : agentTool({
         name: HUMAN_INPUT_TOOL_NAME,
-        description:
-          "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
+        description: toolFamilies.secrets
+          ? `${HUMAN_INPUT_TOOL_DESCRIPTION} ${HUMAN_INPUT_SECRET_DESCRIPTION}`
+          : HUMAN_INPUT_TOOL_DESCRIPTION,
         parameters: RequestHumanInputToolInput,
         needsApproval: true,
         inputGuardrails: [
@@ -3033,10 +3095,21 @@ export function buildOpenGeniAgent(
                   "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
                 );
               }
-              if (!RequestHumanInputToolInput.safeParse(input).success) {
+              const parsed = RequestHumanInputToolInput.safeParse(input);
+              if (!parsed.success) {
                 return ToolGuardrailFunctionOutputFactory.rejectContent(
                   "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
                 );
+              }
+              const secretRejection = await secretQuestionRejection(parsed.data, {
+                enabled: toolFamilies.secrets,
+                hasActingHuman: options.secrets?.hasActingHuman ?? false,
+                ...(options.secrets?.validateQuestionVault
+                  ? { validateQuestionVault: options.secrets.validateQuestionVault }
+                  : {}),
+              });
+              if (secretRejection) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
               }
               return ToolGuardrailFunctionOutputFactory.allow();
             },
