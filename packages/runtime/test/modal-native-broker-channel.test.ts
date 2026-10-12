@@ -83,6 +83,9 @@ test("preaborted observation/write does not touch the provider; in-flight abort 
   controller.abort(new Error("closed caller"));
   await expect(f.channel.write(input(), controller.signal)).rejects.toThrow("closed caller");
   await expect(f.channel.output("0-0", controller.signal).next()).rejects.toThrow("closed caller");
+  await expect(f.channel.diagnostics("0-0", controller.signal).next()).rejects.toThrow(
+    "closed caller",
+  );
   expect(f.calls).toHaveLength(0);
   const during = new AbortController();
   const active = fixture({
@@ -187,4 +190,54 @@ test("production factory requires original authenticated profile and exact SDK",
       taskId: "ta-exact",
     }),
   ).toThrow("authenticated");
+});
+
+test("initial diagnostics use separate stderr and recheck the exact live task after query completion", async () => {
+  const f = fixture({
+    async *sandboxGetLogs(request: unknown) {
+      expect(request).toEqual({
+        sandboxId: "sb-exact",
+        fileDescriptor: 2,
+        timeout: 1,
+        lastEntryId: "0-0",
+      });
+      yield { entryId: "2-0", items: [{ fileDescriptor: 2, data: "diagnostic" }], eof: false };
+    },
+  });
+  const pages = [];
+  for await (const page of f.channel.diagnostics("0-0")) pages.push(page);
+  expect(pages[0]).toMatchObject({
+    requestedFileDescriptor: 2,
+    taskId: "ta-exact",
+    items: [{ fileDescriptor: 2, data: "diagnostic" }],
+  });
+  expect(f.calls.map((call) => call.kind)).toEqual(["task", "task"]);
+  expect(f.calls[0]!.input).toMatchObject({ timeout: 1, waitUntilReady: false });
+});
+
+test("diagnostic terminal task, foreign stream and late task changes never report clean completion", async () => {
+  let reads = 0;
+  const stopped = fixture({
+    sandboxGetTaskId: async () => ({ taskId: "ta-exact", taskResult: { exitcode: 1 } }),
+    async *sandboxGetLogs() {
+      reads++;
+      yield { entryId: "", items: [], eof: false };
+    },
+  });
+  await expect(stopped.channel.diagnostics("0-0").next()).rejects.toThrow("live initial process");
+  expect(reads).toBe(0);
+  const wrong = fixture();
+  await expect(wrong.channel.diagnostics("0-0").next()).rejects.toThrow("invalid_page");
+  let checks = 0;
+  const late = fixture({
+    sandboxGetTaskId: async () => ({ taskId: ++checks === 1 ? "ta-exact" : "ta-other" }),
+    async *sandboxGetLogs() {
+      yield { entryId: "", items: [], eof: false };
+    },
+  });
+  const iterator = late.channel.diagnostics("0-0");
+  expect((await iterator.next()).done).toBe(false);
+  await expect(iterator.next()).rejects.toThrow("live initial process");
+  late.channel.close();
+  await expect(late.channel.diagnostics("0-0").next()).rejects.toThrow("closed");
 });

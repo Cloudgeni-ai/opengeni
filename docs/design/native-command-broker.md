@@ -383,6 +383,32 @@ client does not terminate the sandbox or close its initial stdin. Observation
 containment deadlines do not limit command lifetime. Initial stderr and creation
 provenance remain separate admission obligations, not guessed from empty stdout.
 
+The separate initial-stderr adapter uses descriptor 2 and a bounded one-second
+provider query, checking the original live task before and after completion.
+`native-command-broker-diagnostics.ts` observes from stderr's own origin under a
+five-second/128-page/64-KiB bound. Nonempty diagnostics, initial EOF, foreign
+identity/descriptor, conflicting replay, query errors and aborts cannot produce
+a clean result. A clean observation describes only that completed query, never
+future health, command EOF or permission to execute. Neither stderr cursor nor
+its completion advances stdout framing. Core retains the first definite
+diagnostic/protocol fault in the encrypted append-only transport journal before
+reporting it (maintenance migration `0751`). The exact bounded page and checksum
+are private evidence; malformed or over-bound pages retain the refusal category
+without storing an unbounded payload. A later clean query or restart cannot
+clear a fault. Query failures and aborts alone remain unavailable, not permanent
+fault evidence.
+
+New work reservation and not-yet-accepted work dispatch check that durable fault
+under the broker transaction lock. Exact cancel/status, replay, ACK and writer
+fencing remain available subject to the existing input state machine. A fault
+does not clear unknown input, undo a committed dispatch intent, prove physical
+quiescence, or allow a different request past a pending one. Retained stdin
+refusal rolls back its byte reservation together with the request. Bootstrap
+composition checks diagnostics and rechecks qualified physical ownership after
+all provider reads. Ongoing application lifecycle observation and physical
+provider qualification remain unimplemented; the application does not select
+this path yet.
+
 Output pages commit before the driver asks for a successor. Restartable bounded
 frame reads verify immutable ciphertext/hash/scope and the numeric sequence
 order. `native-command-broker-bootstrap.ts` reconstructs only the initial hello

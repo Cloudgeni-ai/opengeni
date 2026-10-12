@@ -103,6 +103,12 @@ Then open the smallest source files that answer the question:
   `registerQualifiedNativeBrokerBootstrap` derives its pin and broker identity
   through the immutable physical-enrollment reader (migration `0750`), rechecks
   after capture, and requires existing durable evidence for warm recovery.
+  Initial stderr has a separate bounded observer in
+  `native-command-broker-diagnostics.ts`. Core retains the first definite fault
+  in the encrypted append-only journal (migration `0751`), and transport refuses
+  new work without clearing uncertain input or blocking exact cancellation and
+  output retirement. A completed empty query is not durable health or command
+  authority; live application observation and provider qualification remain open.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse

@@ -20,6 +20,14 @@ export { NativeBrokerRetainedCommand } from "./providers/native-command-broker-r
 export type { NativeBrokerChannel } from "./providers/native-command-broker-driver";
 export { ModalNativeBrokerChannel } from "./providers/modal-native-broker-channel";
 export {
+  inspectNativeBrokerInitialDiagnostics,
+  NativeBrokerInitialDiagnosticsError,
+  parseNativeBrokerDiagnosticsFault,
+  type NativeBrokerDiagnosticsFault,
+  type NativeBrokerDiagnosticsChannel,
+  type NativeBrokerDiagnosticsPage,
+} from "./providers/native-command-broker-diagnostics";
+export {
   verifyNativeBrokerBootstrap,
   readNativeBrokerBootstrap,
 } from "./providers/native-command-broker-bootstrap";

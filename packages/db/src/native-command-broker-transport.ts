@@ -49,7 +49,8 @@ export type NativeBrokerEntryKind =
   | "eof"
   | "control_reply"
   | "request_reply"
-  | "stdin_reservation";
+  | "stdin_reservation"
+  | "diagnostic_fault";
 export type NativeBrokerStoredEntry = {
   kind: NativeBrokerEntryKind;
   key: string;
@@ -679,6 +680,7 @@ function validateEntryIdentity(
       "control_reply",
       "request_reply",
       "stdin_reservation",
+      "diagnostic_fault",
     ].includes(kind) ||
     typeof key !== "string" ||
     Buffer.byteLength(key) < 1 ||
@@ -701,6 +703,7 @@ function validateEntryIdentity(
       fenced();
   }
   if (kind === "frame" && !/^[1-9][0-9]*$/.test(key)) fenced();
+  if (kind === "diagnostic_fault" && key !== "initial-stderr") fenced();
   if (!write) return;
   if (
     kind === "request" ||

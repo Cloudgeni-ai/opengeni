@@ -69,8 +69,15 @@ progress or retrofits missing evidence. The qualified core composition derives
 the original broker identity and artifact from the scoped immutable physical
 enrollment (`native_broker_bootstrap_admission`, migration `0750`), before any
 provider reads and again after capture. Warm recovery requires existing durable
-evidence; it cannot register an old running box. This does not verify initial
-stderr or admit commands.
+evidence; it cannot register an old running box. The separate initial-stderr
+observer in `native-command-broker-diagnostics.ts` never advances stdout state.
+Core retains its first definite fault in the encrypted append-only transport
+journal (migration `0751`); the transport then refuses new work and pending
+work dispatch while preserving exact cancellation, observation and receipt
+retirement. Clean queries cannot erase that fault. Query failure alone is
+unavailability, not a fabricated permanent fault; neither clean observations nor
+bootstrap registration grants command authority. Ongoing application lifecycle
+observation and provider qualification remain separate, incomplete gates.
 `retained-provider-commands.ts` atomically captures the versioned broker locator
 and session output under the canonical native receipt/holder/settlement guards;
 the task-router adapter explicitly refuses that separate locator.

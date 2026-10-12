@@ -3,6 +3,10 @@ import { createModalSingleDispatchClient } from "./modal-legacy-command-control"
 import type { NativeBrokerChannel } from "./native-command-broker-driver";
 import type { NativeBrokerOutputPage } from "./native-command-broker-output";
 import { NATIVE_BROKER_FRAME_MAX_BYTES } from "./native-command-broker-wire";
+import {
+  NativeBrokerInitialDiagnosticsError,
+  type NativeBrokerDiagnosticsPage,
+} from "./native-command-broker-diagnostics";
 
 type Port = Pick<
   ModalClient["cpClient"],
@@ -125,5 +129,59 @@ export class ModalNativeBrokerChannel implements NativeBrokerChannel {
       this.closed = true;
       this.closeClient();
     }
+  }
+
+  /** Separate bounded initial-stderr query. Unlike a command stream, any
+   * nonempty data is a broker diagnostic. A normal one-second server-query
+   * completion is observable; abort/error is never converted into clean EOF.
+   * Check task liveness on both sides, without launching an exec or retrying. */
+  async *diagnostics(
+    cursor: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<NativeBrokerDiagnosticsPage> {
+    if (typeof cursor !== "string" || !cursor.length || cursor.length > 200)
+      throw new Error("Invalid native broker diagnostic cursor");
+    const bounded = this.signal(signal);
+    const checkTask = async () => {
+      bounded.throwIfAborted();
+      if (this.closed) throw new Error("Native broker channel is closed");
+      const task = await this.port.sandboxGetTaskId(
+        { sandboxId: this.sandboxId, timeout: 1, waitUntilReady: false },
+        { signal: bounded },
+      );
+      if (task.taskId !== this.taskId || task.taskResult)
+        throw new Error("Native broker diagnostic task is not the live initial process");
+      bounded.throwIfAborted();
+      if (this.closed) throw new Error("Native broker channel is closed");
+    };
+    await checkTask();
+    for await (const page of this.port.sandboxGetLogs(
+      { sandboxId: this.sandboxId, fileDescriptor: 2, timeout: 1, lastEntryId: cursor },
+      { signal: bounded },
+    )) {
+      bounded.throwIfAborted();
+      if (this.closed) throw new Error("Native broker channel is closed");
+      yield {
+        sandboxId: this.sandboxId,
+        taskId: this.taskId,
+        requestedFileDescriptor: 2,
+        entryId: page.entryId,
+        eof: page.eof,
+        items: page.items.map((item) => {
+          if (item.fileDescriptor !== 2)
+            throw new NativeBrokerInitialDiagnosticsError(
+              Object.freeze({
+                version: 1,
+                sandboxId: this.sandboxId,
+                taskId: this.taskId,
+                reason: "invalid_page",
+                page: null,
+              }),
+            );
+          return { fileDescriptor: 2 as const, data: item.data };
+        }),
+      };
+    }
+    await checkTask();
   }
 }

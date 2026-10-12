@@ -14,6 +14,10 @@ import {
   durableNativeBrokerTransport,
   captureNativeBrokerBootstrap,
   readNativeBrokerBootstrap,
+  inspectNativeBrokerInitialDiagnostics,
+  NativeBrokerInitialDiagnosticsError,
+  type NativeBrokerDiagnosticsChannel,
+  type DurableNativeBrokerTransport,
   type NativeBrokerArtifactPin,
   type NativeBrokerChannel,
 } from "@opengeni/runtime/sandbox";
@@ -31,16 +35,46 @@ export function createDurableNativeBrokerTransport(
   );
 }
 
+/** Each query starts at the original stderr origin. Retain a definite
+ * diagnostic/protocol fault before reporting it; uncertainty or abort alone
+ * remains unavailable, not a fabricated permanent provider failure. A fault
+ * wins concurrent clean observations and cannot be cleared by reconnection. */
+export async function observeDurableNativeBrokerDiagnostics(
+  journal: DurableNativeBrokerTransport,
+  channel: NativeBrokerDiagnosticsChannel,
+  signal?: AbortSignal,
+) {
+  signal?.throwIfAborted();
+  const { output } = await journal.read();
+  if (output.sandboxId !== channel.sandboxId || output.taskId !== channel.taskId)
+    throw new Error("Native broker diagnostic channel changed physical identity");
+  const old = await journal.diagnosticFault();
+  if (old) throw new NativeBrokerInitialDiagnosticsError(old);
+  let observation;
+  try {
+    observation = await inspectNativeBrokerInitialDiagnostics(channel, signal);
+  } catch (error) {
+    if (!(error instanceof NativeBrokerInitialDiagnosticsError)) throw error;
+    const retained = await journal.recordDiagnosticFault(error.observation);
+    throw new NativeBrokerInitialDiagnosticsError(retained);
+  }
+  const concurrent = await journal.diagnosticFault();
+  if (concurrent) throw new NativeBrokerInitialDiagnosticsError(concurrent);
+  signal?.throwIfAborted();
+  return observation;
+}
+
 /** Compose the frozen owner-qualified creation with exact authenticated
- * initial-channel capture. This still grants no command authority: initial
- * stderr, live command admission and the session adapter remain separate.
+ * initial-channel capture and durable diagnostic fencing. This still grants
+ * no command authority: live admission and the session adapter remain separate.
  * Warm recovery requires existing retained evidence and never reads a new
  * prefix or retrospectively registers an already-running sandbox. */
 export async function registerQualifiedNativeBrokerBootstrap(
   db: Database,
   encryptionKey: Uint8Array,
   input: NativeBrokerBootstrapAdmissionInput,
-  channel: Pick<NativeBrokerChannel, "sandboxId" | "taskId" | "output">,
+  channel: Pick<NativeBrokerChannel, "sandboxId" | "taskId" | "output"> &
+    NativeBrokerDiagnosticsChannel,
   signal?: AbortSignal,
 ) {
   const scope = structuredClone(input);
@@ -59,6 +93,11 @@ export async function registerQualifiedNativeBrokerBootstrap(
     admitted.artifact,
     signal,
   );
+  const diagnostics = await observeDurableNativeBrokerDiagnostics(
+    captured.journal,
+    channel,
+    signal,
+  );
   // No provider I/O while a DB transaction is held. Recheck after capture: a
   // lost/replaced/draining lease cannot become an application startup result.
   const current = await loadNativeBrokerBootstrapAdmission(db, scope);
@@ -68,7 +107,7 @@ export async function registerQualifiedNativeBrokerBootstrap(
   )
     throw new Error("Native broker bootstrap qualification changed during capture");
   signal?.throwIfAborted();
-  return Object.freeze({ ...captured, commandAdmission: false as const });
+  return Object.freeze({ ...captured, diagnostics, commandAdmission: false as const });
 }
 
 /** Fresh, already-attributed initial channel only. This closes the prefix

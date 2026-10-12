@@ -19,6 +19,11 @@ import {
   type NativeBrokerOutputPage,
 } from "./native-command-broker-output";
 import { NativeBrokerFrameDecoder, type NativeBrokerFrame } from "./native-command-broker-wire";
+import {
+  parseNativeBrokerDiagnosticsFault,
+  NativeBrokerInitialDiagnosticsError,
+  type NativeBrokerDiagnosticsFault,
+} from "./native-command-broker-diagnostics";
 
 type EntryKind =
   | "request"
@@ -27,7 +32,8 @@ type EntryKind =
   | "eof"
   | "control_reply"
   | "request_reply"
-  | "stdin_reservation";
+  | "stdin_reservation"
+  | "diagnostic_fault";
 type Entry = {
   kind: EntryKind;
   key: string;
@@ -138,6 +144,37 @@ export function initialNativeBrokerTransportState(identity: Identity): NativeBro
  * Only `dispatchIntent` returns provider bytes, after the DB commit resolves.
  */
 export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, identity: Identity) {
+  const diagnosticFault = async (tx: NativeBrokerTransportTransaction) => {
+    validate(tx.state, identity);
+    const entry = await tx.read("diagnostic_fault", "initial-stderr");
+    if (!entry) return null;
+    if (
+      entry.kind !== "diagnostic_fault" ||
+      entry.key !== "initial-stderr" ||
+      entry.sequence !== null
+    )
+      invalid();
+    return parseNativeBrokerDiagnosticsFault(JSON.parse(entry.value), identity);
+  };
+  const requireHealthyForWork = async (
+    tx: NativeBrokerTransportTransaction,
+    request: NativeBrokerRequest,
+  ) => {
+    // Preserve exact cancellation, observation and receipt retirement. A fault
+    // cannot authorize a replay, clear a pending request, or prove quiescence.
+    const control = Buffer.from(request.payload).toString("utf8");
+    const safe =
+      ["fence", "ack", "replay"].includes(request.kind) ||
+      (request.kind === "control" &&
+        request.offset === 0 &&
+        (["cancel", "status"].includes(control) ||
+          /^ack\t[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+            control,
+          )));
+    if (safe) return;
+    const fault = await diagnosticFault(tx);
+    if (fault) throw new NativeBrokerInitialDiagnosticsError(fault);
+  };
   const reply = async (
     tx: NativeBrokerTransportTransaction,
     requestId: string,
@@ -198,6 +235,7 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
         invalid();
       return { index: frame.sequence, alreadyReserved: true };
     }
+    await requireHealthyForWork(tx, request);
     state.input = reserveNativeBrokerInput(state.input, epoch, request);
     const pending = state.input.pending!;
     await tx.insert({
@@ -231,6 +269,7 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
     )
       invalid();
     if (entry.sequence! <= state.input.lastAcceptedInputIndex) return null;
+    await requireHealthyForWork(tx, frame);
     if (
       !state.input.pending ||
       entry.sequence !== state.input.pending.providerInputIndex ||
@@ -242,6 +281,26 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
     return pendingNativeBrokerProviderWrite(state.input, epoch);
   };
   return {
+    /** Immutable first observation, encrypted by the DB store. A clean later
+     * query cannot clear it. Observation may still be retained for an obsolete
+     * instance; it grants neither a writer lease nor command authority. */
+    async recordDiagnosticFault(input: NativeBrokerDiagnosticsFault) {
+      const observation = parseNativeBrokerDiagnosticsFault(input, identity);
+      return store.transaction(async (tx) => {
+        const existing = await diagnosticFault(tx);
+        if (existing) return existing;
+        await tx.insert({
+          kind: "diagnostic_fault",
+          key: "initial-stderr",
+          sequence: null,
+          value: JSON.stringify(observation),
+        });
+        return observation;
+      });
+    },
+    async diagnosticFault() {
+      return store.transaction(diagnosticFault);
+    },
     async claimWriter(id: string) {
       return store.transaction(async (tx) => {
         const state = validate(tx.state, identity);

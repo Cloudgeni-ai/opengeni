@@ -37,12 +37,16 @@ import {
   NativeBrokerRetainedCommand,
   captureNativeBrokerBootstrap,
   type NativeBrokerArtifactPin,
+  type NativeBrokerDiagnosticsChannel,
+  type NativeBrokerDiagnosticsFault,
+  NativeBrokerInitialDiagnosticsError,
 } from "@opengeni/runtime/sandbox";
 import { encodeNativeBrokerCommandDefinition } from "../../runtime/src/sandbox/providers/native-command-broker-definition";
 import {
   createDurableNativeBrokerTransport,
   registerCapturedNativeBrokerBootstrap,
   registerQualifiedNativeBrokerBootstrap,
+  observeDurableNativeBrokerDiagnostics,
 } from "../src/native-command-broker-transport";
 import {
   encodeNativeBrokerFrame,
@@ -260,6 +264,7 @@ async function bootstrapFixture(qualified = false) {
     async *output() {
       yield initialPage;
     },
+    async *diagnostics() {},
   };
   const captured = await captureNativeBrokerBootstrap(channel, f.binding.brokerId, pin);
   Object.assign(f.binding, {
@@ -444,6 +449,233 @@ test("initial bootstrap and all receipts commit together, survive concurrent rep
     pin,
   );
   expect(await journal.read()).toEqual(progressed);
+});
+
+function diagnosticFault(
+  f: Fixture,
+  data = "fixture initial diagnostic",
+): NativeBrokerDiagnosticsFault {
+  const value = JSON.stringify({
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    requestedFileDescriptor: 2,
+    entryId: "diag-1",
+    items: [{ fileDescriptor: 2, data }],
+    eof: false,
+  });
+  return {
+    version: 1,
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    reason: "diagnostics",
+    page: { value, sha256: createHash("sha256").update(value).digest("hex") },
+  };
+}
+
+test("qualified startup retains initial diagnostics before rejection and cannot clear them on restart", async () => {
+  const { f, channel } = await bootstrapFixture(true);
+  const fault = diagnosticFault(f);
+  await expect(
+    registerQualifiedNativeBrokerBootstrap(client.db, key, bootstrapAdmission(f), {
+      ...channel,
+      async *diagnostics() {
+        yield JSON.parse(fault.page!.value);
+      },
+    }),
+  ).rejects.toBeInstanceOf(NativeBrokerInitialDiagnosticsError);
+  const journal = f.service();
+  expect(await journal.diagnosticFault()).toEqual(fault);
+  let reads = 0;
+  await expect(
+    registerQualifiedNativeBrokerBootstrap(client.db, key, bootstrapAdmission(f), {
+      ...channel,
+      async *diagnostics() {
+        reads++;
+        yield* [];
+      },
+      output() {
+        throw new Error("Retained bootstrap must not be reread");
+      },
+    }),
+  ).rejects.toThrow("diagnostics");
+  expect(reads).toBe(0);
+  const [stored] = await database.admin`select value_encrypted from native_command_broker_entries
+    where broker_id=${f.binding.brokerId} and kind='diagnostic_fault'`;
+  expect(String(stored!.value_encrypted)).not.toContain("fixture initial diagnostic");
+  expect(await journal.recordDiagnosticFault(diagnosticFault(f, "later failure"))).toEqual(fault);
+  expect(
+    await createDurableNativeBrokerTransport(client.db, key, f.binding).diagnosticFault(),
+  ).toEqual(fault);
+});
+
+test("diagnostic faults fence new work and pending dispatch while preserving unknown input and output custody", async () => {
+  const f = await fixture();
+  const active = await start(f);
+  await f
+    .service()
+    .captureOutput("0-0", page(f, Buffer.from(accepted(f, active.write.input)).toString()));
+  const release = {
+    ...fence(),
+    commandId: crypto.randomUUID(),
+    kind: "control" as const,
+    payload: Buffer.from("release"),
+  };
+  await f.service().reserve(active.writerId, 1, release);
+  const before = await f.service().read();
+  await f.service().recordDiagnosticFault(diagnosticFault(f));
+  await expect(f.service().dispatchIntent(active.writerId, 1, release.requestId)).rejects.toThrow(
+    "diagnostics",
+  );
+  expect(await f.service().read()).toEqual(before);
+  expect((await f.service().request(release.requestId))!.phase).toBe("reserved");
+  for (const kind of ["prepare", "definition", "launch", "resize", "eof"] as const)
+    await expect(
+      f.service().reserve(active.writerId, 1, { ...fence(), commandId: release.commandId, kind }),
+    ).rejects.toThrow("diagnostics");
+  // Failure is not quiescence and never clears the original pending release.
+  await expect(
+    f.service().reserve(active.writerId, 1, {
+      ...release,
+      requestId: crypto.randomUUID(),
+      payload: Buffer.from("cancel"),
+    }),
+  ).rejects.toThrow();
+  expect((await f.service().framesAfter(0)).frames).toHaveLength(1);
+  expect(await f.service().read()).toEqual(before);
+});
+
+test("a diagnostic fault does not block exact cancel, status, replay, ACK or writer fencing", async () => {
+  for (const selected of [
+    { kind: "control" as const, payload: Buffer.from("cancel") },
+    { kind: "control" as const, payload: Buffer.from("status") },
+    { kind: "control" as const, payload: Buffer.from(`ack\t${crypto.randomUUID()}`) },
+    { kind: "replay" as const, payload: new Uint8Array() },
+    { kind: "ack" as const, payload: new Uint8Array() },
+    { kind: "fence" as const, payload: new Uint8Array() },
+  ]) {
+    const f = await fixture();
+    if (selected.kind === "fence") {
+      const writerId = crypto.randomUUID();
+      await f.service().claimWriter(writerId);
+      await f.service().recordDiagnosticFault(diagnosticFault(f));
+      const request = fence();
+      await f.service().reserve(writerId, 1, request);
+      expect((await f.service().dispatchIntent(writerId, 1, request.requestId))!.index).toBe(1);
+      continue;
+    }
+    const active = await start(f);
+    await f
+      .service()
+      .captureOutput("0-0", page(f, Buffer.from(accepted(f, active.write.input)).toString()));
+    await f.service().recordDiagnosticFault(diagnosticFault(f));
+    const request = {
+      ...fence(),
+      commandId: crypto.randomUUID(),
+      ...selected,
+    };
+    expect(await f.service().claimWriter(active.writerId)).toMatchObject({ epoch: 1 });
+    await f.service().reserve(active.writerId, 1, request);
+    expect((await f.service().dispatchIntent(active.writerId, 1, request.requestId))!.index).toBe(
+      2,
+    );
+  }
+});
+
+test("a diagnostic fault does not allow malformed or composite control actions through the recovery exception", async () => {
+  const f = await fixture();
+  const active = await start(f);
+  await f
+    .service()
+    .captureOutput("0-0", page(f, Buffer.from(accepted(f, active.write.input)).toString()));
+  await f.service().recordDiagnosticFault(diagnosticFault(f));
+  for (const payload of [
+    "release",
+    "cancel\nrelease",
+    "status\0",
+    "ack\tinvalid",
+    `ack\t${crypto.randomUUID()}\nrelease`,
+  ])
+    await expect(
+      f.service().reserve(active.writerId, 1, {
+        ...fence(),
+        commandId: crypto.randomUUID(),
+        kind: "control",
+        payload: Buffer.from(payload),
+      }),
+    ).rejects.toThrow("diagnostics");
+  await expect(
+    f.service().reserve(active.writerId, 1, {
+      ...fence(),
+      commandId: crypto.randomUUID(),
+      kind: "control",
+      offset: 1,
+      payload: Buffer.from("cancel"),
+    }),
+  ).rejects.toThrow("diagnostics");
+});
+
+test("diagnostic faults reject stdin before committing byte offsets or provider input", async () => {
+  const { f, active, input, counter } = await stdinFixture();
+  await f.service().recordDiagnosticFault(diagnosticFault(f));
+  await expect(
+    f.service().reserveRetainedStdin(active.writerId, 1, input, Buffer.from("blocked")),
+  ).rejects.toThrow("diagnostics");
+  expect(await counter()).toBe(0);
+  expect(await f.service().request(input.admissionId)).toBeNull();
+});
+
+test("fault observations are immutable, scope-bound and dominate concurrent clean queries", async () => {
+  const f = await fixture();
+  const other = await fixture();
+  const fault = diagnosticFault(f);
+  await expect(other.service().recordDiagnosticFault(fault)).rejects.toThrow("physical identity");
+  await expect(
+    f
+      .service()
+      .recordDiagnosticFault({ ...fault, page: { ...fault.page!, sha256: "f".repeat(64) } }),
+  ).rejects.toThrow("inconsistent");
+  const channel = {
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    async *diagnostics() {
+      await f.service().recordDiagnosticFault(fault);
+      yield* [];
+    },
+  };
+  await expect(observeDurableNativeBrokerDiagnostics(f.service(), channel)).rejects.toThrow(
+    "diagnostics",
+  );
+  expect(await other.service().diagnosticFault()).toBeNull();
+  await expect(
+    withRlsContext(client.db, f.binding, (tx) =>
+      tx.execute(sql`
+    delete from native_command_broker_entries where broker_id=${f.binding.brokerId}::uuid
+      and kind='diagnostic_fault'`),
+    ),
+  ).rejects.toThrow();
+  expect(await f.service().diagnosticFault()).toEqual(fault);
+});
+
+test("uncertain diagnostic reads remain unavailable without inventing a permanent fault", async () => {
+  const f = await fixture();
+  const error = new Error("provider observation unavailable");
+  const channel = {
+    sandboxId: f.binding.sandboxId,
+    taskId: f.binding.taskId,
+    diagnostics() {
+      throw error;
+    },
+  };
+  await expect(observeDurableNativeBrokerDiagnostics(f.service(), channel)).rejects.toBe(error);
+  expect(await f.service().diagnosticFault()).toBeNull();
+  expect(
+    (
+      await observeDurableNativeBrokerDiagnostics(f.service(), {
+        ...channel,
+        async *diagnostics() {},
+      })
+    ).status,
+  ).toBe("clean_observation");
 });
 
 test("initial entry insertion failure rolls back the transport and every receipt", async () => {
@@ -1187,6 +1419,9 @@ test("nested savepoint handles cannot return a dispatch before the actual outer 
         output() {
           throw new Error("qualified provider read inside a transaction");
         },
+        diagnostics() {
+          throw new Error("qualified diagnostics read inside a transaction");
+        },
       }),
     ).rejects.toThrow("outer commit");
   });
@@ -1646,13 +1881,42 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
         wake();
       }
     })();
-    const diagnostics = new Response(child.stderr).text();
+    const diagnosticChunks: string[] = [];
+    let diagnosticReadError: unknown;
+    const diagnostics = (async () => {
+      try {
+        let total = 0;
+        for await (const chunk of child.stderr) {
+          total += chunk.length;
+          if (total > 65536) throw new Error("Native fixture diagnostic bound exceeded");
+          diagnosticChunks.push(Buffer.from(chunk).toString("utf8"));
+        }
+        return diagnosticChunks.join("");
+      } catch (error) {
+        diagnosticReadError = error;
+        throw error;
+      }
+    })();
     let index = 0,
       uncertain = false,
       dispatchCount = 0;
-    const channel: NativeBrokerChannel = {
+    const channel: NativeBrokerChannel & NativeBrokerDiagnosticsChannel = {
       sandboxId: f.binding.sandboxId,
       taskId: f.binding.taskId,
+      async *diagnostics(cursor) {
+        expect(cursor).toBe("0-0");
+        if (diagnosticReadError) throw diagnosticReadError;
+        if (child.exitCode !== null) throw new Error("Native fixture initial process ended");
+        if (diagnosticChunks.length)
+          yield {
+            sandboxId: f.binding.sandboxId,
+            taskId: f.binding.taskId,
+            requestedFileDescriptor: 2 as const,
+            entryId: "1-0",
+            eof: false,
+            items: diagnosticChunks.map((data) => ({ fileDescriptor: 2 as const, data })),
+          };
+      },
       async write(input) {
         dispatchCount++;
         // Model the physically measured Modal high-water input-index contract.
@@ -1946,6 +2210,11 @@ test.skipIf(process.env.OPENGENI_NATIVE_BROKER_LOCAL !== "1")(
         (await frames()).some((frame) => frame.commandId === cancelId && frame.kind === "stdout"),
       );
       await cancellation.capture(128);
+      // Inject a definite host-observed fault after release. The real static
+      // broker must still accept cancellation and the receipt ACK; the fault
+      // is not itself an exit receipt and must not cause early settlement.
+      await f.service().recordDiagnosticFault(diagnosticFault(f));
+      await expect(cancellationCustody.settle()).rejects.toThrow();
       await cancellation.cancel("explicit_stop");
       expect(await cancellationCustody.persistence.cancellationRequested()).toBe(true);
       await observeUntil(async () => !(await f.service().read()).input.pending);
