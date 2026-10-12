@@ -232,6 +232,19 @@ export type {
   UseEnvironmentsOptions,
   UseEnvironmentsResult,
 } from "./hooks/use-environments";
+export {
+  useVaultsApi,
+  useVaults,
+  useVault,
+  useVaultItems,
+  useVaultItem,
+  useVaultFieldVersions,
+  useSessionSecrets,
+} from "./hooks/use-vaults";
+export type { UseVaultQueryOptions } from "./hooks/use-vaults";
+export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults";
+export type { VaultClientLike, VaultsApi } from "./vaults";
+export type * from "./types/vaults";
 export { useChannels } from "./hooks/use-channels";
 export type { UseChannelsOptions, UseChannelsResult } from "./hooks/use-channels";
 export { useRigs, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";
