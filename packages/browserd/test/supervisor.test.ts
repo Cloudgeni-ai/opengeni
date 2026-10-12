@@ -1374,10 +1374,10 @@ async function withFailedRestoredLaunch(
 
 async function latestWorkingReceipt(
   sessionDirectory: string,
-  reference: { browserSessionId: string; controllerGeneration: string },
+  session: { browserSessionId: string; controllerGeneration: string },
 ): Promise<BrowserWorkingRuntimeReceipt | null> {
   const journal = await SqliteBrowserWorkingRuntimeJournal.open(
-    { ...reference, sessionDirectory },
+    { ...session, sessionDirectory },
     true,
   );
   try {
