@@ -527,7 +527,6 @@ test("owner inventory works without private conversation activation and isolates
         resources: [],
         tools: [{ kind: "mcp", id: "mail" }],
         metadata: {},
-        connectionAccounts: [],
       },
       metadata: {},
     });

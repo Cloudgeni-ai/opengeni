@@ -1,23 +1,26 @@
 # Scheduled task access: drift, refresh, and failed-access notices
 
-A scheduled task captures its account authority when it is saved. For runs that
-create a chat, it also stores the chat's initial tool selection:
+A scheduled task never saves which connector accounts were connected when it
+was saved. Every fresh occurrence resolves its owner's current accounts. For
+runs that create a chat, the task stores the chat's initial tool selection:
 
 - its connectors (`agentConfig.tools`);
-- the connector accounts it uses (`agentConfig.connectionAccounts`, frozen with
-  `connectionAccountsFrozen`), resolved against its immutable owner at each
-  fresh occurrence;
+- accounts a person explicitly pinned (`agentConfig.pinnedAccounts`, with
+  `pinnedAccountsRequired` to skip a run instead of going without a pinned
+  account that can no longer be used). A pin narrows only its own connector;
+  every other connector follows the owner's current accounts;
 - for a task an agent created, the creating session's Opengeni tools,
   permissions and access policy (the creator policy, migration 0428).
 
-Later workspace defaults do not widen those saved selections. Existing chats,
-including a reusable schedule's chat after its first run, supply their own
-model, tools and machine. Their scheduled runs still use the schedule's
-captured account authority. A task can therefore fall behind: a
-connector the workspace now gives every new schedule is missing, newer Opengeni
-tools are absent, or the account it chose was disconnected. This page describes
-how Opengeni shows that, how the owner refreshes it, and how the owner learns
-that a run could not use a connector.
+Only a person can pin, through the schedule editor or a human API call; agents,
+API keys and services receive 403. A schedule that posts into an existing chat
+stores only its message and timing and has no pins: that chat, including a
+reusable schedule's chat after its first run, supplies its model, tools and
+machine, and each run uses the owner's current accounts. A task can still fall
+behind: a connector the workspace now gives every new schedule is missing,
+newer Opengeni tools are absent, or an account a person pinned was
+disconnected. This page describes how Opengeni shows that, how the owner
+refreshes it, and how the owner learns that a run could not use a connector.
 
 ## Scheduling a message in a chat
 
@@ -60,11 +63,12 @@ on an outdated execution configuration. Merged patches also compare their
 server-read digest under the database write lock, so a concurrent edit returns
 409 instead of being overwritten.
 
-For a task with frozen accounts, an explicit `connectionAccounts` edit replaces
-the complete accepted selection. Include unchanged accounts that should remain;
-an empty array clears the selection. Omitting the field preserves saved choices.
-It never silently fills an omitted connector with newly available accounts.
-Use the access refresh flow below to review and adopt current defaults.
+`pinnedAccounts` on an update replaces the complete set of pins; an empty array
+unpins every connector, so all of them follow the owner's current accounts.
+Omitting the field keeps the pins. Removing a connector also removes its pins.
+Pins supplied by the request must be usable now; retained pins are kept even
+when their account is gone, so an unrelated edit never fails on a stale pin.
+The old `connectionAccounts` field is rejected on schedule requests.
 
 Scheduler synchronization reads the latest saved task while holding a per-task
 lock shared with deletion cleanup. A failed synchronization restores the previous
@@ -181,14 +185,12 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   schedule gets (`sessionToolDefaults`, or the enabled capability default) are
   added (`missingConnectors`). A refresh never removes a connector the owner
   deliberately kept.
-- **Connector accounts**, per account-backed connector. Chosen accounts that are
-  still usable are kept exactly. When a chosen account can no longer be used
-  (`unavailableAccounts`), a fresh occurrence of the task is blocked before it
-  creates a run, so the refresh attaches every account the owner can use now.
-  A frozen connector with no account while one is now available is reported as
-  `attachableAccounts`. The Google Drive publication and personal GitHub
-  surfaces keep their own account contract and pass through unchanged; a
-  blocked occurrence caused by one of them is not reported yet.
+- **Pinned accounts** are reported, never changed. A pin whose account can no
+  longer be used is listed in `unavailableAccounts`; runs go ahead without that
+  connector (or are skipped when the task sets `pinnedAccountsRequired`) until
+  a person pins another account or unpins it. A refresh never adds, replaces or
+  removes pins, because a pin is a person's explicit choice. Unpinned connectors
+  need nothing: each run already uses the owner's current accounts.
 - **Opengeni tools** (agent-created tasks only). A human- or API-created task
   has no creator policy and already follows the deployment default at each run.
   For a frozen creator policy, the default tools it lacks are reported
@@ -203,7 +205,7 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   creator session policy (agent access, scope, memory) is never rewritten.
 
 Existing-session tasks, and reusable tasks whose session already exists, follow
-that session's tools, so only their accounts are part of the plan.
+that session's tools, so only a reusable task's pins are part of the plan.
 
 ## Who sees drift
 
@@ -259,7 +261,7 @@ missing connectors and Opengeni tools for the task head the person looked at
 (its `executionDigest`); the page then hides them, and "Refresh access" sends
 them as `leaveOut`, carrying the choice to the refreshed head. A new default
 that appears later is shown again, and editing the task any other way (a new
-head) is a fresh look. A chosen account that can no longer be used, a connector
+head) is a fresh look. A pinned account that can no longer be used, a connector
 the workspace removed, and a connector without an account are never hidden.
 
 The choice is a display preference: the server keeps reporting the drift and
@@ -283,25 +285,21 @@ in-app:
   not a failure and is left out.
 - **Per run.** `GET .../scheduled-tasks/:taskId/runs` adds `accessFailures`
   (connector, reason and count) for a viewer who can act on the task.
-- **Blocked before a run.** When a chosen connector account can no longer be
-  used (for example the owner revoked their personal connection), the
-  scheduler refuses every fresh occurrence before it creates a run, so there is
-  no run and no turn to carry a fact. The same happens to a schedule with an
-  owner whose chosen account belongs to a connector the workspace no longer
-  sets up. The attention list therefore also checks each active agent task
-  that chose accounts with the same account plan the drift uses, and lists it
-  with `unavailableAccounts` (the connectors) and a null `runId`/`firedAt`. It
-  clears once the account is usable again or the owner refreshes or edits the
-  accounts. This is read-time only: no migration, no stored notice. Not
-  reported yet: a reusable-session schedule whose live session no longer uses
-  a connector the schedule chose an account for (for example, someone turned
-  that connector off in the session). The scheduler resolves the reusable
-  session's own tool policy and refuses the leftover choice, while the plan
-  follows the task's frozen tools, so a refresh does not fix it either; turning
-  the connector back on in that session does.
+- **A pinned account is gone.** When an account a person pinned can no longer
+  be used (for example the owner revoked that connection, or the workspace no
+  longer sets up its connector), the run goes ahead without that connector and
+  never substitutes another account. The run records the dropped pins in
+  `degradedAccounts`. A personal GitHub repository pin cannot be dropped
+  without changing the task's repositories, so that occurrence is refused, as
+  is every occurrence of a task with `pinnedAccountsRequired`; a refused
+  occurrence creates no run. The attention list checks each active task with
+  pins using the same account plan the drift uses and lists it with
+  `unavailableAccounts` (the connectors) and a null `runId`/`firedAt`. It
+  clears once the account is usable again or a person pins another account or
+  unpins it. This is read-time only: no stored notice.
 - **Attention list.** `GET .../scheduled-tasks/attention` lists the active
   schedules that need attention, one item per schedule: the latest run with a
-  turn failed closed on access (`runId`, `failures`), a chosen account can no
+  turn failed closed on access (`runId`, `failures`), a pinned account can no
   longer be used (`unavailableAccounts`), or both. Schedules that cannot start
   are listed first. For a person, it lists the schedules they own; for an
   organization key, configured key or service that manages schedules, the

@@ -2278,6 +2278,7 @@ describe("release schema contract", () => {
     const appendedMigrationPaths = [
       "0738_private_sessions_share_sandboxes.sql",
       "0737_site_audience.sql",
+      "0738_schedule_live_connector_accounts.sql",
       "0733_subscription_session_bindings_per_provider.sql",
       "0732_sandbox_maintenance_work_probes.sql",
       "0731_published_site_versions_workspace_visible.sql",

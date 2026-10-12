@@ -147,7 +147,7 @@ function resultText(result: unknown): string {
 }
 
 describe("lossless scheduled-task model updates", () => {
-  async function fixture(status: "active" | "paused" = "paused", frozen = true) {
+  async function fixture(status: "active" | "paused" = "paused") {
     const workspace = await workspaceFixture();
     const task = await createScheduledTask(client.db, {
       ...workspace,
@@ -164,7 +164,6 @@ describe("lossless scheduled-task model updates", () => {
         ],
         tools: [{ kind: "mcp", id: "opengeni", eager: true }],
         metadata: { nested: { retained: ["complete", "values"] } },
-        ...(frozen ? { connectionAccounts: [], connectionAccountsFrozen: true as const } : {}),
         approvalTimeoutSeconds: 300,
         maxNestedAgentDepth: 0,
         model: "scripted-model",
@@ -220,8 +219,6 @@ describe("lossless scheduled-task model updates", () => {
         maxNestedAgentDepth: 1000,
         machineTarget: { targetSandboxId: crypto.randomUUID() },
         metadata: {},
-        connectionAccounts: [],
-        connectionAccountsFrozen: true,
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
       metadata: {},
@@ -273,7 +270,7 @@ describe("lossless scheduled-task model updates", () => {
     expect(await getSession(client.db, workspace.workspaceId, session.id)).toEqual(session);
   });
 
-  test("materialized account edits resolve the current chat's connectors without session-control permission", async () => {
+  test("materialized account pins resolve the current chat's connectors without session-control permission", async () => {
     if (!available) return;
     const { workspace, task, session, dependencies, currentTool } = await materializedFixture();
     const connection = await createConnection(client.db, {
@@ -294,10 +291,10 @@ describe("lossless scheduled-task model updates", () => {
       ...dependencies,
       grant,
       existing: task,
-      payload: UpdateScheduledTaskRequest.parse({ connectionAccounts: [account] }),
+      payload: UpdateScheduledTaskRequest.parse({ pinnedAccounts: [account] }),
     });
     const saved = await updateScheduledTaskForApi(client.db, grant, task.id, update);
-    expect(saved.agentConfig.connectionAccounts).toEqual([account]);
+    expect(saved.agentConfig.pinnedAccounts).toEqual([account]);
     expect(saved.agentConfig.tools).toEqual(task.agentConfig.tools);
     expect(saved.reusableSessionId).toBe(session.id);
   });
@@ -701,16 +698,11 @@ describe("lossless scheduled-task model updates", () => {
     expect(saved.agentConfig.reasoningEffort).toBe("high");
   });
 
-  test.each([
-    ["active", true],
-    ["paused", true],
-    ["active", false],
-    ["paused", false],
-  ] as const)(
-    "MCP changes only model settings: status=%s frozen=%s, including beyond the read projection",
-    async (status, frozen) => {
+  test.each(["active", "paused"] as const)(
+    "MCP changes only model settings: status=%s, including beyond the read projection",
+    async (status) => {
       if (!available) return;
-      const { workspace, task } = await fixture(status, frozen);
+      const { workspace, task } = await fixture(status);
       const creatorPolicy = await getScheduledTaskCreatorPolicy(
         client.db,
         workspace.workspaceId,
@@ -939,9 +931,9 @@ describe("lossless scheduled-task model updates", () => {
   });
 });
 
-describe("first-party MCP scheduled task connectionAccounts", () => {
+describe("first-party MCP scheduled task pinned accounts", () => {
   test.each([false, true])(
-    "removing the last personal GitHub repository drops only an omitted account choice (explicit=%s)",
+    "removing the last personal GitHub repository drops only an omitted pin (explicit=%s)",
     async (explicit) => {
       if (!available) return;
       const workspace = await workspaceFixture();
@@ -978,8 +970,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
           ],
           tools: [],
           metadata: {},
-          connectionAccounts: [account],
-          connectionAccountsFrozen: true,
+          pinnedAccounts: [account],
         },
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
         metadata: {},
@@ -993,7 +984,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
           toolsProvided: true,
           payload: UpdateScheduledTaskRequest.parse({
             agentConfig: { ...task.agentConfig, resources: [] },
-            ...(explicit ? { connectionAccounts: [account] } : {}),
+            ...(explicit ? { pinnedAccounts: [account] } : {}),
           }),
         });
       if (explicit) {
@@ -1003,8 +994,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
       }
       const saved = await updateScheduledTaskForApi(client.db, grant, task.id, await validate());
       expect(saved.agentConfig.resources).toEqual([]);
-      expect(saved.agentConfig.connectionAccounts).toEqual([]);
-      expect(saved.agentConfig.connectionAccountsFrozen).toBe(true);
+      expect(saved.agentConfig).not.toHaveProperty("pinnedAccounts");
     },
   );
 
@@ -1050,8 +1040,6 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
           resources: [],
           tools: [],
           metadata: {},
-          connectionAccounts: [],
-          connectionAccountsFrozen: true,
         },
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
         metadata: {},
@@ -1171,8 +1159,6 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         tools: [],
         metadata: { exact: { keep: true } },
         model: "scripted-model",
-        connectionAccounts: [],
-        connectionAccountsFrozen: true,
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
       metadata: { keep: true },
@@ -1205,8 +1191,6 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
       resources: [],
       tools: [],
       metadata: original.agentConfig.metadata,
-      connectionAccounts: [],
-      connectionAccountsFrozen: true,
     });
     await expect(
       validatedScheduledTaskUpdate({
@@ -1349,16 +1333,13 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
   });
 
   test.each([
-    [false, false, "live"],
-    [true, false, "live"],
-    [false, true, "live"],
-    [true, true, "live"],
-    [false, true, "deleted"],
-    [true, true, "deleted"],
-    [false, true, "changed"],
+    [false, "live"],
+    [true, "live"],
+    [false, "deleted"],
+    [false, "changed"],
   ] as const)(
-    "removing an MCP tool preserves explicit-account validation (explicit=%s, existing chat=%s, source=%s)",
-    async (explicit, existingChat, sourceState) => {
+    "removing an MCP tool removes its pin and keeps the rest (re-supplied=%s, source=%s)",
+    async (explicit, sourceState) => {
       if (!available) return;
       const workspace = await workspaceFixture();
       const [sharedWorkspace] = await admin<{ id: string }[]>`
@@ -1383,38 +1364,38 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         { kind: "mcp" as const, id: "removed-integration", optional: true },
         retainedTool,
       ];
-      const makeChat = (tools: typeof oldTools) =>
-        createSession(client.db, {
-          ...workspace,
-          initialMessage: "Review",
-          resources: [],
-          metadata: {},
-          tools,
-          model: "scripted-model",
-          reasoningEffort: "medium",
-          latencyMode: "standard",
-          sandboxBackend: "none",
-        });
-      const source = existingChat ? await makeChat(oldTools) : null;
-      const destination = existingChat ? await makeChat([retainedTool]) : null;
+      const reusable =
+        sourceState === "live"
+          ? null
+          : await createSession(client.db, {
+              ...workspace,
+              initialMessage: "Review",
+              resources: [],
+              metadata: {},
+              tools: oldTools,
+              model: "scripted-model",
+              reasoningEffort: "medium",
+              latencyMode: "standard",
+              sandboxBackend: "none",
+            });
+      const pins = [
+        { serverId: "removed-integration", connectionId: crypto.randomUUID() },
+        retainedAccount,
+      ];
       let task = await createScheduledTask(client.db, {
         ...workspace,
         name: "remove selected integration",
         status: "active",
         schedule: { type: "interval", everySeconds: 3_600 },
         temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-        runMode: existingChat ? "existing_session" : "new_session_per_run",
-        targetSessionId: source?.id ?? null,
+        runMode: reusable ? "reusable_session" : "new_session_per_run",
+        targetSessionId: reusable?.id ?? null,
         overlapPolicy: "allow_concurrent",
         agentConfig: {
-          connectionAccounts: [
-            { serverId: "removed-integration", connectionId: crypto.randomUUID() },
-            retainedAccount,
-          ],
-          connectionAccountsFrozen: true,
+          pinnedAccounts: pins,
           prompt: "scheduled prompt",
           resources: [],
-          tools: existingChat ? [] : oldTools,
+          tools: oldTools,
           metadata: {},
         },
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
@@ -1425,7 +1406,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         task = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
       }
       if (sourceState === "changed") {
-        await admin`update sessions set tools = '[]'::jsonb where id = ${source!.id}`;
+        await admin`update sessions set tools = '[]'::jsonb where id = ${reusable!.id}`;
       }
       const dependencies = deps(client.db);
       dependencies.settings.mcpServers.push({
@@ -1438,45 +1419,84 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
           subjectScope: "workspace",
         },
       });
-      const connected = await connectedClient(
-        buildOpenGeniMcpServer(dependencies, {
-          ...grantFor(workspace),
-          permissions: ["scheduled_tasks:manage", "sessions:control"],
-        }),
-      );
-      try {
-        const result = await connected.client.callTool({
-          name: "scheduled_tasks_update",
-          arguments: {
-            id: task.id,
-            ...(destination
-              ? { targetSessionId: destination.id }
-              : {
-                  agentConfig: { prompt: "scheduled prompt", resources: [], tools: [retainedTool] },
-                }),
-            ...(explicit ? { connectionAccounts: task.agentConfig.connectionAccounts } : {}),
-          },
+      const grant = grantFor(workspace);
+      const validate = () =>
+        validatedScheduledTaskUpdate({
+          ...dependencies,
+          grant,
+          existing: task,
+          toolsProvided: true,
+          payload: UpdateScheduledTaskRequest.parse({
+            agentConfig: { prompt: "scheduled prompt", resources: [], tools: [retainedTool] },
+            ...(explicit ? { pinnedAccounts: pins } : {}),
+          }),
         });
-        if (explicit) {
-          expect(result).toMatchObject({ isError: true });
-          expect(resultText(result)).toContain("did not match a selected MCP server");
-          expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
-          return;
-        }
-        expect(resultText(result)).not.toContain("did not match a selected MCP server");
-        expect(result, resultText(result)).not.toMatchObject({ isError: true });
-      } finally {
-        await connected.close();
+      if (explicit) {
+        await expect(validate()).rejects.toThrow("did not match a selected MCP server");
+        expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+        return;
       }
-      const after = await getScheduledTask(client.db, workspace.workspaceId, task.id);
-      expect(after?.agentConfig.tools).toEqual(existingChat ? [] : [retainedTool]);
-      expect(after?.agentConfig.connectionAccounts).toEqual([retainedAccount]);
-      expect(after?.agentConfig.connectionAccountsFrozen).toBe(true);
-      expect(after?.ownerSubjectId).toBe(workspace.subjectId);
+      const after = await updateScheduledTaskForApi(client.db, grant, task.id, await validate());
+      expect(after.agentConfig.tools).toEqual([retainedTool]);
+      expect(after.agentConfig.pinnedAccounts).toEqual([retainedAccount]);
+      expect(after.ownerSubjectId).toBe(workspace.subjectId);
     },
   );
 
-  test("declares connectionAccounts on create/update and rejects a malformed selection before storage", async () => {
+  test("moving to another chat through MCP stores no account choice", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const makeChat = () =>
+      createSession(client.db, {
+        ...workspace,
+        initialMessage: "Review",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+    const [source, destination] = await Promise.all([makeChat(), makeChat()]);
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "move chat",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3_600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "existing_session",
+      targetSessionId: source.id,
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "scheduled prompt", resources: [], tools: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    const connected = await connectedClient(
+      buildOpenGeniMcpServer(deps(client.db), {
+        ...grantFor(workspace),
+        permissions: ["scheduled_tasks:manage", "sessions:control"],
+      }),
+    );
+    try {
+      const result = await connected.client.callTool({
+        name: "scheduled_tasks_update",
+        arguments: { id: task.id, targetSessionId: destination.id },
+      });
+      expect(result, resultText(result)).not.toMatchObject({ isError: true });
+    } finally {
+      await connected.close();
+    }
+    const after = await getScheduledTask(client.db, workspace.workspaceId, task.id);
+    expect(after?.targetSessionId).toBe(destination.id);
+    expect(after?.agentConfig).toEqual({
+      prompt: "scheduled prompt",
+      resources: [],
+      tools: [],
+      metadata: {},
+    });
+  });
+
+  test("agent schedule tools never accept account pins and reject them before storage", async () => {
     if (!available) return;
     let databaseTouches = 0;
     const throwingDb = new Proxy(
@@ -1500,38 +1520,33 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
       for (const name of ["scheduled_tasks_create", "scheduled_tasks_update"]) {
         const tool = tools.find((candidate) => candidate.name === name);
         expect(tool, name).toBeTruthy();
-        expect(tool?.inputSchema.properties, name).toHaveProperty("connectionAccounts");
+        for (const field of ["pinnedAccounts", "pinnedAccountsRequired", "connectionAccounts"])
+          expect(tool?.inputSchema.properties, name).not.toHaveProperty(field);
       }
-
-      // A selection missing connectionId must reach the contract
-      // parse and fail there. If the MCP input schema stripped the field, the
-      // request would parse as connectionAccounts=[] and proceed to storage.
-      const malformed = await connected.client.callTool({
-        name: "scheduled_tasks_create",
-        arguments: {
-          name: "malformed selection",
-          schedule: { type: "interval", everySeconds: 3_600 },
-          agentConfig: { prompt: "run with a bogus selection" },
-          connectionAccounts: [{ serverId: "linear" }],
-        },
-      });
-      expect(malformed).toMatchObject({ isError: true });
-      expect(resultText(malformed)).toContain("connectionAccounts");
+      for (const field of ["pinnedAccounts", "connectionAccounts"]) {
+        const rejected = await connected.client.callTool({
+          name: "scheduled_tasks_create",
+          arguments: {
+            name: "agent pin",
+            schedule: { type: "interval", everySeconds: 3_600 },
+            runMode: "new_session_per_run",
+            agentConfig: { prompt: "run with a pinned account" },
+            [field]: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
+          },
+        });
+        expect(rejected).toMatchObject({ isError: true });
+        expect(resultText(rejected)).toContain(field);
+      }
       expect(databaseTouches).toBe(0);
     } finally {
       await connected.close();
     }
   });
 
-  test("scheduled_tasks_update accepts connectionAccounts: [] and resets explicit account choices", async () => {
+  test("a person's empty pin list unpins every connector", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const connectionAccounts = [
-      {
-        serverId: "linear",
-        connectionId: crypto.randomUUID(),
-      },
-    ];
+    const pinnedAccounts = [{ serverId: "linear", connectionId: crypto.randomUUID() }];
     const task = await createScheduledTask(client.db, {
       ...workspace,
       name: "reset account choice",
@@ -1541,7 +1556,8 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
       agentConfig: {
-        connectionAccounts,
+        pinnedAccounts,
+        pinnedAccountsRequired: true,
         prompt: "scheduled prompt",
         resources: [],
         tools: [],
@@ -1550,36 +1566,56 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
       metadata: {},
     });
-    expect(task.agentConfig.connectionAccounts).toEqual(connectionAccounts);
-
-    const server = buildOpenGeniMcpServer(deps(client.db), grantFor(workspace));
-    const connected = await connectedClient(server);
-    try {
-      const updated = await connected.client.callTool({
-        name: "scheduled_tasks_update",
-        arguments: { id: task.id, connectionAccounts: [] },
-      });
-      expect(updated).not.toMatchObject({ isError: true });
-      const receipt = JSON.parse(resultText(updated)) as {
-        operation: string;
-        outcome: string;
-        changed: boolean;
-      };
-      expect(receipt).toMatchObject({
-        operation: "scheduled_tasks_update",
-        outcome: "updated",
-        changed: true,
-      });
-    } finally {
-      await connected.close();
-    }
-    const after = await getScheduledTask(client.db, workspace.workspaceId, task.id);
-    expect(after?.agentConfig.connectionAccounts).toEqual([]);
-    expect(after?.ownerSubjectId).toBe(workspace.subjectId);
-    expect(after?.authorityRevision).toBeGreaterThan(task.authorityRevision);
+    expect(task.agentConfig.pinnedAccounts).toEqual(pinnedAccounts);
+    const grant = grantFor(workspace);
+    const after = await updateScheduledTaskForApi(
+      client.db,
+      grant,
+      task.id,
+      await validatedScheduledTaskUpdate({
+        ...deps(client.db),
+        grant,
+        existing: task,
+        payload: UpdateScheduledTaskRequest.parse({ pinnedAccounts: [] }),
+      }),
+    );
+    expect(after.agentConfig).not.toHaveProperty("pinnedAccounts");
+    expect(after.agentConfig).not.toHaveProperty("pinnedAccountsRequired");
+    expect(after.ownerSubjectId).toBe(workspace.subjectId);
+    expect(after.authorityRevision).toBeGreaterThan(task.authorityRevision);
   });
 
-  test("editing one frozen account keeps another connector's empty selection", async () => {
+  test.each([
+    ["an agent attempt", { principalKind: "agent_attempt" as const }],
+    ["an API key", { principalKind: "api_key" as const }],
+  ])("%s cannot pin accounts through the core update", async (_label, principal) => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "agent pin",
+      status: "paused",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Use my mail", tools: [], resources: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    await expect(
+      validatedScheduledTaskUpdate({
+        ...deps(client.db),
+        grant: { ...grantFor(workspace), ...principal },
+        existing: task,
+        payload: UpdateScheduledTaskRequest.parse({
+          pinnedAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
+        }),
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  test("replacing one connector's pin leaves every other connector on current accounts", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const dependencies = deps(client.db);
@@ -1607,7 +1643,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
     );
     const task = await createScheduledTask(client.db, {
       ...workspace,
-      name: "Exact frozen selections",
+      name: "Pinned selection",
       status: "paused",
       schedule: { type: "manual" },
       temporalScheduleId: crypto.randomUUID(),
@@ -1621,8 +1657,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         ],
         resources: [],
         metadata: {},
-        connectionAccounts: [{ serverId: "selected-integration", connectionId: accounts[0]!.id }],
-        connectionAccountsFrozen: true,
+        pinnedAccounts: [{ serverId: "selected-integration", connectionId: accounts[0]!.id }],
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
       metadata: {},
@@ -1637,11 +1672,10 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         ...dependencies,
         grant,
         existing: task,
-        payload: UpdateScheduledTaskRequest.parse({ connectionAccounts: requested }),
+        payload: UpdateScheduledTaskRequest.parse({ pinnedAccounts: requested }),
       }),
     );
-    expect(saved.agentConfig.connectionAccounts).toEqual(requested);
-    expect(saved.agentConfig.connectionAccountsFrozen).toBe(true);
+    expect(saved.agentConfig.pinnedAccounts).toEqual(requested);
   });
 });
 
@@ -1651,59 +1685,53 @@ test.each([
   "scheduled_tasks_resume",
   "scheduled_tasks_trigger",
   "scheduled_tasks_delete",
-] as const)(
-  "%s refuses another participant even with empty connection selections",
-  async (name) => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    const task = await createScheduledTask(client.db, {
-      ...workspace,
-      name: "Owned schedule",
-      status: name === "scheduled_tasks_resume" ? "paused" : "active",
-      schedule: { type: "manual" },
-      temporalScheduleId: crypto.randomUUID(),
-      runMode: "new_session_per_run",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: {
-        prompt: "Use my connections",
-        resources: [],
-        tools: [],
-        metadata: {},
-        connectionAccounts: [],
-      },
-      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+] as const)("%s refuses another participant", async (name) => {
+  if (!available) return;
+  const workspace = await workspaceFixture();
+  const task = await createScheduledTask(client.db, {
+    ...workspace,
+    name: "Owned schedule",
+    status: name === "scheduled_tasks_resume" ? "paused" : "active",
+    schedule: { type: "manual" },
+    temporalScheduleId: crypto.randomUUID(),
+    runMode: "new_session_per_run",
+    overlapPolicy: "allow_concurrent",
+    agentConfig: {
+      prompt: "Use my connections",
+      resources: [],
+      tools: [],
       metadata: {},
-    });
-    const other: AccessGrant = {
-      ...grantFor(workspace),
-      subjectId: "user:other-participant",
-      permissions: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-    };
-    for (const caller of [
-      other,
-      { ...other, subjectId: workspace.subjectId, principalKind: "service" as const },
-    ]) {
-      const server = buildOpenGeniMcpServer(deps(client.db), caller);
-      const connected = await connectedClient(server);
-      try {
-        const result = await connected.client.callTool({
-          name,
-          arguments: {
-            id: task.id,
-            ...(name === "scheduled_tasks_update"
-              ? { connectionAccounts: [], name: "Taken over" }
-              : {}),
-          },
-        });
-        expect(result).toMatchObject({ isError: true });
-        expect(resultText(result)).toContain("Only the schedule owner");
-        expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
-      } finally {
-        await connected.close();
-      }
+    },
+    createdBy: { kind: "subject", subjectId: workspace.subjectId },
+    metadata: {},
+  });
+  const other: AccessGrant = {
+    ...grantFor(workspace),
+    subjectId: "user:other-participant",
+    permissions: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  };
+  for (const caller of [
+    other,
+    { ...other, subjectId: workspace.subjectId, principalKind: "service" as const },
+  ]) {
+    const server = buildOpenGeniMcpServer(deps(client.db), caller);
+    const connected = await connectedClient(server);
+    try {
+      const result = await connected.client.callTool({
+        name,
+        arguments: {
+          id: task.id,
+          ...(name === "scheduled_tasks_update" ? { name: "Taken over" } : {}),
+        },
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(resultText(result)).toContain("Only the schedule owner");
+      expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+    } finally {
+      await connected.close();
     }
-  },
-);
+  }
+});
 
 test.each(["update", "pause", "resume", "trigger", "delete"] as const)(
   "HTTP %s refuses service credentials acting on a personal schedule",
@@ -1731,7 +1759,6 @@ test.each(["update", "pause", "resume", "trigger", "delete"] as const)(
         resources: [],
         tools: [],
         metadata: {},
-        connectionAccounts: [],
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
       metadata: {},
@@ -1755,9 +1782,7 @@ test.each(["update", "pause", "resume", "trigger", "delete"] as const)(
       {
         method: operation === "update" ? "PATCH" : operation === "delete" ? "DELETE" : "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        ...(operation === "update"
-          ? { body: JSON.stringify({ connectionAccounts: [], name: "Taken over" }) }
-          : {}),
+        ...(operation === "update" ? { body: JSON.stringify({ name: "Taken over" }) } : {}),
       },
     );
     expect(response.status).toBe(403);

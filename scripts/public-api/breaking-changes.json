@@ -1,1 +1,16 @@
-[]
+[
+  {
+    "ids": [
+      "schema:CreateScheduledTaskRequest:$|1.connectionAccounts",
+      "schema:CreateSessionScheduledTaskRequest:$.connectionAccounts",
+      "schema:ScheduledTaskAgentConfig:$.connectionAccounts",
+      "schema:ScheduledTaskAgentConfig:$.connectionAccountsFrozen",
+      "schema:ScheduledTaskPolicyDrift:$.attachableAccounts",
+      "schema:UpdateScheduledTaskRequest:$.connectionAccounts"
+    ],
+    "deprecation": ".changeset/schedule-live-connector-accounts.md",
+    "removedInMajor": 2,
+    "sunset": "2026-10-12",
+    "reason": "Schedules no longer save connector accounts. Every run uses the owner's current accounts, and only a person can pin accounts (pinnedAccounts) on a schedule that starts its own session. The old field silently froze a snapshot of accounts, so it is removed in one cutover without an alias; requests that still send connectionAccounts are rejected with a validation error."
+  }
+]

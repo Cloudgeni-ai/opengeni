@@ -1,9 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { CreateScheduledTaskRequest, type AccessGrant, type Permission } from "@opengeni/contracts";
+import {
+  CreateScheduledTaskRequest,
+  UpdateScheduledTaskRequest,
+  type AccessGrant,
+  type Permission,
+} from "@opengeni/contracts";
 import {
   createValidatedScheduledTask,
   listScheduledTaskAccessAttention,
-  refreshScheduledTaskAccess,
+  updateScheduledTaskForApi,
+  validatedScheduledTaskUpdate,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import {
@@ -12,6 +18,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   getScheduledTask,
+  getScheduledTaskRunAcceptedExecution,
   listScheduledTaskRuns,
   type DbClient,
 } from "@opengeni/db";
@@ -26,10 +33,11 @@ import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks
 import type { ActivityServices } from "../src/activities/types";
 
 /**
- * The owner of a schedule learns that it needs attention, end to end through
- * the real scheduler: a run of their own schedule that could not use a
- * connector, and a personal connector account they revoked, which makes the
- * scheduler refuse every fresh occurrence before it creates a run.
+ * Connector accounts resolve live, end to end through the real scheduler. A
+ * schedule without pins uses the owner's current accounts at every run. A
+ * person's pinned account that can no longer be used never blocks the
+ * schedule and is never replaced: the run goes without that connector and the
+ * owner is told, unless the schedule requires its pinned accounts.
  */
 
 let available = true;
@@ -234,12 +242,12 @@ async function startRun(workspace: Fixture, taskId: string) {
 }
 
 describe("the owner is told when a schedule cannot use a connector", () => {
-  test("a revoked personal account notifies its owner, and a refresh clears it", async () => {
+  test("a revoked pinned account: the run goes without it, the owner is told, and re-pinning clears it", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const firstAccount = await connectPersonalMail(workspace);
 
-    // The owner creates the schedule through the ordinary owner path, choosing
+    // The owner creates the schedule through the ordinary owner path, pinning
     // their own mail account.
     const task = await createValidatedScheduledTask({
       settings: settings(),
@@ -251,18 +259,19 @@ describe("the owner is told when a schedule cannot use a connector", () => {
       payload: CreateScheduledTaskRequest.parse({
         name: "Morning inbox digest",
         schedule: { type: "manual" },
+        runMode: "new_session_per_run",
         agentConfig: {
           prompt: "Summarize my unread mail",
           tools: [{ kind: "mcp", id: "mail" }],
         },
-        connectionAccounts: [{ serverId: "mail", connectionId: firstAccount }],
+        pinnedAccounts: [{ serverId: "mail", connectionId: firstAccount }],
       }),
     });
     expect(task.ownerSubjectId).toBe(workspace.owner);
-    expect(task.agentConfig).toMatchObject({
-      connectionAccounts: [{ serverId: "mail", connectionId: firstAccount }],
-      connectionAccountsFrozen: true,
-    });
+    expect(task.agentConfig.pinnedAccounts).toEqual([
+      { serverId: "mail", connectionId: firstAccount },
+    ]);
+    expect(task.agentConfig).not.toHaveProperty("connectionAccounts");
     const key: AccessGrant = {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
@@ -299,10 +308,132 @@ describe("the owner is told when a schedule cannot use a connector", () => {
     expect((await attentionFor(workspace, person(workspace, workspace.member))).items).toEqual([]);
     expect((await attentionFor(workspace, key)).items).toEqual([]);
 
-    // 2. The owner revokes the account. The scheduler now refuses the next
-    //    occurrence without accepting execution, retains a diagnostic run,
-    //    and tells the owner why.
+    // 2. The owner revokes the pinned account and connects another. The next
+    //    occurrence still runs, without the mail connector: it never falls
+    //    back to the other account, and the run records what it went without.
     await admin`update connections set status = 'revoked' where id = ${firstAccount}`;
+    const otherAccount = await connectPersonalMail(workspace);
+    const degraded = await startRun(workspace, task.id);
+    const [degradedRun] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 1);
+    expect(degradedRun?.degradedAccounts).toEqual([
+      { serverId: "mail", connectionId: firstAccount, reason: "account_not_visible" },
+    ]);
+    const degradedExecution = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: degraded.runId,
+    });
+    expect(degradedExecution?.mcpAccountBindings ?? []).toEqual([]);
+    expect(degradedExecution?.resolvedTools.some((tool) => tool.id === "mail")).toBe(false);
+    expect(JSON.stringify(degradedExecution)).not.toContain(otherAccount);
+    await runTurn(workspace, degraded.dispatched, degraded.runId, []);
+    const told = await attentionFor(workspace, person(workspace, workspace.owner));
+    expect(told.items).toMatchObject([
+      { taskId: task.id, unavailableAccounts: [{ id: "mail", name: "Mail" }] },
+    ]);
+    console.info(
+      `[scheduled-task-access-attention] owner attention list with one stale pin: ${told.elapsedMs.toFixed(1)} ms`,
+    );
+    expect((await attentionFor(workspace, person(workspace, workspace.member))).items).toEqual([]);
+    expect((await attentionFor(workspace, key)).items).toEqual([]);
+
+    // 3. The owner pins the other account: the notice clears and the next run
+    //    uses exactly that account.
+    const grant = person(workspace, workspace.owner);
+    const repinned = await updateScheduledTaskForApi(
+      client.db,
+      grant,
+      task.id,
+      await validatedScheduledTaskUpdate({
+        settings: settings(),
+        db: client.db,
+        objectStorage: null,
+        grant,
+        authorization: signedIn(workspace, workspace.owner),
+        existing: (await getScheduledTask(client.db, workspace.workspaceId, task.id))!,
+        payload: UpdateScheduledTaskRequest.parse({
+          pinnedAccounts: [{ serverId: "mail", connectionId: otherAccount }],
+        }),
+      }),
+    );
+    expect(repinned.agentConfig.pinnedAccounts).toEqual([
+      { serverId: "mail", connectionId: otherAccount },
+    ]);
+    expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toEqual([]);
+    const second = await startRun(workspace, task.id);
+    const [secondRun] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 1);
+    expect(secondRun?.degradedAccounts ?? []).toEqual([]);
+    expect(
+      (
+        await getScheduledTaskRunAcceptedExecution(client.db, {
+          workspaceId: workspace.workspaceId,
+          runId: second.runId,
+        })
+      )?.mcpAccountBindings?.map((binding) => binding.connectionId),
+    ).toEqual([otherAccount]);
+    await runTurn(workspace, second.dispatched, second.runId, []);
+    expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toEqual([]);
+    expect((await getScheduledTask(client.db, workspace.workspaceId, task.id))?.status).toBe(
+      "active",
+    );
+  }, 180_000);
+
+  test("without pins a schedule follows the owner's current account after a reconnect", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const firstAccount = await connectPersonalMail(workspace);
+    const task = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: person(workspace, workspace.owner),
+      authorization: signedIn(workspace, workspace.owner),
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Default inbox digest",
+        schedule: { type: "manual" },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "Summarize", tools: [{ kind: "mcp", id: "mail" }] },
+      }),
+    });
+    // Saving never records the accounts the save could see.
+    expect(task.agentConfig).not.toHaveProperty("pinnedAccounts");
+    expect(task.agentConfig).not.toHaveProperty("connectionAccounts");
+    await admin`update connections set status = 'revoked' where id = ${firstAccount}`;
+    const reconnected = await connectPersonalMail(workspace);
+    const run = await startRun(workspace, task.id);
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: run.runId,
+    });
+    expect(accepted?.mcpAccountBindings?.map((binding) => binding.connectionId)).toEqual([
+      reconnected,
+    ]);
+    expect(accepted?.degradedAccounts ?? []).toEqual([]);
+    expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toEqual([]);
+  }, 180_000);
+
+  test("a schedule that requires its pinned accounts skips the occurrence instead", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const account = await connectPersonalMail(workspace);
+    const task = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: person(workspace, workspace.owner),
+      authorization: signedIn(workspace, workspace.owner),
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Strict inbox digest",
+        schedule: { type: "manual" },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "Summarize", tools: [{ kind: "mcp", id: "mail" }] },
+        pinnedAccounts: [{ serverId: "mail", connectionId: account }],
+        pinnedAccountsRequired: true,
+      }),
+    });
+    expect(task.agentConfig.pinnedAccountsRequired).toBe(true);
+    await admin`update connections set status = 'revoked' where id = ${account}`;
     expect(
       await scheduler().dispatchScheduledTaskRun({
         workspaceId: workspace.workspaceId,
@@ -317,66 +448,15 @@ describe("the owner is told when a schedule cannot use a connector", () => {
       diagnostic: {
         version: 1,
         reason: "selected_account_unavailable",
-        accounts: [{ serverId: "mail", connectionId: firstAccount, reason: "account_not_visible" }],
+        accounts: [{ serverId: "mail", connectionId: account, reason: "account_not_visible" }],
       },
     });
-    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      2,
-    );
-    const blocked = await attentionFor(workspace, person(workspace, workspace.owner));
-    expect(blocked.items).toEqual([
-      {
-        taskId: task.id,
-        taskName: "Morning inbox digest",
-        executionDigest: task.executionDigest,
-        runId: first.runId,
-        firedAt: expect.any(String),
-        failures: [expect.objectContaining({ serverId: "mail", reason: "expired" })],
-        unavailableAccounts: [{ id: "mail", name: "Mail" }],
-        awaitingHuman: null,
-      },
-    ]);
-    console.info(
-      `[scheduled-task-access-attention] owner attention list with one blocked schedule: ${blocked.elapsedMs.toFixed(1)} ms`,
-    );
-    expect((await attentionFor(workspace, person(workspace, workspace.member))).items).toEqual([]);
-    expect((await attentionFor(workspace, key)).items).toEqual([]);
-
-    // 3. The owner reconnects and refreshes: the account notice clears and the
-    //    scheduler starts runs again. The earlier failed run stays listed until
-    //    a later run can use the connector.
-    const secondAccount = await connectPersonalMail(workspace);
-    const refreshed = await refreshScheduledTaskAccess({
-      settings: settings(),
-      db: client.db,
-      objectStorage: null,
-      authorization: signedIn(workspace, workspace.owner),
-      taskId: task.id,
-      request: { executionDigest: task.executionDigest },
-      permissionsRequiredByTools: () => [],
-    });
-    expect(refreshed.agentConfig.connectionAccounts).toEqual([
-      { serverId: "mail", connectionId: secondAccount },
-    ]);
     expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toMatchObject(
-      [
-        {
-          taskId: task.id,
-          executionDigest: refreshed.executionDigest,
-          runId: first.runId,
-          unavailableAccounts: [],
-        },
-      ],
-    );
-    const second = await startRun(workspace, task.id);
-    await runTurn(workspace, second.dispatched, second.runId, []);
-    expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toEqual([]);
-    expect((await getScheduledTask(client.db, workspace.workspaceId, task.id))?.status).toBe(
-      "active",
+      [{ taskId: task.id, unavailableAccounts: [{ id: "mail", name: "Mail" }] }],
     );
   }, 180_000);
 
-  test("a chosen account whose connector is no longer set up also blocks, and the owner is told", async () => {
+  test("a pin whose connector is no longer set up: the run goes without it and the owner is told", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const account = await connectPersonalMail(workspace);
@@ -390,28 +470,23 @@ describe("the owner is told when a schedule cannot use a connector", () => {
       payload: CreateScheduledTaskRequest.parse({
         name: "Inbox digest",
         schedule: { type: "manual" },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "Summarize", tools: [{ kind: "mcp", id: "mail" }] },
-        connectionAccounts: [{ serverId: "mail", connectionId: account }],
+        pinnedAccounts: [{ serverId: "mail", connectionId: account }],
       }),
     });
     // The workspace stops setting up the mail connector; the account itself is fine.
-    expect(
-      await scheduler([]).dispatchScheduledTaskRun({
-        workspaceId: workspace.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-        producerKey: `scheduled-access-attention:${crypto.randomUUID()}`,
-      }),
-    ).toEqual({
-      action: "blocked",
-      reason: "connection_account_unavailable",
-      runId: expect.any(String),
-      diagnostic: {
-        version: 1,
-        reason: "selected_account_unavailable",
-        accounts: [{ serverId: "mail", connectionId: account, reason: "connector_unavailable" }],
-      },
+    const dispatched = await scheduler([]).dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `scheduled-access-attention:${crypto.randomUUID()}`,
     });
+    expect(dispatched.action).toBe("start");
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 1);
+    expect(run?.degradedAccounts).toEqual([
+      { serverId: "mail", connectionId: account, reason: "connector_unavailable" },
+    ]);
     expect((await attentionFor(workspace, person(workspace, workspace.owner), [])).items).toEqual([
       {
         taskId: task.id,
@@ -429,7 +504,7 @@ describe("the owner is told when a schedule cannot use a connector", () => {
     );
   }, 180_000);
 
-  test("a paused schedule with a revoked account is not listed", async () => {
+  test("a paused schedule with a revoked pinned account is not listed", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const account = await connectPersonalMail(workspace);
@@ -444,8 +519,9 @@ describe("the owner is told when a schedule cannot use a connector", () => {
         name: "Paused inbox digest",
         status: "paused",
         schedule: { type: "manual" },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "Summarize", tools: [{ kind: "mcp", id: "mail" }] },
-        connectionAccounts: [{ serverId: "mail", connectionId: account }],
+        pinnedAccounts: [{ serverId: "mail", connectionId: account }],
       }),
     });
     expect(task.status).toBe("paused");

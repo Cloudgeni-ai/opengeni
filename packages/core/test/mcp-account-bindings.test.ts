@@ -60,7 +60,7 @@ test("agent account labels use verified provider identity without changing exact
   ).toBe("U_ONE · T_ONE · Only me");
 });
 
-test("rejected frozen accounts retain safe structured identity and eligibility reason", () => {
+test("rejected pinned accounts retain safe structured identity and eligibility reason", () => {
   const selected = connection();
   for (const [servers, connections, reason] of [
     [[], [selected], "connector_unavailable"],
@@ -75,7 +75,6 @@ test("rejected frozen accounts retain safe structured identity and eligibility r
         servers: [...servers],
         connections: [...connections] as ConnectionMetadata[],
         selections: [{ serverId: server.id, connectionId: selected.id }],
-        selectionsFrozen: true,
       });
     } catch (error) {
       failure = error;
@@ -251,48 +250,43 @@ test("explicit connection refs remain exact without selectedResources or account
   expect(mcpAccountBindingsFromVisibleConnections({ ...exact, connections: [other] })).toEqual([]);
 });
 
-test("frozen empty selection never expands when an account appears; historic omission still resolves", () => {
+test("no selection always resolves the current accounts, including ones added later", () => {
   const later = connection();
   expect(
-    mcpAccountBindingsFromVisibleConnections({
-      ...input,
-      connections: [],
-      selections: [],
-      selectionsFrozen: true,
-    }),
-  ).toEqual([]);
-  expect(
-    mcpAccountBindingsFromVisibleConnections({
-      ...input,
-      connections: [later],
-      selections: [],
-      selectionsFrozen: true,
-    }),
+    mcpAccountBindingsFromVisibleConnections({ ...input, connections: [], selections: [] }),
   ).toEqual([]);
   expect(
     mcpAccountBindingsFromVisibleConnections({ ...input, connections: [later], selections: [] }),
   ).toHaveLength(1);
 });
 
-test("frozen selections exclude newly eligible connectors and reject revoked accounts with shared typed error", () => {
+test("a pin narrows only its own connector and a revoked pin fails with the shared typed error", () => {
   const selected = connection();
-  const selections = [{ serverId: server.id, connectionId: selected.id }];
-  const frozen = {
+  const newer = connection();
+  const pinned = {
     ...input,
     servers: [server, { ...server, id: "other" }],
-    selections,
-    selectionsFrozen: true,
+    selections: [{ serverId: server.id, connectionId: selected.id }],
   };
+  const bindings = mcpAccountBindingsFromVisibleConnections({
+    ...pinned,
+    connections: [selected, newer],
+  });
   expect(
-    mcpAccountBindingsFromVisibleConnections({
-      ...frozen,
-      connections: [selected, connection()],
-    }).map((binding) => binding.connectionId),
+    bindings
+      .filter((binding) => binding.canonicalServerId === server.id)
+      .map((binding) => binding.connectionId),
   ).toEqual([selected.id]);
+  expect(
+    bindings
+      .filter((binding) => binding.canonicalServerId === "other")
+      .map((binding) => binding.connectionId)
+      .sort(),
+  ).toEqual([selected.id, newer.id].sort());
   expect(() =>
     mcpAccountBindingsFromVisibleConnections({
-      ...frozen,
-      connections: [{ ...selected, status: "revoked" }, connection()],
+      ...pinned,
+      connections: [{ ...selected, status: "revoked" }, newer],
     }),
   ).toThrow(ConnectionAccountSelectionError);
 });

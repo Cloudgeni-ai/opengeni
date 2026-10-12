@@ -3203,9 +3203,14 @@ export type IncidentTelemetryPreflightInput = Omit<
 export type ScheduledTaskAgentConfig = {
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  /** Read-only: the complete accepted account set, including an empty set. */
-  connectionAccountsFrozen?: true | undefined;
+  /**
+   * Connector accounts a person pinned for a schedule that starts its own
+   * session. Each pinned pair narrows its connector; every other connector
+   * uses the owner's current accounts at each run.
+   */
+  pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Skip an occurrence instead of running without an unusable pinned account. */
+  pinnedAccountsRequired?: true | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -3327,8 +3332,9 @@ export type ScheduledTaskAccessConnector = {
 };
 
 /**
- * What a scheduled task's frozen connectors, connector accounts and Opengeni
- * tools lack compared with what its owner would get by saving it again now.
+ * What a scheduled task's saved connectors and Opengeni tools lack compared
+ * with what its owner would get by saving it again now, plus pinned accounts
+ * that can no longer be used.
  */
 export type ScheduledTaskPolicyDrift = {
   /** Workspace default connectors that new schedules get and this one lacks. */
@@ -3337,10 +3343,8 @@ export type ScheduledTaskPolicyDrift = {
   unavailableConnectors: ScheduledTaskAccessConnector[];
   /** Default Opengeni tools missing from an agent-created task's frozen tools. */
   missingOpenGeniTools: FirstPartyMcpToolName[];
-  /** Connectors whose chosen account can no longer be used by this schedule. */
+  /** Connectors whose pinned account can no longer be used; runs continue without them. */
   unavailableAccounts: ScheduledTaskAccessConnector[];
-  /** Connectors this schedule has no account for, although one is now available. */
-  attachableAccounts: ScheduledTaskAccessConnector[];
   /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
   canRefresh: boolean;
 };
@@ -6814,7 +6818,13 @@ export type CreateAgentScheduledTaskRequest = {
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  /**
+   * Connector accounts a person pins for a schedule that starts its own
+   * session (never an existing-chat schedule, never an agent).
+   */
+  pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Skip an occurrence instead of running without an unusable pinned account. */
+  pinnedAccountsRequired?: boolean | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -6849,7 +6859,6 @@ export type CreateSessionScheduledTaskRequest = {
   /** A schedule posting into an Only me chat is always Only me. */
   visibility?: SessionVisibility | undefined;
   runMode?: "existing_session" | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   status?: ScheduledTaskStatus | undefined;
   metadata?: Record<string, unknown> | undefined;
@@ -6871,7 +6880,10 @@ export type UpdateScheduledTaskRequest = {
   targetSessionId?: string | null | undefined;
   /** Change who can see it. Only the owner can; a schedule posting into an Only me chat stays Only me. */
   visibility?: SessionVisibility | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Replace the person-pinned accounts; `[]` unpins every connector. Omitted keeps the pins. */
+  pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Skip occurrences instead of running without an unusable pinned account. */
+  pinnedAccountsRequired?: boolean | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -6979,6 +6991,23 @@ export type ScheduledTaskRun = {
     | null
     | undefined;
   /**
+   * Pinned connector accounts this run could not use. The run went ahead
+   * without those connectors; no other account was used in their place.
+   */
+  degradedAccounts?:
+    | Array<{
+        serverId: string;
+        connectionId: string | null;
+        reason:
+          | "connector_unavailable"
+          | "account_not_visible"
+          | "account_inactive"
+          | "account_mismatch"
+          | "selection_unavailable"
+          | "owner_access_unavailable";
+      }>
+    | undefined;
+  /**
    * Why the scheduler refused this occurrence before running it; `error`
    * equals `reason`. `retryable: true` (status `skipped`): a later occurrence
    * runs once the condition clears. `retryable: false` (status `failed`):
@@ -7040,9 +7069,10 @@ export type ScheduledTaskRunAccessFailure = {
 
 /**
  * A schedule that needs its owner's attention: its latest run failed closed on
- * connector access (`runId`, `failures`), and/or a chosen connector account can
- * no longer be used so new runs cannot start (`unavailableAccounts`; `runId`
- * and `firedAt` are null when only this applies).
+ * connector access (`runId`, `failures`), and/or a pinned connector account can
+ * no longer be used (`unavailableAccounts`; runs continue without that
+ * connector unless the schedule requires its pins; `runId` and `firedAt` are
+ * null when only this applies).
  */
 export type ScheduledTaskAccessAttention = {
   taskId: string;

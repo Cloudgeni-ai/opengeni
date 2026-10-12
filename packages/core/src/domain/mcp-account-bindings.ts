@@ -47,8 +47,6 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
   servers: McpServerConfig[];
   connections: ConnectionMetadata[];
   selections?: McpConnectionAccountSelection[];
-  /** The complete accepted set, including an explicitly empty set. */
-  selectionsFrozen?: boolean;
 }): McpConnectionAccountBinding[] {
   const remaining = new Set(
     (input.selections ?? []).map((selection) =>
@@ -76,7 +74,7 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
         (ref.resource &&
           (typeof connection.metadata.resource !== "string" ||
             canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource))) ||
-        ((input.selectionsFrozen || selectedIds.size > 0) && !selectedIds.has(connection.id))
+        (selectedIds.size > 0 && !selectedIds.has(connection.id))
       )
         continue;
       const personal = connection.subjectId !== null;

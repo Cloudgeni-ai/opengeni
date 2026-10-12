@@ -276,7 +276,11 @@ describe("scheduled task form projection", () => {
     expect(config).not.toHaveProperty("model");
     expect(config).not.toHaveProperty("reasoningEffort");
 
-    const picked = { ...followed, model: "codex/gpt-6-sol", modelFollowsDefault: false };
+    const picked = {
+      ...followed,
+      model: "codex/gpt-6-sol",
+      modelFollowsDefault: false,
+    };
     expect(agentConfigFromFormState(picked)).toMatchObject({
       model: "codex/gpt-6-sol",
       reasoningEffort: "xhigh",
@@ -292,7 +296,10 @@ describe("scheduled task form projection", () => {
       ...defaults,
       modelFollowsDefault: true,
     });
-    expect(form).toMatchObject({ model: "gpt-6-luna", modelFollowsDefault: true });
+    expect(form).toMatchObject({
+      model: "gpt-6-luna",
+      modelFollowsDefault: true,
+    });
     expect(agentConfigFromFormState(form, following)).not.toHaveProperty("model");
 
     const pinned = scheduledTask();
@@ -301,7 +308,10 @@ describe("scheduled task form projection", () => {
       ...defaults,
       modelFollowsDefault: true,
     });
-    expect(pinnedForm).toMatchObject({ model: "openrouter/free", modelFollowsDefault: false });
+    expect(pinnedForm).toMatchObject({
+      model: "openrouter/free",
+      modelFollowsDefault: false,
+    });
     expect(agentConfigFromFormState(pinnedForm, pinned)).toMatchObject({
       model: "openrouter/free",
     });
@@ -828,10 +838,17 @@ test("session schedule navigation includes matches beyond the first page", async
 test("editing an ordinary source task preserves its source binding and private learning scope", () => {
   const task = scheduledTask();
   const source = knowledgeSyncAction({
-    destination: { kind: "personal", workspaceId: task.workspaceId, subjectId: "user:owner" },
+    destination: {
+      kind: "personal",
+      workspaceId: task.workspaceId,
+      subjectId: "user:owner",
+    },
   });
   task.agentConfig.knowledgeSource = source;
-  task.metadata.knowledgeSourceSync = { sourceEnabled: true, connectionPaused: true };
+  task.metadata.knowledgeSourceSync = {
+    sourceEnabled: true,
+    connectionPaused: true,
+  };
   const form = formStateFromScheduledTask(task);
   expect(form.knowledgeSource).toEqual(source);
   expect(
@@ -884,12 +901,10 @@ describe("scheduled task access in plain words", () => {
         unavailableConnectors: [{ id: "old-crm", name: "old-crm" }],
         missingOpenGeniTools: ["browser_read", "browser_screenshot"],
         unavailableAccounts: [{ id: "slack", name: "Slack" }],
-        attachableAccounts: [{ id: "linear", name: "Linear" }],
         canRefresh: true,
       }),
     ).toEqual([
-      "The account chosen for Slack can no longer be used, so new runs cannot start.",
-      "Linear has no account on this schedule, although one is now connected.",
+      "The account pinned for Slack can no longer be used, so runs go ahead without Slack.",
       "New schedules in this workspace also get Gmail; this one does not.",
       "2 newer Opengeni tools are not available to it: browser read and browser screenshot.",
       "old-crm is no longer set up in this workspace and will be removed.",
@@ -907,12 +922,16 @@ describe("scheduled task access in plain words", () => {
         { id: "slack", name: "Slack" },
         { id: "gmail", name: "Gmail" },
       ],
-      attachableAccounts: [],
       canRefresh: true,
     };
     expect(scheduledTaskUnavailableAccountsText(drift.unavailableAccounts)).toBe(
-      "The account chosen for Slack and Gmail can no longer be used, so new runs cannot start.",
+      "The account pinned for Slack and Gmail can no longer be used, so runs go ahead without Slack and Gmail.",
     );
+    expect(
+      scheduledTaskUnavailableAccountsText(drift.unavailableAccounts, {
+        skipsRuns: true,
+      }),
+    ).toBe("The account pinned for Slack and Gmail can no longer be used, so runs are skipped.");
     expect(scheduledTaskUnavailableAccountsText([])).toBeNull();
     expect(scheduledTaskPolicyDriftLines(drift, { omitUnavailableAccounts: true })).toEqual([]);
   });
@@ -926,11 +945,14 @@ describe("scheduled task access in plain words", () => {
       unavailableConnectors: [],
       missingOpenGeniTools: ["browser_read" as const],
       unavailableAccounts: [],
-      attachableAccounts: [],
       canRefresh: true,
     };
     const head = "a".repeat(64);
-    const dismissal = { executionDigest: head, connectors: ["gmail"], openGeniTools: [] };
+    const dismissal = {
+      executionDigest: head,
+      connectors: ["gmail"],
+      openGeniTools: [],
+    };
     expect(visibleScheduledTaskPolicyDrift(drift, dismissal, head)).toEqual({
       ...drift,
       missingConnectors: [{ id: "notion", name: "Notion" }],
@@ -939,19 +961,33 @@ describe("scheduled task access in plain words", () => {
     expect(
       visibleScheduledTaskPolicyDrift(
         drift,
-        { executionDigest: head, connectors: ["gmail", "notion"], openGeniTools: ["browser_read"] },
+        {
+          executionDigest: head,
+          connectors: ["gmail", "notion"],
+          openGeniTools: ["browser_read"],
+        },
         head,
       ),
     ).toBeNull();
     // A broken account is never hidden by a dismissal.
-    const blocked = { ...drift, unavailableAccounts: [{ id: "slack", name: "Slack" }] };
+    const blocked = {
+      ...drift,
+      unavailableAccounts: [{ id: "slack", name: "Slack" }],
+    };
     expect(
       visibleScheduledTaskPolicyDrift(
         blocked,
-        { executionDigest: head, connectors: ["gmail", "notion"], openGeniTools: ["browser_read"] },
+        {
+          executionDigest: head,
+          connectors: ["gmail", "notion"],
+          openGeniTools: ["browser_read"],
+        },
         head,
       ),
-    ).toMatchObject({ missingConnectors: [], unavailableAccounts: [{ id: "slack" }] });
+    ).toMatchObject({
+      missingConnectors: [],
+      unavailableAccounts: [{ id: "slack" }],
+    });
     // A dismissal made for another task head no longer applies.
     expect(visibleScheduledTaskPolicyDrift(drift, dismissal, "b".repeat(64))).toBe(drift);
     expect(visibleScheduledTaskPolicyDrift(null, dismissal, head)).toBeNull();
@@ -970,7 +1006,10 @@ describe("scheduledTaskAwaitingHumanText", () => {
   test("says when the latest run waits on a person and when the timeout answers", () => {
     expect(scheduledTaskAwaitingHumanText(null)).toBeNull();
     expect(
-      scheduledTaskAwaitingHumanText({ since: "2026-09-29T08:00:00.000Z", expiresAt: null }),
+      scheduledTaskAwaitingHumanText({
+        since: "2026-09-29T08:00:00.000Z",
+        expiresAt: null,
+      }),
     ).toBe("The latest run is waiting for a person to approve a tool or answer a question.");
     expect(
       scheduledTaskAwaitingHumanText({
@@ -1002,7 +1041,10 @@ test("historical Atlassian schedules are retired while hosted MCP tasks remain a
   expect(
     scheduledTaskStateLabel({
       ...task,
-      agentConfig: { ...task.agentConfig, tools: [{ kind: "mcp", id: "atlassian-mcp" }] },
+      agentConfig: {
+        ...task.agentConfig,
+        tools: [{ kind: "mcp", id: "atlassian-mcp" }],
+      },
     }),
   ).toMatchObject({ active: true });
 });

@@ -13,8 +13,6 @@ const selectMenu = await import("@/components/ui/select-menu");
 const workspaceId = "workspace-example";
 let task: ScheduledTask;
 let chats: Session[];
-let pendingAccountBaseline: Promise<Session> | null = null;
-let sourceReads = 0;
 let privateAllowed = false;
 let defaultVisibility: "private" | "workspace" = "workspace";
 let machines: unknown[] = [];
@@ -24,11 +22,7 @@ const updateScheduledTask = mock(
 const client = {
   getScheduledTask: async () => task,
   updateScheduledTask,
-  getSession: async (_workspace: string, id: string) => {
-    if (id === "source-chat" && ++sourceReads === 2 && pendingAccountBaseline)
-      return pendingAccountBaseline;
-    return chats.find((chat) => chat.id === id)!;
-  },
+  getSession: async (_workspace: string, id: string) => chats.find((chat) => chat.id === id)!,
   listSessions: async () => chats,
   getSessionTenancyCreateCapabilities: async () => ({
     activated: true,
@@ -47,7 +41,12 @@ const client = {
       { id: "later-account", providerDomain: "retained.example.test" },
       { id: "empty-account", providerDomain: "empty.example.test" },
       { id: "new-account", providerDomain: "added.example.test" },
-    ].map((connection) => ({ ...connection, status: "active", subjectId: null, metadata: {} })),
+    ].map((connection) => ({
+      ...connection,
+      status: "active",
+      subjectId: null,
+      metadata: {},
+    })),
 };
 const context = {
   client,
@@ -63,7 +62,9 @@ const context = {
     runtime: { mcpServerId: id },
     connectionRef: { providerDomain: `${id}.example.test` },
   })),
-  accessContext: { workspaceGrants: [{ workspaceId, permissions: ["connections:read"] }] },
+  accessContext: {
+    workspaceGrants: [{ workspaceId, permissions: ["connections:read"] }],
+  },
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("./schedule-parts", () => ({
@@ -83,13 +84,21 @@ mock.module("@/lib/use-workspace-machines", () => ({
   useWorkspaceMachines: () => ({ machines, loading: false }),
 }));
 mock.module("@/lib/use-workspace-model-catalog", () => ({
-  useWorkspaceModelCatalog: () => ({ defaultSelection: null, rows: [], loading: false }),
+  useWorkspaceModelCatalog: () => ({
+    defaultSelection: null,
+    rows: [],
+    loading: false,
+  }),
 }));
 mock.module("@/components/knowledge/agent-learning-settings", () => ({
   AgentLearningDraftEditor: () => null,
 }));
-mock.module("./schedule-agent-capabilities", () => ({ ScheduleAgentCapabilities: () => null }));
-mock.module("@/components/schedule-slack-posting", () => ({ ScheduleSlackPosting: () => null }));
+mock.module("./schedule-agent-capabilities", () => ({
+  ScheduleAgentCapabilities: () => null,
+}));
+mock.module("@/components/schedule-slack-posting", () => ({
+  ScheduleSlackPosting: () => null,
+}));
 mock.module("./schedule-composer", () => ({
   ComposerField: ({
     draft,
@@ -163,8 +172,6 @@ type ScheduleFormMode = import("./schedule-form-page").ScheduleFormMode;
 beforeEach(() => {
   document.body.replaceChildren();
   updateScheduledTask.mockClear();
-  pendingAccountBaseline = null;
-  sourceReads = 0;
   privateAllowed = false;
   defaultVisibility = "workspace";
   machines = [];
@@ -191,8 +198,7 @@ beforeEach(() => {
         { kind: "mcp", id: "retained" },
         { kind: "mcp", id: "empty" },
       ],
-      connectionAccounts: [{ serverId: "retained", connectionId: "saved-account" }],
-      connectionAccountsFrozen: true,
+      pinnedAccounts: [{ serverId: "retained", connectionId: "saved-account" }],
     },
   } as unknown as ScheduledTask;
   chats = [
@@ -243,12 +249,20 @@ async function save(container: HTMLElement) {
   });
   expect(updateScheduledTask).toHaveBeenCalledTimes(1);
   return updateScheduledTask.mock.calls[0]![2] as {
-    connectionAccounts?: unknown[];
+    pinnedAccounts?: unknown[];
     prompt?: string;
   };
 }
 
-test("enabling a connector saves its displayed defaults without changing retained or empty account groups", async () => {
+function accountSwitches(container: HTMLElement, serverId: string) {
+  return [
+    ...container.querySelectorAll<HTMLButtonElement>(
+      `[aria-label="${serverId} accounts"] [role="switch"]`,
+    ),
+  ];
+}
+
+test("enabling a connector leaves it on current accounts and keeps the person's pins", async () => {
   const { container, root } = await render();
   await act(async () => {
     [...container.querySelectorAll("button")]
@@ -256,18 +270,21 @@ test("enabling a connector saves its displayed defaults without changing retaine
       .click();
     await flush();
   });
+  expect(accountSwitches(container, "added")[0]?.getAttribute("aria-checked")).toBe("true");
   const request = await save(container);
-  expect(request.connectionAccounts).toEqual([
-    { serverId: "retained", connectionId: "saved-account" },
-    { serverId: "added", connectionId: "new-account" },
-  ]);
+  expect(request.pinnedAccounts).toBeUndefined();
   await act(async () => root.unmount());
 });
 
-test("retargeting a bound schedule saves newly applicable accounts while preserving its saved subset", async () => {
-  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+test("an existing-chat schedule shows no account picker and saves no pins when retargeted", async () => {
+  task = {
+    ...task,
+    runMode: "existing_session",
+    targetSessionId: "source-chat",
+  };
   task.agentConfig.tools = [];
   const { container, root } = await render();
+  expect(container.querySelector('[aria-label="retained accounts"]')).toBeNull();
   const destination = [...container.querySelectorAll("select")].find(
     (select) => select.value === "source-chat",
   )!;
@@ -277,18 +294,18 @@ test("retargeting a bound schedule saves newly applicable accounts while preserv
     await flush();
   });
   await act(flush);
+  expect(container.querySelector('[aria-label="added accounts"]')).toBeNull();
   const request = await save(container);
-  expect(request.connectionAccounts).toEqual([
-    { serverId: "retained", connectionId: "saved-account" },
-    { serverId: "added", connectionId: "new-account" },
-  ]);
+  expect(request.pinnedAccounts).toBeUndefined();
   await act(async () => root.unmount());
 });
 
-test("a saved empty account group stays unchecked and a message-only save leaves accounts omitted", async () => {
+test("an unpinned connector shows its current accounts and a message-only save sends no accounts", async () => {
   const { container, root } = await render();
-  const empty = container.querySelector('[aria-label="empty accounts"]')!;
-  expect(empty.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
+  expect(accountSwitches(container, "empty")[0]?.getAttribute("aria-checked")).toBe("true");
+  expect(container.textContent).toContain(
+    "Pinned for retained. Other connectors use your current accounts each run.",
+  );
   await act(async () => {
     [...container.querySelectorAll("button")]
       .find((button) => button.textContent === "Edit example message")!
@@ -297,54 +314,56 @@ test("a saved empty account group stays unchecked and a message-only save leaves
   });
   const request = await save(container);
   expect(request.prompt).toBe("Updated example message");
-  expect(request.connectionAccounts).toBeUndefined();
+  expect(request.pinnedAccounts).toBeUndefined();
   await act(async () => root.unmount());
 });
 
-test("explicitly deselecting the last account saves no access for an already-frozen schedule", async () => {
+test("picking accounts pins only the connector a person changed", async () => {
   const { container, root } = await render();
   await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>('[aria-label="retained accounts"] [role="switch"]')!
-      .click();
+    accountSwitches(container, "empty")[0]!.click();
     await flush();
   });
-  const group = container.querySelector('[aria-label="retained accounts"]')!;
-  expect(group.querySelector('[role="status"]')?.textContent).toBe(
-    "No account access when this schedule runs.",
-  );
-  expect(group.querySelectorAll('[role="status"]')).toHaveLength(1);
-  const request = await save(container);
-  expect(request.connectionAccounts).toEqual([]);
-  await act(async () => root.unmount());
-});
-
-test("an inherited legacy schedule requiring accounts never suggests its hidden remove-connector control", async () => {
-  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
-  task.agentConfig.tools = [];
-  delete task.agentConfig.connectionAccountsFrozen;
-  const { container, root } = await render();
-  await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>('[aria-label="retained accounts"] [role="switch"]')!
-      .click();
-    await flush();
-  });
+  // Unchecking the only account leaves nothing to pin: ask, never save no access.
   expect(container.querySelector<HTMLButtonElement>("[data-submit]")!.disabled).toBe(true);
-  const reason = container.querySelector("[data-disabled-reason]")!.textContent;
-  expect(reason).toBe("Pick an account for retained.");
-  expect(reason).not.toContain("remove the connector");
-  expect(updateScheduledTask).not.toHaveBeenCalled();
+  expect(container.querySelector("[data-disabled-reason]")!.textContent).toBe(
+    "Pick an account for empty, or use your current accounts.",
+  );
+  await act(async () => {
+    accountSwitches(container, "empty")[0]!.click();
+    accountSwitches(container, "retained")[1]!.click();
+    await flush();
+  });
+  const request = await save(container);
+  expect(request.pinnedAccounts).toEqual([
+    { serverId: "retained", connectionId: "saved-account" },
+    { serverId: "retained", connectionId: "later-account" },
+    { serverId: "empty", connectionId: "empty-account" },
+  ]);
   await act(async () => root.unmount());
 });
 
-test("an unavailable saved account stays unresolved until explicitly removed", async () => {
-  task.agentConfig.connectionAccounts = [{ serverId: "retained", connectionId: "missing-account" }];
+test("using current accounts clears every pin", async () => {
   const { container, root } = await render();
   await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>('[aria-label="retained accounts"] [role="switch"]')!
+    [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use current accounts")!
       .click();
+    await flush();
+  });
+  expect(container.textContent).toContain(
+    "Each run uses your current accounts. Changing one here pins it.",
+  );
+  const request = await save(container);
+  expect(request.pinnedAccounts).toEqual([]);
+  await act(async () => root.unmount());
+});
+
+test("an unavailable pinned account stays unresolved until explicitly removed", async () => {
+  task.agentConfig.pinnedAccounts = [{ serverId: "retained", connectionId: "missing-account" }];
+  const { container, root } = await render();
+  await act(async () => {
+    accountSwitches(container, "retained")[0]!.click();
     await flush();
   });
   expect(container.querySelector<HTMLButtonElement>("[data-submit]")!.disabled).toBe(true);
@@ -356,55 +375,7 @@ test("an unavailable saved account stays unresolved until explicitly removed", a
     await flush();
   });
   const request = await save(container);
-  expect(request.connectionAccounts).toEqual([
-    { serverId: "retained", connectionId: "saved-account" },
-  ]);
-  await act(async () => root.unmount());
-});
-
-test("choosing an account while the original chat loads does not freeze another group's temporary choice", async () => {
-  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
-  task.agentConfig.tools = [];
-  let resolveBaseline!: (session: Session) => void;
-  pendingAccountBaseline = new Promise((resolve) => {
-    resolveBaseline = resolve;
-  });
-  const { container, root } = await render();
-  const destination = [...container.querySelectorAll("select")].find(
-    (select) => select.value === "source-chat",
-  )!;
-  await act(async () => {
-    destination.value = "destination-chat";
-    destination.dispatchEvent(new Event("change", { bubbles: true }));
-    await flush();
-  });
-  await act(flush);
-  await act(async () => {
-    container
-      .querySelectorAll<HTMLButtonElement>('[aria-label="retained accounts"] [role="switch"]')[1]!
-      .click();
-    await flush();
-  });
-  await act(async () => {
-    resolveBaseline(chats[0]!);
-    await flush();
-  });
-  expect(
-    container
-      .querySelector('[aria-label="added accounts"] [role="switch"]')
-      ?.getAttribute("aria-checked"),
-  ).toBe("true");
-  expect(
-    container
-      .querySelector('[aria-label="empty accounts"] [role="switch"]')
-      ?.getAttribute("aria-checked"),
-  ).toBe("false");
-  const request = await save(container);
-  expect(request.connectionAccounts).toEqual([
-    { serverId: "retained", connectionId: "saved-account" },
-    { serverId: "retained", connectionId: "later-account" },
-    { serverId: "added", connectionId: "new-account" },
-  ]);
+  expect(request.pinnedAccounts).toEqual([{ serverId: "retained", connectionId: "saved-account" }]);
   await act(async () => root.unmount());
 });
 
@@ -471,7 +442,10 @@ test("a schedule on your own machine is Only me", async () => {
   task = {
     ...task,
     visibility: "private",
-    agentConfig: { ...task.agentConfig, machineTarget: { targetSandboxId: "my-laptop" } },
+    agentConfig: {
+      ...task.agentConfig,
+      machineTarget: { targetSandboxId: "my-laptop" },
+    },
   } as ScheduledTask;
   const { container, root } = await render();
   expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");

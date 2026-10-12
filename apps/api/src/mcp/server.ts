@@ -648,7 +648,13 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
           .strict()
           .optional(),
       })
-      .omit({ agentLearning: true, connectionAuthorities: true })
+      // Only a person pins connector accounts; agents never do.
+      .omit({
+        agentLearning: true,
+        connectionAuthorities: true,
+        pinnedAccounts: true,
+        pinnedAccountsRequired: true,
+      })
       .strict(),
     UpdateScheduledTaskRequest,
   ),
@@ -1802,7 +1808,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent. Runs retain the schedule owner’s captured account choices and revalidate access; they do not acquire another chat owner’s credentials.",
+          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent. Each run uses the schedule owner’s current connected accounts; it never uses another chat owner’s credentials.",
         inputSchema: contractToolInput(
           scheduledTaskCreateToolProjection(),
           scheduledTaskCreateToolValidation(sessionId),

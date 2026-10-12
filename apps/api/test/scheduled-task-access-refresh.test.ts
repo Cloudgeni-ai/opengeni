@@ -168,7 +168,7 @@ function signedIn(
   };
 }
 
-/** An agent-created schedule, frozen before Notion, browser tools and a reconnected Linear. */
+/** An agent-created schedule saved before Notion and browser tools, with a person's Linear pin that was later disconnected. */
 async function staleAgentTask(workspace: Fixture): Promise<ScheduledTask> {
   return await createScheduledTask(client.db, {
     accountId: workspace.accountId,
@@ -184,9 +184,8 @@ async function staleAgentTask(workspace: Fixture): Promise<ScheduledTask> {
       resources: [],
       tools: [{ kind: "mcp", id: "linear" }],
       metadata: {},
-      // The account chosen at creation was later disconnected and reconnected.
-      connectionAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
-      connectionAccountsFrozen: true,
+      // The pinned account was later disconnected and reconnected.
+      pinnedAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
     },
     createdBy: { kind: "subject", subjectId: workspace.owner },
     creatorPolicy: {
@@ -245,7 +244,6 @@ describe("scheduled task access drift and refresh", () => {
       unavailableConnectors: [],
       missingOpenGeniTools: ["rig_list", "browser_read"],
       unavailableAccounts: [{ id: "linear", name: "Linear" }],
-      attachableAccounts: [],
       canRefresh: true,
     });
     const [memberView] = await withScheduledTaskPolicyDrift({
@@ -257,8 +255,8 @@ describe("scheduled task access drift and refresh", () => {
     });
     expect(memberView).toEqual(task);
 
-    // The chosen Linear account is gone, so the scheduler refuses every fresh
-    // occurrence before it creates a run: the owner's attention list says so.
+    // The pinned Linear account is gone, so runs go without Linear until a
+    // person pins another account or unpins it: the owner's attention list says so.
     const attention = (grantFor: AccessGrant) =>
       listScheduledTaskAccessAttention({ db: client.db, settings: settings(), grant: grantFor });
     expect(await attention(grant(workspace, workspace.owner))).toEqual([
@@ -311,7 +309,7 @@ describe("scheduled task access drift and refresh", () => {
     expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
   }, 60_000);
 
-  test("re-freezes with the owner's current authority and never beyond it", async () => {
+  test("re-saves with the owner's current authority and never replaces a pinned account", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const task = await staleAgentTask(workspace);
@@ -329,10 +327,8 @@ describe("scheduled task access drift and refresh", () => {
       { kind: "mcp", id: "linear" },
       { kind: "mcp", id: "notion", optional: true },
     ]);
-    expect(refreshed.agentConfig.connectionAccounts).toEqual([
-      { serverId: "linear", connectionId: workspace.liveConnectionId },
-    ]);
-    expect(refreshed.agentConfig.connectionAccountsFrozen).toBe(true);
+    // A refresh never swaps a person's pin for another account.
+    expect(refreshed.agentConfig.pinnedAccounts).toEqual(task.agentConfig.pinnedAccounts);
     expect(refreshed.ownerSubjectId).toBe(workspace.owner);
     expect(refreshed.authorityRevision).toBeGreaterThan(task.authorityRevision);
     expect(refreshed.executionDigest).not.toBe(task.executionDigest);
@@ -364,7 +360,14 @@ describe("scheduled task access drift and refresh", () => {
       tasks: [refreshed],
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
-    expect(after?.policyDrift).toBeNull();
+    // Only the stale pin remains, and only a person's edit changes it.
+    expect(after?.policyDrift).toEqual({
+      missingConnectors: [],
+      unavailableConnectors: [],
+      missingOpenGeniTools: [],
+      unavailableAccounts: [{ id: "linear", name: "Linear" }],
+      canRefresh: true,
+    });
 
     // Refreshing an up-to-date task is a no-op, not another re-authorization.
     const again = await refreshScheduledTaskAccess({
@@ -395,11 +398,9 @@ describe("scheduled task access drift and refresh", () => {
       },
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
-    // The broken account is still fixed and rig_list still added.
+    // rig_list is still added and the pin is left for a person to change.
     expect(refreshed.agentConfig.tools).toEqual([{ kind: "mcp", id: "linear" }]);
-    expect(refreshed.agentConfig.connectionAccounts).toEqual([
-      { serverId: "linear", connectionId: workspace.liveConnectionId },
-    ]);
+    expect(refreshed.agentConfig.pinnedAccounts).toEqual(task.agentConfig.pinnedAccounts);
     const policy = await getScheduledTaskCreatorPolicy(client.db, workspace.workspaceId, task.id);
     expect(policy?.firstPartyMcpTools).toEqual(["sessions_list", "rig_list"]);
     // The drift still reports the defaults that were left out; the web hides
@@ -414,15 +415,15 @@ describe("scheduled task access drift and refresh", () => {
     expect(after?.policyDrift).toMatchObject({
       missingConnectors: [{ id: "notion", name: "Notion" }],
       missingOpenGeniTools: ["browser_read"],
-      unavailableAccounts: [],
+      unavailableAccounts: [{ id: "linear", name: "Linear" }],
     });
   }, 60_000);
 
-  test("fixing an account never lifts a narrowed agent task's permission boundary", async () => {
+  test("a stale pin alone never makes a refresh rewrite a narrowed agent task", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     // A read-only agent session created this task with today's default tools;
-    // only its Linear account is stale.
+    // only a person's Linear pin is stale.
     const task = await createScheduledTask(client.db, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
@@ -440,8 +441,7 @@ describe("scheduled task access drift and refresh", () => {
           { kind: "mcp", id: "notion", optional: true },
         ],
         metadata: {},
-        connectionAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
-        connectionAccountsFrozen: true,
+        pinnedAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
       },
       createdBy: { kind: "subject", subjectId: workspace.owner },
       creatorPolicy: {
@@ -472,9 +472,8 @@ describe("scheduled task access drift and refresh", () => {
       request: { executionDigest: task.executionDigest },
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
-    expect(refreshed.agentConfig.connectionAccounts).toEqual([
-      { serverId: "linear", connectionId: workspace.liveConnectionId },
-    ]);
+    // Nothing to re-save: the pin is a person's choice and stays until a person changes it.
+    expect(refreshed).toEqual(task);
     const policy = await getScheduledTaskCreatorPolicy(client.db, workspace.workspaceId, task.id);
     expect(policy?.firstPartyMcpTools).toEqual(["sessions_list", "rig_list", "browser_read"]);
     expect(policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
@@ -497,14 +496,12 @@ describe("scheduled task access drift and refresh", () => {
         resources: [],
         tools: [],
         metadata: {},
-        connectionAccounts: [],
-        connectionAccountsFrozen: true,
       },
       createdBy: { kind: "service", subjectId: "scheduler" },
       metadata: {},
     });
     expect(task.ownerSubjectId).toBeNull();
-    // A service schedule whose chosen workspace account was removed: nobody
+    // A service schedule whose pinned workspace account was removed: nobody
     // owns it, so the key that manages schedules is told.
     const blocked = await createScheduledTask(client.db, {
       accountId: workspace.accountId,
@@ -520,8 +517,7 @@ describe("scheduled task access drift and refresh", () => {
         resources: [],
         tools: [{ kind: "mcp", id: "linear" }],
         metadata: {},
-        connectionAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
-        connectionAccountsFrozen: true,
+        pinnedAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
       },
       createdBy: { kind: "service", subjectId: "scheduler" },
       metadata: {},
@@ -557,7 +553,6 @@ describe("scheduled task access drift and refresh", () => {
       unavailableConnectors: [],
       missingOpenGeniTools: [],
       unavailableAccounts: [],
-      attachableAccounts: [],
       canRefresh: false,
     });
 

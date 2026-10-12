@@ -98,7 +98,12 @@ export type ScheduledTaskFormState = {
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
   mcpServerIds?: string[];
-  connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
+  /**
+   * Accounts a person pinned for a schedule that starts its own session.
+   * Connectors without a pin use the owner's current accounts at each run;
+   * an existing-chat schedule never has pins.
+   */
+  pinnedAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
   /** Channel a person chose for the Opengeni bot's posts; empty means no posting. */
   slackBotChannelId: string;
@@ -253,7 +258,8 @@ export function formStateFromScheduledTask(
     mcpServerIds: task.agentConfig.tools
       .filter((tool) => tool.id !== "opengeni")
       .map((tool) => tool.id),
-    connectionAccounts: task.agentConfig.connectionAccounts ?? [],
+    pinnedAccounts:
+      task.runMode === "existing_session" ? [] : (task.agentConfig.pinnedAccounts ?? []),
     name: task.name,
     knowledgeSource: task.agentConfig.knowledgeSource,
     description: scheduledTaskDescription(task),
@@ -412,10 +418,15 @@ export function agentConfigFromFormState(
     slackBotConnectionId: _bot,
     slackBotChannelId: _channel,
     agent: _agent,
-    connectionAccounts: _accounts,
-    connectionAccountsFrozen: _frozen,
+    // Pins travel as their own request field, never inside the config.
+    pinnedAccounts: _pins,
+    pinnedAccountsRequired: _pinsRequired,
     ...retainedConfig
-  } = { connectionAccountsFrozen: undefined, ...existingTask?.agentConfig };
+  } = {
+    pinnedAccounts: undefined,
+    pinnedAccountsRequired: undefined,
+    ...existingTask?.agentConfig,
+  };
   const agent =
     form.runMode === "existing_session"
       ? undefined
@@ -834,7 +845,11 @@ export async function loadSessionSchedules(
   const limit = 100;
   let offset = 0;
   while (true) {
-    const page = await client.listScheduledTasks(workspaceId, { sessionId, limit, offset });
+    const page = await client.listScheduledTasks(workspaceId, {
+      sessionId,
+      limit,
+      offset,
+    });
     for (const task of page) tasks.set(task.id, task);
     if (page.length < limit) return [...tasks.values()];
     offset += page.length;
@@ -900,12 +915,19 @@ export function scheduledTaskAwaitingHumanText(
     : base;
 }
 
-/** "The account chosen for Slack can no longer be used, so new runs cannot start." */
+/**
+ * "The account pinned for Slack can no longer be used, so runs go ahead without
+ * Slack." `skipsRuns` when the schedule requires its pinned accounts.
+ */
 export function scheduledTaskUnavailableAccountsText(
   connectors: readonly { name: string }[] | undefined,
+  options: { skipsRuns?: boolean } = {},
 ): string | null {
   if (!connectors || connectors.length === 0) return null;
-  return `The account chosen for ${namedList(connectors.map((item) => item.name))} can no longer be used, so new runs cannot start.`;
+  const names = namedList(connectors.map((item) => item.name));
+  return options.skipsRuns
+    ? `The account pinned for ${names} can no longer be used, so runs are skipped.`
+    : `The account pinned for ${names} can no longer be used, so runs go ahead without ${names}.`;
 }
 
 /**
@@ -915,20 +937,17 @@ export function scheduledTaskUnavailableAccountsText(
  */
 export function scheduledTaskPolicyDriftLines(
   drift: ScheduledTaskPolicyDrift | null | undefined,
-  options: { omitUnavailableAccounts?: boolean } = {},
+  options: { omitUnavailableAccounts?: boolean; skipsRuns?: boolean } = {},
 ): string[] {
   if (!drift) return [];
   const lines: string[] = [];
   const names = (items: readonly { name: string }[]) => namedList(items.map((item) => item.name));
   const unavailableAccounts = options.omitUnavailableAccounts
     ? null
-    : scheduledTaskUnavailableAccountsText(drift.unavailableAccounts);
+    : scheduledTaskUnavailableAccountsText(drift.unavailableAccounts, {
+        skipsRuns: options.skipsRuns === true,
+      });
   if (unavailableAccounts) lines.push(unavailableAccounts);
-  if (drift.attachableAccounts.length > 0) {
-    lines.push(
-      `${names(drift.attachableAccounts)} ${drift.attachableAccounts.length === 1 ? "has" : "have"} no account on this schedule, although one is now connected.`,
-    );
-  }
   if (drift.missingConnectors.length > 0) {
     lines.push(
       `New schedules in this workspace also get ${names(drift.missingConnectors)}; this one does not.`,
@@ -992,7 +1011,6 @@ export function visibleScheduledTaskPolicyDrift(
   return visible.missingConnectors.length > 0 ||
     visible.missingOpenGeniTools.length > 0 ||
     visible.unavailableAccounts.length > 0 ||
-    visible.attachableAccounts.length > 0 ||
     visible.unavailableConnectors.length > 0
     ? visible
     : null;

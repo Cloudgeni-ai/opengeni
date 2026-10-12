@@ -11,7 +11,7 @@ import type { AccessGrantAuthorization } from "../src/access";
 import {
   isScheduledTaskAccessRefreshHuman,
   orderScheduledTaskAccessAttention,
-  planScheduledTaskConnectionAccounts,
+  planScheduledTaskPinnedAccounts,
   planScheduledTaskConnectors,
   planScheduledTaskOpenGeniTools,
   scheduledTaskAccessSource,
@@ -87,103 +87,73 @@ describe("scheduled task connector drift", () => {
   });
 });
 
-describe("scheduled task connector accounts", () => {
+describe("scheduled task pinned accounts", () => {
   const binding = (canonicalServerId: string, connectionId: string) => ({
     canonicalServerId,
     connectionId,
   });
 
-  test("keeps usable chosen accounts exactly", () => {
-    const plan = planScheduledTaskConnectionAccounts({
-      priorSelections: [{ serverId: "linear", connectionId: "c-1" }],
-      selectionsFrozen: true,
-      priorToolIds: new Set(["linear"]),
+  test("keeps a usable pin exactly", () => {
+    const plan = planScheduledTaskPinnedAccounts({
+      pins: [{ serverId: "linear", connectionId: "c-1" }],
       connectionServerIds: ["linear"],
       availableBindings: [binding("linear", "c-1"), binding("linear", "c-2")],
       names,
     });
     expect(plan).toEqual({
-      selections: [{ serverId: "linear", connectionId: "c-1" }],
+      kept: [{ serverId: "linear", connectionId: "c-1" }],
       unavailable: [],
-      attachable: [],
       dropped: [],
     });
   });
 
-  test("replaces a chosen account that can no longer be used and reports it", () => {
-    const plan = planScheduledTaskConnectionAccounts({
-      priorSelections: [{ serverId: "slack", connectionId: "revoked" }],
-      selectionsFrozen: true,
-      priorToolIds: new Set(["slack"]),
+  test("reports a pin that can no longer be used and never substitutes another account", () => {
+    const plan = planScheduledTaskPinnedAccounts({
+      pins: [{ serverId: "slack", connectionId: "revoked" }],
       connectionServerIds: ["slack"],
       availableBindings: [binding("slack", "reconnected")],
       names,
     });
     expect(plan.unavailable).toEqual([{ id: "slack", name: "Slack" }]);
-    expect(plan.selections).toEqual([{ serverId: "slack", connectionId: "reconnected" }]);
+    expect(plan.kept).toEqual([{ serverId: "slack", connectionId: "revoked" }]);
   });
 
-  test("keeps the remaining chosen account when only one of two is gone", () => {
-    const plan = planScheduledTaskConnectionAccounts({
-      priorSelections: [
+  test("names a connector once when one of its two pins is gone", () => {
+    const plan = planScheduledTaskPinnedAccounts({
+      pins: [
         { serverId: "gmail", connectionId: "work" },
         { serverId: "gmail", connectionId: "gone" },
       ],
-      selectionsFrozen: true,
-      priorToolIds: new Set(["gmail"]),
       connectionServerIds: ["gmail"],
       availableBindings: [binding("gmail", "work"), binding("gmail", "personal")],
       names,
     });
     expect(plan.unavailable).toEqual([{ id: "gmail", name: "Gmail" }]);
-    expect(plan.selections).toEqual([{ serverId: "gmail", connectionId: "work" }]);
   });
 
-  test("offers an account for a frozen connector that had none, and attaches new connectors silently", () => {
-    const plan = planScheduledTaskConnectionAccounts({
-      priorSelections: [],
-      selectionsFrozen: true,
-      priorToolIds: new Set(["slack"]),
+  test("an unpinned connector is never reported, whatever accounts exist", () => {
+    const plan = planScheduledTaskPinnedAccounts({
+      pins: [],
       connectionServerIds: ["slack", "gmail"],
       availableBindings: [binding("slack", "s-1"), binding("gmail", "g-1")],
       names,
     });
-    expect(plan.attachable).toEqual([{ id: "slack", name: "Slack" }]);
-    expect(plan.selections).toEqual([
-      { serverId: "slack", connectionId: "s-1" },
-      { serverId: "gmail", connectionId: "g-1" },
-    ]);
+    expect(plan).toEqual({ kept: [], unavailable: [], dropped: [] });
   });
 
-  test("a legacy unfrozen task already binds every account, so nothing is attachable", () => {
-    const plan = planScheduledTaskConnectionAccounts({
-      priorSelections: [],
-      selectionsFrozen: false,
-      priorToolIds: new Set(["slack"]),
-      connectionServerIds: ["slack"],
-      availableBindings: [binding("slack", "s-1")],
-      names,
-    });
-    expect(plan.attachable).toEqual([]);
-    expect(plan.selections).toEqual([{ serverId: "slack", connectionId: "s-1" }]);
-  });
-
-  test("passes special surfaces through and drops choices for connectors the task no longer uses", () => {
-    const plan = planScheduledTaskConnectionAccounts({
-      priorSelections: [
+  test("passes special surfaces through and drops pins for connectors the task no longer uses", () => {
+    const plan = planScheduledTaskPinnedAccounts({
+      pins: [
         { serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID, connectionId: "drive" },
         { serverId: "retired-crm", connectionId: "crm" },
       ],
-      selectionsFrozen: true,
-      priorToolIds: new Set(["retired-crm"]),
       connectionServerIds: [],
       availableBindings: [],
       names,
     });
-    expect(plan.selections).toEqual([
+    expect(plan.kept).toEqual([
       { serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID, connectionId: "drive" },
     ]);
-    // The dropped choice is named: for an owned task the scheduler refuses it.
     expect(plan.dropped).toEqual([{ id: "retired-crm", name: "retired-crm" }]);
   });
 });
@@ -507,7 +477,6 @@ describe("who sees and refreshes scheduled task access", () => {
         unavailableConnectors: [],
         missingOpenGeniTools: [],
         unavailableAccounts: [],
-        attachableAccounts: [],
       }),
     ).toBe(false);
   });

@@ -165,16 +165,15 @@ connection revocation.
 The accepted binding set follows queued work, continuations, child work and
 scheduled occurrences. New empty sets mean no authenticated account routes;
 historical absent/null sets retain the legacy execution path. Scheduled tasks
-save the selected pairs with `connectionAccountsFrozen: true` under the task's
-execution owner and revalidate them when an occurrence is accepted. A frozen
-empty list stays empty if accounts are connected later. Material edits preserve
-the accepted selection unless the owner explicitly replaces the account choices.
-Removing an MCP tool also removes its inherited account choice, without changing
-the exact accounts of retained tools. Explicitly supplied choices for unselected
-tools are still rejected;
-historical tasks without the marker retain their prior selection semantics.
-Unavailable selected accounts permanently block the occurrence with
-`connection_account_unavailable`, rather than retrying another identity.
+never save resolved accounts: each fresh occurrence resolves the execution
+owner's current accounts when it is accepted, and that accepted set is then
+fixed for the occurrence and its retries. Only a person can pin accounts
+(`pinnedAccounts`) on a schedule that starts its own session; a pin narrows
+only its own connector. Removing an MCP tool also removes its pins. Pins for
+unselected tools are rejected. When a pinned account can no longer be used, the
+occurrence runs without that connector and records it in `degradedAccounts`;
+it never retries another identity. With `pinnedAccountsRequired` the
+occurrence is refused with `connection_account_unavailable` instead.
 Later workspace participants cannot borrow the
 prior sender's personal accounts. Results posted in a shared session remain
 visible to that session's participants.

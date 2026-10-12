@@ -1,14 +1,16 @@
 /**
  * Scheduled-task access drift, the owner's explicit access refresh, and the
- * in-app signal for runs that failed closed on connector access.
+ * in-app signal for runs that failed closed on connector access or ran without
+ * an unusable pinned account.
  *
- * A task freezes its connectors, its connector accounts and (when an agent
- * created it, migration 0428) its Opengeni tool policy. Workspace changes made
- * later never reach its runs on their own. This module computes one plan: what
- * the task's owner would get by saving it again now. The drift projection is
- * that plan's difference, and the refresh applies exactly that plan through the
- * ordinary owner update path, so a refresh never widens beyond what the calling
- * person could grant with an edit. See docs/scheduled-task-access.md.
+ * A separate-agent task saves its connectors and (when an agent created it,
+ * migration 0428) its Opengeni tool policy. Connector accounts are never
+ * saved: every run resolves the owner's current accounts, except for accounts
+ * a person explicitly pinned. This module computes one plan: what the task's
+ * owner would get by saving it again now, and which pinned accounts can no
+ * longer be used. The refresh applies exactly that plan through the ordinary
+ * owner update path, so a refresh never widens beyond what the calling person
+ * could grant with an edit. See docs/scheduled-task-access.md.
  */
 import {
   allowedFirstPartyMcpToolsForSession,
@@ -45,7 +47,7 @@ import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-d
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   getSession,
-  listActiveScheduledTasksWithConnectionAccounts,
+  listActiveScheduledTasksWithPinnedAccounts,
   listScheduledTaskAccessAttentionEvents,
   listScheduledTaskHumanWaitAttention,
   listScheduledTaskCreatorPolicies,
@@ -145,76 +147,55 @@ export function planScheduledTaskConnectors(input: {
   };
 }
 
-export type ScheduledTaskAccountPlan = {
-  selections: McpConnectionAccountSelection[];
+export type ScheduledTaskPinnedAccountPlan = {
+  /** Pins that stay: their connector is still used (special surfaces always stay). */
+  kept: McpConnectionAccountSelection[];
+  /** Connectors with a pinned account the owner can no longer use. */
   unavailable: ScheduledTaskAccessConnector[];
-  attachable: ScheduledTaskAccessConnector[];
-  /** Connectors with a chosen account that the task no longer uses; their choice is dropped. */
+  /** Connectors with a pin that the task no longer uses; saving drops the pin. */
   dropped: ScheduledTaskAccessConnector[];
 };
 
 /**
- * Connector accounts, per account-backed connector:
- * - chosen accounts that are still usable are kept exactly;
- * - when none of the chosen accounts is usable any more (a fresh run would be
- *   blocked), every account the owner can use now is attached instead;
- * - a connector with no chosen account on a frozen task gets every usable
- *   account, as creating the task now would.
- * Special first-party surfaces are passed through unchanged, and a choice for a
- * connector the task no longer uses is dropped (the update would refuse it).
+ * Person-pinned accounts against what the owner can use now. Unpinned
+ * connectors need no plan: every run resolves the owner's current accounts.
+ * A pin is unavailable when its connector is still used but the pinned
+ * account no longer resolves for the owner; runs then go without that
+ * connector, never with another account. A pin whose connector the task no
+ * longer uses is dropped by the next save. Special first-party surfaces keep
+ * their own account contract and are checked at admission.
  */
-export function planScheduledTaskConnectionAccounts(input: {
-  priorSelections: readonly McpConnectionAccountSelection[];
-  selectionsFrozen: boolean;
-  priorToolIds: ReadonlySet<string>;
+export function planScheduledTaskPinnedAccounts(input: {
+  pins: readonly McpConnectionAccountSelection[];
   connectionServerIds: readonly string[];
   availableBindings: ReadonlyArray<{ canonicalServerId: string; connectionId: string }>;
   names: ReadonlyMap<string, string>;
-}): ScheduledTaskAccountPlan {
-  const selections: McpConnectionAccountSelection[] = input.priorSelections.filter((selection) =>
-    PRESERVED_ACCOUNT_SURFACES.has(selection.serverId),
-  );
-  const unavailable: ScheduledTaskAccessConnector[] = [];
-  const attachable: ScheduledTaskAccessConnector[] = [];
-  for (const serverId of new Set(input.connectionServerIds)) {
-    const available = [
-      ...new Set(
-        input.availableBindings
-          .filter((binding) => binding.canonicalServerId === serverId)
-          .map((binding) => binding.connectionId),
-      ),
-    ];
-    const chosen = [
-      ...new Set(
-        input.priorSelections
-          .filter((selection) => selection.serverId === serverId)
-          .map((selection) => selection.connectionId),
-      ),
-    ];
-    let next: string[];
-    if (chosen.length > 0) {
-      const kept = chosen.filter((connectionId) => available.includes(connectionId));
-      if (kept.length < chosen.length) unavailable.push(connector(serverId, input.names));
-      next = kept.length > 0 ? kept : available;
-    } else {
-      if (input.selectionsFrozen && input.priorToolIds.has(serverId) && available.length > 0) {
-        attachable.push(connector(serverId, input.names));
-      }
-      next = available;
-    }
-    selections.push(...next.map((connectionId) => ({ serverId, connectionId })));
-  }
+}): ScheduledTaskPinnedAccountPlan {
   const used = new Set(input.connectionServerIds);
-  const dropped = input.priorSelections
-    .filter(
-      (selection) =>
-        !PRESERVED_ACCOUNT_SURFACES.has(selection.serverId) && !used.has(selection.serverId),
-    )
-    .map((selection) => connector(selection.serverId, input.names));
+  const available = new Set(
+    input.availableBindings.map((binding) =>
+      JSON.stringify([binding.canonicalServerId, binding.connectionId]),
+    ),
+  );
+  const kept: McpConnectionAccountSelection[] = [];
+  const unavailable: ScheduledTaskAccessConnector[] = [];
+  const dropped: ScheduledTaskAccessConnector[] = [];
+  for (const pin of input.pins) {
+    if (PRESERVED_ACCOUNT_SURFACES.has(pin.serverId)) {
+      kept.push(pin);
+      continue;
+    }
+    if (!used.has(pin.serverId)) {
+      dropped.push(connector(pin.serverId, input.names));
+      continue;
+    }
+    kept.push(pin);
+    if (!available.has(JSON.stringify([pin.serverId, pin.connectionId])))
+      unavailable.push(connector(pin.serverId, input.names));
+  }
   return {
-    selections,
+    kept,
     unavailable: uniqueById(unavailable),
-    attachable: uniqueById(attachable),
     dropped: uniqueById(dropped),
   };
 }
@@ -391,10 +372,9 @@ function hasAgentAccess(task: Pick<ScheduledTask, "action" | "agentConfig">): bo
 
 export type ScheduledTaskAccessPlan = {
   drift: Omit<ScheduledTaskPolicyDrift, "canRefresh">;
-  /** Connectors with a chosen account the task no longer uses (see the account plan). */
-  droppedAccountChoices: ScheduledTaskAccessConnector[];
+  /** Connectors with a pinned account the task no longer uses (see the pin plan). */
+  droppedPins: ScheduledTaskAccessConnector[];
   tools: ToolRef[];
-  connectionAccounts: McpConnectionAccountSelection[];
   creatorFirstPartyPolicy: ScheduledTaskOpenGeniToolPlan["policy"];
   changed: boolean;
 };
@@ -439,19 +419,11 @@ function registryNames(settings: Pick<Settings, "mcpServers">): Map<string, stri
   return new Map(settings.mcpServers.map((server) => [server.id, server.name ?? server.id]));
 }
 
-function sameSelections(
-  left: readonly McpConnectionAccountSelection[],
-  right: readonly McpConnectionAccountSelection[],
-): boolean {
-  const key = (selection: McpConnectionAccountSelection) =>
-    `${selection.serverId}\u0000${selection.connectionId}`;
-  return sameMembers(left.map(key), right.map(key));
-}
-
 /**
- * What saving `task` again would freeze for its owner now, read-only. The
- * connector registry used to judge availability is the calling person's, the
- * same registry the owner update path validates against.
+ * What saving `task` again would save for its owner now, and which of its
+ * pinned accounts the owner can no longer use, read-only. The connector
+ * registry used to judge availability is the calling person's, the same
+ * registry the owner update path validates against.
  */
 export async function computeScheduledTaskAccessPlan(input: {
   db: Database;
@@ -517,33 +489,30 @@ export async function computeScheduledTaskAccessPlan(input: {
     )
     .map((server) => server.id);
   const source = input.source;
-  const availableBindings = await availableMcpAccountBindings({
-    db,
-    accountId: task.accountId,
-    workspaceId: task.workspaceId,
-    settings: accountRegistry,
-    tools: connectionTools,
-    source,
-    connections: await cached(
-      cache.connections,
-      source.kind === "subject" ? `subject:${source.subjectId}` : "workspace",
-      () =>
-        visibleMcpAccountConnections(db, {
+  const pins = task.agentConfig.pinnedAccounts ?? [];
+  const availableBindings =
+    pins.length === 0
+      ? []
+      : await availableMcpAccountBindings({
+          db,
           accountId: task.accountId,
           workspaceId: task.workspaceId,
+          settings: accountRegistry,
+          tools: connectionTools,
           source,
-        }),
-    ),
-  });
-  const priorSelections = task.agentConfig.connectionAccounts ?? [];
-  const accounts = planScheduledTaskConnectionAccounts({
-    priorSelections,
-    selectionsFrozen: task.agentConfig.connectionAccountsFrozen === true,
-    priorToolIds: new Set(
-      target
-        ? connectionToolIds
-        : [...task.agentConfig.tools.map((tool) => tool.id), ALWAYS_ATTACHED_CONNECTOR],
-    ),
+          connections: await cached(
+            cache.connections,
+            source.kind === "subject" ? `subject:${source.subjectId}` : "workspace",
+            () =>
+              visibleMcpAccountConnections(db, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                source,
+              }),
+          ),
+        });
+  const accounts = planScheduledTaskPinnedAccounts({
+    pins,
     connectionServerIds,
     availableBindings,
     names,
@@ -570,17 +539,11 @@ export async function computeScheduledTaskAccessPlan(input: {
       unavailableConnectors: connectors.unavailable,
       missingOpenGeniTools: openGeni.missing,
       unavailableAccounts: accounts.unavailable,
-      attachableAccounts: accounts.attachable,
     },
-    droppedAccountChoices: accounts.dropped,
+    droppedPins: accounts.dropped,
     tools: connectors.tools,
-    connectionAccounts: accounts.selections,
     creatorFirstPartyPolicy: openGeni.policy,
-    changed:
-      toolsChanged ||
-      !sameSelections(accounts.selections, priorSelections) ||
-      task.agentConfig.connectionAccountsFrozen !== true ||
-      openGeni.policy !== null,
+    changed: toolsChanged || accounts.dropped.length > 0 || openGeni.policy !== null,
   };
 }
 
@@ -591,8 +554,7 @@ export function scheduledTaskPolicyDriftHasChanges(
     drift.missingConnectors.length > 0 ||
     drift.unavailableConnectors.length > 0 ||
     drift.missingOpenGeniTools.length > 0 ||
-    drift.unavailableAccounts.length > 0 ||
-    drift.attachableAccounts.length > 0
+    drift.unavailableAccounts.length > 0
   );
 }
 
@@ -662,9 +624,12 @@ export async function withScheduledTaskPolicyDrift(input: {
 }
 
 /**
- * The owner's explicit access refresh: re-freeze the task's connectors,
- * connector accounts and (for an agent-created task) Opengeni tool policy with
- * the calling person's current authority. It is an ordinary owner edit whose
+ * The owner's explicit access refresh: re-save the task's connectors and (for
+ * an agent-created task) Opengeni tool policy with the calling person's
+ * current authority. Connector accounts are not part of it: unpinned
+ * connectors already follow the owner's current accounts, and pins change only
+ * when a person edits them (a pin whose connector is dropped goes with it).
+ * It is an ordinary owner edit whose
  * content the server computes, so the owner check, Variable Set permission,
  * model policy, target validation, personal-resource re-authorization and
  * execution-digest update all run exactly as for a manual edit.
@@ -722,8 +687,8 @@ export async function refreshScheduledTaskAccess(input: {
   });
   if (!plan.changed) return existing;
   const {
-    connectionAccounts: _connectionAccounts,
-    connectionAccountsFrozen: _connectionAccountsFrozen,
+    pinnedAccounts: _pinnedAccounts,
+    pinnedAccountsRequired: _pinnedAccountsRequired,
     ...agentConfig
   } = existing.agentConfig;
   const update = await validatedScheduledTaskUpdate({
@@ -733,10 +698,7 @@ export async function refreshScheduledTaskAccess(input: {
     grant,
     authorization: input.authorization,
     existing,
-    payload: {
-      agentConfig: { ...agentConfig, tools: plan.tools },
-      connectionAccounts: plan.connectionAccounts,
-    },
+    payload: { agentConfig: { ...agentConfig, tools: plan.tools } },
     toolsProvided: true,
     sessionAuthorization: input.sessionAuthorization,
     authorizationSurface: input.authorizationSurface,
@@ -839,16 +801,13 @@ export function scheduledTaskAttentionScope(
 }
 
 /**
- * Tasks among `tasks` that a fresh occurrence would refuse before creating a
- * run because a chosen connector account can no longer be used: the account
- * plan's `unavailableAccounts`, exactly what the drift reports, plus, for a
- * task with an owner, a chosen account whose connector the task can no longer
- * use (the workspace stopped setting it up). The scheduler resolves an owner's
- * choices against that owner and refuses one that matches no connector it
- * uses; a task without an owner only binds workspace accounts for connectors
- * it uses, so such a choice does not block it. Only the account part of the
- * plan is read, which does not depend on the creator policy. Advisory: a task
- * whose plan cannot be computed is skipped.
+ * Tasks among `tasks` with a person-pinned connector account that can no
+ * longer be used: the pin plan's `unavailableAccounts`, exactly what the
+ * drift reports, plus pins whose connector the workspace stopped setting up.
+ * A fresh occurrence runs without those connectors (or is
+ * skipped when the task requires its pinned accounts). Only the pin part of
+ * the plan is read, which does not depend on the creator policy. Advisory: a
+ * task whose plan cannot be computed is skipped.
  */
 export async function scheduledTasksWithUnavailableAccounts(input: {
   db: Database;
@@ -861,7 +820,7 @@ export async function scheduledTasksWithUnavailableAccounts(input: {
     (task) =>
       task.status === "active" &&
       hasAgentAccess(task) &&
-      (task.agentConfig.connectionAccounts?.length ?? 0) > 0 &&
+      (task.agentConfig.pinnedAccounts?.length ?? 0) > 0 &&
       scheduledTaskAccessSource(task, input.grant) !== null,
   );
   if (actionable.length === 0) return [];
@@ -890,9 +849,10 @@ export async function scheduledTasksWithUnavailableAccounts(input: {
         cache,
         workspaceSettings,
       });
+      // A pin whose connector is no longer set up is also one the run goes without.
       const unavailableAccounts = uniqueById([
         ...plan.drift.unavailableAccounts,
-        ...(task.ownerSubjectId !== null ? plan.droppedAccountChoices : []),
+        ...plan.droppedPins,
       ]);
       if (unavailableAccounts.length > 0) blocked.push({ task, unavailableAccounts });
     } catch (error) {
@@ -904,10 +864,9 @@ export async function scheduledTasksWithUnavailableAccounts(input: {
 
 /**
  * The owner's in-app notice: schedules whose latest run failed closed on
- * connector access and that no later run has cleared, plus schedules whose
- * chosen account can no longer be used. The second kind never creates a run
- * (the scheduler refuses each fresh occurrence first), so it carries no run
- * and names the connectors instead. Tasks needing both appear once.
+ * connector access and that no later run has cleared, plus schedules with a
+ * pinned account that can no longer be used (their runs go without that
+ * connector), named by connector. Tasks needing both appear once.
  */
 export async function listScheduledTaskAccessAttention(input: {
   db: Database;
@@ -928,7 +887,7 @@ export async function listScheduledTaskAccessAttention(input: {
       ...query,
       taskLimit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
     }),
-    listActiveScheduledTasksWithConnectionAccounts(input.db, grant.workspaceId, {
+    listActiveScheduledTasksWithPinnedAccounts(input.db, grant.workspaceId, {
       ...query,
       limit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
     }),
@@ -1037,8 +996,8 @@ export async function listScheduledTaskAccessAttention(input: {
 }
 
 /**
- * Schedules that cannot start at all come first, then the most recent failed
- * runs. Ties keep a stable order by task id.
+ * Schedules with an unusable pinned account come first, then the most recent
+ * failed runs. Ties keep a stable order by task id.
  */
 export function orderScheduledTaskAccessAttention(
   items: readonly ScheduledTaskAccessAttention[],

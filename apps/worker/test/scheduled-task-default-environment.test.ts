@@ -181,8 +181,6 @@ describe("scheduled task default Sandbox Environment", () => {
         tools: [],
         resources: [],
         metadata: {},
-        connectionAccounts: [],
-        connectionAccountsFrozen: true,
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
       metadata: {},

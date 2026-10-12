@@ -66,7 +66,7 @@ import {
   deriveScheduleName,
   draftFromTemplate,
   isKnowledgeSync,
-  mergeScheduleConnectionAccounts,
+  mergeSchedulePinnedAccounts,
   nextRunOf,
   newScheduleDraft,
   ownsSchedule,
@@ -83,7 +83,12 @@ import { useScheduleAccess, useScheduleNavigation } from "./schedule-parts";
 import { KnowledgeSyncFormPage } from "./knowledge-sync-form-page";
 
 export type ScheduleFormMode =
-  | { kind: "create"; template?: string; from?: string; sourceSessionId?: string }
+  | {
+      kind: "create";
+      template?: string;
+      from?: string;
+      sourceSessionId?: string;
+    }
   | { kind: "edit"; scheduleId: string };
 
 type Source =
@@ -281,7 +286,9 @@ function AgentScheduleForm({
   const canAsk = useCanCreateScheduleWithAgent(workspaceId);
   const ask = useCreateWithOpenGeni(workspaceId);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
+  const fleet = useWorkspaceMachines({
+    pollIntervalMs: MACHINES_COMPOSER_POLL_MS,
+  });
   const canAttachOpenGeniTool = context.clientConfig.mcpServers.some(
     (server) => server.id === "opengeni",
   );
@@ -349,7 +356,7 @@ function AgentScheduleForm({
         ...fromTask,
         name: `${task.name} (copy)`.slice(0, NAME_MAX_LENGTH),
         knowledgeSource: undefined,
-        connectionAccounts: own ? fromTask.connectionAccounts : [],
+        pinnedAccounts: own ? fromTask.pinnedAccounts : [],
         cadence: fromTask.cadence ?? defaultCadence(),
       };
     }
@@ -386,7 +393,6 @@ function AgentScheduleForm({
   } | null>(null);
   const [adoptSessionSettings, setAdoptSessionSettings] = useState(false);
   const [editedAccountServerIds, setEditedAccountServerIds] = useState<string[]>([]);
-  const accountsChanged = editedAccountServerIds.length > 0;
   const accessReview = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (accessChange) {
@@ -394,14 +400,8 @@ function AgentScheduleForm({
       accessReview.current?.scrollIntoView({ block: "nearest" });
     }
   }, [accessChange]);
-  const preserveAccounts =
-    editing &&
-    !accountsChanged &&
-    draft.runMode === initial.runMode &&
-    draft.targetSessionId === initial.targetSessionId &&
-    draft.includeOpenGeniTool === initial.includeOpenGeniTool &&
-    JSON.stringify(draft.mcpServerIds) === JSON.stringify(initial.mcpServerIds) &&
-    JSON.stringify(draft.agentCapabilities) === JSON.stringify(initial.agentCapabilities);
+  // Accounts matter to saving only while a person is pinning some.
+  const pinningAccounts = draft.runMode !== "existing_session" && editedAccountServerIds.length > 0;
   const now = useMemo(() => new Date(), []);
 
   const update = (patch: Partial<ScheduleDraft>) => {
@@ -450,7 +450,10 @@ function AgentScheduleForm({
       isMachineComputeSelectable(machine.state),
     );
     if (firstSelectable) {
-      setDraft((current) => ({ ...current, machineSandboxId: firstSelectable.sandboxId }));
+      setDraft((current) => ({
+        ...current,
+        machineSandboxId: firstSelectable.sandboxId,
+      }));
     }
   }, [draft.executionTarget, draft.machineSandboxId, inheritsChatSettings, sharedMachines]);
 
@@ -562,61 +565,39 @@ function AgentScheduleForm({
     !personal &&
     (canCreatePrivate === true || draft.visibility === "private" || privateReason !== null);
 
-  /* ----- connected accounts for the chosen tools */
+  /* ----- connected accounts for the chosen tools
+   * Connectors follow the owner's current accounts at every run. Only a
+   * schedule that starts its own session can pin accounts, and only for the
+   * connectors a person changes here. An existing-chat schedule uses that
+   * chat's connectors, so it shows no account picker. */
+  const pinnable = draft.runMode !== "existing_session";
   const accountTargetSession = inheritsChatSettings
     ? sessions.find((session) => session.id === targetSessionId)
     : undefined;
-  const initialAccountSessionId = editing
-    ? initial.runMode === "existing_session"
-      ? initial.targetSessionId
-      : savedReusableSessionId
-    : null;
-  const [initialAccountSession, setInitialAccountSession] = useState<Session | null>(null);
-  const [accountBaselineLoading, setAccountBaselineLoading] = useState(
-    Boolean(initialAccountSessionId),
-  );
-  useEffect(() => {
-    if (!initialAccountSessionId || !access.canTargetSessions) {
-      setAccountBaselineLoading(false);
-      return;
-    }
-    let live = true;
-    setAccountBaselineLoading(true);
-    void client
-      .getSession(workspaceId, initialAccountSessionId, { fresh: true })
-      .then((session) => {
-        if (live) setInitialAccountSession(session);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (live) setAccountBaselineLoading(false);
-      });
-    return () => {
-      live = false;
-    };
-  }, [access.canTargetSessions, client, initialAccountSessionId, workspaceId]);
-  const selectedIds = inheritsChatSettings
-    ? (accountTargetSession?.effectiveToolPolicy?.configuredIds ??
-      accountTargetSession?.tools.map((tool) => tool.id) ??
-      [])
-    : (draft.mcpServerIds ?? []);
+  const [pinsCleared, setPinsCleared] = useState(false);
+  const savedPins = pinsCleared ? [] : (initial.pinnedAccounts ?? []);
+  const selectedIds = !pinnable
+    ? []
+    : inheritsChatSettings
+      ? (accountTargetSession?.effectiveToolPolicy?.configuredIds ??
+        accountTargetSession?.tools.map((tool) => tool.id) ??
+        [])
+      : (draft.mcpServerIds ?? []);
   const accountIntent = scheduleConnectionAccountIntent({
-    saved: initial.connectionAccounts ?? [],
-    frozen: editing && task?.agentConfig.connectionAccountsFrozen === true,
-    // An unreadable prior chat cannot prove that an omitted account group is new.
-    initialServerIds:
-      accountBaselineLoading || (initialAccountSessionId && !initialAccountSession)
-        ? selectedIds
-        : (initialAccountSession?.effectiveToolPolicy?.configuredIds ??
-          initialAccountSession?.tools.map((tool) => tool.id) ??
-          initial.mcpServerIds ??
-          []),
-    selectedServerIds: selectedIds,
-    editedServerIds: editedAccountServerIds,
+    saved: savedPins,
+    editedServerIds: pinnable ? editedAccountServerIds : [],
     destinationChanged:
       draft.runMode !== initial.runMode || draft.targetSessionId !== initial.targetSessionId,
     toolsChanged: JSON.stringify(draft.mcpServerIds) !== JSON.stringify(initial.mcpServerIds),
+    pinsCleared,
   });
+  // Re-checking pins against a chat's connectors needs that chat loaded.
+  const pinsNeedChat =
+    pinnable &&
+    accountIntent.changed &&
+    (savedPins.length > 0 || editedAccountServerIds.length > 0) &&
+    inheritsChatSettings &&
+    !accountTargetSession;
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -641,27 +622,28 @@ function AgentScheduleForm({
       }),
     ),
   };
-  const supportsEmptyAccountSelection =
-    editing && task?.agentConfig.connectionAccountsFrozen === true;
-  const explicitlyEmptyAccountIds = new Set(
-    supportsEmptyAccountSelection
-      ? editedAccountServerIds.filter((id) => accountChoices[id]?.length === 0)
-      : [],
-  );
+  // Only the groups a person changed become pins; the rest stay live.
   const accountSelection = selectedConnectionAccounts(
-    connectionAccounts.accountGroups.filter(
-      (group) =>
-        (!editing || accountIntent.changedServerIds.includes(group.serverId)) &&
-        !explicitlyEmptyAccountIds.has(group.serverId),
+    connectionAccounts.accountGroups.filter((group) =>
+      accountIntent.changedServerIds.includes(group.serverId),
     ),
     accountChoices,
   );
   const requiresAccountChoice = accountSelection.unresolved.length > 0;
   const accountChoiceMessage = requiresAccountChoice
-    ? supportsEmptyAccountSelection
-      ? `Review accounts for ${accountSelection.unresolved.map((group) => group.name).join(", ")}. Choose available accounts or remove unavailable accounts above.`
-      : `Pick an account for ${accountSelection.unresolved.map((group) => group.name).join(", ")}${inheritsChatSettings ? "." : ", or remove the connector."}`
+    ? `Pick an account for ${accountSelection.unresolved.map((group) => group.name).join(", ")}, or use your current accounts.`
     : null;
+  const pinnedGroupNames = connectionAccounts.accountGroups
+    .filter(
+      (group) =>
+        accountIntent.changedServerIds.includes(group.serverId) ||
+        savedPins.some((pin) => pin.serverId === group.serverId),
+    )
+    .map((group) => group.name);
+  const usePinnedAccountsDefaults = () => {
+    setPinsCleared(true);
+    setEditedAccountServerIds([]);
+  };
 
   /* ----- agent learning (edit loads the stored overrides) */
   const learningScope = scheduledLearningScope(draft, sessions, personal);
@@ -676,7 +658,10 @@ function AgentScheduleForm({
     setLearningLoading(true);
     setLearningError(null);
     void client
-      .getAgentLearningSettings(workspaceId, "context", { kind: "scheduled_task", id: taskId })
+      .getAgentLearningSettings(workspaceId, "context", {
+        kind: "scheduled_task",
+        id: taskId,
+      })
       .then((record) => {
         if (current)
           setDraft((previous) => ({
@@ -821,10 +806,13 @@ function AgentScheduleForm({
     if (Object.values(next).some(Boolean) || cadenceProblem) return false;
     const submitted: ScheduleDraft = {
       ...draft,
-      connectionAccounts: editing
-        ? accountIntent.changed
-          ? mergeScheduleConnectionAccounts(
-              initial.connectionAccounts ?? [],
+      // Pins only for connectors a person changed; everything else stays live.
+      pinnedAccounts: !pinnable
+        ? []
+        : editing && !accountIntent.changed
+          ? initial.pinnedAccounts
+          : mergeSchedulePinnedAccounts(
+              savedPins,
               accountSelection.selections,
               accountIntent.changedServerIds,
               {
@@ -832,9 +820,7 @@ function AgentScheduleForm({
                 resources: draft.resources,
                 ...(accountTargetSession ? { chat: accountTargetSession } : {}),
               },
-            )
-          : initial.connectionAccounts
-        : accountSelection.selections,
+            ),
     };
     const submitNow = new Date();
     if (editing && task) {
@@ -924,31 +910,28 @@ function AgentScheduleForm({
     (draft.runMode === "existing_session" &&
       (!sessions.some((session) => session.id === draft.targetSessionId) ||
         (accessChange && !adoptSessionSettings))) ||
-    (accountIntent.changed && inheritsChatSettings && !accountTargetSession) ||
-    (!preserveAccounts &&
-      (accountBaselineLoading ||
-        connectionAccounts.loading ||
-        Boolean(connectionAccounts.error) ||
-        requiresAccountChoice));
+    pinsNeedChat ||
+    (pinningAccounts &&
+      (connectionAccounts.loading || Boolean(connectionAccounts.error) || requiresAccountChoice));
   const blockedReason = noAccess
     ? editing && task && !ownsSchedule(task, access.viewerSubjectId)
       ? "Only the schedule's owner can change it. Duplicate it to make your own."
       : "You need permission to manage schedules in this workspace."
     : cantRunHere && computeChanged
       ? "Connect a machine first. This Opengeni server can't run schedules without one."
-      : !preserveAccounts && requiresAccountChoice
+      : pinningAccounts && requiresAccountChoice
         ? (accountChoiceMessage ?? "Pick an account for each tool.")
         : (draft.runMode !== "existing_session" && learningLoading) ||
-            (!preserveAccounts && (accountBaselineLoading || connectionAccounts.loading))
+            (pinningAccounts && connectionAccounts.loading)
           ? "Loading this schedule's settings…"
-          : !preserveAccounts && connectionAccounts.error
+          : pinningAccounts && connectionAccounts.error
             ? connectionAccounts.accessDenied
               ? "You can't see this workspace's connected accounts. Ask a workspace admin."
               : "Connected accounts couldn't load. Try again."
             : draft.runMode === "existing_session" &&
                 !sessions.some((session) => session.id === draft.targetSessionId)
               ? "Choose an available chat."
-              : accountIntent.changed && inheritsChatSettings && !accountTargetSession
+              : pinsNeedChat
                 ? "Chat settings couldn't load. Reload before changing accounts."
                 : accessChange && !adoptSessionSettings
                   ? "Review the destination chat’s attachments before saving."
@@ -1129,7 +1112,10 @@ function AgentScheduleForm({
                           to="/workspaces/$workspaceId/sessions/$sessionId"
                           target="_blank"
                           rel="noreferrer"
-                          params={{ workspaceId, sessionId: draft.targetSessionId }}
+                          params={{
+                            workspaceId,
+                            sessionId: draft.targetSessionId,
+                          }}
                         >
                           Open the destination chat
                         </Link>{" "}
@@ -1199,11 +1185,6 @@ function AgentScheduleForm({
               <ConnectionAccountPicker
                 groups={connectionAccounts.accountGroups}
                 choices={accountChoices}
-                emptySelectionHint={
-                  supportsEmptyAccountSelection
-                    ? "No account access when this schedule runs."
-                    : undefined
-                }
                 onChoose={(serverId, ids) => {
                   setEditedAccountServerIds((current) =>
                     current.includes(serverId) ? current : [...current, serverId],
@@ -1211,6 +1192,23 @@ function AgentScheduleForm({
                   connectionAccounts.selectAccount(serverId, ids);
                 }}
               />
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <p className="min-w-0 text-xs text-fg-muted">
+                  {pinnedGroupNames.length > 0
+                    ? `Pinned for ${pinnedGroupNames.join(", ")}. Other connectors use your current accounts each run.`
+                    : "Each run uses your current accounts. Changing one here pins it."}
+                </p>
+                {pinnedGroupNames.length > 0 ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    onClick={usePinnedAccountsDefaults}
+                  >
+                    Use current accounts
+                  </Button>
+                ) : null}
+              </div>
               {connectionAccounts.error ? (
                 <Notice
                   tone="failed"
@@ -1299,7 +1297,9 @@ function AgentScheduleForm({
                   <FieldSegmented<IfStillRunning>
                     value={ifStillRunning}
                     onValueChange={(value) =>
-                      update({ overlapPolicy: value === "skip" ? "skip" : "allow_concurrent" })
+                      update({
+                        overlapPolicy: value === "skip" ? "skip" : "allow_concurrent",
+                      })
                     }
                     options={[
                       { value: "queue", label: "Queue this run" },
@@ -1316,7 +1316,10 @@ function AgentScheduleForm({
                     onValueChange={(value) =>
                       value === "managed"
                         ? update({ executionTarget: "managed" })
-                        : update({ executionTarget: "machine", machineSandboxId: value })
+                        : update({
+                            executionTarget: "machine",
+                            machineSandboxId: value,
+                          })
                     }
                     placeholder={fleet.loading ? "Loading machines…" : "Pick where it runs"}
                     loading={fleet.loading && scheduledMachines.length === 0 && machineOnly}
@@ -1356,7 +1359,10 @@ function AgentScheduleForm({
                     active={advancedOpen}
                     connectionLocked={Boolean(materializedSessionId)}
                     onChange={({ connectionId, channelId }) =>
-                      update({ slackBotConnectionId: connectionId, slackBotChannelId: channelId })
+                      update({
+                        slackBotConnectionId: connectionId,
+                        slackBotChannelId: channelId,
+                      })
                     }
                   />
                 </Suspense>
@@ -1429,6 +1435,10 @@ function suggestedZones(current: string) {
   const zones = [...new Set([viewerTimeZone(), current, "UTC"])];
   return zones.map((id) => {
     const city = id === "UTC" ? "UTC" : (id.split("/").pop() ?? id).replaceAll("_", " ");
-    return { id, label: id === "UTC" ? "UTC" : `${city} time`, shortLabel: city };
+    return {
+      id,
+      label: id === "UTC" ? "UTC" : `${city} time`,
+      shortLabel: city,
+    };
   });
 }

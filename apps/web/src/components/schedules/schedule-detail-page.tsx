@@ -354,6 +354,7 @@ export function ScheduleDetailPage({
         task.executionDigest,
       )}
       attention={attention?.taskId === task.id ? attention : null}
+      pinnedAccountsRequired={task.agentConfig.pinnedAccountsRequired === true}
       ownsTask={perms.own}
       busy={busy}
       onRefreshAccess={() => void refreshAccess()}

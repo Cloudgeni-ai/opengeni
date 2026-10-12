@@ -495,7 +495,20 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
     ? eligible.filter((connection) => connection.id === selection.connectionId)
     : eligible;
   if (selection && selectedEligible.length !== 1) {
-    throw new Error("Google Drive publication authority selection is unavailable");
+    throw new ConnectionAccountSelectionError(
+      "Google Drive publication authority selection is unavailable",
+      {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: [
+          {
+            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+            connectionId: selection.connectionId,
+            reason: "selection_unavailable",
+          },
+        ],
+      },
+    );
   }
   if (!selection && selectedEligible.length !== 1) return null;
   const connection = selectedEligible[0]!;
@@ -565,6 +578,22 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
     connection.grantedScopes.length !== 1 ||
     connection.grantedScopes[0] !== "repo"
   ) {
+    if (authoritySelection) {
+      throw new ConnectionAccountSelectionError(
+        "personal GitHub connection authority selection is unavailable",
+        {
+          version: 1,
+          reason: "selected_account_unavailable",
+          accounts: [
+            {
+              serverId: PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
+              connectionId: authoritySelection.connectionId,
+              reason: "selection_unavailable",
+            },
+          ],
+        },
+      );
+    }
     throw new Error("personal GitHub connection authority selection is unavailable");
   }
   const metadata = PersonalGitHubConnectionMetadata.parse(connection.metadata);
@@ -784,7 +813,6 @@ export async function freezeConnectionAccounts(
       workspaceId: input.workspaceId,
       subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
       servers,
-      selectionsFrozen: input.authoritySelectionsFrozen === true,
       connections: await visibleMcpAccountConnections(input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -934,8 +962,6 @@ export async function freezePersonalConnectionDelegations(input: {
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
   authoritySelections?: McpConnectionAccountSelection[];
-  /** Internal durable schedule snapshot, not a default account selector. */
-  authoritySelectionsFrozen?: boolean;
   /** Exact first-party export tool + permission gate, not broad opengeni attachment. */
   googleDrivePublicationEnabled?: boolean;
   /** Exact first-party Atlassian tool + permission gate. */
@@ -1056,11 +1082,7 @@ export async function freezePersonalConnectionDelegations(input: {
     db: input.db,
     accountId: input.source.accountId,
     subjectId: ownerSubjectId,
-    connections: input.authoritySelectionsFrozen
-      ? visibleConnections.filter(
-          (connection) => connection.id === personalGitHubAuthoritySelection?.connectionId,
-        )
-      : visibleConnections,
+    connections: visibleConnections,
     resources: input.resources ?? [],
     ...(personalGitHubAuthoritySelection
       ? { authoritySelection: personalGitHubAuthoritySelection }
@@ -1096,11 +1118,7 @@ export async function freezePersonalConnectionDelegations(input: {
   const googleDrivePublication = input.googleDrivePublicationEnabled
     ? googleDrivePublicationDelegationFromVisibleConnections({
         subjectId: ownerSubjectId,
-        connections: input.authoritySelectionsFrozen
-          ? visibleConnections.filter(
-              (connection) => connection.id === googleDriveAuthoritySelection?.connectionId,
-            )
-          : visibleConnections,
+        connections: visibleConnections,
         ...(googleDriveAuthoritySelection
           ? { authoritySelection: googleDriveAuthoritySelection }
           : {}),

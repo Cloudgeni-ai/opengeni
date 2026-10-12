@@ -616,6 +616,7 @@ import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
   ConnectionAccountSelectionDiagnostic,
+  ScheduledTaskDegradedAccounts,
   ScheduledTaskAdmissionRefusal,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
   WORK_CLAIM_DISCOVERY_LIMIT,
@@ -18999,13 +19000,13 @@ export async function listScheduledTasks(
 }
 
 /**
- * Active agent-turn tasks that chose connector accounts, owned by `subjectId`
- * (and, with `includeOwnerless`, tasks without an owner). Only these can have
- * a fresh occurrence refused before it creates a run because a chosen account
- * is gone, so the owner's access attention list checks each one's account
- * plan. A caller without a subject passes an empty id, which owns nothing.
+ * Active agent-turn tasks with person-pinned connector accounts, owned by
+ * `subjectId` (and, with `includeOwnerless`, tasks without an owner). Only
+ * these can have a pinned account become unusable, so the owner's access
+ * attention list checks each one's pins. A caller without a subject passes an
+ * empty id, which owns nothing.
  */
-export async function listActiveScheduledTasksWithConnectionAccounts(
+export async function listActiveScheduledTasksWithPinnedAccounts(
   db: Database,
   workspaceId: string,
   input: { subjectId: string; includeOwnerless: boolean; limit: number },
@@ -19022,8 +19023,8 @@ export async function listActiveScheduledTasksWithConnectionAccounts(
           isNull(schema.scheduledTasks.deletedAt),
           eq(schema.scheduledTasks.status, "active"),
           sql`${schema.scheduledTasks.action} ->> 'kind' = 'agent_turn'`,
-          sql`(case when jsonb_typeof(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts') = 'array'
-            then jsonb_array_length(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts')
+          sql`(case when jsonb_typeof(${schema.scheduledTasks.agentConfig} -> 'pinnedAccounts') = 'array'
+            then jsonb_array_length(${schema.scheduledTasks.agentConfig} -> 'pinnedAccounts')
             else 0 end) > 0`,
           input.includeOwnerless ? or(owner, isNull(schema.scheduledTasks.ownerSubjectId)) : owner,
         ),
@@ -86625,6 +86626,21 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
   };
 }
 
+/**
+ * The pinned accounts an admitted run went without, read from its accepted
+ * execution. Only this credential-free list is projected; the snapshot itself
+ * stays private worker authority.
+ */
+function scheduledTaskRunDegradedAccounts(
+  snapshot: unknown,
+): Pick<ScheduledTaskRun, "degradedAccounts"> {
+  if (!snapshot || typeof snapshot !== "object") return {};
+  const parsed = ScheduledTaskDegradedAccounts.safeParse(
+    (snapshot as { degradedAccounts?: unknown }).degradedAccounts,
+  );
+  return parsed.success && parsed.data.length > 0 ? { degradedAccounts: parsed.data } : {};
+}
+
 function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect): ScheduledTaskRun {
   return {
     id: row.id,
@@ -86648,6 +86664,7 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
       row.admissionDiagnostic == null
         ? null
         : ConnectionAccountSelectionDiagnostic.parse(row.admissionDiagnostic),
+    ...scheduledTaskRunDegradedAccounts(row.acceptedExecutionSnapshot),
     admissionRefusal:
       row.admissionRefusal == null
         ? null
