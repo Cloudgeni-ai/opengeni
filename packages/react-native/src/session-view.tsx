@@ -30,7 +30,7 @@ import type {
 import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { OpenGeniNativeSessionController } from "./use-native-session";
 import type { NativeFileAttachmentsResult } from "./attachments";
-import { useOpenNativeLink } from "./environment";
+import { useOpenNativeLink } from "./links";
 import {
   DEFAULT_OPENGENI_NATIVE_LABELS,
   DEFAULT_OPENGENI_NATIVE_THEME,

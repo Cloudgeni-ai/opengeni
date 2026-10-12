@@ -7,7 +7,6 @@ import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { recordToolApproval } from "@opengeni/observability";
-import { sessionMcpApprovalConnectionId } from "@opengeni/runtime";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -72,6 +71,7 @@ import {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   prepareWorkspaceToolGatewayTools,
+  sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime/workspace-tool-gateway";
 import {
   ToolGatewayApprovalRequiredError,
