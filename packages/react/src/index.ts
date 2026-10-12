@@ -245,6 +245,14 @@ export type { UseVaultQueryOptions } from "./hooks/use-vaults";
 export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults";
 export type { VaultClientLike, VaultsApi } from "./vaults";
 export type * from "./types/vaults";
+export { SecretsUiProvider, useSecretsUi } from "./secrets-ui";
+export type {
+  SecretsUi,
+  SecretReferenceLike,
+  SecretReferenceTargetLike,
+  SecretTextTokenLike,
+  PasswordStrengthLike,
+} from "./secrets-ui";
 export { useChannels } from "./hooks/use-channels";
 export type { UseChannelsOptions, UseChannelsResult } from "./hooks/use-channels";
 export { useRigs, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";
