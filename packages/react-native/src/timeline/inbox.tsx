@@ -22,7 +22,7 @@ import {
   type LayoutChangeEvent,
 } from "react-native";
 
-import { useOpenNativeLink } from "../environment";
+import { useOpenNativeLink } from "../links";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";

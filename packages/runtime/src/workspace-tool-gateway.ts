@@ -9,4 +9,7 @@ export {
   type PreparedAgentTools as PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
+  // Secret-free identity that keys session MCP tool permission rules; the
+  // gateway must derive it exactly as model execution does.
+  sessionMcpApprovalConnectionId,
 } from "./index";

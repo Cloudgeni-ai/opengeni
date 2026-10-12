@@ -14,10 +14,10 @@ export {
   installOpenGeniReactNativeEnvironment,
   OpenGeniReactNativeProvider,
   useOpenGeniReactNativeEnvironment,
-  useOpenNativeLink,
   type NativeEnvironmentContextValue,
   type OpenGeniReactNativeProviderProps,
 } from "./environment";
+export { useOpenNativeLink } from "./links";
 export {
   NATIVE_ATTACHMENT_PREPARATION_TIMEOUT_MS,
   prepareNativeAttachmentUpload,
