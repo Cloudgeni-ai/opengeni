@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 import { parseSync } from "oxc-parser";
 import {
   LEGACY_SUBSCRIPTION_RETIREMENTS,
@@ -46,6 +46,13 @@ function declarationNames(node: any): string[] {
 
 export type LegacySubscriptionFinding = { file: string; line: number; message: string };
 
+/** The repository-relative module a relative specifier names, without extension or `/index`. */
+function resolvedRelativeModule(file: string, specifier: string): string | null {
+  if (!specifier.startsWith("./") && !specifier.startsWith("../")) return null;
+  const resolved = posix.normalize(posix.join(dirname(file).split("\\").join("/"), specifier));
+  return resolved.replace(/\.[cm]?[jt]sx?$/, "").replace(/\/index$/, "");
+}
+
 /** Findings of every given retired runtime in one source file. */
 export function checkLegacySubscriptionSource(
   file: string,
@@ -70,6 +77,19 @@ export function checkLegacySubscriptionSource(
   walk(result.program, (node) => {
     if (node.type === "Literal" && typeof node.value === "string") {
       literals.push({ start: node.start!, end: node.end!, value: node.value });
+    }
+    // A template without substitutions is a string literal too, so
+    // ``import(`./deleted`)`` cannot bypass the module checks.
+    if (
+      node.type === "TemplateLiteral" &&
+      Array.isArray(node.expressions) &&
+      node.expressions.length === 0 &&
+      Array.isArray(node.quasis) &&
+      node.quasis.length === 1
+    ) {
+      const cooked = (node.quasis[0] as { value?: { cooked?: unknown } }).value?.cooked;
+      if (typeof cooked === "string")
+        literals.push({ start: node.start!, end: node.end!, value: cooked });
     }
   });
   for (const runtime of runtimes) {
@@ -129,6 +149,11 @@ export function checkLegacySubscriptionSource(
         report(literal.start, `Runtime source references ${runtime.name} test-only code`);
       }
       if (runtime.deletedModules?.some((module) => module.test(value))) {
+        report(literal.start, `Runtime references a deleted ${runtime.name} producer`);
+        continue;
+      }
+      const resolved = runtime.deletedPaths ? resolvedRelativeModule(file, value) : null;
+      if (resolved && runtime.deletedPaths!.includes(resolved)) {
         report(literal.start, `Runtime references a deleted ${runtime.name} producer`);
       }
     }

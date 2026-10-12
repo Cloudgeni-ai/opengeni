@@ -109,6 +109,12 @@ export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
     "buildXaiTurnRequestAuthorization",
     "encryptVideoGenerationXaiCredential",
     "xaiVideoGenerationCredentialLease",
+    "XaiTurnRequestAuthorization",
+    "XaiSubscriptionAuthorization",
+    "executeXaiSubscriptionImageGeneration",
+    "xaiRotationEnabled",
+    "xaiCredentialQuarantined",
+    "xaiSubscriptionMetadataFromRow",
   ],
   patterns: [
     {
@@ -120,13 +126,17 @@ export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
     },
   ],
   // Deleted producers: the v1 repository module, the organization surface,
-  // the legacy waiter, quota and API authorization modules. Relative
-  // specifiers only, so the live `@opengeni/xai-subscription` package, the
-  // transcription provider and the core modules (`xai-subscription-core*`,
-  // `subscription-core-xai*`) stay importable.
-  deletedModules: [
-    /^\.\/xai-subscription(?:\.[cm]?[jt]s)?$/,
-    /^\.{1,2}\/(?:.*\/)?(?:organization-xai-subscriptions|xai-capacity|xai-quota|xai-subscription-auth)(?:\.[cm]?[jt]s)?$/,
+  // the legacy waiter, quota and API authorization modules. Resolved from the
+  // importing file, so the live `@opengeni/xai-subscription` package, the
+  // transcription provider (`providers/xai-subscription`) and the core
+  // modules (`xai-subscription-core*`, `subscription-core-xai*`) stay
+  // importable.
+  deletedPaths: [
+    "packages/db/src/xai-subscription",
+    "packages/db/src/organization-xai-subscriptions",
+    "apps/api/src/xai-subscription-auth",
+    "apps/worker/src/activities/xai-quota",
+    "apps/worker/src/activities/agent-turn/xai-capacity",
   ],
   testFixtures: /legacy-xai/,
   exceptions: {

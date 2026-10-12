@@ -212,28 +212,35 @@ describe("M4 X4 SuperGrok entry", () => {
       expect(xai(file, code)).toHaveLength(1);
     }
   });
-  test("blocks imports of deleted SuperGrok producers and the legacy-xai fixture only", () => {
-    for (const specifier of [
-      "./xai-subscription",
-      "./xai-subscription.ts",
-      "./organization-xai-subscriptions",
-      "../agent-turn/xai-capacity",
-      "./xai-quota",
-      "../xai-subscription-auth",
-      "../test/fixtures/legacy-xai",
-    ]) {
-      expect(xai("apps/worker/src/run.ts", `import { x } from "${specifier}";`)).toHaveLength(1);
+  test("blocks imports of deleted SuperGrok producers, resolved from the importer", () => {
+    for (const [importer, specifier] of [
+      ["packages/db/src/index.ts", "./xai-subscription"],
+      ["packages/db/src/index.ts", "./xai-subscription.ts"],
+      ["packages/db/src/subscription-core/operations.ts", "../xai-subscription"],
+      ["packages/db/src/subscription-core/operations.ts", "../organization-xai-subscriptions.js"],
+      ["apps/worker/src/activities/turns.ts", "./agent-turn/xai-capacity"],
+      ["apps/worker/src/activities/agent-turn/run.ts", "../xai-quota"],
+      ["apps/api/src/routes/supergrok.ts", "../xai-subscription-auth"],
+      ["apps/worker/src/run.ts", "../test/fixtures/legacy-xai"],
+    ] as const) {
+      expect(xai(importer, `import { x } from "${specifier}";`)).toHaveLength(1);
+      expect(xai(importer, `export { x } from "${specifier}";`)).toHaveLength(1);
+      expect(xai(importer, "const m = await import(`" + specifier + "`);")).toHaveLength(1);
     }
-    for (const specifier of [
-      "@opengeni/xai-subscription",
-      "./providers/xai-subscription",
-      "../xai-subscription-core",
-      "./xai-subscription-core-cutover",
-      "./subscription-core-xai-compat",
-      "./agent-turn/scoped-subscription-capacity",
-    ]) {
-      expect(xai("apps/worker/src/run.ts", `import { x } from "${specifier}";`)).toEqual([]);
+    for (const [importer, specifier] of [
+      ["apps/worker/src/run.ts", "@opengeni/xai-subscription"],
+      ["apps/api/src/transcription/service.ts", "./providers/xai-subscription"],
+      ["apps/api/src/routes/supergrok.ts", "../xai-subscription-core"],
+      ["packages/db/src/index.ts", "./xai-subscription-core-cutover"],
+      ["packages/db/src/index.ts", "./subscription-core-xai-compat"],
+      ["apps/worker/src/activities/turns.ts", "./agent-turn/scoped-subscription-capacity"],
+      // Same basename, live module elsewhere.
+      ["apps/worker/src/activities/turns.ts", "./xai-subscription"],
+    ] as const) {
+      expect(xai(importer, `import { x } from "${specifier}";`)).toEqual([]);
     }
+    // A template with a substitution is not a module name the guard can know.
+    expect(xai("packages/db/src/index.ts", "const m = await import(`./${name}`);")).toEqual([]);
     expect(xai("packages/config/src/index.ts", 'const kind = "xai-subscription";')).toEqual([]);
   });
   test("schema, posture and the 0721 codec stage are exact exceptions", () => {

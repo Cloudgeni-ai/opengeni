@@ -40,6 +40,14 @@ export type LegacySubscriptionRetirement = {
   /** Module specifiers a runtime file must not import: deleted producers. */
   deletedModules?: readonly RegExp[];
   /**
+   * Deleted producer files (repository-relative, without extension). A
+   * relative specifier is resolved against the importing file and refused
+   * when it names one of them (as `<path>`, `<path>.<ext>` or
+   * `<path>/index`), whatever its `./` or `../` form; a live module with the
+   * same basename elsewhere stays importable.
+   */
+  deletedPaths?: readonly string[];
+  /**
    * Historical fixture module names (matched on a path segment or basename)
    * that only tests may import.
    */
