@@ -10,6 +10,9 @@ import {
 type Finding = { file: string; line?: number; reason: string };
 
 const GENERIC_HOME_NAMES = new Set([
+  // Path navigation segments ("/Users/..") name no account.
+  ".",
+  "..",
   "app",
   "me",
   "node",

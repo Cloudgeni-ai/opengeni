@@ -176,6 +176,15 @@ describe("public repository hygiene", () => {
     ).toEqual([]);
   });
 
+  test("treats dot segments after a home root as path navigation, not an account", () => {
+    expect(auditPublicText("fixture.rs", 'let unusable = ["/Users/..", "/home/."];')).toEqual([]);
+    expect(
+      auditPublicText("fixture.rs", `let named = "${["/Users/", "..private"].join("")}";`).map(
+        (finding) => finding.reason,
+      ),
+    ).toEqual(["non-generic home path"]);
+  });
+
   test("does not mistake repository URL path segments for local home directories", () => {
     expect(
       auditPublicText(

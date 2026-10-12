@@ -1204,7 +1204,7 @@ mod tests {
         for cwd in [
             None,
             Some("/"),
-            Some("/Users/other"),
+            Some("/Users/user"),
             Some("/Users/Runner & Co-extra"),
         ] {
             let definition = cwd.map_or_else(
