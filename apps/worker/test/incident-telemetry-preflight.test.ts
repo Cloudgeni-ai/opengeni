@@ -86,10 +86,10 @@ function responder(
       credentialHooks: ["azure-monitor"],
       checkHealth: "passing",
     },
-    variableSets: [
+    vaults: [
       {
-        name: "incident-production",
-        variables: [{ name: "PROMETHEUS_TOKEN" }, { name: "PROMETHEUS_URL" }],
+        name: "Incident-Production",
+        items: [{ name: "prometheus_token" }, { name: "PROMETHEUS_URL" }],
       },
     ],
     toolPolicyVersion: 1,
@@ -189,7 +189,7 @@ describe("incident telemetry dispatch preflight", () => {
       { firstPartyMcpTools: [] },
       { firstPartyMcpPermissions: [] },
       { rig: null },
-      { variableSets: [] },
+      { vaults: [] },
     ] satisfies Array<Partial<IncidentTelemetryResponderMetadata>>) {
       expect(evaluate(config, missing)).toEqual({
         action: "blocked",
@@ -331,7 +331,7 @@ describe("incident telemetry dispatch preflight", () => {
   });
 
   test("returns fixed blockers without secret, endpoint, repository, or identity leakage", () => {
-    const blocked = evaluate(incidentConfig(), { variableSets: [] });
+    const blocked = evaluate(incidentConfig(), { vaults: [] });
     const rendered = JSON.stringify(blocked);
     expect(rendered).toBe('{"action":"blocked","reason":"incident_responder_under_capable"}');
     for (const privateFact of [
