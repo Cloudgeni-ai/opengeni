@@ -1,11 +1,24 @@
 import type {
+  HumanInputAnswer,
   HumanInputQuestion,
+  HumanInputSecretAnswer,
+  HumanInputSecretSaveTo,
+  HumanInputSecretSpec,
   SkillRecord,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import {
@@ -13,9 +26,11 @@ import {
   defaultHumanInputFormMessages,
   emptyDraft,
   initialDrafts,
+  secretAnswerFromReading,
   type HumanInputAnswerDraft,
   type HumanInputFormMessages,
 } from "../human-input-model";
+import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
 
 export {
   answersFromDrafts,
@@ -51,6 +66,12 @@ export type HumanInputFormProps = {
    * Off by default; embedded conversations turn it on.
    */
   decisionButtons?: boolean | undefined;
+  /**
+   * Where this person may save an answer to a secret question. A request for
+   * a target outside this list falls back to the most private allowed one,
+   * with a note. Defaults to Only me, This task and This workspace.
+   */
+  allowedSaveTo?: readonly HumanInputSecretSaveTo[] | undefined;
   className?: string | undefined;
 };
 
@@ -83,6 +104,7 @@ function HumanInputRequestForm({
   autoFocus = true,
   defaultCollapsed = false,
   decisionButtons = false,
+  allowedSaveTo,
   className,
 }: HumanInputFormProps) {
   const formatError = useErrorMessage();
@@ -119,6 +141,26 @@ function HumanInputRequestForm({
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
+  // Secret answers stay in their uncontrolled inputs until submit.
+  const secretHandles = useRef(new Map<string, SecretFieldHandle>());
+  const secretRegistrars = useMemo(
+    () => new Map<string, (handle: SecretFieldHandle | null) => void>(),
+    [],
+  );
+  const registerSecret = useCallback(
+    (questionId: string) => {
+      let registrar = secretRegistrars.get(questionId);
+      if (!registrar) {
+        registrar = (handle) => {
+          if (handle) secretHandles.current.set(questionId, handle);
+          else secretHandles.current.delete(questionId);
+        };
+        secretRegistrars.set(questionId, registrar);
+      }
+      return registrar;
+    },
+    [secretRegistrars],
+  );
   const busy = submitting || submittingInternally;
   const reviewIdentity = JSON.stringify(
     request.questions
@@ -290,18 +332,29 @@ function HumanInputRequestForm({
     });
   };
 
-  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<void> => {
-    if (busy || submissionInFlight.current) return;
+  const clearValidationError = (questionId: string): void =>
+    setValidationErrors((current) => {
+      if (!(questionId in current)) return current;
+      const next = { ...current };
+      delete next[questionId];
+      return next;
+    });
+
+  /** Resolves true when the host accepted the response. */
+  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<boolean> => {
+    if (busy || submissionInFlight.current) return false;
     const generation = submissionGeneration.current;
     submissionInFlight.current = true;
     setSubmissionError(null);
     setSubmittingInternally(true);
     try {
       await onSubmit(response);
+      return true;
     } catch (cause) {
       if (generation === submissionGeneration.current) {
         setSubmissionError(formatError(cause));
       }
+      return false;
     } finally {
       if (generation === submissionGeneration.current) {
         submissionInFlight.current = false;
@@ -326,6 +379,21 @@ function HumanInputRequestForm({
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const result = answersFromDrafts(request.questions, drafts, messages);
+    const secretAnswers: HumanInputSecretAnswer[] = [];
+    const secretPublicAnswers = new Map<string, HumanInputAnswer>();
+    for (const question of request.questions) {
+      if (question.kind !== "secret") continue;
+      const handle = secretHandles.current.get(question.id);
+      if (!handle) continue;
+      const secret = secretAnswerFromReading(question, handle.read(), messages);
+      if (!secret) continue;
+      if ("error" in secret) {
+        result.errors[question.id] = secret.error;
+        continue;
+      }
+      secretAnswers.push(secret.secretAnswer);
+      secretPublicAnswers.set(question.id, secret.answer);
+    }
     if (Object.keys(result.errors).length > 0) {
       setValidationErrors(result.errors);
       const firstInvalid = request.questions.find((question) => question.id in result.errors);
@@ -351,7 +419,18 @@ function HumanInputRequestForm({
       });
       return;
     }
-    await submitResponse({ outcome: "answered", answers: result.answers });
+    // Keep the request's question order across drafted and secret answers.
+    const drafted = new Map(result.answers.map((answer) => [answer.questionId, answer]));
+    const answers = request.questions.flatMap((question) => {
+      const answer = drafted.get(question.id) ?? secretPublicAnswers.get(question.id);
+      return answer ? [answer] : [];
+    });
+    const accepted = await submitResponse({
+      outcome: "answered",
+      answers,
+      ...(secretAnswers.length > 0 ? { secretAnswers } : {}),
+    });
+    if (accepted) for (const handle of secretHandles.current.values()) handle.clear();
   };
 
   const metaBits = [
@@ -577,6 +656,9 @@ function HumanInputRequestForm({
                           showPromptChrome={false}
                           allowSkip={request.allowSkip}
                           busy={busy}
+                          allowedSaveTo={allowedSaveTo}
+                          registerSecret={registerSecret(question.id)}
+                          onSecretEdited={() => clearValidationError(question.id)}
                           onUpdate={(apply) => update(question.id, apply)}
                         />
                       </div>
@@ -602,6 +684,9 @@ function HumanInputRequestForm({
                         showPromptChrome
                         allowSkip={request.allowSkip}
                         busy={busy}
+                        allowedSaveTo={allowedSaveTo}
+                        registerSecret={registerSecret(question.id)}
+                        onSecretEdited={() => clearValidationError(question.id)}
                         onUpdate={(apply) => update(question.id, apply)}
                       />
                     </div>
@@ -721,6 +806,9 @@ function QuestionControls({
   showPromptChrome,
   allowSkip,
   busy,
+  allowedSaveTo,
+  registerSecret,
+  onSecretEdited,
   onUpdate,
 }: {
   question: HumanInputQuestion;
@@ -735,6 +823,9 @@ function QuestionControls({
   showPromptChrome: boolean;
   allowSkip: boolean;
   busy: boolean;
+  allowedSaveTo: readonly HumanInputSecretSaveTo[] | undefined;
+  registerSecret: (handle: SecretFieldHandle | null) => void;
+  onSecretEdited: () => void;
   onUpdate: (apply: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
 }) {
   const errorId = `${fieldId}-error`;
@@ -827,7 +918,30 @@ function QuestionControls({
         </>
       )}
 
-      {question.kind === "text" ? (
+      {question.kind === "secret" ? (
+        question.secret ? (
+          <SecretQuestionField
+            question={question as HumanInputQuestion & { secret: HumanInputSecretSpec }}
+            fieldId={fieldId}
+            messages={messages}
+            autoFocus={autoFocus}
+            allowedSaveTo={allowedSaveTo}
+            error={error}
+            describedBy={
+              [
+                question.label && showPromptChrome ? promptId : null,
+                question.helpText && showPromptChrome ? helpId : null,
+              ]
+                .filter(Boolean)
+                .join(" ") || undefined
+            }
+            register={registerSecret}
+            onEdited={onSecretEdited}
+          />
+        ) : (
+          <p className="text-og-sm text-og-fg-muted">This question can't be answered here.</p>
+        )
+      ) : question.kind === "text" ? (
         <textarea
           id={fieldId}
           value={draft.values[0] ?? ""}

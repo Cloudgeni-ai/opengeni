@@ -210,7 +210,7 @@ export type SessionConversationProps = ClientOverride &
     /** Localized questions and presentation; responses remain stock. */
     humanInputProps?: Pick<
       HumanInputSurfaceProps,
-      "messages" | "autoFocus" | "decisionButtons" | "className"
+      "messages" | "autoFocus" | "decisionButtons" | "allowedSaveTo" | "className"
     >;
     /** Product approval presentation; permission decisions remain stock. */
     approvalProps?: Omit<

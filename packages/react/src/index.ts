@@ -247,6 +247,18 @@ export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./va
 export type { VaultClientLike, VaultsApi } from "./vaults";
 export type * from "./types/vaults";
 export { SecretsUiProvider, useSecretsUi } from "./secrets-ui";
+export {
+  SecretAnswerChip,
+  SecretRefChip,
+  SecretRefText,
+  secretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretAnswerChipProps,
+  SecretRefChipProps,
+  SecretRefTextProps,
+  SecretReferenceLabel,
+} from "./components/secret-ref-chip";
 export type {
   SecretsUi,
   SecretReferenceLike,
