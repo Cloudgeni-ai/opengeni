@@ -385,7 +385,7 @@ describe("Claude usage routes on the core route", () => {
     expect(usageCalls).toEqual([]);
   });
 
-  test("the organization path: an administrator reads and gets the stored projection on refresh; a member is refused", async () => {
+  test("the organization path: an administrator reads and refreshes live; a member and another organization are refused", async () => {
     const org = await organization();
     const connection = await sharedConnection(org, "org-admin");
     const path = `/v1/organizations/${org.accountId}/claude/accounts/${connection}/usage`;
@@ -394,12 +394,6 @@ describe("Claude usage routes on the core route", () => {
     expect(((await read.json()) as { credentialVersion: number }).credentialVersion).toBe(
       await connectionVersion(connection),
     );
-    const refresh = await organizationRequest(org, org.ownerSubjectId, `${path}/refresh`, "POST");
-    expect(refresh.status).toBe(200);
-    // No workspace context for the credential seam: nothing is read live.
-    expect(((await refresh.json()) as { refreshStatus: string }).refreshStatus).toBe("unavailable");
-    expect(usageCalls).toEqual([]);
-
     for (const method of ["GET", "POST"] as const) {
       const refused = await organizationRequest(
         org,
@@ -409,6 +403,37 @@ describe("Claude usage routes on the core route", () => {
       );
       expect(refused.status).toBe(403);
     }
+    // Another organization's administrator, on that organization's path.
+    const other = await organization();
+    for (const method of ["GET", "POST"] as const) {
+      const refused = await organizationRequest(
+        other,
+        other.ownerSubjectId,
+        `/v1/organizations/${other.accountId}/claude/accounts/${connection}/usage${method === "POST" ? "/refresh" : ""}`,
+        method,
+      );
+      expect(refused.status).toBe(404);
+    }
+    expect(usageCalls).toEqual([]);
+
+    // The administrator: a live read through the administrator seam.
+    const refresh = await organizationRequest(org, org.ownerSubjectId, `${path}/refresh`, "POST");
+    expect(refresh.status).toBe(200);
+    expect(refresh.headers.get("cache-control")).toBe("private, no-store");
+    const body = (await refresh.json()) as {
+      refreshStatus: string;
+      credentialVersion: number;
+      windows: Array<{ id: string; usedPercent: number | null }>;
+    };
+    expect(body.refreshStatus).toBe("available");
+    expect(body.credentialVersion).toBe(await connectionVersion(connection));
+    expect(body.windows.find((window) => window.id === "five_hour")?.usedPercent).toBe(12);
+    expect(usageCalls).toHaveLength(1);
+    // Within 30 seconds the stored reading answers.
+    const again = await organizationRequest(org, org.ownerSubjectId, `${path}/refresh`, "POST");
+    expect(((await again.json()) as { refreshStatus: string }).refreshStatus).toBe("available");
+    expect(usageCalls).toHaveLength(1);
+    usageCalls.length = 0;
   });
 });
 
@@ -503,12 +528,12 @@ describe("the owner's personal connection on the core route", () => {
     return { org, cookie };
   }
 
-  test("the owner reads it and gets its stored projection on refresh only in their own Personal workspace", async () => {
+  test("the owner refreshes it live only in their own Personal workspace", async () => {
     usageCalls.length = 0;
     const api = managedApp();
     const { org, cookie } = await signedInOwner(api);
     expect(org.personalWorkspaceId).toBeTruthy();
-    const personal = await personalConnection(org, "owner-personal");
+    const personal = await personalConnection(org, "owner-live");
     const browser = {
       cookie,
       origin,
@@ -585,17 +610,10 @@ describe("the owner's personal connection on the core route", () => {
         message: "Private Claude accounts require a verified owning user",
       });
     }
+    expect(usageCalls).toEqual([]);
 
-    // The owner, in their own Personal workspace: GET projects the stored
-    // connection (no 409 from the legacy ordinary-workspace rule).
-    const read = await api.request(usagePath(org.personalWorkspaceId), { headers: browser });
-    expect(read.status).toBe(200);
-    expect(read.headers.get("cache-control")).toBe("private, no-store");
-    const stored = (await read.json()) as { connected: boolean; credentialVersion: number };
-    expect(stored.connected).toBe(true);
-    expect(stored.credentialVersion).toBe(await connectionVersion(personal));
-    // POST answers the stored projection as `unavailable` until the owner-only
-    // live read lands (C2c); nothing is read live.
+    // The owner, in their own Personal workspace: a live read through the
+    // owner-only seam, then the stored reading.
     const refreshed = await api.request(`${usagePath(org.personalWorkspaceId)}/refresh`, {
       method: "POST",
       headers: browser,
@@ -605,12 +623,20 @@ describe("the owner's personal connection on the core route", () => {
     expect(refreshed.headers.get("cache-control")).toBe("private, no-store");
     const body = (await refreshed.json()) as {
       refreshStatus: string;
-      refreshCheckedAt: string | null;
       credentialVersion: number;
+      windows: Array<{ id: string; usedPercent: number | null }>;
     };
-    expect(body.refreshStatus).toBe("unavailable");
-    expect(body.refreshCheckedAt).toBeNull();
+    expect(body.refreshStatus).toBe("available");
     expect(body.credentialVersion).toBe(await connectionVersion(personal));
-    expect(usageCalls).toEqual([]);
+    expect(body.windows.find((window) => window.id === "five_hour")?.usedPercent).toBe(12);
+    expect(usageCalls).toHaveLength(1);
+    const read = await api.request(usagePath(org.personalWorkspaceId), { headers: browser });
+    expect(read.status).toBe(200);
+    expect(
+      ((await read.json()) as { windows: Array<{ id: string }> }).windows.map(
+        (window) => window.id,
+      ),
+    ).toContain("five_hour");
+    usageCalls.length = 0;
   });
 });

@@ -5267,36 +5267,47 @@ core read before C3 fails closed in the registry.
   organization route reads the organization pool for an organization
   administrator only. Anything else is the legacy 404; a malformed id never
   reaches SQL.
-- Refresh. POST refresh reads live usage only for a shared connection of
-  the workspace pool, through the core connection seam in workspace scope,
-  with every Claude model of the workspace's catalog (`modelIds`, both
-  prefixes). The probe reports whether its reading was applied (`applied`;
+- Refresh. POST refresh reads live usage through one of three seams, each
+  under its own authority: a shared connection of the workspace pool
+  through the core connection seam in workspace scope; the caller's own
+  personal connection in their own Personal workspace through the
+  owner-only seam; and an organization-pool connection on the organization
+  route through the administrator seam (both C2c, below). The decoder gets
+  every Claude model the caller's catalog lists (`modelIds`): the
+  workspace's catalog on a workspace route (both prefixes), the
+  organization's Claude models on the organization route (read as the
+  administrator; when they cannot be read, nothing is read live). The
+  organization route has no workspace catalog, so a workspace's own model
+  gets its family cooldown from that workspace's reads; a later reading
+  never shortens a stored cooldown. The probe reports whether its reading
+  was applied (`applied`;
   the generation fence or a failed write leaves it unapplied): an unapplied
   reading, or one whose read-back fails, answers `unavailable`, never
   `available`. A recovery wakes the Claude core waiters
   (`usage_recovered`); a failed wake is dropped and never fails the
-  committed read.
-- Live refresh gap (owned by C2a, closed by C2c before C3). C2c (#4157,
-  split into a provider-neutral PR for the administrator-scoped and
-  owner-only reads plus the Claude wiring on top of C2a) closes it, and is
-  a precondition of C3 (see the C3 row of the Claude track); C2c turns the
-  pinned `unavailable` route tests into live-read tests, including one for
-  an owner's personal connection.
-  Legacy read organization accounts and user-scope accounts live (D-01),
-  and Codex's organization usage reads live through an administrator-scoped
-  reader. The core connection seam cannot do either today: its target
-  routine (`subscription_core_connection_target`, 0707) requires a
-  workspace and, without a turn lease, returns only shared connections, so
-  the organization route (no workspace) and an owner's personal connection
-  have no credential path without new neutral SQL (an organization-scoped,
-  administrator-checked target and an owner-only personal credential read).
-  Until that lands, such a refresh reads nothing and answers its stored
-  projection with refresh status `unavailable` and no check time
-  (`reconnect` and `scope_required` kept). This follows the Codex
-  core usage rule that a connection the caller's context cannot read
-  reports no data (5.1.1, PR 2c); it is not Codex's organization behaviour,
-  which reads live. `available` would claim a read that did not happen, and
-  `not_checked` would invite a retry that cannot succeed.
+  committed read, on every path. Any seam that refuses (not visible,
+  maintenance, a revoked authority) reads nothing and answers the stored
+  projection with `unavailable` and no check time (`reconnect` and
+  `scope_required` kept), the Codex rule that a connection the caller's
+  context cannot read reports no data (5.1.1, PR 2c).
+- Administered refresh (C2c; D-01 parity: legacy read organization and
+  user-scope accounts live). This closes the live refresh gap C2a recorded
+  (the C3 precondition in the Claude track's C3 row). The organization
+  route refreshes an organization-pool connection for an organization
+  administrator through the `organization_administrator` scope, and the
+  owner's personal connection refreshes in their own Personal workspace
+  through the `personal_owner` scope, both of the shared administered usage
+  reads (5.3, "Administered usage reads"). A workspace-managed connection
+  stays with its workspace (the workspace path's 409 rule).
+- Known limit (organization route catalog). The organization route has no
+  workspace catalog, so its decoder gets only the organization's Claude
+  models (read as the administrator; when they cannot be read, nothing is
+  read live). A model only a workspace's catalog adds gets no family
+  cooldown from an organization-route reading; its workspace's reads and
+  refusal settlement still cool it, and no reading
+  shortens a stored cooldown, so at most one request for such a model can
+  be refused before it cools down. This narrows a quota hint, never
+  authority.
 - Throttle. The legacy 30-second refresh throttle holds. A stored
   usage-endpoint reading younger than 30 seconds answers first (this bound
   holds across replicas, but only while the newest stored observation is a
@@ -5305,8 +5316,9 @@ core read before C3 fails closed in the registry.
   this API process's remembered attempt (failed attempts included, kept in
   a bounded in-process map) answers when it is younger than 30 seconds and
   newer than the stored reading. The memory is keyed by organization,
-  workspace, connection and row version, so a reconnect never replays an
-  outcome of the old credential. Another replica may read once more within
+  workspace (`organization` on the organization route), connection and row
+  version, so a reconnect never replays an outcome of the old credential,
+  and the three refresh paths share one rule. Another replica may read once more within
   the interval (accepted for this release: refresh is an explicit,
   scope-checked mutation of a read-only endpoint). The memory is per
   workspace, so the bound on live reads of one connection per interval is
@@ -5362,7 +5374,10 @@ core read before C3 fails closed in the registry.
   `applyQuotaObservation` option and the conformance expectation; `applied`
   on the probe's `read` result; and, copied unchanged from C2b, `version` on
   the shared connection row reads with the 0730 owner-only personal version
-  reader (renumbered at merge).
+  reader (renumbered at merge). C2c uses the shared administered usage reads
+  (5.3, "Administered usage reads"; the probe, 0731's owner-only routines
+  and the shared operations steps), which land in their own
+  provider-neutral PR before it.
 
 ##### C1b: Claude settlement, finalization and waits (implemented)
 

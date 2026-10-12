@@ -301,13 +301,22 @@ describe("workspace Claude usage on the core route", () => {
 });
 
 describe("organization Claude usage on the core route", () => {
-  test("GET projects the organization connection; POST refreshes nothing", async () => {
+  test("GET projects the organization connection; POST refreshes it through the administrator seam", async () => {
     route("core");
     // The organization administrator check, with no legacy Claude read.
     const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
     const row = mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () => connectionRow());
-    const refresh = mock("refreshSubscriptionCoreClaudeWorkspaceUsage", async () => {
-      throw new Error("the organization path has no workspace context to read live");
+    const workspaceRefresh = mock("refreshSubscriptionCoreClaudeWorkspaceUsage", async () => {
+      throw new Error("the organization path never uses the workspace seam");
+    });
+    const refreshed = { ...storedUsage, refreshCheckedAt: "2026-10-11T12:05:00.000Z" };
+    const refresh = mock("refreshSubscriptionCoreClaudeOrganizationUsage", async () => ({
+      usage: refreshed,
+      recovered: true,
+    }));
+    const wakes: unknown[] = [];
+    mock("deliverSubscriptionCoreProviderWake", async (...args: never[]) => {
+      wakes.push(args.slice(1));
     });
     const read = await app().fetch(organizationAdminRequest(organizationPath));
     expect(read.status).toBe(200);
@@ -322,20 +331,13 @@ describe("organization Claude usage on the core route", () => {
       organizationAdminRequest(`${organizationPath}/refresh`, { method: "POST", body: "{}" }),
     );
     expect(posted.status).toBe(200);
-    expect(await posted.json()).toEqual({
-      ...storedUsage,
-      refreshStatus: "unavailable",
-      refreshCheckedAt: null,
+    expect(await posted.json()).toEqual(refreshed);
+    expect(refresh.mock.calls[0]![2]).toMatchObject({
+      organizationId: ACCOUNT,
+      subjectId: "user:org-admin",
     });
-    expect(refresh.mock.calls).toHaveLength(0);
-    // A connection that needs a new sign-in keeps reconnect.
-    mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () =>
-      connectionRow({ status: "needs_relogin" }),
-    );
-    const relogin = await app().fetch(
-      organizationAdminRequest(`${organizationPath}/refresh`, { method: "POST", body: "{}" }),
-    );
-    expect(((await relogin.json()) as { refreshStatus: string }).refreshStatus).toBe("reconnect");
+    expect(workspaceRefresh.mock.calls).toHaveLength(0);
+    expect(wakes).toEqual([["claude", { accountId: ACCOUNT, reason: "usage_recovered" }]]);
     mock("readSubscriptionCoreClaudeOrganizationUsageRow", async () => null);
     const missing = await app().fetch(organizationAdminRequest(organizationPath));
     expect(missing.status).toBe(404);
