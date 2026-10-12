@@ -89,17 +89,30 @@ export async function reconcileVideoGenerationOperation(
   if (!operation.credentialEncrypted) {
     throw new Error("Video provider credential lease was erased too early");
   }
-  const providerCredential = decryptVideoGenerationCredential(key, operation.credentialEncrypted);
   const usesSuperGrok = operation.fundingSource === "supergrok_subscription";
+  let providerCredential: ReturnType<typeof decryptVideoGenerationCredential>;
+  try {
+    providerCredential = decryptVideoGenerationCredential(key, operation.credentialEncrypted);
+  } catch (error) {
+    // A SuperGrok envelope the cutover did not convert (a legacy token
+    // envelope or a restored row) is never decoded: like an unavailable
+    // connection it waits until the recovery deadline, then ends.
+    if (usesSuperGrok) return await subscriptionConnectionUnavailable(service, input, operation);
+    throw error;
+  }
+  if (
+    usesSuperGrok &&
+    (providerCredential.kind !== "subscription-connection" ||
+      providerCredential.provider !== SUBSCRIPTION_CORE_XAI_PROVIDER)
+  ) {
+    return await subscriptionConnectionUnavailable(service, input, operation);
+  }
   if (usesSuperGrok !== (providerCredential.kind !== "api-key")) {
     throw new Error("Video provider credential does not match its funding source");
   }
   if (providerCredential.kind === "subscription-connection") {
     // After the SuperGrok cutover: the canonical connection under a `video`
     // operation lease, refreshed only under the core lock (EP-N13/EP-N14).
-    if (providerCredential.provider !== SUBSCRIPTION_CORE_XAI_PROVIDER) {
-      throw new Error("Video provider credential does not match its funding source");
-    }
     const ran = await withSubscriptionCoreVideoConnection(
       service.db,
       service.settings,

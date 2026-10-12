@@ -259,6 +259,28 @@ describe("SuperGrok video on the shared core", () => {
     expect(calls).toEqual([`lease:video:${CONNECTION}:session:user:owner`, "outcome_unknown"]);
   });
 
+  test("an unconverted legacy token envelope is never decoded and ends at the recovery deadline", async () => {
+    const legacy = encryptEnvironmentValue(
+      KEY,
+      JSON.stringify({ accessToken: "legacy-access", refreshToken: "legacy-refresh" }),
+    );
+    for (const credentialEncrypted of [legacy, encryptEnvironmentValue(KEY, "not json")]) {
+      calls = [];
+      operation = admitted("accepted", { credentialEncrypted } as Partial<Operation>);
+      expect(await reconcile()).toMatchObject({ action: "waiting" });
+      // No lease, no provider call: only the bounded recheck.
+      expect(calls).toEqual(["reschedule"]);
+      calls = [];
+      operation = admitted("provider_started", {
+        credentialEncrypted,
+        providerJobId: "xai-job-1",
+        recoveryDeadlineAt: new Date(Date.now() - 1_000),
+      } as Partial<Operation>);
+      expect(await reconcile()).toEqual({ action: "terminal", status: "outcome_unknown" });
+      expect(calls).toEqual(["outcome_unknown"]);
+    }
+  });
+
   test("a crash after the submission intent is never replayed on the core path", async () => {
     operation = admitted("accepted");
     provider = async () => {
