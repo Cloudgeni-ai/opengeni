@@ -56,8 +56,8 @@ export function projectSubscriptionCoreAccountUsage(
     source: quota.source,
     windows: quota.windows.map((window) => ({
       id: window.id,
-      // Like the existing stored Claude usage projection, retain values over
-      // 100 (overage), but do not present negative utilization as real capacity.
+      // Retain values over 100 (overage), but do not present negative
+      // utilization as real capacity.
       usedPercent:
         window.usedPercent !== null && window.usedPercent >= 0 ? window.usedPercent : null,
       resetsAt: iso(window.resetsAt),
