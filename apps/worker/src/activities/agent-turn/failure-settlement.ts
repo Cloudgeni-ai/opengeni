@@ -1573,7 +1573,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     failure.retryable &&
     eventing.publish &&
     eventing.turnStartedPublished &&
-    !(coreLaneRecoverable(coreClaude.requests) && coreLaneRecoverable(coreClaude.titleRequests))
+    !coreLaneRecoverable(coreClaude.requests)
   ) {
     await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
       await flushRuntimeBatcher();

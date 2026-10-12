@@ -5252,9 +5252,10 @@ like C1a.
   requests that still await their checkpoint (a paused search's
   continuation refused with a 529, or a tool or MCP failure after a
   complete response), settlement commits the history durably and
-  checkpoints the lanes first (as the lease-lost and failover paths do), so
-  the turn recovers; a lane with a request still without its response stays
-  terminal. Codex and SuperGrok keep their existing gate (tested).
+  checkpoints the main lane first (as the lease-lost and failover paths do), so
+  the turn recovers; a main request still without its response stays terminal.
+  Tool-less titles neither trigger this checkpoint nor block recovery, as in
+  #4179. Codex and SuperGrok keep their existing main-lane gate (tested).
   An unknown request outcome or a lost lease skips the refusal step. The legacy
   Claude receipts, refresh recovery, rotation and wait never run for a core
   turn, and the core never reads the v1 `claudeAuthRecovery` marker (the

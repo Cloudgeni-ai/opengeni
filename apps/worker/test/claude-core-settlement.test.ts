@@ -376,6 +376,28 @@ describe("Claude refusal settlement on the core", () => {
     for (const legacy of runtime.legacy) expect(legacy).not.toHaveBeenCalled();
   });
 
+  for (const unknown of [false, true]) {
+    test(`an unfinished tool-less title does not checkpoint or fence overload recovery (unknown=${unknown})`, async () => {
+      const runtime = coreRuntime({ refusals: 1 });
+      const recovery = recoveringRecovery();
+      const { deps, releaseCurrent } = failureDeps(
+        anthropic(529, "overloaded_error"),
+        core({
+          titleRequests: {
+            canRecover: () => false,
+            hasUnknownOutcome: () => unknown,
+          } as SubscriptionCoreTurn["titleRequests"],
+        }),
+      );
+      const history = spy(deps.historySink, "reconcileConversationTruth");
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recovery.mock.calls[0]![2]).toMatchObject({ reason: "provider_overloaded" });
+      expect(history).not.toHaveBeenCalled();
+      expect(runtime.apply).not.toHaveBeenCalled();
+      expect(releaseCurrent).not.toHaveBeenCalled();
+    });
+  }
+
   test("a 529 on a paused search's continuation checkpoints the answered request, then recovers", async () => {
     coreRuntime({ refusals: 1 });
     const order: string[] = [];
