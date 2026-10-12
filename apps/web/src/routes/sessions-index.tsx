@@ -121,6 +121,7 @@ import {
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { composerFallbackModel } from "@/lib/model-access-onboarding";
+import { useForgetLastSession } from "@/lib/last-session-memory";
 import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
@@ -227,7 +228,8 @@ export function SessionsIndexRoute({
   workspaceId: string;
   launch?: ComposerLaunchSearch;
 }) {
-  const { accessKeyVersion } = useAppContext();
+  const { accessKeyVersion, accessContext } = useAppContext();
+  useForgetLastSession(accessContext.subjectId, workspaceId);
   return (
     <SessionsIndexRouteContent
       key={`${workspaceId}:${accessKeyVersion}`}

@@ -90,7 +90,7 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { sessionAgentsSignal } from "@opengeni/react/session-agents-model";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   BotIcon,
   BugIcon,
@@ -157,6 +157,7 @@ import {
   catalogConnectionAccountSelection,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { useSessionRouteMemory } from "@/lib/last-session-memory";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { currentModelRecovery } from "@/lib/model-recovery";
@@ -419,6 +420,26 @@ export function SessionRoute({
   } = useSession(sessionId, {
     events,
     beginRead: beginSessionDetailRead,
+  });
+  // "Back to sessions" from Settings reopens this session (see last-session-memory).
+  const restoredSessionId = useRouterState({
+    select: (state) => state.location.state.restoredSessionId,
+  });
+  const leaveRestoredSession = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions",
+      params: { workspaceId },
+      replace: true,
+    });
+  }, [navigate, workspaceId]);
+  const leavingRestoredSession = useSessionRouteMemory({
+    subjectId: context.accessContext.subjectId,
+    workspaceId,
+    sessionId,
+    openedSessionId: fetchedSession?.id ?? null,
+    loadError,
+    restoredSessionId,
+    leave: leaveRestoredSession,
   });
   useEffect(
     () => () =>
@@ -1184,6 +1205,7 @@ export function SessionRoute({
   // A freshly sent creation handoff already has visible conversation truth.
   // Never paint the genesis message or mount a second loading treatment first.
   if (!session || !opened) {
+    if (leavingRestoredSession) return <LoadingPanel />;
     if (!session && loadError) {
       return (
         <Suspense fallback={<LoadingPanel />}>
