@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,8 @@
 
 #define PROTOCOL "native-subreaper-v1"
 #define PTY_PROTOCOL "native-subreaper-pty-v1"
+#define CHANNEL_PROTOCOL "native-subreaper-broker-channel-v1"
+#define CHANNEL_PTY_PROTOCOL "native-subreaper-broker-channel-pty-v1"
 #define FRAME_SIZE 1024
 #define CANCEL_GRACE_MS 200
 #define KEEPER_PROTOCOL "native-artifact-keeper-v1"
@@ -47,10 +50,12 @@
 struct options {
     const char *invocation, *nonce, *path, *action, *receipt;
     char **command;
-    bool launch, pty;
+    bool launch, pty, channel;
+    int channel_fd;
 };
 
 static const char *protocol(const struct options *o) {
+    if (o->channel) return o->pty ? CHANNEL_PTY_PROTOCOL : CHANNEL_PROTOCOL;
     return o->pty ? PTY_PROTOCOL : PROTOCOL;
 }
 
@@ -294,9 +299,11 @@ static int keeper(int argc, char **argv) {
 }
 
 static struct options parse(int argc, char **argv) {
-    struct options o = {0};
+    struct options o = {.channel_fd = -1};
+    const char *channel_fd = NULL;
     if (argc < 2) fail("missing subcommand");
-    o.launch = !strcmp(argv[1], "launch");
+    o.channel = !strcmp(argv[1], "launch-channel");
+    o.launch = o.channel || !strcmp(argv[1], "launch");
     if (!o.launch && strcmp(argv[1], "control")) fail("invalid subcommand");
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--pty")) {
@@ -314,15 +321,30 @@ static struct options parse(int argc, char **argv) {
         if (!strcmp(argv[i], "--invocation")) slot = &o.invocation;
         else if (!strcmp(argv[i], "--nonce")) slot = &o.nonce;
         else if (!strcmp(argv[i], "--socket")) slot = &o.path;
+        else if (!strcmp(argv[i], "--control-fd")) slot = &channel_fd;
         else if (!strcmp(argv[i], "--action")) slot = &o.action;
         else if (!strcmp(argv[i], "--receipt")) slot = &o.receipt;
         else fail("unknown option");
         if (*slot) fail("duplicate option");
         *slot = argv[++i];
     }
-    if (!o.invocation || !uuid(o.invocation) || !o.nonce || !hex(o.nonce, 64) ||
-        !o.path || o.path[0] != '/' || strlen(o.path) >= sizeof(((struct sockaddr_un *)0)->sun_path))
-        fail("invalid identity or socket path");
+    if (!o.invocation || !uuid(o.invocation) || !o.nonce || !hex(o.nonce, 64))
+        fail("invalid identity");
+    if (o.channel) {
+        if (o.path || !channel_fd || channel_fd[0] < '1' || channel_fd[0] > '9')
+            fail("invalid control descriptor");
+        unsigned long value = 0;
+        for (const char *p = channel_fd; *p; p++) {
+            if (*p < '0' || *p > '9' ||
+                value > ((unsigned long)INT_MAX - (unsigned long)(*p - '0')) / 10)
+                fail("invalid control descriptor");
+            value = value * 10 + (unsigned long)(*p - '0');
+        }
+        if (value < 3) fail("invalid control descriptor");
+        o.channel_fd = (int)value;
+    } else if (channel_fd || !o.path || o.path[0] != '/' ||
+               strlen(o.path) >= sizeof(((struct sockaddr_un *)0)->sun_path))
+        fail("invalid socket path");
     if (o.launch) {
         if (!o.command || o.action || o.receipt) fail("invalid launch options");
     } else {
@@ -450,9 +472,45 @@ static ssize_t receive_frame(int fd, char buffer[FRAME_SIZE]) {
     return n;
 }
 
-static void send_frame(int fd, const char *message) {
+static bool send_frame(int fd, const char *message) {
     /* Lost client/ACK response does not destroy the replayable receipt. */
-    (void)send(fd, message, strlen(message), MSG_NOSIGNAL);
+    ssize_t size;
+    do { size = send(fd, message, strlen(message), MSG_NOSIGNAL | MSG_DONTWAIT); }
+    while (size < 0 && errno == EINTR);
+    return size == (ssize_t)strlen(message);
+}
+
+/* This is a topology check, not authentication of an arbitrary guest peer.
+ * Only the admitted initial broker may create/pass this private socketpair.
+ * SO_PEERCRED describes creation-time identity, not a current sender or a
+ * hostile same-UID isolation boundary. No guest-path control is accepted. */
+static int inherited_control_channel(int fd) {
+    int type = 0;
+    socklen_t size = sizeof(type);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &size) ||
+        size != sizeof(type) || type != SOCK_SEQPACKET)
+        fail("private control socket type unavailable");
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    size = sizeof(address);
+    if (getsockname(fd, (struct sockaddr *)&address, &size) ||
+        size != offsetof(struct sockaddr_un, sun_path) || address.sun_family != AF_UNIX)
+        fail("private control local endpoint unavailable");
+    memset(&address, 0, sizeof(address));
+    size = sizeof(address);
+    if (getpeername(fd, (struct sockaddr *)&address, &size) ||
+        size != offsetof(struct sockaddr_un, sun_path) || address.sun_family != AF_UNIX)
+        fail("private control peer endpoint unavailable");
+    struct ucred credentials;
+    size = sizeof(credentials);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &size) ||
+        size != sizeof(credentials) || credentials.pid != getppid() ||
+        credentials.uid != geteuid() || credentials.gid != getegid())
+        fail("private control parent identity unavailable");
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) ||
+        fcntl(fd, F_SETFD, FD_CLOEXEC)) fail("private control descriptor flags unavailable");
+    return fd;
 }
 
 static int control(const struct options *o) {
@@ -609,7 +667,7 @@ static pid_t start_command(const struct options *o, int listener, int client, in
     if (leader < 0) fail("leader fork failed");
     if (!leader) {
         close(client);
-        close(listener);
+        if (listener != client) close(listener);
         if (o->pty) {
             close(terminal);
             close(prepared[0]);
@@ -648,16 +706,21 @@ static int launch(const struct options *o) {
          * receives terminal signals. User children restore native defaults. */
         terminal_signals(SIG_IGN);
     }
-    validate_directory(o->path, true);
-    int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-    if (listener < 0) fail("control socket unavailable");
-    struct sockaddr_un address = socket_address(o->path);
-    mode_t previous = umask(0077);
-    int bound = bind(listener, (struct sockaddr *)&address, sizeof(address));
-    umask(previous);
-    /* Never unlink an existing socket, including an earlier invocation. */
-    if (bound || listen(listener, 16)) fail("control bind failed");
+    int listener;
+    if (o->channel) listener = inherited_control_channel(o->channel_fd);
+    else {
+        validate_directory(o->path, true);
+        listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (listener < 0) fail("control socket unavailable");
+        struct sockaddr_un address = socket_address(o->path);
+        mode_t previous = umask(0077);
+        int bound = bind(listener, (struct sockaddr *)&address, sizeof(address));
+        umask(previous);
+        /* Never unlink an existing socket, including an earlier invocation. */
+        if (bound || listen(listener, 16)) fail("control bind failed");
+    }
     bool started = false, cancelled = false, quiescent = false, leader_seen = false;
+    bool channel_lost = false;
     pid_t leader = 0;
     struct launch_barrier barrier = {.prepared = -1, .release = -1};
     int leader_exit = 125; /* Cancelled before release: no leader was launched. */
@@ -665,6 +728,10 @@ static int launch(const struct options *o) {
     char receipt_id[37], response[FRAME_SIZE];
     make_receipt_id(receipt_id);
     for (;;) {
+        if (channel_lost && !cancelled) {
+            cancelled = true;
+            cancel_at = milliseconds();
+        }
         if (!quiescent && (started || cancelled)) {
             if (barrier.prepared >= 0) {
                 if (cancelled) close_barrier(&barrier);
@@ -685,34 +752,72 @@ static int launch(const struct options *o) {
                     "\"receiptId\":\"%s\",\"leaderExitCode\":%d}}", protocol(o), o->invocation, receipt_id, leader_exit);
             }
         }
-        if (!ready(listener, POLLIN, 10)) continue;
-        int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
-        if (client < 0) {
-            if (errno == EAGAIN || errno == EINTR) continue;
-            fail("control accept failed");
-        }
-        char frame[FRAME_SIZE];
-        bool ack = false;
-        if (!ready(client, POLLIN, 100) || receive_frame(client, frame) < 0) {
-            close(client);
+        if (channel_lost) {
+            if (quiescent) {
+                if (terminal >= 0) close(terminal);
+                /* A drained child set is not a delivered receipt or clean ACK. */
+                return 125;
+            }
+            (void)poll(NULL, 0, 10);
             continue;
         }
-        char *fields[5], *position = frame;
-        bool valid = true;
-        for (int i = 0; i < 5; i++) {
+        int client;
+        if (o->channel) {
+            struct pollfd p = {.fd = listener, .events = POLLIN};
+            int observed;
+            do { observed = poll(&p, 1, 10); } while (observed < 0 && errno == EINTR);
+            if (observed < 0 || (p.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+                close(listener);
+                channel_lost = true;
+                continue;
+            }
+            if (!observed || !(p.revents & POLLIN)) continue;
+            client = listener;
+        } else {
+            if (!ready(listener, POLLIN, 10)) continue;
+            client = accept4(listener, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+            if (client < 0) {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                fail("control accept failed");
+            }
+        }
+        char frame[FRAME_SIZE];
+        bool ack = false, sent = true, frame_valid;
+        if (o->channel) {
+            ssize_t count;
+            do { count = recv(client, frame, FRAME_SIZE - 1, MSG_TRUNC | MSG_DONTWAIT); }
+            while (count < 0 && errno == EINTR);
+            if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            if (count <= 0) {
+                close(listener);
+                channel_lost = true;
+                continue;
+            }
+            frame_valid = count < FRAME_SIZE - 1 && !memchr(frame, 0, (size_t)count);
+            if (frame_valid) frame[count] = 0;
+        } else {
+            if (!ready(client, POLLIN, 100) || receive_frame(client, frame) < 0) {
+                close(client);
+                continue;
+            }
+            frame_valid = true;
+        }
+        char *fields[5] = {0}, *position = frame;
+        bool valid = frame_valid;
+        for (int i = 0; valid && i < 5; i++) {
             fields[i] = strsep(&position, "\t");
             if (!fields[i]) valid = false;
         }
         valid = valid && !position && !strcmp(fields[0], protocol(o)) &&
             !strcmp(fields[1], o->invocation) && !strcmp(fields[2], o->nonce);
         if (!valid) {
-            send_frame(client, "{\"error\":\"unauthenticated\"}");
+            sent = send_frame(client, "{\"error\":\"unauthenticated\"}");
         } else if (!strcmp(fields[3], "ack")) {
             ack = quiescent && !strcmp(fields[4], receipt_id);
-            send_frame(client, ack ? response : "{\"error\":\"receipt_mismatch\"}");
+            sent = send_frame(client, ack ? response : "{\"error\":\"receipt_mismatch\"}");
         } else if (strcmp(fields[4], "-") || (strcmp(fields[3], "release") &&
             strcmp(fields[3], "cancel") && strcmp(fields[3], "status"))) {
-            send_frame(client, "{\"error\":\"invalid_action\"}");
+            sent = send_frame(client, "{\"error\":\"invalid_action\"}");
         } else {
             if (!strcmp(fields[3], "cancel") && !cancelled && !quiescent) {
                 cancelled = true;
@@ -722,15 +827,20 @@ static int launch(const struct options *o) {
                 leader = start_command(o, listener, client, terminal, &barrier);
                 started = true;
             }
-            send_frame(client, quiescent ? response :
+            sent = send_frame(client, quiescent ? response :
                 (started || cancelled ? "{\"state\":\"running\"}" : "{\"state\":\"idle\"}"));
         }
-        close(client);
+        if (!o->channel) close(client);
+        else if (!sent) {
+            close(listener);
+            channel_lost = true;
+            continue;
+        }
         if (ack) {
             close(listener);
             if (terminal >= 0) close(terminal);
             /* Control housekeeping only; never mutate /workspace after proof. */
-            if (unlink(o->path)) fail("control cleanup failed");
+            if (!o->channel && unlink(o->path)) fail("control cleanup failed");
             return 0;
         }
     }

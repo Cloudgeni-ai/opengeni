@@ -106,6 +106,34 @@ with the leader status only after kernel ECHILD; it creates no command receipt
 or control socket. This mode is for browserd, whose detached descendants must
 not outlive its controller. Retained-command `launch` semantics are unchanged.
 
+## Private inherited broker channel (not activated)
+
+`launch-channel --control-fd FD --invocation UUID --nonce HEX64 [--pty] -- COMMAND...`
+is an internal primitive for the initial broker, not a replacement path selected
+after ordinary control fails. It accepts only an inherited, connected, unnamed
+Unix `SOCK_SEQPACKET` pair whose creation credentials match the direct parent.
+The broker must itself own authenticated initial-process custody; the creation
+credentials are a topology check, not proof of the current sender, an arbitrary
+guest's identity, or hostile same-UID containment. This primitive is not yet
+connected to provider execution or host command admission.
+
+The channel is persistent and uses `native-subreaper-broker-channel-v1` or
+`native-subreaper-broker-channel-pty-v1`, with the same five-field request and
+receipt fields as the existing path protocol. No filesystem socket is created.
+One nonblocking bounded response accompanies each request; the broker must keep
+reading replies. A full response queue, receive EOF or channel error closes
+launch, cancels/drains all owned descendants through the normal pidfd/subreaper
+path, restores the PTY after ECHILD, then exits **125**, never clean ACK success.
+A closed peer wins over a queued release. There is no receipt inferred from
+that exit or from stream EOF. As before, only the exact acknowledged receipt
+permits exit 0. User children never inherit the control descriptor.
+
+The tests cover persistent replay/authentication, malformed/oversized packets,
+half-close and full-close, response backpressure, detached and TERM-ignoring
+descendants, strict descriptor topology, real PTY job control and inherited
+signal/descriptor hygiene. These tests do not qualify the complete broker or a
+provider's command ownership contract.
+
 Run local native tests (Linux, C compiler, make, Python 3):
 
 ```sh

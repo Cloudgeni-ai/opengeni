@@ -21,6 +21,7 @@ $(BUILD)/kernel: tests/kernel.c supervisor.c | $(BUILD)
 test: all $(BUILD)/fixture $(BUILD)/kernel
 	$(BUILD)/kernel
 	python3 tests/test_supervisor.py $(abspath $(BUILD))
+	python3 tests/test_broker_channel.py $(abspath $(BUILD))
 
 static: | $(BUILD)
 	sh build-static.sh $(abspath supervisor.c) $(abspath $(BUILD))
@@ -32,6 +33,7 @@ test-static: static $(BUILD)/fixture $(BUILD)/kernel
 	python3 tests/test_supervisor.py $(abspath $(BUILD))
 	python3 tests/test_keeper.py $(abspath $(BUILD))
 	python3 tests/test_broker_preflight.py $(abspath $(BUILD))
+	python3 tests/test_broker_channel.py $(abspath $(BUILD))
 
 clean:
 	rm -f $(BUILD)/opengeni-command-supervisor $(BUILD)/fixture $(BUILD)/kernel

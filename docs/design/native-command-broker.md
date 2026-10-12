@@ -1,8 +1,9 @@
 # Keeper-owned native command transport
 
 Status: implementation in progress; not an admitted runtime capability. The
-initial increment is an internal bounded wire codec and a native bootstrap
-preflight with tests. It does not
+current increments provide bounded framing, a native bootstrap preflight,
+input/output custody state machines, encrypted atomic transport storage and a
+private inherited supervisor channel. They do not
 enable new command starts, change a production protocol tuple, or qualify an
 existing sandbox. The existing [command supervision](../command-supervision.md)
 and [native keeper](../../agent/native/command-supervisor/README.md) contracts
@@ -68,6 +69,17 @@ only this fresh-image bootstrap primitive; it does not qualify arbitrary command
 admission, cancellation, durable input/output replay, or old-snapshot handling.
 
 ## Bounded framing
+
+The native `launch-channel` primitive supplies the broker's per-command control
+link: an unnamed, inherited Unix sequenced-packet pair with distinct pipe/PTY
+protocol names. It reuses the supervisor's idle/release, pidfd cancellation,
+ECHILD receipt and exact ACK behavior without a mutable guest socket pathname.
+Channel loss or response backpressure permanently closes launch and drains owned
+descendants before exit 125; that exit supplies no receipt or clean ACK proof.
+Creation-time parent credentials only check the intended topology. They do not
+authenticate a host invocation or make a transferred socket trustworthy. The
+broker's sealed initial custody and full dispatch/exit binding remain required.
+This primitive is not yet called by a live broker or an admitted runtime route.
 
 The internal codec is
 `packages/runtime/src/sandbox/providers/native-command-broker-wire.ts`.

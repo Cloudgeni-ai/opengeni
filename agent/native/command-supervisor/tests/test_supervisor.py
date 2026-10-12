@@ -27,9 +27,11 @@ class PtyProcess:
     stdout = None
     stderr = None
 
-    def __init__(self, argv, redirected=False):
+    def __init__(self, argv, redirected=False, pass_fds=()):
         self.pid, self.master = pty.fork()
         if self.pid == 0:
+            for fd in pass_fds:
+                os.set_inheritable(fd, True)
             os.environ["PS1"] = "NATIVE_PROMPT> "
             os.environ["TERM"] = "dumb"
             if redirected == "other-pty":
