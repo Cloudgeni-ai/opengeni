@@ -20,6 +20,7 @@ export type ModelConnectionAccess = {
   allowPersonalWorkspaces: boolean;
   /** Chosen people (organization membership ids); shared core connections only. */
   allowedPeople?: string[] | null | undefined;
+  sharePersonal?: true | undefined;
   version: number;
 };
 

@@ -56,7 +56,6 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
-import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -565,22 +564,13 @@ async function withChannelAOperation<T>(
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
 
   // The STABLE run-environment used by both a cloud home and a machine home.
-  // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(db, settings, {
-    accountId,
-    workspaceId,
-    session,
-    subjectId: ctx.subjectId,
-  });
+  // It also carries the per-session Codemode pointer selected below. Constants
+  // only: user secrets are resolved per command (W1), never seeded here.
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
       : settings;
-  const environment = stableSandboxEnvironmentForRun(
-    settingsForSession,
-    workspaceEnvironmentValues,
-    { workspaceId },
-  );
+  const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
     applyGitAuthPointerEnvironment(
       environment,

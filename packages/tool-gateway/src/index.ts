@@ -91,6 +91,21 @@ export type ToolGatewayApprovalResolver = (input: {
   entry: ToolGatewayCatalogEntryValue;
 }) => Promise<"allow" | "ask" | "block"> | "allow" | "ask" | "block";
 
+/**
+ * Trusted, in-process argument resolution (for example secret references).
+ * Runs inside `execute`, after approval and before the lifecycle crosses the
+ * side-effect boundary, on a deep copy of the validated arguments. Only the
+ * executor receives the result: approval digests, lifecycle rows, journals and
+ * receipts keep the original arguments. Throwing prevents execution.
+ */
+export type ToolGatewayArgumentResolver = (input: {
+  call: ToolGatewayCall;
+  entry: ToolGatewayCatalogEntryValue;
+  /** Deep copy of `call.arguments`; the resolver may mutate or replace it. */
+  arguments: Record<string, unknown>;
+  context: ToolGatewayCallContext;
+}) => Promise<Record<string, unknown>> | Record<string, unknown>;
+
 export type ToolGatewayCall = {
   operationId: string;
   catalogDigest: string;
@@ -177,6 +192,7 @@ export class PreparedToolGatewayDefinitions {
       modelName: string;
       subjectId: string;
     }) => boolean;
+    resolveArguments?: ToolGatewayArgumentResolver;
   }): ToolGateway {
     return new ToolGateway(
       input.catalogDigest,
@@ -185,6 +201,7 @@ export class PreparedToolGatewayDefinitions {
       input.requireApproval,
       input.confirmModelApproval,
       input.resolveApproval,
+      input.resolveArguments,
     );
   }
 }
@@ -212,6 +229,7 @@ export class ToolGateway {
         }) => boolean)
       | undefined,
     private readonly resolveApproval?: ToolGatewayApprovalResolver,
+    private readonly resolveArguments?: ToolGatewayArgumentResolver,
   ) {
     for (const definition of definitions) {
       this.byIdentity.set(identityKey(definition.entry.identity), definition);
@@ -348,11 +366,21 @@ export class ToolGateway {
           "execution",
           async () => {
             if (lifecycle?.waitingForApproval) throw new ToolGatewayApprovalRequiredError();
+            // Resolution failures behave like a refused begin: nothing crossed
+            // the side-effect boundary, so no lifecycle settlement is recorded.
+            const executeArguments = this.resolveArguments
+              ? await this.resolveArguments({
+                  call,
+                  entry: definition.entry,
+                  arguments: structuredClone(callArguments),
+                  context,
+                })
+              : callArguments;
             await measureMcpPhase("lifecycle_begin", () => lifecycle?.begin?.());
             let result: ToolGatewayResultValue;
             try {
               result = ToolGatewayResult.parse(
-                await definition.execute(callArguments, {
+                await definition.execute(executeArguments, {
                   operationId,
                   caller,
                   ...(context.sourceCallId === undefined
@@ -498,6 +526,7 @@ export function createWorkspaceToolGateway(input: {
     caller: ToolGatewayCaller,
     context: { transportMeta?: Record<string, unknown> | null },
   ) => boolean;
+  resolveArguments?: ToolGatewayArgumentResolver;
 }): { catalog: ToolGatewayCatalogValue; gateway: ToolGateway } {
   const prepared = prepareToolGatewayDefinitions(input.definitions);
   const unsigned = {
@@ -520,6 +549,7 @@ export function createWorkspaceToolGateway(input: {
       ...(input.authorize ? { authorize: input.authorize } : {}),
       ...(input.resolveApproval ? { resolveApproval: input.resolveApproval } : {}),
       ...(input.requireApproval ? { requireApproval: input.requireApproval } : {}),
+      ...(input.resolveArguments ? { resolveArguments: input.resolveArguments } : {}),
     }),
   };
 }

@@ -79,6 +79,14 @@ import {
 } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
+import type { ShellDialect } from "@opengeni/vaults";
+import {
+  secretExecCarryFor,
+  secretExecEnvironment,
+  secretScopeDirectory,
+  shellDialectFor,
+  spliceCarry,
+} from "../secret-delivery";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -87,6 +95,9 @@ const encoder = new TextEncoder();
 const SELFHOSTED_FS_READ_CHUNK_BYTES = 512 * 1024;
 const SELFHOSTED_PLACEMENT_PRIVATE_PREFIX = "/tmp/opengeni-private/";
 const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
+// Private files (secretfile values up to the vault's 256 KiB file limit) stay
+// well below the 1 MiB RPC payload ceiling.
+const SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES = 512 * 1024;
 
 /**
  * Builds the exact argv for an explicitly selected shell.
@@ -463,6 +474,8 @@ export class SelfhostedSession {
   readonly controlWorkspaceId: string;
   readonly agentId: string;
   private readonly controlRpc: ControlRpc;
+  /** Attempt scopes this session wrote `{{secretfile:…}}` files under. */
+  private readonly secretScopes = new Set<string>();
   private readonly relay: SelfhostedRelayConfig;
   private readonly terminalScopeId: string;
   private readonly epoch: number;
@@ -945,6 +958,60 @@ export class SelfhostedSession {
     return Math.min(configured, SELFHOSTED_MAX_EXEC_TIMEOUT_MS);
   }
 
+  /** Host OS family, from the Hello workspace root (drive letter / UNC => Windows). */
+  private hostOs(): "linux" | "windows" | "unknown" {
+    const root = this.workspaceRoot;
+    if (/^[A-Za-z]:[\\/]/.test(root) || root.startsWith("\\\\")) return "windows";
+    if (root.startsWith("/")) return "linux";
+    return "unknown";
+  }
+
+  /** The splice dialect a command run through `shell` (or the default) uses here. */
+  describeShellDialect(shell?: string): ShellDialect {
+    return shellDialectFor(shell?.trim() || null, this.hostOs());
+  }
+
+  private async prepareSecretExec(
+    args: SelfhostedExecArgs,
+    requestedShell: string | undefined,
+  ): Promise<{ command: string; shell: string; env: Record<string, string> } | null> {
+    const carry = secretExecCarryFor(args.cmd);
+    if (!carry) return null;
+    const dialect = carry.spliced ? "posix" : this.describeShellDialect(requestedShell);
+    const spliced = spliceCarry(carry, dialect);
+    const command = carry.spliced ? args.cmd : args.cmd.split(carry.command).join(spliced.text);
+    const env = await secretExecEnvironment(carry, spliced, async (file) => {
+      await this.writePlacementPrivate({ ...file, createParents: true });
+      this.secretScopes.add(carry.scope);
+    });
+    const shell = requestedShell || (dialect === "powershell" ? "powershell" : "/bin/sh");
+    return { command, shell, env };
+  }
+
+  /**
+   * Remove this attempt's secret files from the machine (attempt end). Uses the
+   * recursive filesystem control op, not a shell, so it works on any host OS
+   * and runs even when the consuming command never started.
+   */
+  async clearSecretFilesForAttempt(scope?: string): Promise<void> {
+    const scopes = scope === undefined ? [...this.secretScopes] : [scope];
+    for (const entry of scopes) {
+      const path = selfhostedPlacementPrivatePath(secretScopeDirectory(entry));
+      try {
+        const result = await this.call({
+          $case: "fsRemove",
+          fsRemove: { path, recursive: true },
+        });
+        if (result.$case !== "fsRemove") {
+          throw new Error(`selfhosted clearSecretFiles: unexpected result ${result.$case}`);
+        }
+      } catch (error) {
+        if (!(error instanceof SelfhostedControlError && error.osNotFound)) throw error;
+      }
+      this.secretScopes.delete(entry);
+    }
+  }
+
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
     return await this.execInternal(args, false);
@@ -981,14 +1048,23 @@ export class SelfhostedSession {
       // its exact connection/capability/policy snapshot through completion.
       admission = await this.admitCommand();
       const requestedShell = args.shell?.trim();
+      // Secret references (design §10.3, connected machines): splice in the
+      // machine's dialect and deliver the values natively in ExecRequest.env.
+      // With no explicit shell the command is forced through a known one
+      // (`/bin/sh -c` on POSIX, `powershell -NoProfile -NonInteractive
+      // -Command` on Windows) so the splice matches the parser. `args.cmd`
+      // (references) remains the command recorded for background adoption.
+      const secret = await this.prepareSecretExec(args, requestedShell);
+      const commandText = secret?.command ?? args.cmd;
+      const shell = secret?.shell ?? requestedShell;
       execReq = {
         // An explicit shell is encoded as direct argv so every agent version honors
         // it. With no explicit shell, preserve the existing machine-owned default
         // shell behavior byte-for-byte.
-        command: requestedShell
-          ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
-          : [args.cmd],
-        shell: !requestedShell,
+        command: shell
+          ? explicitShellArgv(shell, commandText, secret ? false : args.login === true)
+          : [commandText],
+        shell: !shell,
         // Relative paths resolve from the exact host root, while absolute paths
         // retain their literal machine meaning. In particular, "/workspace" is
         // sent as the real absolute path "/workspace".
@@ -996,7 +1072,7 @@ export class SelfhostedSession {
         // The machine owns its ambient shell environment and ordinary credentials.
         // Only attempt-local values explicitly supplied by the worker cross here;
         // snapshot now so a later renewal cannot mutate an in-flight request.
-        env: { ...(this.transientExecEnvironment?.() ?? {}) },
+        env: { ...(this.transientExecEnvironment?.() ?? {}), ...(secret?.env ?? {}) },
         stdin,
         timeoutMs: executionTimeoutMs,
       };
@@ -1791,7 +1867,7 @@ export class SelfhostedSession {
   }): Promise<number> {
     const path = selfhostedPlacementPrivatePath(args.path);
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
-    if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
+    if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES) {
       throw new TypeError("selfhosted placement-private content is invalid");
     }
     const result = await this.call({

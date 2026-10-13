@@ -320,44 +320,6 @@ export async function admitVideoGenerationOperation(
   );
 }
 
-/** Persist a rotated provider token before it is used for another remote call. */
-export async function rotateVideoGenerationCredential(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    operationId: string;
-    requestDigest: string;
-    expectedCredentialEncrypted: string;
-    credentialEncrypted: string;
-  },
-): Promise<VideoGenerationOperation> {
-  const [row] = await db
-    .update(schema.videoGenerationOperations)
-    .set({
-      credentialEncrypted: input.credentialEncrypted,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.videoGenerationOperations.accountId, input.accountId),
-        eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
-        eq(schema.videoGenerationOperations.id, input.operationId),
-        eq(schema.videoGenerationOperations.requestDigest, input.requestDigest),
-        eq(schema.videoGenerationOperations.credentialEncrypted, input.expectedCredentialEncrypted),
-        inArray(schema.videoGenerationOperations.status, [
-          "accepted",
-          "submission_uncertain",
-          "provider_started",
-          "retaining",
-        ]),
-      ),
-    )
-    .returning();
-  if (!row) throw new VideoGenerationConflictError("Video provider credential changed");
-  return row;
-}
-
 /**
  * Seal a reference-bearing operation only after every immutable staging object
  * has been uploaded and independently verified by the worker.  The source

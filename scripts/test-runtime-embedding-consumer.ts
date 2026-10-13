@@ -68,10 +68,12 @@ function releaseShape(
   return manifest;
 }
 
+// Embedders install the runtime plus the vault provider contract they
+// implement for `connectionCredentials.vaultProvider` (OP-6).
+const EMBEDDING_ROOTS = ["@opengeni/runtime", "@opengeni/vaults"] as const;
+
 function runtimePackageClosure(): WorkspacePackage[] {
   const packagesByName = workspacePackageByName();
-  const root = packagesByName.get("@opengeni/runtime");
-  if (!root) throw new Error("@opengeni/runtime is missing from the workspace");
   const closure = new Map<string, WorkspacePackage>();
   const collect = (pkg: WorkspacePackage): void => {
     if (closure.has(pkg.name)) return;
@@ -84,7 +86,11 @@ function runtimePackageClosure(): WorkspacePackage[] {
       collect(dependency);
     }
   };
-  collect(root);
+  for (const name of EMBEDDING_ROOTS) {
+    const root = packagesByName.get(name);
+    if (!root) throw new Error(`${name} is missing from the workspace`);
+    collect(root);
+  }
   return topologicallySortedPackages([...closure.values()], PUBLISHED_DEP_FIELDS);
 }
 
@@ -146,7 +152,11 @@ try {
           version: "0.0.0",
           private: true,
           type: "module",
-          dependencies: { "@opengeni/runtime": files["@opengeni/runtime"], zod: "3.25.76" },
+          dependencies: {
+            "@opengeni/runtime": files["@opengeni/runtime"],
+            "@opengeni/vaults": files["@opengeni/vaults"],
+            zod: "3.25.76",
+          },
           overrides: files,
         },
         null,
@@ -171,7 +181,30 @@ try {
         '  const spoof = Object.assign(new Error("DNS-shaped server error"), { name, code: 14 });',
         '  if (isModalTaskExecStartPreDispatchUnavailableError(spoof) || isModalCommandStartOutcomeUnknownError(spoof)) throw new Error("unpatched SDK error-name spoof was classified as local proof");',
         "}",
-        "console.log(`RUNTIME_EMBED_OK root_zod=${rootZod} unpatched_modal=true`);",
+        // OP-6: an embedder-owned password manager, linked as a `host` vault and
+        // resolved through the published provider registry and call budget.
+        'const { createVaultProviderRegistry, createProviderCallBudget, VaultProviderError } = await import("@opengeni/vaults");',
+        'const hostItems = new Map([["github", { name: "GitHub", value: "host-owned-password" }]]);',
+        "const hostProvider = {",
+        '  id: "host",',
+        "  capabilities: () => ({ write: false, createVault: false, totp: false, files: false, groupGrants: false, passkeys: false }),",
+        '  async validate() { return { accountName: "embedder" }; },',
+        '  async listVaults(ctx) { ctx.budget.take("list"); return [{ externalVaultId: "host-vault", name: "Host vault", contentVersion: "1", itemCount: hostItems.size }]; },',
+        '  async listItems(ctx) { ctx.budget.take("list"); return [...hostItems].map(([id, item]) => ({ externalItemId: id, name: item.name, type: "login", websites: [], fields: [{ externalFieldId: "password", name: "password", kind: "concealed" }], version: "1", updatedAt: null })); },',
+        '  async readFields(ctx, _vault, itemId, fieldIds) { ctx.budget.take("read"); const item = hostItems.get(itemId); if (!item) throw new VaultProviderError("provider_not_found", "no such item"); return fieldIds.map((id) => ({ externalFieldId: id, material: { type: "text", value: item.value } })); },',
+        '  async writeItem() { throw new VaultProviderError("provider_permission_denied", "read-only host"); },',
+        '  async archiveItem() { throw new VaultProviderError("provider_permission_denied", "read-only host"); },',
+        "};",
+        "const registry = createVaultProviderRegistry({ host: async () => hostProvider });",
+        'const linked = await registry.forVault({ source: "host", providerConnectionId: null });',
+        "const ctx = { connectionId: null, budget: createProviderCallBudget(3) };",
+        "const [vault] = await linked.listVaults(ctx);",
+        "const [item] = await linked.listItems(ctx, vault.externalVaultId);",
+        'const [field] = await linked.readFields(ctx, vault.externalVaultId, item.externalItemId, ["password"]);',
+        'if (field.material.type !== "text" || field.material.value !== "host-owned-password") throw new Error("host vault provider did not resolve");',
+        'const unlinked = await registry.forVault({ source: "onepassword", providerConnectionId: null }).catch((error) => error);',
+        'if (!(unlinked instanceof VaultProviderError) || unlinked.code !== "provider_unavailable") throw new Error("unconfigured providers must be provider_unavailable");',
+        "console.log(`RUNTIME_EMBED_OK root_zod=${rootZod} unpatched_modal=true host_vault_provider=resolved`);",
         "",
       ].join("\n"),
     ),

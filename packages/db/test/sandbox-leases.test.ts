@@ -1,3 +1,4 @@
+import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createHash } from "node:crypto";
@@ -23,7 +24,6 @@ import {
   confirmDrainCold,
   createDb,
   createSession,
-  createVariableSet,
   deleteWorkspaceIfQuiescent,
   failSandboxRematerialization,
   failWarmingToCold,
@@ -1285,7 +1285,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // A workspace owns both the selected variable set and the selecting
     // session. Deletion must detach that relationship through the session
     // activity gate before the parent cascade reaches workspace_variable_sets.
-    const selectedVariableSet = await createVariableSet(db, {
+    const selectedVariableSet = await createLegacyVariableSet(db, {
       accountId,
       workspaceId,
       name: "workspace deletion fixture",

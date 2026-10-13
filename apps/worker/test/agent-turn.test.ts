@@ -22,7 +22,6 @@ import {
 import {
   XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER,
   XaiSubscriptionHostedToolContinuationError,
-  XaiSubscriptionReloginRequired,
   XaiSubscriptionStreamIdleTimeoutError,
   XaiSubscriptionStreamingTerminalError,
   type XaiSubscriptionRequestContext,
@@ -66,9 +65,8 @@ import {
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
   classifySandboxLogicalProvisionFailure,
-  classifyXaiCredentialFailure,
+  classifyXaiProviderError,
   credentialSubjectIdForTurnInitiator,
-  xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
   classifyCodexCredentialFailure,
   clearAttemptCredentialsWithSettledFence,
@@ -1063,32 +1061,6 @@ describe("accepted turn execution identity", () => {
         latencyModeSource: "continuation",
       });
     }
-  });
-
-  test("uses frozen initiating-human xAI authority for service-originated catalog reads", () => {
-    const authoritySnapshot = {
-      version: 1 as const,
-      scope: "user" as const,
-      authorityGeneration: 7,
-    };
-    expect(
-      xaiCatalogReadinessAuthority(
-        {
-          initiatingHumanSubjectId: "human-subject",
-          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
-        },
-        undefined,
-      ),
-    ).toEqual({ subjectId: "human-subject", authoritySnapshot });
-    expect(
-      xaiCatalogReadinessAuthority(
-        {
-          initiatingHumanSubjectId: null,
-          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
-        },
-        "direct-subject",
-      ),
-    ).toEqual({ subjectId: "direct-subject", authoritySnapshot });
   });
 });
 
@@ -5695,7 +5667,7 @@ describe("transient provider error classifier", () => {
       expect(isTransientProviderError(error)).toBe(false);
       expect(classifyCodexCredentialFailure(error)).toBeNull();
       expect(
-        classifyXaiCredentialFailure(
+        classifyXaiProviderError(
           Object.assign(new Error(message), {
             status,
             headers: new Headers({ [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1" }),
@@ -5735,7 +5707,7 @@ describe("transient provider error classifier", () => {
     });
     expect(isTransientProviderError(error)).toBe(false);
     expect(classifyCodexCredentialFailure(error)).toBeNull();
-    expect(classifyXaiCredentialFailure(error)).toBeNull();
+    expect(classifyXaiProviderError(error)).toBeNull();
     expect(error.message).toContain("2031-04-05 06:07:08 UTC");
   });
 
@@ -5753,7 +5725,7 @@ describe("transient provider error classifier", () => {
     });
     expect(isTransientProviderError(error)).toBe(false);
     expect(classifyCodexCredentialFailure(error)).toBeNull();
-    expect(classifyXaiCredentialFailure(error)).toBeNull();
+    expect(classifyXaiProviderError(error)).toBeNull();
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
@@ -6309,61 +6281,6 @@ describe("transient provider error classifier", () => {
     expect(titleXaiContext.onFinalContextUsage).toBeUndefined();
     expect(titleXaiContext.onModelRequestDiagnostic).toBeUndefined();
     expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
-  });
-
-  test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
-    const marked = (status: number, headers: HeadersInit = {}) =>
-      Object.assign(new Error(`xAI request failed (${status})`), {
-        status,
-        headers: new Headers({
-          ...Object.fromEntries(new Headers(headers).entries()),
-          [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1",
-        }),
-      });
-    expect(classifyXaiCredentialFailure(new XaiSubscriptionReloginRequired())).toEqual({
-      kind: "auth",
-      cooldownMs: null,
-    });
-    expect(classifyXaiCredentialFailure(marked(401))).toEqual({
-      kind: "auth",
-      cooldownMs: null,
-    });
-    expect(classifyXaiCredentialFailure(marked(403))).toEqual({
-      kind: "forbidden",
-      cooldownMs: null,
-    });
-    expect(classifyXaiCredentialFailure(marked(429, { "retry-after": "12" }))).toEqual({
-      kind: "rate_limit",
-      cooldownMs: 12_000,
-    });
-    expect(classifyXaiCredentialFailure(marked(503))).toBeNull();
-    expect(
-      classifyXaiCredentialFailure(Object.assign(new Error("unrelated 401"), { status: 401 })),
-    ).toBeNull();
-    expect(
-      classifyXaiCredentialFailure(
-        new XaiSubscriptionStreamingTerminalError({
-          message:
-            "The model is currently at capacity due to high demand. Please try again in a few minutes.",
-          code: "response_error",
-          eventType: "error",
-          status: 502,
-        }),
-      ),
-    ).toEqual({
-      kind: "rate_limit",
-      cooldownMs: 60_000,
-    });
-    expect(
-      classifyXaiCredentialFailure(
-        new XaiSubscriptionStreamingTerminalError({
-          message: "Our servers are currently overloaded. Please try again later.",
-          code: "response_error",
-          eventType: "error",
-          status: 502,
-        }),
-      ),
-    ).toBeNull();
   });
 
   test("surfaces a stalled hosted-search continuation without unsafe replay", () => {

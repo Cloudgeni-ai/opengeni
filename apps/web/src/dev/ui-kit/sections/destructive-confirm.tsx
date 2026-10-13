@@ -423,7 +423,7 @@ export default function DestructiveConfirmSection() {
                   kind: "environment",
                   kindLabel: "Sandbox environment default",
                   name: "Platform CI",
-                  href: "/dev/ui-kit?section=page-variable-sets",
+                  href: "/dev/ui-kit?section=page-general",
                 },
                 {
                   id: "c",

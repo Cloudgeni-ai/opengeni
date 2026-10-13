@@ -3,7 +3,7 @@
 
 export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/insights"
-  | "/workspaces/$workspaceId/variable-sets"
+  | "/workspaces/$workspaceId/secrets"
   | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
@@ -15,6 +15,7 @@ export type WorkspaceConfigTarget =
 export type WorkspaceConfigIcon =
   | "gauge"
   | "box"
+  | "lock-keyhole"
   | "server-cog"
   | "laptop"
   | "brain-circuit"
@@ -85,10 +86,10 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
     label: "Runtime",
     items: [
       {
-        to: "/workspaces/$workspaceId/variable-sets",
-        icon: "box",
-        label: "Variable sets",
-        description: "Secret variableSets for sandboxes",
+        to: "/workspaces/$workspaceId/secrets",
+        icon: "lock-keyhole",
+        label: "Secrets",
+        description: "Logins, keys and files agents use without seeing them",
       },
       {
         to: "/workspaces/$workspaceId/rigs",

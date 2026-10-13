@@ -91,6 +91,8 @@ export type ModelPolicyPickerProps = {
   collapseScopes?: boolean | undefined;
   /** Hide latency controls on surfaces whose saved policy does not include latency. */
   allowLatencyMode?: boolean | undefined;
+  /** Hide effort and latency controls when the saved policy chooses only a model identity. */
+  allowModelOptions?: boolean | undefined;
   /** Settings → Models. Shown when the catalog has no model that can run. */
   connectModelsHref?: string | undefined;
   /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */

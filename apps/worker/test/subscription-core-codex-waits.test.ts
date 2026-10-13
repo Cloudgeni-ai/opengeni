@@ -12,7 +12,7 @@ import {
   wakeSubscriptionCoreCodexWaitersAndDeliver,
 } from "../src/activities/subscription-core-codex-waits";
 import { XAI_CORE_WAIT_BINDING } from "../src/activities/subscription-core-xai-waits";
-import * as xaiQuota from "../src/activities/xai-quota";
+import * as xaiQuota from "../src/activities/subscription-core-xai-quota";
 
 const restores: Array<{ mockRestore(): void }> = [];
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
@@ -59,6 +59,7 @@ function outbox(deliveries: db.SubscriptionCapacityWakeDelivery[]) {
 const waiter: db.SubscriptionCoreCodexCapacityWait = {
   waiterId: "waiter-1",
   provider: "codex",
+  candidateProviders: null,
   accountId: "account-1",
   workspaceId: "workspace-1",
   sessionId: "session-1",
@@ -304,7 +305,7 @@ describe("capacity activities accept both waiter shapes", () => {
       ...waiter,
       provider: "xai",
     });
-    const legacyXai = spy(db, "getXaiCapacityWaitForSession");
+
     expect(
       await activities().getCodexCapacityWait({
         workspaceId: "workspace-1",
@@ -317,7 +318,6 @@ describe("capacity activities accept both waiter shapes", () => {
       wakeRevision: 5,
       provider: "xai",
     });
-    expect(legacyXai).not.toHaveBeenCalled();
   });
 
   test("a Claude core waiter is peeked before the legacy waiters and names its provider", async () => {
@@ -325,8 +325,7 @@ describe("capacity activities accept both waiter shapes", () => {
       ...waiter,
       provider: "claude",
     });
-    const legacyXai = spy(db, "getXaiCapacityWaitForSession");
-    const legacyClaude = spy(db, "getClaudeCapacityWaitForSession");
+
     expect(
       await activities().getCodexCapacityWait({
         workspaceId: "workspace-1",
@@ -339,44 +338,17 @@ describe("capacity activities accept both waiter shapes", () => {
       wakeRevision: 5,
       provider: "claude",
     });
-    expect(legacyXai).not.toHaveBeenCalled();
-    expect(legacyClaude).not.toHaveBeenCalled();
   });
 
-  test.each(["xai", "claude"] as const)(
-    "without a core waiter the %s peek remains unchanged",
-    async (provider) => {
-      spy(db, "getSubscriptionCoreCapacityWaitForSession").mockResolvedValue(null);
-      const legacy = spy(db, "getCodexCapacityWaitForSession");
-      const nextCheckAt = new Date("2030-01-01T00:00:00.000Z");
-      const row = {
-        id: "provider-waiter",
-        generation: 7,
-        wakeRevision: 2,
-        observedWakeRevision: 2,
-        nextCheckAt,
-      };
-      spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(
-        provider === "xai" ? (row as never) : null,
-      );
-      spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(
-        provider === "claude" ? (row as never) : null,
-      );
-      expect(
-        await activities().getCodexCapacityWait({
-          workspaceId: "workspace-1",
-          sessionId: "session-1",
-        }),
-      ).toEqual({
-        provider,
-        waiterId: row.id,
-        generation: 7,
-        nextCheckAt: nextCheckAt.toISOString(),
-        wakeRevision: 2,
-      });
-      expect(legacy).not.toHaveBeenCalled();
-    },
-  );
+  test("without a core waiter the peek has no legacy fallback", async () => {
+    spy(db, "getSubscriptionCoreCapacityWaitForSession").mockResolvedValue(null);
+    expect(
+      await activities().getCodexCapacityWait({
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+      }),
+    ).toBeNull();
+  });
 
   test("reconcile resolves a recorded waiter id against the core waiter first", async () => {
     spy(db, "getSubscriptionCoreCodexCapacityWaitById").mockResolvedValue(waiter);
@@ -494,8 +466,7 @@ describe("capacity activities accept both waiter shapes", () => {
   test("SuperGrok and Claude waits consult the core by id first; a Codex-only lookup never runs", async () => {
     const core = spy(db, "getSubscriptionCoreCodexCapacityWaitById");
     const anyCore = spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(null);
-    spy(db, "getXaiCapacityWaitForSession").mockResolvedValue(null);
-    spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(null);
+
     expect(
       await activities().reconcileCodexCapacityWait({
         accountId: "account-1",
@@ -575,6 +546,7 @@ describe("capacity activities accept both waiter shapes", () => {
       settings: {},
       accountId: "account-1",
       workspaceId: "workspace-1",
+      personalTurn: parkedTurn,
     });
     expect(read).toHaveBeenCalledTimes(2);
     expect(reconcile).toHaveBeenCalledWith(
@@ -645,7 +617,6 @@ describe("capacity activities accept both waiter shapes", () => {
       provider: "xai",
     });
     const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
-    spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue(null);
     expect(
       await activities().reconcileCodexCapacityWait({
         accountId: "account-1",
@@ -672,8 +643,7 @@ describe("capacity activities accept both waiter shapes", () => {
       events: [],
     });
     spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
-    const legacyRead = spy(db, "getClaudeCapacityWaitForSession");
-    const legacyReconcile = spy(db, "reconcileClaudeCapacityWait");
+
     const codexReconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait");
     expect(
       await activities().reconcileCodexCapacityWait({
@@ -696,8 +666,7 @@ describe("capacity activities accept both waiter shapes", () => {
         evaluation: { kind: "revoked" },
       }),
     );
-    expect(legacyRead).not.toHaveBeenCalled();
-    expect(legacyReconcile).not.toHaveBeenCalled();
+
     expect(codexReconcile).not.toHaveBeenCalled();
   });
 
@@ -709,7 +678,7 @@ describe("capacity activities accept both waiter shapes", () => {
     outbox([]);
     const identityRead = spy(db, "readSubscriptionCoreTurnIdentity");
     const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
-    const legacyRead = spy(db, "getClaudeCapacityWaitForSession");
+
     expect(
       await activities().reconcileCodexCapacityWait({
         accountId: "account-1",
@@ -723,59 +692,31 @@ describe("capacity activities accept both waiter shapes", () => {
     ).toEqual({ action: "stale" });
     expect(identityRead).not.toHaveBeenCalled();
     expect(reconcile).not.toHaveBeenCalled();
-    expect(legacyRead).not.toHaveBeenCalled();
   });
 
-  test("a v1 Claude waiter the core does not hold reconciles only through the v1 path", async () => {
-    // Before the receipt the exact-id core lookup finds nothing: the v1
-    // reconcile runs unchanged, and no core reconcile, placement or wake does.
-    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(null);
-    const coreReconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
-    const coreIdentity = spy(db, "readSubscriptionCoreTurnIdentity");
-    const coreWake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters");
-    const nextCheckAt = new Date("2030-01-01T00:00:00.000Z");
-    spy(db, "getClaudeCapacityWaitForSession").mockResolvedValue({
-      id: "legacy-waiter",
-      generation: 3,
-    } as never);
-    spy(db, "resolveClaudeWaiterSubject").mockResolvedValue(null);
-    const legacyReconcile = spy(db, "reconcileClaudeCapacityWait").mockResolvedValue({
-      action: "waiting",
-      waiter: { id: "legacy-waiter", generation: 3, nextCheckAt, wakeRevision: 9 },
-      events: [],
-    } as never);
-    expect(
-      await activities().reconcileCodexCapacityWait({
-        accountId: "account-1",
-        workspaceId: "workspace-1",
-        sessionId: "session-1",
-        waiterId: "legacy-waiter",
-        generation: 3,
-        cause: "timer",
-        provider: "claude",
-      }),
-    ).toEqual({
-      action: "waiting",
-      provider: "claude",
-      waiterId: "legacy-waiter",
-      generation: 3,
-      nextCheckAt: nextCheckAt.toISOString(),
-      wakeRevision: 9,
-    });
-    expect(legacyReconcile).toHaveBeenCalledWith(
-      {},
-      {
-        accountId: "account-1",
-        workspaceId: "workspace-1",
-        sessionId: "session-1",
-        waiterId: "legacy-waiter",
-        generation: 3,
-      },
-    );
-    expect(coreReconcile).not.toHaveBeenCalled();
-    expect(coreIdentity).not.toHaveBeenCalled();
-    expect(coreWake).not.toHaveBeenCalled();
-  });
+  test.each(["claude", "xai"] as const)(
+    "a missing %s core waiter is stale, never a legacy reconciliation",
+    async (provider) => {
+      spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(null);
+      const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait");
+      const identity = spy(db, "readSubscriptionCoreTurnIdentity");
+      const wake = spy(db, "wakeSubscriptionCoreProviderCapacityWaiters");
+      expect(
+        await activities().reconcileCodexCapacityWait({
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          waiterId: "legacy-waiter",
+          generation: 3,
+          cause: "timer",
+          provider,
+        }),
+      ).toEqual({ action: "stale" });
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(identity).not.toHaveBeenCalled();
+      expect(wake).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("core waiter recheck schedule", () => {

@@ -304,6 +304,29 @@ async function artifactRow(
   return (row as ArtifactRow | undefined) ?? null;
 }
 
+/** Whether this viewer can see the Site at all, without loading its history. */
+export async function isWorkspaceArtifactVisible(
+  db: Database,
+  workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
+  artifactId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.workspaceArtifacts.id })
+      .from(schema.workspaceArtifacts)
+      .where(
+        and(
+          eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+          eq(schema.workspaceArtifacts.id, artifactId),
+          visibleTo(viewer),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  });
+}
+
 export async function listWorkspaceArtifacts(
   db: Database,
   workspaceId: string,

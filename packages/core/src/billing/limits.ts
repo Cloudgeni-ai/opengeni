@@ -21,6 +21,7 @@ import {
   isCodexBilledTurn,
   readSubscriptionCoreRouteFunding,
   recordUsageEvent,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
   sumUsageQuantity,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -80,11 +81,11 @@ export function modelFundingForAdmission(
     resolvedModel.credentialSource.provider === "codex";
   return {
     // A Codex namespace/definition never bypasses credits by itself: the live
-    // workspace credential predicate above remains authoritative. SuperGrok's
+    // workspace credential predicate above remains authoritative. Claude's
     // static overlay is likewise secret-free on its legacy route; its
     // worker/provider admission owns live account selection before any
-    // upstream request can occur. On the core route the core's funding
-    // answer is authoritative instead.
+    // upstream request can occur. On the core route (the only SuperGrok
+    // route) the core's funding answer is authoritative instead.
     fundedWithoutCredits:
       codexBilled ||
       (coreRoutedFunding ??
@@ -93,6 +94,14 @@ export function modelFundingForAdmission(
       !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment",
   };
 }
+
+/**
+ * Connected subscriptions whose legacy runtime was deleted after their
+ * cutover: only the shared core funds them, so any other route is unfunded.
+ */
+const CORE_ONLY_SUBSCRIPTION_PROVIDERS: ReadonlySet<string> = new Set([
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
+]);
 
 /**
  * The shared core's funding answer for a non-Codex connected subscription
@@ -131,7 +140,8 @@ export async function coreRoutedSubscriptionFunding(
     productModelId: input.model,
     ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
   });
-  return answer.route === "core" ? answer.value : undefined;
+  if (answer.route === "core") return answer.value;
+  return CORE_ONLY_SUBSCRIPTION_PROVIDERS.has(source.provider) ? false : undefined;
 }
 
 export async function requireLimit(deps: LimitDependencies, input: LimitCheckInput): Promise<void> {

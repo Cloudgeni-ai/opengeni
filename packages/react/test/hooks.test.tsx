@@ -22,7 +22,6 @@ import type {
   SessionMcpServerMetadata,
   SessionTurn,
   SteerMessageResult,
-  WorkspaceEnvironment,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -31,7 +30,6 @@ import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
-import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
 
@@ -5806,97 +5804,6 @@ describe("useComposer file-only send", () => {
     expect(sent).toHaveLength(1);
     expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
     expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    await hook.unmount();
-  });
-});
-
-describe("useEnvironments", () => {
-  test("lists environments and refreshes after each mutation", async () => {
-    const log: string[] = [];
-    let environments: WorkspaceEnvironment[] = [];
-    const client = fakeClient({
-      listEnvironments: async () => {
-        log.push("list");
-        return environments;
-      },
-      createEnvironment: async (_ws, request) => {
-        log.push(`create:${request.name}`);
-        const created: WorkspaceEnvironment = {
-          id: "env-1",
-          accountId: "acc",
-          workspaceId: WORKSPACE_ID,
-          scope: "workspace",
-          generation: 1,
-          status: "active",
-          name: request.name,
-          description: null,
-          variables: [],
-          createdAt: "",
-          updatedAt: "",
-        };
-        environments = [created];
-        return created;
-      },
-      setEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`set:${environmentId}:${name}`);
-        return { name, version: 1, createdAt: "", updatedAt: "" };
-      },
-      getVariableSetVariable: async (_ws, environmentId, name) => {
-        log.push(`read:${environmentId}:${name}`);
-        return {
-          variableSetId: environmentId,
-          name,
-          version: 1,
-          value: `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`,
-        };
-      },
-      deleteEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`unset:${environmentId}:${name}`);
-      },
-      deleteEnvironment: async (_ws, environmentId) => {
-        log.push(`delete:${environmentId}`);
-        environments = [];
-      },
-    });
-    const hook = await renderHook(
-      () => useEnvironments({ client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    await flush();
-    expect(hook.result.current.environments).toEqual([]);
-    await flushing(async () => {
-      await hook.result.current.create({
-        name: "staging",
-        variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
-      });
-    });
-    expect(hook.result.current.environments.map((environment) => environment.name)).toEqual([
-      "staging",
-    ]);
-    await flushing(async () => {
-      const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
-      expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
-    });
-    // Plaintext is returned directly to the caller and never triggers a
-    // metadata-cache refresh that could retain it.
-    expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");
-    await flushing(async () => {
-      await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
-      await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
-      await hook.result.current.remove("env-1");
-    });
-    expect(log).toEqual([
-      "list",
-      "create:staging",
-      "list",
-      "read:env-1:EXAMPLE_TOKEN",
-      "set:env-1:EXAMPLE_TOKEN",
-      "list",
-      "unset:env-1:EXAMPLE_TOKEN",
-      "list",
-      "delete:env-1",
-      "list",
-    ]);
     await hook.unmount();
   });
 });

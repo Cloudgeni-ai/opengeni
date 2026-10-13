@@ -173,7 +173,9 @@ try {
           JSON.stringify([
             "createOrganizationApiKey",
             "createWorkspace",
-            "createVariableSet",
+            "listVaults",
+            "createVault",
+            "createItem",
             "getNewSessionDraft",
             "saveNewSessionDraft",
           ])

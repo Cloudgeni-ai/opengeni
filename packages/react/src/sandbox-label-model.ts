@@ -32,6 +32,18 @@ export function machineDisplayName(
   return machine.isSessionGroup ? sessionSandboxLabel(machine.kind) : machine.name;
 }
 
+/**
+ * Who can use a Connected Machine, in the words of the Connect dialog's
+ * "Who can use it?" choice: a personal machine is "Only me" (its owner, in any
+ * workspace they can access), a workspace machine is shared with that
+ * workspace's members, and an organization machine with the whole organization.
+ */
+export function machineScopeLabel(scope: MachineView["scope"]): string {
+  if (scope === "user") return "Only me";
+  if (scope === "organization") return "Organization";
+  return "Workspace";
+}
+
 /** The compute label a session timeline shows: the active machine, else the cloud box. */
 export function sessionComputeLabel(
   machines: readonly Pick<MachineView, "active" | "isSessionGroup" | "kind" | "name">[],

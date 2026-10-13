@@ -931,10 +931,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   targetSessionExecution.effectiveFirstPartyMcpTools ??
                   targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions: targetSessionExecution.firstPartyMcpPermissions,
-                variableSetIds: targetSessionExecution.variableSets.map(
-                  (variableSet) => variableSet.id,
-                ),
-                variableSetId: targetSessionExecution.variableSetId,
                 rigId: targetSessionExecution.rigId,
                 rigVersionId: targetSessionExecution.rigVersionId,
                 toolPolicy: targetSessionExecution.toolPolicy,
@@ -945,7 +941,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 tools: taskTools,
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
-                variableSetId: acceptedVariableSet?.id ?? null,
                 rigId: acceptedRig?.id ?? null,
                 rigVersionId: acceptedRig?.activeVersion?.id ?? null,
                 toolPolicy: responderSession?.toolPolicy ?? {
@@ -1448,6 +1443,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 sandboxBackend,
                 sandboxOs,
                 variableSetId: task.variableSetId ?? null,
+                // The schedule's vault narrowing lives on the run session so every
+                // later turn and every child inherits it through the policy chain.
+                ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
                 rigId: frozenRigId,
                 rigVersionId: frozenRigVersionId,
                 personalConnectionDelegations: [],
@@ -1483,7 +1481,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                         tools: exactSession.tools,
                         firstPartyMcpTools: exactSession.firstPartyMcpTools,
                         firstPartyMcpPermissions: exactSession.firstPartyMcpPermissions,
-                        variableSetId: exactSession.variableSetId,
                         rigId: exactSession.rigId,
                         rigVersionId: exactSession.rigVersionId,
                         toolPolicy: exactSession.toolPolicy,
@@ -2233,10 +2230,6 @@ async function prepareIncidentTelemetrySource(input: {
             input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
           firstPartyMcpPermissions:
             input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
-          variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
-            (variableSet) => variableSet.id,
-          ),
-          variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
           rigId: input.acceptedExecution.targetSessionExecution.rigId,
           rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,
           toolPolicy: input.acceptedExecution.targetSessionExecution.toolPolicy,
@@ -2247,7 +2240,6 @@ async function prepareIncidentTelemetrySource(input: {
           tools: input.acceptedExecution.resolvedTools,
           firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
           firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
-          variableSetId: input.acceptedExecution.resolvedVariableSet?.id ?? null,
           rigId: input.acceptedExecution.resolvedRig?.id ?? null,
           rigVersionId: input.acceptedExecution.resolvedRig?.versionId ?? null,
           toolPolicy: session.toolPolicy,
@@ -2542,6 +2534,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         ? { instructions: input.acceptedExecution.resolvedAgentInstructions }
         : {}),
       ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
+      ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
       ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
       task.visibility === "private"
         ? {

@@ -22,6 +22,8 @@ import {
   readSubscriptionCoreServingPolicyForTurn as read,
   countSubscriptionCoreTurnServingPolicyChanges as count,
   stageSubscriptionCorePendingServingPolicyTx,
+  readSubscriptionCoreTurnFailoverBudget,
+  SubscriptionCoreServingFailoverLimitError,
 } from "../src/subscription-core/serving-policy";
 import { lockTurnAttemptWriteFenceTx } from "../src/session-attempt-fence";
 import {
@@ -246,7 +248,12 @@ describe.skipIf(!realDb)("serving revisions on real PostgreSQL as the non-owner 
     }
     await expect(
       stage({ ...input, policy: { ...input.policy, productModelId: "target/over-budget" } }),
-    ).rejects.toThrow("bound exceeded");
+    ).rejects.toBeInstanceOf(SubscriptionCoreServingFailoverLimitError);
+    expect(await readSubscriptionCoreTurnFailoverBudget(client.db, input)).toEqual({
+      changes: 4,
+      refusals: 0,
+      steps: 4,
+    });
   }, 180_000);
 
   test("D-37 pending target is fenced, idempotent, rollback-safe and consumed only by a newer claim", async () => {
@@ -342,7 +349,18 @@ describe.skipIf(!realDb)("serving revisions on real PostgreSQL as the non-owner 
     expect(await record(client.db, input)).toMatchObject({ accepted: true, modelChangeCount: 1 });
     await expect(
       stage({ ...input, policy: { ...policy, productModelId: "target/again" } }),
-    ).rejects.toThrow("bound exceeded");
+    ).rejects.toMatchObject({ steps: 4 });
+    expect(await readSubscriptionCoreTurnFailoverBudget(client.db, input)).toEqual({
+      changes: 1,
+      refusals: 3,
+      steps: 4,
+    });
+    expect(
+      await readSubscriptionCoreTurnFailoverBudget(client.db, {
+        ...input,
+        workspaceId: crypto.randomUUID(),
+      }),
+    ).toBeNull();
   }, 180_000);
 
   test("D-37 RLS isolates workspaces even for unqualified reads under a non-owner non-bypass role", async () => {

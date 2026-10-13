@@ -136,6 +136,14 @@ export function userErrorText(error: unknown, fallback?: string): string {
 }
 
 /**
+ * A user-facing error for a form or dialog, keeping the original as its cause.
+ * An API error becomes what to do next, never its raw "Opengeni API ..." text.
+ */
+export function userFacingError(error: unknown, message = userErrorText(error)): Error {
+  return new Error(message, { cause: error });
+}
+
+/**
  * `userErrorText` without the request reference, for places that show the
  * reference behind Technical details already (`apiErrorDetails`,
  * `apiErrorTechnicalFacts`).

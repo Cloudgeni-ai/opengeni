@@ -6,20 +6,18 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // swap is exercised inside a session (the dock), where the active-sandbox pointer
 // + the synthetic Modal group box are in scope. Here at the workspace level the
 // fleet is the read-first overview + the zero-click enroll-token entry (with a
-// manual device-flow approve kept as a secondary option).
+// manual code pairing kept as a secondary option inside the same dialog).
 import {
-  EnrollmentDeviceFlow,
   MachineDetail,
   MachinesDashboard,
   connectionStatusForState,
   MACHINES_DASHBOARD_POLL_MS,
-  type DeviceFlowPhase,
   type MetricSample,
   type MetricWindow,
 } from "@opengeni/react/machines";
 import { copyTextToClipboard } from "@opengeni/react/clipboard";
 import { usePageLiveActivity } from "@opengeni/react";
-import { ArrowLeftIcon, LaptopIcon, TerminalIcon } from "lucide-react";
+import { LaptopIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -30,29 +28,18 @@ import {
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
-import { Button } from "@/components/ui/button";
+import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
 import { TechnicalDetails } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
 import { PageHeader } from "@/components/ui/page-header";
-import {
-  detectConnectPlatform,
-  deviceVerificationUri,
-  installOneLiner,
-  installOneLinerWindows,
-} from "@/lib/deployment";
-import { MachineConnectCommand } from "@/components/machines/machine-connect-command";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
 import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
 import type { MachineView } from "@opengeni/react/machines";
+
+/** While the connect dialog waits for the new machine, look for it sooner. */
+const CONNECT_WATCH_POLL_MS = 3_000;
 
 /** Copy to the clipboard and toast the outcome. The shared helper falls back to
  *  a temporary textarea when private HTTP origins cannot use navigator.clipboard. */
@@ -66,10 +53,14 @@ export async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
-  const { client } = useAppContext();
-  const machines = useWorkspaceMachines({ pollIntervalMs: MACHINES_DASHBOARD_POLL_MS });
-  const pageLive = usePageLiveActivity();
+  const { client, workspaces } = useAppContext();
   const [enrollOpen, setEnrollOpen] = useState(false);
+  const machines = useWorkspaceMachines({
+    pollIntervalMs: enrollOpen ? CONNECT_WATCH_POLL_MS : MACHINES_DASHBOARD_POLL_MS,
+  });
+  const pageLive = usePageLiveActivity();
+  const personalWorkspace =
+    workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
   const [removeBlocked, setRemoveBlocked] = useState<RemoveEnrollmentResponse | null>(null);
   const [removeMoveError, setRemoveMoveError] = useState<Error | null>(null);
@@ -169,6 +160,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   // first loaded list seeds the baseline silently so existing machines don't
   // announce; the empty placeholder before that load is not a baseline.
   const onlineSeenRef = useRef<Set<string> | null>(null);
+  const enrollOpenRef = useRef(enrollOpen);
+  enrollOpenRef.current = enrollOpen;
   useEffect(() => {
     if (onlineSeenRef.current === null && (machines.loading || machines.error)) return;
     const online = new Set(
@@ -185,7 +178,9 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         if (
           !machine.isSessionGroup &&
           connectionStatusForState(machine.state) === "online" &&
-          !previous.has(machine.sandboxId)
+          !previous.has(machine.sandboxId) &&
+          // The connect dialog shows its own success for the machine it connected.
+          !enrollOpenRef.current
         ) {
           toast.success(`${machine.name} connected`, {
             description: "It's ready to run sessions.",
@@ -304,23 +299,18 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         </Notice>
       ) : null}
 
-      <Dialog open={enrollOpen && machines.canManage} onOpenChange={setEnrollOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Connect a machine</DialogTitle>
-            <DialogDescription>
-              Run one command to install or update the agent and add this workspace. Existing
-              Opengeni connections stay intact.
-            </DialogDescription>
-          </DialogHeader>
-          {/* Gated on `enrollOpen` so the body mounts (and mints a fresh token)
-              each time the dialog is opened, and unmounts on close — Radix already
-              unmounts closed content, this just makes the mint-on-open explicit. */}
-          {enrollOpen && machines.canManage ? (
-            <EnrollDialogBody workspaceId={workspaceId} origin={origin} />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      {machines.canManage ? (
+        <ConnectMachineDialog
+          open={enrollOpen}
+          onOpenChange={setEnrollOpen}
+          workspaceId={workspaceId}
+          origin={origin}
+          machines={machines.machines}
+          machinesLoading={machines.loading}
+          machinesError={machines.error}
+          personalWorkspace={personalWorkspace}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={removeTarget !== null && machines.canManage}
@@ -493,74 +483,5 @@ export function MachineRemovalBlockNotice({
       ) : null}
       <p className="mt-2">{result.action}</p>
     </Notice>
-  );
-}
-
-/**
- * The enroll dialog body. The primary path is the shared one-command connect
- * step: it mints a single-use token on open and renders the matching Mac/Linux
- * or Windows command, with screen control baked into the token. The interactive
- * device-flow approve stays as a secondary "Approve manually instead" option for
- * a terminal that cannot receive a pasted command.
- */
-function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin: string }) {
-  const [mode, setMode] = useState<"token" | "manual">("token");
-
-  if (mode === "manual") {
-    const installCommand =
-      detectConnectPlatform(typeof navigator === "undefined" ? undefined : navigator.userAgent) ===
-      "windows"
-        ? installOneLinerWindows(origin, { workspaceId })
-        : installOneLiner(origin, { workspaceId });
-    const verificationUri = deviceVerificationUri(origin);
-    return (
-      <div className="flex flex-col gap-3">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="-ml-1 w-fit text-fg-muted"
-          onClick={() => setMode("token")}
-        >
-          <ArrowLeftIcon className="size-4" />
-          Back to one-command setup
-        </Button>
-        <EnrollmentDeviceFlow
-          // The agent mints the real code via the device-flow start; until the
-          // user runs the one-liner this panel shows the install step + where to
-          // approve. (A live code arrives once the agent calls /enrollments/start.)
-          userCode="——————"
-          verificationUri={verificationUri}
-          installCommand={installCommand}
-          phase={"pending" satisfies DeviceFlowPhase}
-          onCopyInstall={() => void copyToClipboard(installCommand, "Connect command copied")}
-          className="border-0 shadow-none"
-        />
-        <p className="text-center text-2xs text-fg-muted">
-          Screen control is granted on the approval page when you confirm the code.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-3">
-      <MachineConnectCommand workspaceId={workspaceId} origin={origin} />
-      <div className="mt-1 border-t border-border pt-3">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="w-full justify-between text-fg-muted"
-          onClick={() => setMode("manual")}
-        >
-          <span className="flex items-center gap-2">
-            <TerminalIcon className="size-4" />
-            Approve manually instead
-          </span>
-          <span className="text-2xs">device flow</span>
-        </Button>
-      </div>
-    </div>
   );
 }

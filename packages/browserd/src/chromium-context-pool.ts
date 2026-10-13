@@ -27,6 +27,7 @@ type LeaseOptions = Pick<
   | "downloadDirectory"
   | "downloadEvents"
   | "emulation"
+  | "passkeys"
 >;
 
 /** Experimental opt-in path for bounded disposable verification.

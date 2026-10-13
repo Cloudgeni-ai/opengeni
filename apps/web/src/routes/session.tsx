@@ -54,8 +54,13 @@ import {
   LightboxProvider,
   sessionAdmissionBlocked,
   sessionDisplayStatus,
+  useSessionSecrets,
   type WorkspaceTab,
 } from "@opengeni/react";
+import {
+  SessionSecretsMenuBody,
+  sessionSecretsSummary,
+} from "@/components/secrets/session-secrets-panel";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
   ApprovalSurface,
@@ -140,8 +145,6 @@ import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker-panel";
-import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAppContext } from "@/context";
@@ -159,6 +162,7 @@ import {
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { useSessionRouteMemory } from "@/lib/last-session-memory";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { secretSaveTargets } from "@/lib/secrets-ui";
 import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { currentModelRecovery } from "@/lib/model-recovery";
 import { ModelRecoveryNotice } from "@/components/session/model-recovery-notice";
@@ -227,7 +231,7 @@ import {
   recordGitHubInstallRequest,
 } from "@/lib/github-install-request";
 import {
-  useFixedResourceScopes,
+  useFixedRigScope,
   usePersonalResourceAttachment,
 } from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
@@ -2027,12 +2031,6 @@ function SessionChatPane(props: {
   const onVoiceActiveChange = useCallback((active: boolean) => {
     setVoiceActive(active);
   }, []);
-  const [variableSetPickerState, setVariableSetPickerState] = useSessionVariableSetPickerState(
-    props.session,
-  );
-  const variableSetComposerBlocked =
-    variableSetPickerState.saving ||
-    variableSetPickerState.committedSelection?.sessionId === props.session.id;
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -2381,17 +2379,12 @@ function SessionChatPane(props: {
     [context.client, props.session.workspaceId, context.accessContext.subjectId],
   );
   const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
-  const sessionVariableSetIds =
-    props.session.variableSetIds ??
-    (props.session.variableSetId ? [props.session.variableSetId] : []);
-  const [fixedVariableSetScopes, fixedRigScope] = useFixedResourceScopes(
+  const fixedRigScope = useFixedRigScope(
     context.client,
     workspace?.id ?? null,
-    sessionVariableSetIds,
     props.session.rigId,
     fixedResourceCatalogEnabled,
   );
-  const fixedVariableSetScope = fixedVariableSetScopes.at(-1) ?? null;
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -2402,10 +2395,6 @@ function SessionChatPane(props: {
     session: props.session,
     enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
-      variableSetIds: sessionVariableSetIds,
-      variableSetScopes: fixedVariableSetScopes,
-      variableSetId: props.session.variableSetId,
-      variableSetScope: fixedVariableSetScope,
       rigId: props.session.rigId,
       rigScope: fixedRigScope,
       connectedMachine: null,
@@ -2418,7 +2407,6 @@ function SessionChatPane(props: {
       uploadPending: attachments.hasUnresolved,
       repositoryError: repositories.error,
       policyValid: composerPolicyValidRef.current,
-      variableSetBlocked: variableSetComposerBlocked,
       personalDecision:
         personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
       personalLoading:
@@ -2821,6 +2809,11 @@ function SessionChatPane(props: {
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
+  // The chat's Secrets row: hidden when its agent can't use secrets.
+  const sessionSecrets = useSessionSecrets(props.session.id, {
+    enabled: workspacePermissions.includes("secrets:list"),
+  });
+  const secretsView = sessionSecrets.secrets;
   const renderMessageSender = useMessageSenderRenderer(
     context.client,
     props.session.workspaceId,
@@ -3194,14 +3187,20 @@ function SessionChatPane(props: {
                               <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
                                 <HumanInputSurface
                                   loadSkillReview={loadSkillReview}
+                                  allowedSaveTo={secretSaveTargets(
+                                    context.accessContext,
+                                    props.session.workspaceId,
+                                  )}
                                   requests={props.humanInput.requests}
                                   respondingRequestId={props.humanInput.respondingRequestId}
                                   error={props.humanInput.mutationError?.message}
-                                  onSubmit={(requestId, response) =>
-                                    props.humanInput
-                                      .respond(requestId, response)
-                                      .then(() => undefined)
-                                  }
+                                  onSubmit={async (requestId, response) => {
+                                    // A failed send resolves null. Reject so the card
+                                    // keeps what was typed (including a secret) to retry.
+                                    if (!(await props.humanInput.respond(requestId, response))) {
+                                      throw new Error("Your answer wasn't sent. Try again.");
+                                    }
+                                  }}
                                 />
                               </Suspense>
                             </div>
@@ -3459,36 +3458,49 @@ function SessionChatPane(props: {
                         );
                       }}
                       onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
-                      variableSets={{
-                        selectedCount:
-                          props.session.variableSetIds?.length ??
-                          (props.session.variableSetId ? 1 : 0),
-                        panel: (
-                          <SessionVariableSetPicker
-                            session={props.session}
-                            canControl={workspacePermissions.includes("sessions:control")}
-                            canAttach={workspacePermissions.includes("variable-sets:attach")}
-                            canUse={workspacePermissions.includes("variable-sets:use")}
-                            canList={
-                              workspacePermissions.includes("variable-sets:list") &&
-                              workspacePermissions.includes("secrets:list")
-                            }
-                            disabled={terminal}
-                            busy={
-                              voiceActive ||
-                              composer.sending ||
-                              props.session.activeTurnId !== null ||
-                              props.queue.queue.length > 0
-                            }
-                            goalActive={props.goal.isActive}
-                            voiceActive={voiceActive}
-                            sharedState={variableSetPickerState}
-                            setSharedState={setVariableSetPickerState}
-                            embedded
-                            onReloadSession={props.onReloadSession}
-                          />
-                        ),
-                      }}
+                      {...(secretsView?.capabilityEnabled
+                        ? {
+                            secrets: {
+                              summary: sessionSecretsSummary(
+                                secretsView.policy,
+                                secretsView.reachableVaults,
+                              ),
+                              panel: (
+                                <SessionSecretsMenuBody
+                                  vaults={secretsView.reachableVaults}
+                                  policy={secretsView.policy}
+                                  narrowedByParent={secretsView.narrowedBySessionId !== null}
+                                  taskItems={secretsView.taskItems}
+                                  canEdit={workspacePermissions.includes("sessions:control")}
+                                  disabled={terminal}
+                                  loading={sessionSecrets.loading}
+                                  error={sessionSecrets.error}
+                                  onRetry={() => void sessionSecrets.refresh()}
+                                  onPolicyChange={async (policy) => {
+                                    await sessionSecrets.api.setSessionVaultPolicy(
+                                      props.session.id,
+                                      policy,
+                                    );
+                                    await sessionSecrets.refresh();
+                                  }}
+                                  onSaveTo={async (item, target) => {
+                                    await sessionSecrets.api.moveItem(item.vaultId, item.id, {
+                                      targetVaultId: target.id,
+                                      mode: "copy",
+                                    });
+                                    toast.success(`Saved ${item.name} to ${target.name}`);
+                                  }}
+                                  onManage={() =>
+                                    void navigate({
+                                      to: "/workspaces/$workspaceId/secrets",
+                                      params: { workspaceId: props.session.workspaceId },
+                                    })
+                                  }
+                                />
+                              ),
+                            },
+                          }
+                        : {})}
                       repositories={{
                         selectedCount: repositories.selectionCount,
                         disabled: terminal || composer.sending,

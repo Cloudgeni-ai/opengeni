@@ -465,6 +465,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
     set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
     set_config('opengeni.pending_tool_event_output_v1', '1', true),
     set_config('opengeni.session_variable_set_attachments_v1', '1', true),
+    set_config('opengeni.shared_personal_choice_v1', '1', true),
     set_config('jit', 'off', true)`);
   const sessionActor = sessionRlsActorContext.getStore();
   if (sessionActor) {

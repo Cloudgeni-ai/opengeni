@@ -129,7 +129,7 @@ function Fixture() {
                 selection={galleryToolSelection}
                 onToolSelectionChange={() => {}}
                 repositories={{ selectedCount: 2, panel: <PickerFixture label="Repository" /> }}
-                variableSets={{ selectedCount: 2, panel: <PickerFixture label="Variable set" /> }}
+                secrets={{ summary: "All", panel: <PickerFixture label="Vault" /> }}
               />
             </>
           }

@@ -107,6 +107,9 @@ const ICONS: Record<string, string> = {
   "arrow-up-right": "ArrowUpRightIcon",
   camera: "CameraIcon",
   "image-plus": "ImagePlusIcon",
+  // Secret ask card: show / hide the value.
+  eye: "EyeIcon",
+  "eye-off": "EyeOffIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};

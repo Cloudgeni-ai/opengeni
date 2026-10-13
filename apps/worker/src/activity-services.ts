@@ -18,6 +18,7 @@ import type { ActivityDependencies, SharedActivityServices } from "./activities/
 import { observabilityEventBusOptions } from "./observability-metrics";
 import { buildPersonalGitHubGitCredentials } from "./personal-github-git-credentials";
 import { createStandaloneConnectionCredentialsPort } from "./pr-review-credentials";
+import { loadOnePasswordVaultProvider } from "./onepassword-vault-provider";
 
 /**
  * Build the dependency graph common to both worker roles exactly once.
@@ -87,6 +88,10 @@ export function createSharedActivityServices(
           createStandaloneConnectionCredentialsPort(settings, db),
         personalGitHubCredentials:
           dependencies.personalGitHubCredentials ?? buildPersonalGitHubGitCredentials(db, settings),
+        onePasswordVaultProvider:
+          dependencies.onePasswordVaultProvider === undefined
+            ? loadOnePasswordVaultProvider
+            : dependencies.onePasswordVaultProvider,
       };
     })();
     return await servicesPromise;

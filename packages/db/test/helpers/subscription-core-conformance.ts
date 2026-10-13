@@ -1202,7 +1202,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
     });
 
-    test("connects shared and personal connections of the provider's kind; identity fails closed", async () => {
+    test("SUB-ELIG-04: connects the provider's kind and reconnects health without changing allocation consent", async () => {
       const org = await organization();
       const connect = (
         label: string,
@@ -1242,11 +1242,16 @@ export function describeSubscriptionCoreConformance<Credential>(
         provider: providerId,
       });
       // The same identity reconnects in place.
+      await admin()`update subscription_connections set status = 'needs_relogin', allocator_enabled = false
+        where id = ${first.id}::uuid`;
       expect(await connect(label, null, identity)).toMatchObject({
         kind: "connected",
         id: first.id,
         isNew: false,
       });
+      const [reconnected] =
+        await admin()`select status, allocator_enabled from subscription_connections where id = ${first.id}::uuid`;
+      expect(reconnected).toEqual({ status: "active", allocator_enabled: false });
       // A row of this provider with the other connection kind is never
       // reconnected in place (taken over) by a connect of the same identity.
       // The identity index spans kinds, so such a connect cannot succeed at
@@ -1350,7 +1355,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("placement honours shared scopes and keeps ownerless sessions shared-only", async () => {
+    test("SUB-OWN-02 SUB-ELIG-01: placement honours shared scopes and keeps ownerless sessions shared-only", async () => {
       const org = await organization();
       const otherWorkspace = await sharedConnection(org, `other-${crypto.randomUUID()}`, {
         kind: "workspaces",
@@ -1395,7 +1400,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
     });
 
-    test("personal connections serve only the owner's own turns with frozen authority", async () => {
+    test("SUB-OWN-03: personal connections serve only the owner's own turns with frozen authority", async () => {
       const org = await organization();
       const personal = await personalConnection(org, `personal-${crypto.randomUUID()}`);
       // The owner's personal connection of the foreign provider (same kind,
@@ -2987,7 +2992,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("leases are generation-fenced: replay, renew, foreign holders, release", async () => {
+    test("SUB-LEASE-01 SUB-LEASE-02: one turn lease is generation-fenced: replay, renew, foreign holders, release", async () => {
       const org = await organization();
       const connectionId = await sharedConnection(org, `lease-${crypto.randomUUID()}`);
       const turn = await runningTurn(org);
@@ -2998,6 +3003,9 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
       // The same attempt's retry keeps its live lease.
       expect(await place(turn)).toMatchObject({ kind: "run", connectionId, reusedLease: true });
+      const [turnLeaseCount] =
+        await admin()`select count(*)::int as n from subscription_leases where turn_id = ${turn.identity.turnId}::uuid`;
+      expect(turnLeaseCount!.n).toBe(1);
       // Another holder at the same generation is not this attempt.
       expect(await place(turn, { holderId: `${turn.holderId}:other` })).toEqual({
         kind: "attempt_fenced",
@@ -3059,6 +3067,9 @@ export function describeSubscriptionCoreConformance<Credential>(
       expect(
         await withRlsContext(db(), tenant, (tx) => releaseSubscriptionTurnLease(tx, leaseIdentity)),
       ).toBe(true);
+      expect(
+        await withRlsContext(db(), tenant, (tx) => releaseSubscriptionTurnLease(tx, leaseIdentity)),
+      ).toBe(false);
       expect(
         await runtime().loadSubscriptionCoreCredential(
           db(),
@@ -3155,7 +3166,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       ).rejects.toBeInstanceOf(unknownOutcome);
     });
 
-    test("a rate-limited connection fails over to another and counts the refusal", async () => {
+    test("SUB-FAIL-01, SUB-FAIL-02: a rate-limited connection fails over to another and counts the refusal", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `a-${crypto.randomUUID()}`);
       const b = await sharedConnection(org, `b-${crypto.randomUUID()}`);
@@ -4478,11 +4489,11 @@ export function describeSubscriptionCoreConformance<Credential>(
           [pooled]: "choosable",
           [personal]: "choosable",
         });
-        // In a shared session the personal account is listed for its owner but
-        // cannot be chosen; another person never sees it.
+        // An explicit shared-session choice is offered only to the account's
+        // owner; another participant never sees or inherits that account.
         expect(await offered(sharedTurn, org.ownerSubjectId)).toEqual({
           [pooled]: "choosable",
-          [personal]: "personal_not_owner_work",
+          [personal]: "choosable",
         });
         expect(await offered(sharedTurn, member)).toEqual({ [pooled]: "choosable" });
         // Another person cannot read the owner's private session at all.
@@ -4507,7 +4518,7 @@ export function describeSubscriptionCoreConformance<Credential>(
         });
       });
 
-      test("SUB-SEL-04, D-28: the owner chooses their personal account for their private session; the database refuses it anywhere else", async () => {
+      test("SUB-SEL-04, D-28: personal choices remain owner-only in private and shared sessions", async () => {
         const org = await organization();
         const pooled = await sharedConnection(org, `choose-shared-${crypto.randomUUID()}`);
         const personal = await personalConnection(org, `choose-personal-${crypto.randomUUID()}`);
@@ -4569,10 +4580,13 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(await bindingOf(second)).toMatchObject({ choice: "automatic" });
         expect((await choose(second, org.ownerSubjectId, null)).outcome).toBe("unchanged");
 
-        // A shared session of the owner: the binding guard refuses the
-        // personal account (the picker listed it as not choosable).
+        // A shared choice affects the next acceptance, never authority on
+        // the already accepted turn.
         const sharedTurn = await runningTurn(org, { visibility: "workspace_shared" });
-        expect((await choose(sharedTurn, org.ownerSubjectId, personal)).outcome).toBe("refused");
+        expect(await choose(sharedTurn, org.ownerSubjectId, personal)).toMatchObject({
+          outcome: "changed",
+          appliedTo: "next_turn",
+        });
         // Any member may choose a pool account for a shared session.
         expect(await choose(sharedTurn, member, pooled)).toMatchObject({
           outcome: "changed",
@@ -4631,6 +4645,129 @@ export function describeSubscriptionCoreConformance<Credential>(
           choice: "explicit",
         });
       });
+
+      test("shared explicit consent belongs to the participating account owner, not the session creator or next sender", async () => {
+        const org = await organization();
+        const member = await workspaceMember(org);
+        const [membership] = await admin()<{ id: string; personal_workspace_id: string }[]>`
+          select id::text, personal_workspace_id::text from organization_memberships
+          where account_id = ${org.accountId}::uuid and subject_id = ${member}`;
+        const memberOrg = {
+          ...org,
+          ownerSubjectId: member,
+          ownerMembershipId: membership!.id,
+          personalWorkspaceId: membership!.personal_workspace_id,
+        };
+        const own = await personalConnection(memberOrg, `participant-${crypto.randomUUID()}`);
+        const sibling = await personalConnection(
+          memberOrg,
+          `participant-sibling-${crypto.randomUUID()}`,
+        );
+        const creatorAccount = await personalConnection(org, `creator-${crypto.randomUUID()}`);
+        const first = await runningTurn(org, { visibility: "workspace_shared" });
+        expect(first.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await offered(first, member)).toEqual({
+          [own]: "choosable",
+          [sibling]: "choosable",
+        });
+        expect((await choose(first, member, creatorAccount)).outcome).toBe("not_found");
+        expect(await choose(first, member, own)).toMatchObject({
+          outcome: "changed",
+          appliedTo: "next_turn",
+        });
+        expect((await picker(first, org.ownerSubjectId))!.binding).toEqual({
+          provider: providerId,
+          connectionId: null,
+          choice: "explicit",
+        });
+        // The old turn cannot gain the participant's authority through a
+        // choice made after acceptance, even with a live explicit binding.
+        expect(await placeChecked(first)).toMatchObject({
+          kind: "wait",
+          reason: "pinned_account_ineligible",
+        });
+        const accepted = await nextTurn(org, first, { initiator: { subjectId: member } });
+        const exact = {
+          version: 2,
+          personal: [
+            {
+              provider: providerId,
+              ownerMembershipId: membership!.id,
+              authorityGeneration: 1,
+              sharedSessionChoice: { sessionId: first.identity.sessionId, connectionId: own },
+            },
+          ],
+        };
+        expect(accepted.identity.acceptedAuthorityV2 as unknown).toEqual(exact);
+        expect(await placeChecked(accepted)).toMatchObject({
+          kind: "run",
+          connectionId: own,
+          personal: true,
+        });
+        // The account owner's same-generation sibling is not in this pool.
+        expect(await choose(accepted, member, sibling)).toMatchObject({
+          outcome: "changed",
+          appliedTo: "next_turn",
+        });
+        const [frozen] = await admin()<{ subscription_authority: unknown }[]>`
+          select subscription_authority from session_turns where id = ${accepted.identity.turnId}::uuid`;
+        expect(frozen!.subscription_authority).toEqual(exact);
+        const creator = await nextTurn(org, accepted);
+        expect(creator.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await placeChecked(creator)).toMatchObject({
+          kind: "wait",
+          reason: "pinned_account_ineligible",
+        });
+        const service = await nextTurn(org, creator, { initiator: "service" });
+        expect(service.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await placeChecked(service)).toMatchObject({
+          kind: "wait",
+          reason: "pinned_account_ineligible",
+        });
+        // Returning to automatic prevents personal fallback even for a
+        // subsequent send by the participant with live own personal accounts.
+        expect((await choose(service, member, null)).outcome).toBe("changed");
+        const automatic = await nextTurn(org, service, { initiator: { subjectId: member } });
+        expect(automatic.identity.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        expect(await placeChecked(automatic)).toMatchObject({ kind: "wait" });
+      });
+
+      test.skipIf(!subject.sessionWaits)(
+        "shared consent does not expand frozen authority for a waiting turn",
+        async () => {
+          const org = await organization();
+          const personal = await personalConnection(org, `waiting-personal-${crypto.randomUUID()}`);
+          const first = await runningTurn(org, { visibility: "workspace_shared" });
+          const wait = await placeChecked(first);
+          if (wait.kind !== "wait") throw new Error("expected a wait");
+          // The public choice's response must describe the accepted work, not
+          // imply that the write repaired a previously empty frozen pool.
+          const armed = await armSubscriptionCoreCapacityWait(
+            db(),
+            subject.sessionWaits!.provider,
+            {
+              ...sessionOf(first),
+              turnId: first.identity.turnId,
+              attemptId: first.attemptId,
+              waitReason: wait.reason,
+              earliestResetAt: wait.earliestResetAt,
+              failurePayload: { code: "subscription_capacity_unavailable" },
+            },
+          );
+          expect(armed.action).toBe("waiting");
+          expect(await choose(first, org.ownerSubjectId, personal)).toMatchObject({
+            outcome: "changed",
+            appliedTo: "next_turn",
+            events: [
+              expect.objectContaining({
+                payload: expect.objectContaining({ appliedTo: "next_turn", turnId: null }),
+              }),
+            ],
+          });
+          const identity = await readSubscriptionCoreTurnIdentity(db(), first.identity);
+          expect(identity!.acceptedAuthorityV2).toEqual({ version: 2, personal: [] });
+        },
+      );
 
       test("SUB-OWN-05, D-24, D-27: turning personal accounts off makes an explicit personal choice wait as ineligible", async () => {
         const org = await organization();
@@ -4987,9 +5124,11 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
     });
 
-    // Runs before the tests that close the rolling window: production keeps
-    // 0733's rolling index until the next drained provider cutover drops it.
+    // Reconstruct the pre-cutover rolling window. A fully migrated fixture
+    // may already have dropped this index in a drained provider cutover.
     test("rolling window: a first binding that meets 0733's rolling index is a lost compare-and-swap, not an error", async () => {
+      await admin()`CREATE UNIQUE INDEX IF NOT EXISTS subscription_session_bindings_rolling_session_idx
+        ON subscription_session_bindings (workspace_id, session_id)`;
       const [index] = await admin()<{ present: boolean }[]>`
         select to_regclass('subscription_session_bindings_rolling_session_idx') is not null
           as present`;
@@ -5225,98 +5364,32 @@ export function describeSubscriptionCoreConformance<Credential>(
     });
 
     const sessionWaits = subject.sessionWaits;
-    test.skipIf(!sessionWaits)(
-      "a placement wait parks the session on its core waiter; only this provider's wake reaches it; capacity resumes it",
-      async () => {
-        const waits = sessionWaits!;
-        const org = await organization();
-        const connection = await sharedConnection(org, `parked-${crypto.randomUUID()}`);
-        const turn = await runningTurn(org);
-        const now = Date.now();
-        const resetAt = now + 3_600_000;
-        expect(await placeChecked(turn, new Date(now))).toMatchObject({
-          kind: "run",
-          connectionId: connection,
-        });
-        await callUpstream(
-          turn,
-          connection,
-          [{ kind: "rate_limited", retryAfterSeconds: 3_600 }],
-          now,
-        );
-        const waiting = await placeChecked(turn, new Date(now));
-        if (waiting.kind !== "wait") throw new Error("expected a wait");
-        const armed = await armSubscriptionCoreCapacityWait(db(), waits.provider, {
-          accountId: org.accountId,
-          workspaceId: turn.identity.workspaceId,
-          sessionId: turn.identity.sessionId,
-          turnId: turn.identity.turnId,
-          attemptId: turn.attemptId,
-          waitReason: waiting.reason,
-          earliestResetAt: waiting.earliestResetAt,
-          failurePayload: { code: "subscription_capacity_unavailable" },
-        });
-        if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
-        expect(armed.waiter).toMatchObject({
-          provider: waits.provider,
-          blockedTurnId: turn.identity.turnId,
-          generation: 1,
-          wakeRevision: 1,
-        });
-        expect(instantOf(armed.waiter, "earliestResetAt")).toBe(resetAt);
-        // A provider whose usage read can end an exhaustion early (the
-        // adapter's flag, which the waiter vocabulary mirrors) rechecks on the
-        // bounded backoff capped at the reset; any other sleeps until it.
-        const rechecks = subscriptionCoreWaiterRechecksBeforeReset(waits.provider);
-        expect(rechecks).toBe(provider.adapter.usageReadEndsQuotaExhaustion === true);
-        const armedCheckAt = armed.waiter.nextCheckAt.getTime();
-        if (rechecks) {
-          expect(armed.waiter).toMatchObject({ resetKind: "bounded_refresh", refreshAttempt: 0 });
-          expect(armedCheckAt).toBeGreaterThanOrEqual(now + 60_000);
-          expect(armedCheckAt).toBeLessThanOrEqual(Date.now() + 60_000);
-        } else {
-          expect(armed.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
-          expect(armedCheckAt).toBe(resetAt);
-        }
-        expect(armed.events.map((event): string => event.type)).toEqual([
-          waits.events.waiting,
-          "session.status.changed",
-        ]);
-        const [row] = await admin()<{ provider: string }[]>`
-          select provider from subscription_capacity_waiters
-          where session_id = ${turn.identity.sessionId}::uuid`;
-        expect(row?.provider).toBe(providerId);
-        // The workflow peek and the activity lookup see the waiter; its ref
-        // names the provider only when it is not Codex (the legacy shape).
-        const ref = subscriptionCoreCapacityWaitRef(armed.waiter);
-        expect("provider" in ref).toBe(waits.provider !== "codex");
-        expect(
-          await peekSessionWork(db(), turn.identity.workspaceId, turn.identity.sessionId),
-        ).toEqual({
-          kind: "capacity-wait",
-          ref,
-        });
-        expect(
-          await getSubscriptionCoreCapacityWaitForSession(
-            db(),
-            turn.identity.workspaceId,
-            turn.identity.sessionId,
-          ),
-        ).toMatchObject({ waiterId: armed.waiter.waiterId, provider: waits.provider });
-        // A parked session is not runnable: a claim finds no work.
-        expect(
-          await claimSessionWorkForAttempt(db(), turn.identity.workspaceId, {
-            sessionId: turn.identity.sessionId,
-            workflowId: `session-${turn.identity.sessionId}`,
-            workflowRunId: crypto.randomUUID(),
-            dispatchId: crypto.randomUUID(),
-            attemptId: crypto.randomUUID(),
-            trigger: { kind: "next" },
-          }),
-        ).toMatchObject({ action: "unclaimed", reason: "no-work" });
-        // Re-arming the same attempt is an idempotent no-op.
-        expect(
-          await armSubscriptionCoreCapacityWait(db(), waits.provider, {
+    // SUB-ACCESS-03: the same core arm, workflow peek,
+    // wake and recovery must work for private and shared sessions. The
+    // isolation helper suite separately inverts access to other owners.
+    for (const visibility of ["workspace_shared", "user_private"] as const) {
+      test.skipIf(!sessionWaits)(
+        `SUB-ACCESS-03 ${visibility}: a placement wait parks the session on its core waiter; only this provider's wake reaches it; capacity resumes it`,
+        async () => {
+          const waits = sessionWaits!;
+          const org = await organization();
+          const connection = await sharedConnection(org, `parked-${crypto.randomUUID()}`);
+          const turn = await runningTurn(org, { visibility });
+          const now = Date.now();
+          const resetAt = now + 3_600_000;
+          expect(await placeChecked(turn, new Date(now))).toMatchObject({
+            kind: "run",
+            connectionId: connection,
+          });
+          await callUpstream(
+            turn,
+            connection,
+            [{ kind: "rate_limited", retryAfterSeconds: 3_600 }],
+            now,
+          );
+          const waiting = await placeChecked(turn, new Date(now));
+          if (waiting.kind !== "wait") throw new Error("expected a wait");
+          const armed = await armSubscriptionCoreCapacityWait(db(), waits.provider, {
             accountId: org.accountId,
             workspaceId: turn.identity.workspaceId,
             sessionId: turn.identity.sessionId,
@@ -5325,100 +5398,174 @@ export function describeSubscriptionCoreConformance<Credential>(
             waitReason: waiting.reason,
             earliestResetAt: waiting.earliestResetAt,
             failurePayload: { code: "subscription_capacity_unavailable" },
-          }),
-        ).toMatchObject({ action: "waiting", events: [] });
+          });
+          if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
+          expect(armed.waiter).toMatchObject({
+            provider: waits.provider,
+            blockedTurnId: turn.identity.turnId,
+            generation: 1,
+            wakeRevision: 1,
+          });
+          expect(instantOf(armed.waiter, "earliestResetAt")).toBe(resetAt);
+          // A provider whose usage read can end an exhaustion early (the
+          // adapter's flag, which the waiter vocabulary mirrors) rechecks on the
+          // bounded backoff capped at the reset; any other sleeps until it.
+          const rechecks = subscriptionCoreWaiterRechecksBeforeReset(waits.provider);
+          expect(rechecks).toBe(provider.adapter.usageReadEndsQuotaExhaustion === true);
+          const armedCheckAt = armed.waiter.nextCheckAt.getTime();
+          if (rechecks) {
+            expect(armed.waiter).toMatchObject({ resetKind: "bounded_refresh", refreshAttempt: 0 });
+            expect(armedCheckAt).toBeGreaterThanOrEqual(now + 60_000);
+            expect(armedCheckAt).toBeLessThanOrEqual(Date.now() + 60_000);
+          } else {
+            expect(armed.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
+            expect(armedCheckAt).toBe(resetAt);
+          }
+          expect(armed.events.map((event): string => event.type)).toEqual([
+            waits.events.waiting,
+            "session.status.changed",
+          ]);
+          const [row] = await admin()<{ provider: string }[]>`
+          select provider from subscription_capacity_waiters
+          where session_id = ${turn.identity.sessionId}::uuid`;
+          expect(row?.provider).toBe(providerId);
+          // The workflow peek and the activity lookup see the waiter; its ref
+          // names the provider only when it is not Codex (the legacy shape).
+          const ref = subscriptionCoreCapacityWaitRef(armed.waiter);
+          expect("provider" in ref).toBe(waits.provider !== "codex");
+          expect(
+            await peekSessionWork(db(), turn.identity.workspaceId, turn.identity.sessionId),
+          ).toEqual({
+            kind: "capacity-wait",
+            ref,
+          });
+          expect(
+            await getSubscriptionCoreCapacityWaitForSession(
+              db(),
+              turn.identity.workspaceId,
+              turn.identity.sessionId,
+            ),
+          ).toMatchObject({ waiterId: armed.waiter.waiterId, provider: waits.provider });
+          // A parked session is not runnable: a claim finds no work.
+          expect(
+            await claimSessionWorkForAttempt(db(), turn.identity.workspaceId, {
+              sessionId: turn.identity.sessionId,
+              workflowId: `session-${turn.identity.sessionId}`,
+              workflowRunId: crypto.randomUUID(),
+              dispatchId: crypto.randomUUID(),
+              attemptId: crypto.randomUUID(),
+              trigger: { kind: "next" },
+            }),
+          ).toMatchObject({ action: "unclaimed", reason: "no-work" });
+          // Re-arming the same attempt is an idempotent no-op.
+          expect(
+            await armSubscriptionCoreCapacityWait(db(), waits.provider, {
+              accountId: org.accountId,
+              workspaceId: turn.identity.workspaceId,
+              sessionId: turn.identity.sessionId,
+              turnId: turn.identity.turnId,
+              attemptId: turn.attemptId,
+              waitReason: waiting.reason,
+              earliestResetAt: waiting.earliestResetAt,
+              failurePayload: { code: "subscription_capacity_unavailable" },
+            }),
+          ).toMatchObject({ action: "waiting", events: [] });
 
-        const wakeRevision = async () => {
-          const [waiter] = await admin()<{ wake_revision: string }[]>`
+          const wakeRevision = async () => {
+            const [waiter] = await admin()<{ wake_revision: string }[]>`
             select wake_revision::text as wake_revision from subscription_capacity_waiters
             where waiter_id = ${armed.waiter.waiterId}::uuid`;
-          return waiter ? Number(waiter.wake_revision) : null;
-        };
-        // Another provider's account-wide wake never reaches this waiter (an
-        // unregistered provider's wake fails closed before any write).
-        const other: SubscriptionCoreWaiterProvider = waits.provider === "codex" ? "xai" : "codex";
-        await wakeSubscriptionCoreProviderCapacityWaiters(db(), other, {
-          accountId: org.accountId,
-          reason: "quota_observed_available",
-        }).catch(() => []);
-        expect(await wakeRevision()).toBe(1);
-        const scopes = await wakeSubscriptionCoreProviderCapacityWaiters(db(), waits.provider, {
-          accountId: org.accountId,
-          reason: "quota_observed_available",
-        });
-        expect(scopes.map((scope) => scope.workspaceId)).toContain(turn.identity.workspaceId);
-        expect(await wakeRevision()).toBe(2);
-        // The provider-neutral delivery entry point (a quota recovery's wake)
-        // reaches the same armed waiter.
-        await deliverSubscriptionCoreProviderWake(db(), providerId, {
-          accountId: org.accountId,
-          reason: "usage_recovered",
-        });
-        expect(await wakeRevision()).toBe(3);
-
-        const reconcileInput = {
-          accountId: org.accountId,
-          workspaceId: turn.identity.workspaceId,
-          sessionId: turn.identity.sessionId,
-          waiterId: armed.waiter.waiterId,
-          generation: 1,
-          evaluatedWakeRevision: 3,
-          provider: waits.provider,
-        };
-        const beforeRecheck = Date.now();
-        const rechecked = await reconcileSubscriptionCoreCapacityWait(db(), {
-          ...reconcileInput,
-          evaluation: {
-            kind: "wait",
-            waitReason: waiting.reason,
-            earliestResetAt: waiting.earliestResetAt,
-            healthRetryAt: null,
-          },
-        });
-        if (rechecked.action !== "waiting")
-          throw new Error(`reconcile returned ${rechecked.action}`);
-        const recheckAt = rechecked.waiter.nextCheckAt.getTime();
-        if (rechecks) {
-          // The backoff grows across rechecks (60 s, then 120 s, ...).
-          expect(rechecked.waiter).toMatchObject({
-            resetKind: "bounded_refresh",
-            refreshAttempt: 1,
+            return waiter ? Number(waiter.wake_revision) : null;
+          };
+          // Another provider's account-wide wake never reaches this waiter (an
+          // unregistered provider's wake fails closed before any write).
+          const other: SubscriptionCoreWaiterProvider =
+            waits.provider === "codex" ? "xai" : "codex";
+          await wakeSubscriptionCoreProviderCapacityWaiters(db(), other, {
+            accountId: org.accountId,
+            reason: "quota_observed_available",
+          }).catch(() => []);
+          expect(await wakeRevision()).toBe(1);
+          const scopes = await wakeSubscriptionCoreProviderCapacityWaiters(db(), waits.provider, {
+            accountId: org.accountId,
+            reason: "quota_observed_available",
           });
-          expect(recheckAt).toBeGreaterThanOrEqual(beforeRecheck + 120_000);
-          expect(recheckAt).toBeLessThanOrEqual(Date.now() + 120_000);
-        } else {
-          expect(rechecked.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
-          expect(recheckAt).toBe(resetAt);
-        }
-        // After the reset the connection serves again and the same turn resumes.
-        expect(await evaluateChecked(turn, new Date(resetAt + 1_000))).toMatchObject({
-          kind: "run",
-          connectionId: connection,
-        });
-        const resumed = await reconcileSubscriptionCoreCapacityWait(db(), {
-          ...reconcileInput,
-          evaluation: { kind: "run" },
-        });
-        expect(resumed.action).toBe("resumed");
-        expect(resumed.events.map((event): string => event.type)).toEqual([
-          waits.events.resumed,
-          "session.status.changed",
-        ]);
-        const [state] = await admin()<{ session_status: string; turn_status: string }[]>`
+          expect(scopes.map((scope) => scope.workspaceId)).toContain(turn.identity.workspaceId);
+          expect(await wakeRevision()).toBe(2);
+          // The provider-neutral delivery entry point (a quota recovery's wake)
+          // reaches the same armed waiter.
+          await deliverSubscriptionCoreProviderWake(db(), providerId, {
+            accountId: org.accountId,
+            reason: "usage_recovered",
+          });
+          expect(await wakeRevision()).toBe(3);
+
+          const reconcileInput = {
+            accountId: org.accountId,
+            workspaceId: turn.identity.workspaceId,
+            sessionId: turn.identity.sessionId,
+            waiterId: armed.waiter.waiterId,
+            generation: 1,
+            evaluatedWakeRevision: 3,
+            provider: waits.provider,
+          };
+          const beforeRecheck = Date.now();
+          const rechecked = await reconcileSubscriptionCoreCapacityWait(db(), {
+            ...reconcileInput,
+            evaluation: {
+              kind: "wait",
+              waitReason: waiting.reason,
+              earliestResetAt: waiting.earliestResetAt,
+              healthRetryAt: null,
+            },
+          });
+          if (rechecked.action !== "waiting")
+            throw new Error(`reconcile returned ${rechecked.action}`);
+          const recheckAt = rechecked.waiter.nextCheckAt.getTime();
+          if (rechecks) {
+            // The backoff grows across rechecks (60 s, then 120 s, ...).
+            expect(rechecked.waiter).toMatchObject({
+              resetKind: "bounded_refresh",
+              refreshAttempt: 1,
+            });
+            expect(recheckAt).toBeGreaterThanOrEqual(beforeRecheck + 120_000);
+            expect(recheckAt).toBeLessThanOrEqual(Date.now() + 120_000);
+          } else {
+            expect(rechecked.waiter).toMatchObject({
+              resetKind: "authoritative",
+              refreshAttempt: 0,
+            });
+            expect(recheckAt).toBe(resetAt);
+          }
+          // After the reset the connection serves again and the same turn resumes.
+          expect(await evaluateChecked(turn, new Date(resetAt + 1_000))).toMatchObject({
+            kind: "run",
+            connectionId: connection,
+          });
+          const resumed = await reconcileSubscriptionCoreCapacityWait(db(), {
+            ...reconcileInput,
+            evaluation: { kind: "run" },
+          });
+          expect(resumed.action).toBe("resumed");
+          expect(resumed.events.map((event): string => event.type)).toEqual([
+            waits.events.resumed,
+            "session.status.changed",
+          ]);
+          const [state] = await admin()<{ session_status: string; turn_status: string }[]>`
           select session.status as session_status, turn.status as turn_status
           from sessions session join session_turns turn on turn.session_id = session.id
           where turn.id = ${turn.identity.turnId}::uuid`;
-        expect(state).toEqual({ session_status: "recovering", turn_status: "recovering" });
-        expect(await wakeRevision()).toBeNull();
-        expect(
-          await reconcileSubscriptionCoreCapacityWait(db(), {
-            ...reconcileInput,
-            evaluation: { kind: "run" },
-          }),
-        ).toEqual({ action: "stale", events: [] });
-      },
-    );
-
+          expect(state).toEqual({ session_status: "recovering", turn_status: "recovering" });
+          expect(await wakeRevision()).toBeNull();
+          expect(
+            await reconcileSubscriptionCoreCapacityWait(db(), {
+              ...reconcileInput,
+              evaluation: { kind: "run" },
+            }),
+          ).toEqual({ action: "stale", events: [] });
+        },
+      );
+    }
     test.skipIf(!sessionWaits)(
       "a false resumption counts toward the shared breaker; at its limit the turn stops with this provider's code",
       async () => {

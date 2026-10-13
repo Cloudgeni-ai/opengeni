@@ -29,9 +29,12 @@ import {
   SUBSCRIPTION_CORE_XAI,
   type SubscriptionCoreXaiTokens,
 } from "./subscription-core-xai-adapter";
-import type { XaiSubscriptionAccountMetadata } from "./xai-subscription";
 
 export type SubscriptionCoreXaiScope = "workspace" | "user" | "organization";
+
+/** The legacy SuperGrok account shape the SuperGrok routes render. */
+export type XaiSubscriptionAccountMetadata =
+  import("./subscription-core/account-projection").SubscriptionCorePoolAccount;
 
 function date(value: Date | string | null | undefined): Date | null {
   return value === null || value === undefined ? null : new Date(value);

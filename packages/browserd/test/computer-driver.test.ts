@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { ComputerActionCommand, ComputerSessionCapabilities } from "@opengeni/contracts";
+import {
+  type ComputerActionCommand,
+  type ComputerSessionCapabilities,
+  parseSecretReference,
+  referenceKey,
+} from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import {
   ComputerDriver,
@@ -554,6 +559,107 @@ describe("ComputerDriver", () => {
     }
     expect(transport.stoppedCaptures).toBe(1);
   });
+
+  test("pastes text the native keymap refused before typing any key", async () => {
+    const transport = new UntypeableTextTransport();
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const typing = typeCommand("ÆØÅ–π密");
+    await expect(driver.dispatch(typing)).resolves.toMatchObject({
+      observationId: "observation-2",
+    });
+    expect(transport.calls).toEqual([
+      ["dispatch", { type: "keyboard", action: "type", value: "ÆØÅ–π密" }],
+      ["validate", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
+      ["validate", { type: "clipboard", operation: "paste" }],
+      ["dispatch", { type: "clipboard", operation: "write", text: "ÆØÅ–π密" }],
+      ["dispatch", { type: "clipboard", operation: "paste" }],
+    ]);
+    expect(transport.dispatched).toMatchObject({
+      operationId: typing.operationId,
+      targetId: typing.targetId,
+      expectedTargetGeneration: typing.expectedTargetGeneration,
+      expectedObservationId: typing.expectedObservationId,
+    });
+  });
+
+  test("never pastes after possible input, for keys with their own effect, or without a clipboard", async () => {
+    const cases: Array<[string, (transport: UntypeableTextTransport) => ComputerActionCommand]> = [
+      [
+        "outcome_unknown",
+        (transport) => {
+          transport.refusal = new ComputerBackendError(
+            "outcome_unknown",
+            transport.refusal.message,
+            false,
+            true,
+          );
+          return typeCommand("ÆØÅ");
+        },
+      ],
+      ["unsupported", () => typeCommand("Æ\n")],
+      [
+        "unsupported",
+        () => ({ ...typeCommand("Æ"), action: { type: "keyboard", action: "press", value: "Æ" } }),
+      ],
+      [
+        "unsupported",
+        (transport) => {
+          transport.refusal = new ComputerBackendError(
+            "unsupported",
+            "X11 window input route is not verified: XKB is unavailable",
+            false,
+            false,
+          );
+          return typeCommand("Æ");
+        },
+      ],
+      [
+        "unsupported",
+        (transport) => {
+          transport.handshake.capabilities.clipboard = false;
+          return typeCommand("Æ");
+        },
+      ],
+    ];
+    for (const [code, arrange] of cases) {
+      const transport = new UntypeableTextTransport();
+      const typing = arrange(transport);
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      await expect(driver.dispatch(typing)).rejects.toMatchObject({ code });
+      expect(transport.calls).toEqual([["dispatch", typing.action]]);
+    }
+  });
+
+  test("never pastes text that carries a resolved secret", async () => {
+    const transport = new UntypeableTextTransport();
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const raw = "{{secret:Desk/password}}";
+    const typing: ComputerActionCommand = {
+      ...typeCommand(raw),
+      secretValues: { [referenceKey(parseSecretReference(raw))]: "pÆss密" },
+    };
+    const error = await driver.dispatch(typing).then(
+      () => null,
+      (caught: unknown) => caught as Error,
+    );
+    expect(error).toMatchObject({ code: "unsupported" });
+    expect(error?.message).not.toContain("pÆss密");
+    expect(transport.calls).toEqual([
+      ["dispatch", { type: "keyboard", action: "type", value: "pÆss密" }],
+    ]);
+  });
 });
 
 class FixtureNativeTransport implements ComputerBackend {
@@ -714,4 +820,30 @@ function command(): ComputerActionCommand {
       action: "invoke",
     },
   };
+}
+
+/** Refuses keyboard text like the Linux X11 keymap does, before any key. */
+class UntypeableTextTransport extends FixtureNativeTransport {
+  calls: Array<["validate" | "dispatch", ComputerBackendActionCommand["action"]]> = [];
+  refusal = new ComputerBackendError(
+    "unsupported",
+    "X11 keymap cannot type Unicode scalar U+00C6; use clipboard paste",
+    false,
+    false,
+  );
+
+  override async validate(nativeCommand: ComputerBackendActionCommand): Promise<void> {
+    this.calls.push(["validate", nativeCommand.action]);
+    await super.validate(nativeCommand);
+  }
+
+  override async dispatch(nativeCommand: ComputerBackendActionCommand) {
+    this.calls.push(["dispatch", nativeCommand.action]);
+    if (nativeCommand.action.type === "keyboard") throw this.refusal;
+    return await super.dispatch(nativeCommand);
+  }
+}
+
+function typeCommand(value: string): ComputerActionCommand {
+  return { ...command(), action: { type: "keyboard", action: "type", value } };
 }

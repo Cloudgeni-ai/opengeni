@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import postcss, { type AtRule, type Declaration } from "postcss";
+import { parse, type AtRule, type Declaration } from "postcss";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { Markdown } from "../src/components/markdown";
@@ -46,7 +46,7 @@ describe("links are recognisable at rest", () => {
   });
 
   test("og-link underlines at rest and strengthens the underline on hover", () => {
-    const root = postcss.parse(readFileSync(join(styles, "index.css"), "utf8"));
+    const root = parse(readFileSync(join(styles, "index.css"), "utf8"));
     let utility: AtRule | undefined;
     root.walkAtRules("utility", (rule) => {
       if (rule.params === "og-link") utility = rule;

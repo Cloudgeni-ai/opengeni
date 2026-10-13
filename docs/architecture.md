@@ -114,6 +114,15 @@ Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
+Subscription serving revisions are attempt-scoped; the accepted model and
+frozen connection authority remain the logical turn's contract. Shared-core
+placement, candidate-aware capacity waits and lease-backed switch events use
+the same provider-neutral eligibility rules. The worker's serving hooks live
+in `apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts`;
+the metadata-only catalog helper also serves control-worker recovery without
+loading provider credentials. Remote-compaction conversion and UI activation
+remain separately gated; see [subscription accounts](subscription-accounts.md).
+
 **Turns** are accepted work; replaceable **attempts** append ordered,
 exactly-once atomic history batches.
 
@@ -1006,8 +1015,9 @@ All producers use the ordinary session/turn runtime:
 - a **child session** is a normal session with explicit lineage, depth, compute,
   visibility, and initiating-authority rules. Omitted child resources inherit
   repositories only; file attachments require explicit selection, and an
-  omitted Sandbox Environment or Variable Set selection resolves like any new
-  session rather than copying the parent's (see
+  omitted Sandbox Environment or vault policy resolves like any new
+  session rather than copying the parent's, though a child's vault policy can
+  never be wider than its parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
 Schedule indicators include authorized reusable-session targets and paused schedules; the API filters by `sessionId`.
@@ -1148,14 +1158,15 @@ Text-only turns need no compute provisioning/Connected Machine contact.
 Filesystem/process/Git/browser/computer tools resolve exact current targets
 and validate epochs/authority.
 
-Explicit Variable Sets freeze in ascending precedence. Reconfiguration requires
-quiescence and rotates managed compute, never hot-swapping active credentials.
+Nothing from a vault is injected into compute. `{{secret:…}}` references in
+tool arguments resolve per call at the execution boundary, so vault and policy
+changes apply to the next command without restarting a box.
 
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
-[`connected-machines.md`](connected-machines.md). Variable Set lifecycle/ordering:
-[`variable-sets.md`](variable-sets.md).
+[`connected-machines.md`](connected-machines.md). Vaults, references and
+delivery: [`secrets.md`](secrets.md).
 
 Configured agents retain discovery; `media` gates image/video guidance.
 Unmatched `tool_list.namePrefix` returns empty pages plus bounded authorized
@@ -1234,9 +1245,12 @@ Workspace Insights and Organization settings > Insights render one dashboard
 adapter in `usage-adapter.ts` serves the older endpoints until every
 deployment answers it.
 
-Codex/SuperGrok pools preserve logical turns. Shared/Personal workspaces inherit
-same-organization pools as separate allocator boundaries, not access grants.
-SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter/Opper BYOK keys
+Codex, Claude and SuperGrok use the provider-neutral subscription core for
+selection, leases, quota, waits and recovery. Organization-owned connections
+are scoped to the organization, selected workspaces or selected people;
+pool eligibility is not a session-access grant. Accepted work keeps its frozen
+authority through recovery. Legacy tables and snapshots are historical evidence,
+not alternate runtime selectors. Vercel AI Gateway/OpenRouter/Opper BYOK keys
 belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
 inherit into same-organization shared workspaces, retain payer identity, and
 never fall back across rails.
@@ -1326,6 +1340,8 @@ behind a generic 500, so its session lookups run through
 | `packages/documents` | `@opengeni/documents` | Document parsing/indexing and authority-first hybrid retrieval |
 | `packages/capabilities` | `@opengeni/capabilities` | Integration definitions, facets, local MCP bridges, and protocol compilers |
 | `packages/tool-gateway` | `@opengeni/tool-gateway` | Protocol-neutral tool identity, cataloging, schemas, validation, authorization, approval classification, and execution |
+| `packages/vaults` | `@opengeni/vaults` | Vault provider interface and registry, shell reference splicing, and secret test doubles |
+| `packages/vaults-onepassword` | `@opengeni/vaults-onepassword` | 1Password service-account vault provider (pinned `@1password/sdk`), loaded only by dynamic import from the API and worker |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
@@ -1525,8 +1541,12 @@ optional full-entry definition pins reject drift before approval consumption.
 The pin is not authority and requires no shared cache or previous discovery.
 Version-2 approvals bind executable effect and Site context, not the public
 approval display field, and share the permanent operation tombstone namespace
-with v1. Physical targeted dispatch rechecks the caller, exact pinned Site and
-selected live action policy after awaited native credential authorization.
+with v1. One per-request live fence (`workspace-tool-target-fence.ts`) covers
+the caller, exact pinned Site, selected route and live action policy; each
+physical provider request evaluates it once after awaited native credential
+authorization, reading only the selected rows (a pinned Site once, as the
+caller may see it) in bounded transactions that start no further part after the
+evaluation's deadline and then roll back.
 Legacy HTTP calls may rebuild only the
 target identity's connector when their complete catalog digest has a
 content-free per-process attestation for the same caller scope and the live
@@ -2083,7 +2103,7 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   Connected Machines retain their environment.
 
 Canonical: [`../SECURITY.md`](../SECURITY.md),
-[`credentials.md`](credentials.md), [`variable-sets.md`](variable-sets.md),
+[`credentials.md`](credentials.md), [`secrets.md`](secrets.md),
 [`session-mcp-servers.md`](session-mcp-servers.md),
 [`organization-tenancy.md`](organization-tenancy.md), and
 [`agent-session-authority.md`](agent-session-authority.md).
@@ -2190,7 +2210,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
 | Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
-| Variable Sets, ordered session attachment, or secret reads | `packages/core/src/`, `packages/db/src/`, `apps/api/src/routes/` | [`variable-sets.md`](variable-sets.md) |
+| Vaults, `{{secret:…}}` references, secret delivery, or secret reads | `packages/contracts/src/vaults.ts`, `packages/core/src/domain/vaults/`, `packages/db/src/vaults.ts`, `packages/vaults/`, `apps/api/src/routes/vaults.ts` | [`secrets.md`](secrets.md) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
 | Integration policy | `packages/db/src/organization-integration-policy.ts`, `apps/api/src/routes/organization-integration-policy.ts` | [`organization-integration-policy.md`](organization-integration-policy.md) |
 
@@ -2201,8 +2221,8 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/chat-reasoning.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/agent-turn/codex-core-capacity.ts`, `packages/db/src/subscription-core-codex.ts`, `packages/db/src/subscription-core-codex-adapter.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
-| Shared subscription core (policy, reference model, runtime, adapters) | `packages/subscriptions/` (`src/reference-model.ts`, `src/adapter.ts`), `packages/db/src/subscription-core/`, `packages/db/src/subscription-core-providers.ts`, `packages/db/src/legacy-subscription-world.ts`, `apps/worker/src/activities/agent-turn/subscription-core-shadow.ts` | [`subscription-accounts.md`](subscription-accounts.md), [`design/subscription-core-2026-10-07.md`](design/subscription-core-2026-10-07.md) |
-| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
+| Shared subscription core (policy, reference model, runtime, adapters) | `packages/subscriptions/` (`src/reference-model.ts`, `src/adapter.ts`), `packages/db/src/subscription-core/`, `packages/db/src/subscription-core-providers.ts`, `apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts` | [`subscription-accounts.md`](subscription-accounts.md), [`design/subscription-core-2026-10-07.md`](design/subscription-core-2026-10-07.md) |
+| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/subscription-core-xai.ts`, `packages/db/src/subscription-core-xai-adapter.ts`, `packages/db/src/subscription-core-xai-compat.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
@@ -2325,11 +2345,11 @@ catalogue does not confer installation compatibility. See [plugin catalogue](plu
 
 [Headless-shell](headless-shell.md).
 
-Claude subscription accounts reuse the scoped SuperGrok repository, individual
-account UI, credential lease and durable provider-capacity wait/resume seams.
+Claude subscription accounts use the shared core through the Claude adapter,
+with provider-specific authentication, transport and usage decoding.
 The encrypted account bundle owns token/account/device identity; public account
 rows expose only permitted display metadata. Acceptance freezes workspace,
 organization or explicit user authority independently of the current browser
-user. Execution rechecks that frozen pool, live owner authority and the exact
+user. Execution rechecks that frozen authority, live owner authority and the exact
 serving account generation before every physical request. See the native Claude
 section in model-providers.md and the maintenance activation in deployment.md.

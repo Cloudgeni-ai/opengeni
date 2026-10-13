@@ -156,7 +156,8 @@ describe("organization administration surface", () => {
     // Models is an organization page for owners, admins and workspace admins.
     expect(accessSource).toContain('visible.add("models")');
     expect(accessSource).toContain("administeredWorkspaceIds.length > 0");
-    expect(organizationCodexSource).toContain("setLoadError(");
+    // A failed organization read is a load error, never an empty account list.
+    expect(organizationCodexSource).toContain("const loadError = query.error ? apiErrorAdvice(");
     expect(workspaceCodexSource).toContain("Couldn't load the organization's Codex accounts.");
     expect(workspaceCodexSource).toContain("Try again");
     // Workspace Codex: no source control; one line says which pool new work uses, with

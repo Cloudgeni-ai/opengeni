@@ -6,14 +6,12 @@ import {
   settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
-  resolveClaudeAccountCredential,
-  ClaudeSubscriptionReconnectRequired,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
-  assertModelConnectionAllowsTurn,
   freezeAgentLearningPolicy,
   recoverLegacyKnowledgeConfirmations,
   withSessionRlsActorContext,
@@ -48,19 +46,13 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import { parseModelProvidersJson } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
-import { createClaudeUsageObserver } from "./claude-usage-observer";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
-import {
-  buildXaiTurnRequestAuthorization,
-  xaiTurnRequestContext,
-  type XaiTurnRequestContextOptions,
-} from "../xai-auth";
+import { xaiTurnRequestContext, type XaiTurnRequestContextOptions } from "../xai-auth";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext } from "../streaming";
 import type {
@@ -105,6 +97,7 @@ import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
+import { selectServingTurnCapacity } from "./subscription-serving-capacity";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import {
   assertTurnModelConnection,
@@ -648,12 +641,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               trigger,
               codexWorkspaceKey,
             };
-            const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
-            if ("exit" in codexCapacity) return codexCapacity.exit;
-            const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
-            if ("exit" in xaiCapacity) return xaiCapacity.exit;
-            const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
-            if ("exit" in claudeCapacity) return claudeCapacity.exit;
+            if (claimed.ok.servingAttempt) {
+              const servingCapacity = await selectServingTurnCapacity(
+                { ...capacityDeps, settings: capabilitySettings },
+                claimed.ok.servingAttempt,
+              );
+              if ("exit" in servingCapacity) return servingCapacity.exit;
+            } else {
+              const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
+              if ("exit" in codexCapacity) return codexCapacity.exit;
+              const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
+              if ("exit" in xaiCapacity) return xaiCapacity.exit;
+              const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
+              if ("exit" in claudeCapacity) return claudeCapacity.exit;
+            }
           }
 
           let selectedCapabilitySettings = capabilitySettings;
@@ -685,31 +686,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
             );
           } else if (billingState.isClaudeTurn) {
-            const credentialId = providerTurn.effectiveClaudeCredentialId;
-            const subjectId = leases.claude.subjectId;
-            const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
-            if (!credentialId || !subjectId || !authoritySnapshot)
-              throw new Error("Claude serving account has no accepted authority");
-            leases.claude.assertUsable();
-            const credential = await resolveClaudeAccountCredential(db, settings, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              credentialId,
-              authoritySnapshot,
-            });
-            providerTurn.effectiveClaudeCredentialVersion = credential.version;
-            if ("reconnectRequired" in credential) throw new ClaudeSubscriptionReconnectRequired();
-            selectedCapabilitySettings = withClaudeConnectionCredential(
-              capabilitySettings,
-              "claude_subscription",
-              JSON.stringify(credential.secret),
-              authoritySnapshot.scope === "organization" ? "organization" : "workspace",
-              {
-                connectionId: credentialId,
-                credentialVersion: credential.version,
-              },
-            );
+            // The legacy Claude runtime is deleted: a Claude turn is placed
+            // by the shared core or failed by its route before this point.
+            throw new Error("Claude turn was not placed on the shared subscription core");
           }
           const governance = await prepareGovernanceAndModel({
             learningPolicy: learning,
@@ -735,9 +714,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
             modelId: turnExecutionPolicy.productModelId,
             codexCredentialId: providerTurn.effectiveCodexCredentialId,
-            xaiCredentialId: providerTurn.effectiveXaiCredentialId,
-            claudeCredentialId: providerTurn.effectiveClaudeCredentialId,
-            claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
           });
           const {
             runtimePreparationStartedAt,
@@ -1036,7 +1012,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
           if (resolvedModel?.provider.kind === "xai-subscription") {
             const xaiCore = providerTurn.xaiSubscriptionCore;
-            if (!providerTurn.effectiveXaiCredentialId || (!xaiCore && !leases.xai.subjectId)) {
+            if (!providerTurn.effectiveXaiCredentialId || !xaiCore) {
               throw new Error("SuperGrok subscription execution has no leased credential");
             }
             let xaiModelRequestSequence = 0;
@@ -1182,43 +1158,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }
               },
             };
-            // On the shared core the bearer, refresh and request custody come
-            // from the core placement; the legacy path keeps its own.
-            xaiCoreAuthorization = xaiCore
-              ? buildXaiCoreRequestAuthorization({
-                  db,
-                  settings: runSettings,
-                  core: xaiCore,
-                  lease: leases.xai,
-                  execution: {
-                    attemptId: input.attemptId,
-                    executionGeneration: attempt.executionGeneration!,
-                  },
-                })
-              : null;
-            providerTurn.xaiRequestContext = xaiCoreAuthorization
-              ? xaiTurnRequestContext(xaiRequestOptions, xaiCoreAuthorization)
-              : (
-                  await buildXaiTurnRequestAuthorization({
-                    db,
-                    settings: runSettings,
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    subjectId: leases.xai.subjectId!,
-                    credentialId: providerTurn.effectiveXaiCredentialId,
-                    authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
-                    ...xaiRequestOptions,
-                  })
-                ).context;
+            // The bearer, refresh and request custody come from the core
+            // placement.
+            xaiCoreAuthorization = buildXaiCoreRequestAuthorization({
+              db,
+              settings: runSettings,
+              core: xaiCore,
+              lease: leases.xai,
+              execution: {
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration!,
+              },
+            });
+            providerTurn.xaiRequestContext = xaiTurnRequestContext(
+              xaiRequestOptions,
+              xaiCoreAuthorization,
+            );
           }
-          const claudeUsageObserver = await createClaudeUsageObserver(
-            parseModelProvidersJson(runSettings.modelProvidersJson),
-            providerTurn.latestClaudeUsage,
-            async () => null,
-          );
           // A core-placed Claude turn: every physical request carries the core
           // bearer and the custody of its lane (the agent's, or the session
-          // title's); the legacy observer and its receipts are not used.
+          // title's). Any other turn sends no Claude subscription request.
           const claudeProviderIds = claudeSubscriptionProviderIds(runSettings);
           let claudeModelRequestSequence = 0;
           let claudeTitleRequestSequence = 0;
@@ -1245,63 +1204,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
             };
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            claudeCore ? withClaudeCoreLane("requests")(fn) : withLegacyClaudeUsage(fn);
+            claudeCore ? withClaudeCoreLane("requests")(fn) : fn();
           const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            claudeCore ? withClaudeCoreLane("titleRequests")(fn) : withLegacyClaudeUsage(fn);
-          const withLegacyClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
-              return claudeUsageObserver.prepareRequestWithObserver(
-                providerId,
-                headers,
-                async (binding) => {
-                  const credentialId = providerTurn.effectiveClaudeCredentialId;
-                  const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
-                  const subjectId = leases.claude.subjectId;
-                  if (
-                    !credentialId ||
-                    !authoritySnapshot ||
-                    !subjectId ||
-                    binding.expectedConnectionId !== credentialId ||
-                    binding.expectedCredentialVersion !==
-                      providerTurn.effectiveClaudeCredentialVersion ||
-                    binding.scope !==
-                      (authoritySnapshot.scope === "organization" ? "organization" : "workspace")
-                  )
-                    throw new Error(
-                      "Claude physical request is outside its accepted serving account",
-                    );
-                  await leases.claude.renew("runtime_event");
-                  leases.claude.assertUsable();
-                  await assertModelConnectionAllowsTurn(db, {
-                    workspaceId: input.workspaceId,
-                    subjectId,
-                    modelId: turnExecutionPolicy.productModelId,
-                    claudeCredentialId: credentialId,
-                    claudeAuthoritySnapshot: authoritySnapshot,
-                  });
-                  const credential = await resolveClaudeAccountCredential(
-                    db,
-                    settings,
-                    {
-                      accountId: input.accountId,
-                      workspaceId: input.workspaceId,
-                      subjectId,
-                      credentialId,
-                      authoritySnapshot,
-                    },
-                    { expectedCredentialVersion: binding.expectedCredentialVersion },
-                  );
-                  if ("reconnectRequired" in credential)
-                    throw new ClaudeSubscriptionReconnectRequired();
-                  leases.claude.assertUsable();
-                  return {
-                    token: credential.secret.token,
-                    connectionId: credential.id,
-                    credentialVersion: credential.version,
-                  };
-                },
-              );
-            });
+            claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn();
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
@@ -1404,7 +1309,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             input,
             db,
             cancellationSignal,
-            connectionCredentials,
             turn,
             session,
             fileAuthoritySubjectId,
@@ -1419,8 +1323,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             mcpAvailabilityNote,
             turnTools,
             connectionScope,
-            workspaceVariableSet,
-            sandboxWorkspaceEnvironmentValues,
           } = toolPolicy;
 
           let knowledgeRecoveryNote: string | undefined;
@@ -1567,7 +1469,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             fileAuthoritySubjectId,
             runSettings,
-            workspaceVariableSet,
             turnResources,
             requiredGeneratedVideoFiles,
             machinePrimary,
@@ -1575,7 +1476,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             groupBoxBackend,
             sandboxCreationBackend,
             effectiveRunCredentialBackend,
-            sandboxWorkspaceEnvironmentValues,
             connectionScope,
             runWorkspaceMutationForSandbox,
           });
@@ -1702,7 +1602,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ]),
             ).values(),
           ];
+          // Connected vaults (1Password, host) resolve under the acting human;
+          // one provider read budget covers every resolver of this attempt.
+          const vaultAccess = createAttemptVaultAccess({
+            db,
+            settings,
+            workspaceId: input.workspaceId,
+            subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? null,
+            hostVaultProvider: connectionCredentials?.vaultProvider,
+            onePasswordVaultProvider: resolvedServices.onePasswordVaultProvider,
+          });
           const toolRuntime = await prepareTurnToolRuntime({
+            vaultAccess,
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
@@ -1755,6 +1666,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } = toolRuntime;
 
           const builtAgent = await buildTurnAgent({
+            vaultAccess,
             skillCatalog: toolRuntime.skillCatalog,
             mcpServers: toolRuntime.mcpServers,
             input,
@@ -1795,7 +1707,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             rigName,
             buildCompanyBrainContributionReceiptFor,
             promptCacheKey,
-            workspaceVariableSet,
             runtimeResources,
             sandboxEnvironment,
             sandboxArtifactRuntime,

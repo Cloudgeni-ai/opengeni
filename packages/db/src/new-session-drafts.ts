@@ -624,12 +624,6 @@ export async function seedNewSessionDraftInTransaction(
     ...(targetSandboxId && typeof options.workingDir === "string"
       ? { workingDir: options.workingDir }
       : {}),
-    ...(options.variableSetIds && options.variableSetIds.length > 0
-      ? {
-          variableSetIds: options.variableSetIds,
-          variableSetId: options.variableSetIds[options.variableSetIds.length - 1],
-        }
-      : {}),
     ...(rememberRig ? { rigId: options.rigId } : {}),
   };
   const resources = (Array.isArray(current.resources) ? current.resources : []).flatMap((raw) => {

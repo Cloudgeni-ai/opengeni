@@ -16,13 +16,18 @@
  */
 import {
   requestSessionTurnRecovery,
+  readSubscriptionCoreTurnFailoverBudget,
+  SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
   type Database,
   type SubscriptionCoreTurnIdentity,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import type { RunAgentTurnResult } from "../types";
-import { subscriptionCoreFailoverExhaustedFailure } from "./codex-core-errors";
+import {
+  subscriptionCoreFailoverExhaustedFailure,
+  subscriptionCoreServingFailoverExhaustedFailure,
+} from "./codex-core-errors";
 import type { CoreSubscriptionTurnLease } from "./credential-leases";
 import type { TurnFailureDeps } from "./failure-settlement";
 import type { SubscriptionCoreTurn } from "./turn-context";
@@ -132,10 +137,16 @@ export async function failOverCoreSubscriptionTurn(
   const refusals = disconnected
     ? null
     : await binding.countRefusals(db, core.identity).catch(() => null);
+  const servingBudget = settings.subscriptionCrossProviderFailoverEnabled
+    ? await readSubscriptionCoreTurnFailoverBudget(db, core.identity).catch(() => null)
+    : null;
+  if (settings.subscriptionCrossProviderFailoverEnabled && servingBudget === null) return null;
   const disposition =
-    disconnected || refusal.unbounded
-      ? "failover"
-      : coreFailoverDisposition(refusals, binding.refusalLimit);
+    servingBudget && servingBudget.steps >= SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT
+      ? "exhausted"
+      : disconnected || refusal.unbounded
+        ? "failover"
+        : coreFailoverDisposition(refusals, binding.refusalLimit);
   observability.incrementCounter({
     ...binding.metrics.settlements,
     labels: { ...binding.metrics.labels(deps), outcome: `core_${disposition}` },
@@ -149,11 +160,16 @@ export async function failOverCoreSubscriptionTurn(
   lease.held = false;
 
   if (disposition === "exhausted") {
-    const failure = subscriptionCoreFailoverExhaustedFailure(
-      refusals!,
-      binding.refusalLimit,
-      binding.displayName,
-    );
+    const failure = servingBudget
+      ? subscriptionCoreServingFailoverExhaustedFailure(
+          servingBudget.steps,
+          SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
+        )
+      : subscriptionCoreFailoverExhaustedFailure(
+          refusals!,
+          binding.refusalLimit,
+          binding.displayName,
+        );
     if (
       !(await eventing.settle({
         events: [

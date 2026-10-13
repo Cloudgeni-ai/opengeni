@@ -8,7 +8,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./subscription-reference-model": "./src/subscription-reference-model.ts",
-    "./subscription-reference-worlds": "./src/subscription-reference-worlds.ts"
+    "./subscription-reference-worlds": "./src/subscription-reference-worlds.ts",
+    "./fake-login": "./src/fake-login/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
@@ -28,6 +29,7 @@
     "nats": "^2.29.3",
     "playwright": "^1.57.0",
     "postgres": "^3.4.7",
+    "uqr": "0.1.3",
     "zod": "^4.2.1"
   },
   "devDependencies": {

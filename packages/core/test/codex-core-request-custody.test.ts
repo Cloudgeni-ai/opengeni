@@ -7,6 +7,7 @@ import {
   refreshCoreCodexModelEntitlements,
   loadWorkspaceCodexCatalogReadiness,
 } from "../src/codex-model-availability";
+import { resolveWorkspaceModelSelection } from "../src/model-catalog";
 
 const settings = testSettings({ codexSubscriptionEnabled: true });
 const models = configuredModels(withCodexCatalogProvider(settings)).filter(
@@ -81,6 +82,38 @@ function fixture(fetchImpl: CodexFetch) {
 }
 
 describe("core model discovery physical request custody", () => {
+  test("SUB-ELIG-03: an unreachable eligible account stays selectable and unknown, not a pooled entitlement denial", async () => {
+    const f = fixture(async () => Response.json({ models: [] }));
+    const uncertain = { ...f.connection, connectionId: crypto.randomUUID() };
+    f.deps.listServing = async () => [f.connection, uncertain];
+    f.deps.getCoreToken = async (_db, _settings, _context, id) => ({
+      accessToken: id,
+      chatgptAccountId: null,
+      isFedramp: false,
+      credentialVersion: 1,
+      planType: "pro",
+    });
+    f.deps.fetchModels = async ({ accessToken }) => ({
+      ok: accessToken !== uncertain.connectionId,
+      status: accessToken === uncertain.connectionId ? 503 : 200,
+      slugs: [models[0]!.upstreamModelId],
+    });
+    const read = await f.read();
+    expect(read.observations[models[0]!.definitionVersion]?.status).toBe("available");
+    expect(read.observations[models[1]!.definitionVersion]).toBeUndefined();
+    expect(
+      resolveWorkspaceModelSelection({
+        settings,
+        policy: null,
+        codexSubscriptionActive: read.active,
+        observations: read.observations,
+      }).find((model) => model.model.id === models[1]!.id)?.availability,
+    ).toMatchObject({ status: "unknown", selectable: true, reason: null });
+    // An account outside this model's allowlist cannot introduce uncertainty.
+    uncertain.allowedModelIds = [models[0]!.id];
+    const restricted = await f.read();
+    expect(restricted.observations[models[1]!.definitionVersion]?.reason).toBe("not_entitled");
+  });
   test("placement reads the picker's per-credential facts and refresh invalidates old entitlements", async () => {
     let slugs = [models[0]!.upstreamModelId];
     const upstream = mock<CodexFetch>(async () =>
@@ -151,10 +184,7 @@ describe("core model discovery physical request custody", () => {
     const f = fixture(upstream);
     f.disconnect();
     const readiness = await f.read();
-    expect(readiness.observations[models[0]!.definitionVersion]).toMatchObject({
-      status: "unavailable",
-      reason: "provider_unhealthy",
-    });
+    expect(readiness.observations[models[0]!.definitionVersion]).toBeUndefined();
     expect(upstream).not.toHaveBeenCalled();
     expect(f.reserve).toHaveBeenCalledTimes(1);
     expect(f.settle).not.toHaveBeenCalled();
@@ -173,10 +203,7 @@ describe("core model discovery physical request custody", () => {
     );
     const f = fixture(upstream);
     const readiness = await f.read();
-    expect(readiness.observations[models[0]!.definitionVersion]).toMatchObject({
-      status: "unavailable",
-      reason: "provider_unhealthy",
-    });
+    expect(readiness.observations[models[0]!.definitionVersion]).toBeUndefined();
     expect(upstream).toHaveBeenCalledTimes(1);
     expect(f.settle.mock.calls[0]?.[2]).toMatchObject({ outcome: "unknown" });
   });

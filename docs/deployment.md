@@ -2748,7 +2748,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
-- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for hosted vault values (and other encrypted connection material); required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (hosted vault writes and reference resolution fail with `encryption_key_missing` until it is set). See `docs/secrets.md`.
 - Workspace-owned Vercel AI Gateway, OpenRouter, and Opper keys are entered by workspace
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
@@ -4361,7 +4361,8 @@ secret already does).
   The new routines read them through the owner-only view
   `opengeni_private.subscription_core_auto_assignments`; the table keeps its
   name, and the column its `codex` default for older binaries' reach writes,
-  until the retirement migration.
+  until the retirement migration (0751, "Subscription legacy retirement"
+  below), which renames the table to the view's name.
 - Applying reach on workspace and Personal-workspace creation, reading and
   setting reach, plan-change history and the organization workspace inventory
   take the provider as data, so a later SuperGrok or Claude cutover adds rows,
@@ -4625,6 +4626,23 @@ account switches only on the organization route and its managing workspace's.
 Narrowing it back to its workspace alone (`allowedWorkspaces: []`) removes the
 organization's copies, so an organization "off" is not kept: the account page
 then shows the connection's switch, which a later share copies.
+
+**Accounts page change (separate release, after owner approval).** The
+organization Accounts page then lists a workspace-connected account once, as
+an organization account whose access the editor changes. Validate:
+`GET /v1/organizations/<organization id>/codex/accounts` returns each such
+account with `ownInWorkspaceIds` naming its workspace, and that workspace's
+`GET /v1/workspaces/<workspace id>/codex/accounts` returns
+`source.workspaceSetAside` and `source.organizationCount` (how many
+organization accounts other than its own reach it; after sharing only its own
+account it is 0, while `organizationAvailable` reads true). A browser tab
+still running the previous page lists the account twice (once as "<workspace>
+only") and offers "Make primary" for it, which the server refuses as not
+found, until it reloads. API
+and SDK callers of the organization account list now also receive
+workspace-connected accounts, each with `ownInWorkspaceIds`, and the
+workspace account list's `source` gains the two optional fields above; nothing
+else changes.
 
 **Fix forward.** The previous setter definitions are in 0713. If they
 misbehave, ship a forward migration restoring those definitions and keeping
@@ -4998,6 +5016,33 @@ triggers, the policy `subscription_settings_lock_guard_read`, the four
 routines and the two CHECKs; the stored locks stay and the resolver keeps
 ignoring locked workspace overrides.
 
+### Shared-chat explicit personal choice (0749)
+
+This is a **maintenance**, one-way runtime protocol upgrade. Stop all API,
+control-worker and turn-worker processes using this database, including old
+and candidate versions; supply their exact login names through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`).
+The migration checks the inventory and refuses live sessions before and after
+locking the accepted-work tables. It installs strict readers before enabling
+the acceptance writer. Start only the matching runtime after commit; its
+transaction-local protocol receipt prevents an incompatible writer from
+emitting restricted authority and incompatible readers from spending it.
+This receipt is not a feature flag or delegated permission.
+
+New explicit shared-chat consent is restricted to the exact session and
+connection owned by the accepting human, who need not be the chat creator.
+Existing v2 entries, compatibility records, waiting turns, background launch
+receipts and replay histories are not rewritten or reauthorized. Live owner,
+membership, resource-generation and effective-policy checks still apply.
+Other senders and automatic placement do not inherit the choice.
+
+After any restricted entry exists, do not restart a pre-upgrade image: its
+strict readers cannot parse that entry. Recovery is forward-only with readers
+that preserve the exact restriction; removing the field or regenerating old
+pools is not rollback. No provider cutover, data move or deployment is performed
+by this source change. The provisional ordinal must be reconciled against the
+published ledger during batch integration without renaming published SQL.
+
 ### Personal Codex acceptance under row security (0726)
 
 Migration `0726_subscription_personal_acceptance_reads.sql` is **rolling**
@@ -5110,6 +5155,637 @@ no privilege on the table.
 unchanged on 0729. An opt-in a person turned on stays in effect after a
 rollback (placement already read it); dropping the four policies and two
 routines removes only the person's own access.
+
+### SuperGrok on the shared subscription core (0747)
+
+Migration `0747_subscription_core_xai_cutover.sql` is a one-way maintenance
+cutover, the SuperGrok counterpart of 0689. It moves every organization's
+SuperGrok (`xai`) subscription state onto the shared subscription core,
+records the `xai` receipt and registry row, and enables the SuperGrok cutover
+row for every organization, in one transaction. Design record:
+[subscription core, X3](design/subscription-core-2026-10-07.md#x3-the-drained-supergrok-cutover).
+It requires the generic precursor, core acceptance reads, SuperGrok runtime
+and personal-status recovery, and per-provider session-binding migration.
+The latter must supply the `(workspace_id, session_id, provider)` primary
+key and enabled `subscription_session_bindings_provider_fixed` trigger;
+the cutover refuses a missing or malformed prerequisite before writing state.
+The release that carries it must also carry the dormant SuperGrok core
+runtime (chat, refresh, media, routes and capacity waits); after the receipt
+the runtime serves SuperGrok only through the core.
+
+What it moves, per organization: credentials (shared workspace accounts
+become organization-owned connections assigned to their workspace, as for
+any account connected in a workspace; organization accounts keep their
+allowlist and Personal-workspace reach; a Personal workspace's accounts and
+every `user`-scoped account become their owner's personal connections), one
+secret copy each with its health, quota and allocator counters, rotation and
+primaries, the workspace inference source, session pins as bindings, live
+leases with their exact fences, waiting capacity waiters with their ids,
+generations, wake revisions and pending wakes, an accepted-authority
+compatibility record for every live carrier, one fresh personal authority
+generation per owner, and in-flight video operations (their token envelope
+is replaced by a reference to the canonical connection). Legacy rows stay
+for forensics. The five legacy SuperGrok tables become read-only: the
+runtime role keeps only `SELECT`, and restrictive policies that apply once
+the receipt exists refuse every insert or update of them, also by the legacy
+connect and rotation routines that run as the schema owner; the legacy
+disconnect refuses (accounts are disconnected on the core); and no role can
+add a legacy SuperGrok personal authority.
+
+Every pre-existing binding for another provider stays byte-identical.
+Eligible automatic and explicit SuperGrok pins become a separate `xai`
+binding regardless of the session's current model; Codex and Claude pins
+coexist with it. After the drained preflight, before inserting new-provider
+bindings or enabling SuperGrok, the first provider cutover drops
+`subscription_session_bindings_rolling_session_idx`. A later provider
+cutover tolerates its absence. The provider-identity trigger stays enabled
+throughout the owner window. Shared settings rows gain
+only their `xai` keys and the SuperGrok primary, and a Personal workspace
+with moved accounts gets the provider-neutral `personal_fallback_allowed`
+override. Existing per-person fallback preferences remain unchanged. D-28
+already permits automatic use in the owner's Personal workspace; moving a
+credential does not opt its owner into fallback in other workspaces.
+
+**1. Inventory (before the window).** As a superuser or `BYPASSRLS` role,
+record the source counts the migration compares. The schema owner is subject
+to row security on these tables and would count zero rows, so the block
+refuses any other role:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN TRANSACTION READ ONLY;
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the SuperGrok inventory as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+SELECT account_id, authority_scope, count(*) FROM xai_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, authority_scope, count(*) FROM xai_rotation_settings GROUP BY 1, 2;
+SELECT account_id, count(*) FROM xai_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM xai_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM xai_session_account_pins
+  WHERE pinned_credential_id IS NOT NULL OR last_credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+  GROUP BY 1;
+SELECT account_id, count(*) FROM video_generation_operations
+  WHERE funding_source = 'supergrok_subscription' AND terminal_at IS NULL GROUP BY 1;
+SELECT account_id, count(*) FROM image_generation_operations
+  WHERE provider_id = 'supergrok-subscription' AND status IN ('prepared', 'provider_started')
+  GROUP BY 1;
+COMMIT;
+```
+
+With the same role, confirm the core holds no SuperGrok state yet. Each query
+must return no rows; the migration aborts otherwise.
+Rows left over from before 0712 are removed as described in
+[Shared subscription core generic precursor (0712)](#shared-subscription-core-generic-precursor-0712).
+
+```sql
+SELECT account_id, id, ownership FROM subscription_connections WHERE provider = 'xai';
+SELECT account_id, alias_connection_id FROM subscription_connection_aliases WHERE provider = 'xai';
+SELECT account_id, session_id FROM subscription_session_bindings WHERE provider = 'xai';
+SELECT account_id, turn_id FROM subscription_leases WHERE provider = 'xai';
+SELECT account_id, session_id FROM subscription_capacity_waiters WHERE provider = 'xai';
+SELECT account_id FROM subscription_operation_leases WHERE provider = 'xai';
+SELECT account_id, enabled FROM subscription_provider_cutovers WHERE provider = 'xai';
+SELECT account_id, carrier_kind FROM opengeni_private.subscription_authority_compat
+  WHERE provider = 'xai';
+SELECT account_id, workspace_id FROM subscription_settings
+  WHERE xai_primary_connection_id IS NOT NULL;
+```
+
+Before the window, with the same role, list the workspaces whose SuperGrok
+setting will follow a locked organization value instead of the workspace's
+legacy one. A workspace with its own SuperGrok accounts is normally frozen on its own
+accounts (`inferenceSource: workspace`) with its local rotation and primary;
+where the organization locks `providers` or `rotation`, the cutover leaves
+that key to the organization and records the workspace in the report. Decide
+with the organization whether to unlock first; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM xai_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+;
+```
+
+**2. Stop and drain.** Stop every API, control worker and turn worker of the
+old and the new release, including idle pooled connections. Drain processes,
+not work: queued, waiting, checkpointed and scheduled work stays in the
+database and is moved. Do not cancel turns or video operations.
+Prevent old images from restarting (including autoscalers, rollback jobs and
+restart policies) before releasing the drain. Dropping the rolling index
+does not make old readers or Codex's old automatic-binding UPDATE fail
+closed: an old process can read or mutate another provider's pin. Keep the
+drain and startup refusal effective until an old image cannot run again.
+
+**3. Back up.** Take a consistent backup (or snapshot) after the drain and
+before migrating. It is the only recovery point before the one-way commit.
+
+**4. Migrate.** Run the normal TypeScript migrator as the schema owner (plain
+`psql` cannot run the codec stage and is refused) with:
+
+- `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`: the complete list of old
+  and new runtime logins (for example `["opengeni_app"]`). Any live session
+  for a listed login, or for any other non-superuser login that can write a
+  relation the cutover moves, aborts with SQLSTATE `55000` before anything
+  changes;
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`: the existing key. Each credential
+  is decrypted, canonicalized to the core format, re-encrypted and read back
+  before the legacy copy is blanked; each in-flight video envelope is
+  replaced by an encrypted connection reference and read back. An
+  installation without legacy SuperGrok credentials or in-flight SuperGrok
+  videos needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drain-check
+failure; a transaction isolation other than READ COMMITTED (the runner's
+default: do not set `default_transaction_isolation` for the migrating role or
+database); an undecodable credential (fixed message, no material); identity or
+ownership ambiguity, named by content-free classes such as
+`provider_identity_mismatch` (the stored account id differs from the token's),
+`personal_workspace_owner_ambiguous`, `personal_owner_missing`,
+`unrepresentable_status`, `unrepresentable_scope`, `session_owner_ambiguous`,
+`personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
+session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
+waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
+pre-existing core SuperGrok state; or any parity mismatch (`0747 parity
+mismatch (<metrics>)`). A database error while writing the core surfaces only
+as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
+statement parameter, token, label or email leaves the migration. Fix the named
+legacy rows (for example disconnect a duplicate account) and run the migrator
+again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles`, which now grants
+the runtime role only `SELECT` on the five legacy SuperGrok tables, then start
+only binaries of this release. Runtime readiness refuses a database without
+the `xai` receipt
+(`opengeni_private.subscription_provider_cutover_committed('xai')`), so a new
+binary cannot run before the migration, and an older binary must never be
+restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The parity report has no mismatch, as the migration owner:
+
+  ```sql
+  SELECT metric, account_id, legacy_count, core_count
+  FROM opengeni_private.subscription_cutover_report
+  WHERE provider = 'xai' AND legacy_count <> core_count
+    AND metric NOT LIKE 'disposition:%' AND metric NOT LIKE 'readiness:%'
+    AND metric <> 'compat:carriers_that_will_wait';
+  ```
+
+  returns no rows. `compat:dependent_sources_without_record` is zero.
+  `disposition:*` rows record accepted non-parity outcomes: expired leases,
+  dropped rotation rows with no local accounts, `user` rotation rows and fairness cursors, pins
+  whose target has no connection the session may use, collapsed duplicate
+  waiters, in-flight videos whose credential no longer existed (their
+  reference names no connection, so they are never polled again and end at
+  their recovery deadline), owners whose organization disallows personal
+  connections, locked-off personal fallback, one
+  `disposition:local_pool_freeze_locked:<workspace>` or
+  `disposition:local_rotation_locked:<workspace>` row per workspace whose
+  frozen source or local rotation and primary the organization's lock kept
+  (the workspace follows the organization; `locked_workspace_keys_untouched`
+  proves the workspace row kept those keys), logins of unknown or
+  contradictory identity kept separate, merged duplicate pool policies and
+  organization reach kept by auto-assignment.
+  `compat:carriers_that_will_wait` counts accepted work whose recorded
+  account cannot serve it now; it waits for capacity rather than failing.
+  `readiness:owners_with_multiple_current_personal_generations` is zero for
+  `xai`.
+- Every organization has `subscription_provider_cutovers (provider = 'xai',
+  enabled = true)`.
+- Spot-check a workspace's SuperGrok accounts, source and rotation in the web
+  UI; legacy account ids still resolve through aliases.
+- Waiting SuperGrok turns keep their waiter (same id, generation and wake
+  revisions; a wake they had not observed is in the core wake outbox) and
+  resume through the core when capacity returns; no workflow reset is
+  needed.
+
+**Release notes (behaviour users can see).**
+
+- Transcription and realtime voice use only organization and workspace
+  SuperGrok accounts, never a personal one.
+- An account a person connected for themselves (`user` scope) becomes their
+  personal connection, usable in their own private sessions in any workspace
+  that allows personal connections, not only the workspace it was connected
+  in. Accounts connected in a Personal workspace become the owner's personal
+  connection; personal fallback is switched on in that Personal workspace
+  unless the organization locked it off, and the owner is opted in to
+  personal fallback (a per-person preference that covers every provider).
+- A workspace that had its own SuperGrok accounts keeps using only them: its
+  inference source is frozen on `workspace` with organization accounts off,
+  as before. An administrator can change that afterwards. Where the
+  organization locks the provider settings or rotation, the workspace
+  follows the organization's locked value instead (listed in the report).
+- Work accepted before the cutover keeps exactly the accounts it was
+  accepted with. Personal access is re-issued at one new generation per
+  owner, so a later disconnect-all revokes it as for Codex.
+- Personal-workspace rotation and primary selection move with the owner's
+  accounts, unless an organization lock requires the organization value
+  instead. The owner's rotation and activate routes remain available subject
+  to those locks; the administrator settings API still refuses Personal
+  overrides.
+- Activating an account through a legacy alias returns its new canonical
+  connection id in `accountId`.
+
+**Containment.** An organization administrator (or an operator acting for one)
+may set that organization's SuperGrok cutover row `enabled = false`. That is
+fail-closed maintenance: SuperGrok turns fail with typed copy
+(`subscription_core_cutover_disabled`) or stay parked, SuperGrok routes and
+media refuse, and nothing reads a legacy SuperGrok table. The row cannot be deleted by the
+application role nor moved to another provider or organization.
+
+**Fix forward.** After commit there is no down migration. Restoring the
+pre-migration backup discards every change made since; use it only if the
+migration itself is wrong and no traffic has been served. Otherwise ship a
+fix-forward binary and, if data needs repair, a narrowly scoped, idempotent,
+alias-aware, parity-checked forward migration, keeping affected
+organizations switched off meanwhile. Never copy rows back to the legacy
+tables, drop aliases, reset refresh generations or clear waiters.
+
+**With the Claude cutover.** The SuperGrok and Claude cutovers touch disjoint
+legacy tables and only their own provider's keys in shared relations, and
+each commits in its own transaction with its own parity. Either order of
+releases works:
+
+- Separately: deploy the release that carries 0747, run steps 1 to 6 in one
+  window, and run the Claude cutover's window with its later release.
+- In one window: deploy a release that carries both. Drain and back up once,
+  take both inventories, and run the migrator once with the same roles and
+  key; it applies 0747 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0747 stays committed: fix the named Claude rows and
+  run the migrator again (it resumes at the Claude cutover). Start binaries
+  only after both receipts exist; readiness refuses a database missing
+  either. Validate each provider's report rows separately. While only 0747
+  is committed no binary can start: this release needs both receipts and
+  the old release must not run after 0747. If the Claude rows cannot be
+  fixed within the window, restore the step 3 backup and use the separate
+  path, or deploy a release that carries 0747 but not the Claude cutover.
+  The Claude steps are in
+  [Claude on the shared subscription core (0748)](#claude-on-the-shared-subscription-core-0748).
+
+### Claude on the shared subscription core (0748)
+
+Migration `0748_subscription_core_claude_cutover.sql` is a one-way
+maintenance cutover, the Claude counterpart of 0689 and 0747, and shares
+0747's receipt, readiness, report, compatibility-record and stage machinery.
+It moves every organization's Claude (`claude`) subscription state onto the
+shared subscription core, records the `claude` receipt and registry row, and
+enables the Claude cutover row for every organization, in one transaction.
+Design record:
+[subscription core, C3](design/subscription-core-2026-10-07.md#c3-the-drained-claude-cutover).
+The release that carries it must also carry the dormant Claude core runtime
+(chat placement, settlement, waits, usage, routes and writers); after the
+receipt the runtime serves Claude only through the core.
+
+What it moves, per organization: credentials (OAuth logins and setup tokens,
+each copied unchanged as `claude_oauth_v1` or `claude_setup_token_v1`; shared
+workspace accounts become organization-owned connections assigned to their
+workspace; organization accounts keep their allowlist, workspace reach and
+Personal-workspace reach; a Personal workspace's accounts and every
+`user`-scoped account become their owner's personal connections), one
+secret copy each with its health, allocator counters and legacy
+`exhausted_until`, the current usage reading from
+`claude_subscription_account_usage` with its per-model cooldowns and request
+restrictions re-keyed from Anthropic's model ids to Opengeni's product model
+ids, rotation and primaries, the workspace inference source, session pins as
+bindings, live leases with their exact fences, waiting capacity waiters with
+their ids, generations, wake revisions and pending wakes, each live turn's
+`claudeAuthRecovery` value as a turn-failure receipt, an accepted-authority
+compatibility record for every live carrier, and one fresh personal
+authority generation per owner. Legacy rows stay for forensics. The six
+legacy Claude tables (`claude_subscription_credentials`,
+`claude_rotation_settings`, `claude_credential_leases`,
+`claude_session_account_pins`, `claude_capacity_waiters`,
+`claude_subscription_account_usage`) become read-only as 0747 does for
+SuperGrok: the runtime role keeps only `SELECT`, restrictive policies refuse
+every insert or update once the receipt exists, the legacy disconnect
+refuses, and no role can add a legacy Claude personal authority.
+
+Every eligible Claude pin in its effective pool becomes a Claude binding,
+regardless of the session's current model. Codex and SuperGrok bindings stay
+exactly unchanged, including choice, version and cache clock; the
+`other_provider_session_bindings` parity metric checks every stored field.
+There is no Claude `pin_other_provider_binding_kept` disposition. Shared
+settings rows gain only their `claude` keys and the Claude primary, subject
+to organization locks, plus the Personal-workspace fallback override.
+Existing per-person fallback preferences remain unchanged; D-28 preserves
+Personal-workspace use without inventing consent elsewhere. No SuperGrok
+legacy data is moved.
+
+**Provider-keyed binding prerequisite.** The release must include the
+provider-keyed binding precursor before the first provider cutover (planned
+SuperGrok), with primary key `(workspace_id, session_id, provider)` and
+`subscription_session_bindings_provider_fixed` enabled. Claude preflight
+refuses a missing key or disabled guard. After both runtime drain checks,
+Claude drops `subscription_session_bindings_rolling_session_idx` with
+`DROP INDEX IF EXISTS`, before any binding writes or activation. Normally
+SuperGrok already removed it. Claude keeps the provider-fixed trigger
+enabled even while other row triggers are disabled for the owner window.
+Exclude every previous binary, including its ability to restart: losing
+the old upsert conflict target does not fence its unscoped reads or UPDATEs.
+Do not activate a stack whose ledger runs the binding precursor after X3;
+renumber dependencies through their owners before shipping.
+
+**1. Inventory (before the window).** Run every query in this step as a
+superuser or another `BYPASSRLS` role: the schema owner is subject to row
+security and sees no legacy Claude rows, so its counts all read 0. Start the
+session with this guard, which stops otherwise:
+
+```sql
+\set ON_ERROR_STOP on
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the 0748 inventory as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+```
+
+```sql
+SELECT account_id, authority_scope, count(*) FROM claude_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, authority_scope, count(*) FROM claude_rotation_settings GROUP BY 1, 2;
+SELECT account_id, count(*) FROM claude_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM claude_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM claude_session_account_pins
+  WHERE pinned_credential_id IS NOT NULL OR last_credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM claude_subscription_account_usage GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+  GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+    AND metadata ? 'claudeAuthRecovery'
+  GROUP BY 1;
+```
+
+0598 moved every legacy Claude model connection into the account pools and
+revoked it. Confirm none is left; the migration aborts with
+`legacy_connection_not_revoked` otherwise:
+
+```sql
+SELECT account_id, id FROM connections
+  WHERE metadata->>'credentialRole' = 'claude_subscription'
+    AND (status <> 'revoked' OR credential_encrypted <> '');
+SELECT account_id, id FROM organization_model_provider_connections
+  WHERE provider_kind = 'claude_subscription'
+    AND (status <> 'revoked' OR credential_encrypted <> '');
+```
+
+Still as that role, confirm the core holds no Claude state
+yet. Each query must return no rows:
+
+```sql
+SELECT account_id, id, ownership FROM subscription_connections WHERE provider = 'claude';
+SELECT account_id, alias_connection_id FROM subscription_connection_aliases WHERE provider = 'claude';
+SELECT account_id, session_id FROM subscription_session_bindings WHERE provider = 'claude';
+SELECT account_id, turn_id FROM subscription_leases WHERE provider = 'claude';
+SELECT account_id, session_id FROM subscription_capacity_waiters WHERE provider = 'claude';
+SELECT account_id FROM subscription_operation_leases WHERE provider = 'claude';
+SELECT account_id, turn_id FROM subscription_turn_failures WHERE provider = 'claude';
+SELECT account_id, enabled FROM subscription_provider_cutovers WHERE provider = 'claude';
+SELECT account_id, carrier_kind FROM opengeni_private.subscription_authority_compat
+  WHERE provider = 'claude';
+SELECT account_id, workspace_id FROM subscription_settings
+  WHERE claude_primary_connection_id IS NOT NULL;
+```
+
+List the workspaces whose Claude setting will follow a locked organization
+value; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM claude_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+  AND NOT EXISTS (SELECT 1 FROM organization_memberships owner
+    WHERE owner.account_id = workspace.account_id
+      AND owner.personal_workspace_id = workspace.id);
+```
+
+After the drained-role preflight, the migration holds `ACCESS EXCLUSIVE`
+locks on `subscription_settings` and the other moved relations until commit.
+These protect the organization-lock reads and workspace override writes;
+the owner window disables and restores the fence-checking triggers while
+keeping the provider-fixed trigger enabled. It takes no organization settings
+advisory locks: waiting on one after a table lock would invert the runtime
+writers' lock order. `READ COMMITTED` is still required, and locked keys,
+Personal-workspace fallback handling and their parity assertions are unchanged.
+
+**2. Stop and drain. 3. Back up.** As for 0747. Do not cancel turns.
+
+**4. Migrate.** Run the TypeScript migrator as the schema owner with
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` and
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, as for 0747. Plain `psql` is refused.
+Each credential is decrypted, checked, re-encrypted and read back before the
+legacy copy is blanked. An installation without legacy Claude credentials
+needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drain-check
+failure; an undecodable credential (fixed message, no material); a legacy
+Claude model connection that is not revoked
+(`legacy_connection_not_revoked`); identity or ownership ambiguity, named by
+content-free classes such as `provider_identity_mismatch` (the stored
+account id is neither the token's Claude account nor its `oauth:` or
+`setup:` derived id), `personal_workspace_owner_ambiguous`,
+`personal_owner_missing`, `unrepresentable_status`, `unrepresentable_scope`,
+`session_owner_ambiguous`, `personal_generation_ambiguous` or
+`pin_pool_ambiguous`; `lease_conflict`, `waiter_conflict` or
+`waiter_workflow_mismatch`; pre-existing core Claude state; or a parity
+mismatch (`0748 parity mismatch (<metrics>)`). Database errors surface only
+as `could not write the shared core (SQLSTATE <code>, <constraint>)`. Fix the
+named legacy rows and run the migrator again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles` (the runtime role
+keeps only `SELECT` on the six legacy Claude tables), then start only
+binaries of this release. Readiness refuses a database without the `claude`
+receipt (`opengeni_private.subscription_provider_cutover_committed('claude')`);
+an older binary must never be restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The 0747 report query with `provider = 'claude'` returns no rows, and
+  `compat:dependent_sources_without_record` is zero. Claude adds these
+  `disposition:*` rows to 0747's: `auth_recovery_unmapped` (a live
+  `claudeAuthRecovery` value naming no moved credential; nothing to bound),
+  `auth_recovery_not_current` (a live value naming a duplicate login, now an
+  alias, or an older credential version; no receipt),
+  `auth_recovery_malformed` (a value without a credential id and a positive
+  version; ignored), `usage_rows_stale` (a usage row of an older credential
+  version; only the legacy `exhausted_until` moved), `usage_snapshot_unreadable`
+  (a current usage row that does not decode; the connection's usage is
+  unknown until its first reading) and `usage_reconnect_pending` (the last
+  usage refresh asked for a reconnect; it stays a quota fact and the
+  connection status is unchanged). The `local_pool_freeze_locked:<workspace>`
+  and `local_rotation_locked:<workspace>` rows list each workspace whose
+  Claude source, rotation or primary the organization's lock kept.
+  `readiness:owners_with_multiple_current_personal_generations` is zero for
+  `claude`.
+- Every organization has `subscription_provider_cutovers (provider = 'claude',
+  enabled = true)`.
+- Waiting Claude turns keep their waiter (same id, generation and wake
+  revisions) and resume through the core; no workflow reset is needed. A
+  live turn that had already spent its one forced token refresh of a
+  connection's current credential has an `unauthorized` row in
+  `subscription_turn_failures` for that connection with `refusals: 0` (it
+  does not use the turn's failover bound); one that renewed a duplicate
+  login or an older version is listed as `auth_recovery_not_current`.
+
+**Release notes (behaviour users can see).**
+
+- An OAuth login and a setup token of the same Claude account stay two
+  accounts; neither is merged into the other.
+- An account a person connected for themselves (`user` scope) becomes their
+  personal connection, usable in their own private sessions in any
+  workspace that allows personal connections. Accounts connected in a
+  Personal workspace become the owner's personal connection, as for
+  SuperGrok.
+- A workspace that had its own Claude accounts keeps using only them, unless
+  the organization locks the provider settings or rotation (listed in the
+  report).
+- Work accepted before the cutover keeps exactly the accounts it was
+  accepted with; personal access is re-issued at one new generation per
+  owner.
+- Usage windows, per-model cooldowns and request restrictions of the current
+  reading carry over; a stale or unreadable reading does not (only a running
+  account exhaustion does), so such an account shows unknown usage until its
+  next reading.
+- An account whose last usage check asked for a reconnect was held out of
+  selection; after the cutover it is selectable again (and chosen first when
+  it is the primary or a session's explicit choice) until a request or the
+  next refresh shows it still needs signing in, which then marks it.
+
+**Containment and fix forward.** As for 0747, with the Claude cutover row.
+
+**With the SuperGrok cutover.** 0747 and 0748 touch disjoint legacy tables
+and only their own provider's keys, each with its own parity report and
+readiness gate. Run them in separate windows (each release carries one) or
+together as described in "With the Claude cutover" above. A release that
+carries 0748 also carries 0747, so the SuperGrok window comes first or
+shares the Claude window.
+
+### Subscription legacy retirement (0751)
+
+Migration `0751_subscription_core_legacy_retirement.sql` is a one-way
+**maintenance** migration: drained, never rolling. It retires what the
+SuperGrok (0747) and Claude (0748) cutovers left unused:
+
+- the legacy SuperGrok and Claude pool routines: account writers, pool
+  resolvers, revalidators, liveness and visibility predicates, and their
+  trigger functions;
+- the triggers and row policies that call them;
+- the 19 Codex-named twins of the provider-neutral routines and their two
+  owner-only internals;
+- 0689's unused Codex auto-assignment routine.
+
+It also gives the organization reach rows provider-free names. The table
+`opengeni_private.subscription_codex_auto_assignments` becomes
+`opengeni_private.subscription_core_auto_assignments`, replacing 0713's view
+of that name. Each row must name a connection of its own provider, and the
+`codex` column default goes.
+
+Legacy tables and columns, every cutover receipt and the `*_closed`
+restrictive policies stay. The legacy SuperGrok and Claude tables keep
+FORCE RLS without a permissive policy, so the runtime role reads no row
+from them. The migration changes no row and needs no encryption key.
+Design record:
+[subscription core, R](design/subscription-core-2026-10-07.md#r-retirement-of-the-legacy-pool-routines-and-the-codex-twins).
+
+**When.** Run it after the `xai` and `claude` cutover receipts are
+committed: in the Claude window right after 0748, or in a later window.
+Only the release that carries it, or a later one, starts on a retired
+database. Older releases refuse it because their runtime posture requires
+the dropped routines. This release refuses a database without it
+(`retired subscription <object> is present; apply the drained retirement
+migration 0751_subscription_core_legacy_retirement.sql`). Stop everything
+before migrating, and start only this release afterwards.
+
+**1. Check (before the window).** Run these queries as a superuser or
+another `BYPASSRLS` role, behind the guard from 0748 step 1. Every row of
+the first query must read `committed = true`, and the second must return no
+rows:
+
+```sql
+SELECT provider, opengeni_private.subscription_provider_cutover_committed(provider) AS committed
+FROM unnest(ARRAY['codex', 'xai', 'claude']) AS provider;
+
+SELECT auto.account_id, auto.connection_id, auto.provider, connection.provider
+FROM opengeni_private.subscription_codex_auto_assignments auto
+JOIN subscription_connections connection
+  ON connection.account_id = auto.account_id AND connection.id = auto.connection_id
+WHERE connection.provider <> auto.provider;
+```
+
+No supported path writes a reach row whose provider differs from its
+connection's provider, so investigate any such row before the window.
+Deleting it removes only that connection's reach to workspaces created
+later; an administrator can set the reach again in the access editor.
+
+**2. Stop and drain. 3. Back up.** As for 0747. Include idle pooled
+connections: the migration refuses while any application login is
+connected.
+
+**4. Migrate.** Run the TypeScript migrator as the schema owner with
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, the complete list of old
+and new runtime logins (for example `["opengeni_app"]`). Plain `psql` is
+refused, because it does not pass that list. The preflight changes nothing.
+Every refusal rolls back the whole migration, and nothing is committed:
+
+| SQLSTATE | Message | Meaning and fix |
+|---|---|---|
+| `55000` | `0751 requires explicit application database roles` or `received invalid application roles` | The role list is missing or malformed. Pass it and run again. |
+| `55000` | `0751 requires drained application sessions` | A listed login, or another non-superuser login that could execute a retired routine or write an affected table, is connected. This includes transitive `SET ROLE` access by `NOINHERIT` logins, before or after switching roles. Stop it and run again. |
+| `55000` | `0751 requires the provider cutover receipts (0712)` or `the committed cutover receipt of every provider; missing: <providers>` | A cutover has not committed. Complete 0747 or 0748 first. |
+| `55000` | `0751 found a retired routine missing or changed`, `an unexpected overload of a retired routine`, `a retired policy missing`, `a retired trigger missing or changed`, `the reach table, its view, its default or the connection key changed`, or `a reach routine` (or `reach trigger`, `reach policy`) `missing, changed or already renamed` | The schema differs from what 0747 and 0748 leave. Something changed it out of band, so do not edit around it: restore the step 3 backup or escalate. |
+| `2BP01` | `0751 found a kept object that depends on a retired routine`, `names a retired object` or `names a Codex-named reach object` | Something that stays still calls or names a retired object: a routine (SQL-standard bodies included), a policy, a trigger's `WHEN` clause or arguments, a view, a default or a `CHECK` constraint. Matching is case-insensitive and covers `format()` patterns and ordinary or dollar-quoted fragments concatenated around the provider. Escalate; never drop it by hand. |
+| `55000` | `0751 received an invalid retired name` | A defect in the migration's own lists. Escalate. |
+| `23503` | `0751 found a reach row whose provider is not its connection's` | Fix it as in step 1 and run again. |
+| `55P03` | lock timeout | A session still holds a table. Drain it and run again. |
+
+The FK validation temporarily removes FORCE RLS from
+`subscription_connections` within the migration transaction so the restricted
+schema owner can validate populated reach rows, then restores it. A refusal
+rolls back that change together with the migration; runtime sessions remain
+drained throughout.
+
+**5. Provision roles and start.** Run `db:provision-roles`. Its inventory-derived
+conditional revokes protect old owner-only helpers if provisioning runs before
+retirement and become no-ops after those objects disappear. It also revokes the
+renamed reach trigger functions by their new names. Then start only binaries
+of this release.
+
+**6. Validate after start.** Runtime posture is ready on every API and
+worker; the posture checks that every retired object is absent.
+`\d opengeni_private.subscription_core_auto_assignments` shows a table with
+`subscription_core_auto_assignments_connection_provider_fkey` and no
+`provider` default. Organization connections still reach workspaces created
+later.
+
+**Forward-only.** There is no down migration, and recovery is fix-forward.
+Before the new release has written anything, restoring the step 3 backup
+and starting the previous release is the only way back. After that,
+restoring loses every write since.
 
 ### Slack API pilot activation (0597)
 

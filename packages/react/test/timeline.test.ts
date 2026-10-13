@@ -75,6 +75,38 @@ describe("toolDisplayName", () => {
 
 let sequence = 0;
 
+describe("SUB-FAIL-06 serving switch presentation", () => {
+  test("one identity-free notice survives replay without duplicating provider aliases", () => {
+    const recorded = [
+      event("subscription.account.switched", {
+        reason: "failover_cross_provider",
+        fromAccountId: "secret-owner",
+        toAccountId: "secret-account",
+        accountEmail: "private@example.test",
+      }),
+      event("subscription.account.selected", { provider: "claude", modelId: "fallback-model" }),
+      event("codex.account.switched", { accountEmail: "private@example.test" }),
+    ];
+    const items = buildTimeline(JSON.parse(JSON.stringify(recorded)));
+    expect(items.filter((item) => item.kind === "notice")).toMatchObject([
+      { kind: "notice", tone: "input", text: "Switched to a fallback model." },
+    ]);
+    expect(JSON.stringify(items)).not.toContain("secret-");
+    expect(JSON.stringify(items)).not.toContain("private@example.test");
+  });
+
+  test("same-provider rotation and return to preferred have distinct quiet notices", () => {
+    const items = buildTimeline([
+      event("subscription.account.switched", { reason: "failover_same_provider" }),
+      event("subscription.account.switched", { reason: "return_to_preferred" }),
+    ]);
+    expect(items.filter((item) => item.kind === "notice").map((item) => item.text)).toEqual([
+      "Switched to another subscription account.",
+      "Returned to your preferred model.",
+    ]);
+  });
+});
+
 function event(
   type: string,
   payload: unknown,
