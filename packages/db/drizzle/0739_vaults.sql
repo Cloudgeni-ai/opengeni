@@ -275,10 +275,65 @@ ALTER TABLE sessions
   ADD COLUMN IF NOT EXISTS vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
   ADD CONSTRAINT sessions_vault_policy_check
     CHECK (opengeni_private.vault_policy_is_valid(vault_policy));
+
+-- A schedule's execution digest hashes its whole row, so a new column would
+-- change every stored digest and leave accepted run receipts and revision
+-- authorities out of step. Record which stored digests reproduce before the
+-- column is added; each of them must still reproduce afterwards.
+ALTER TABLE scheduled_tasks NO FORCE ROW LEVEL SECURITY;
+CREATE TEMP TABLE vault_schedule_digests_before ON COMMIT DROP AS
+SELECT task.id
+FROM scheduled_tasks task
+WHERE task.execution_digest = scheduled_task_execution_digest(task);
+
 ALTER TABLE scheduled_tasks
   ADD COLUMN IF NOT EXISTS vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
   ADD CONSTRAINT scheduled_tasks_vault_policy_check
     CHECK (opengeni_private.vault_policy_is_valid(vault_policy));
+
+-- A schedule's vault policy is execution configuration: narrowing it gives
+-- the schedule a new digest like any other execution change. The default
+-- policy (every vault the owner may use) is how every schedule ran before
+-- vaults, so the digest leaves it out and existing digests stay exact. Both
+-- digest routines are rewritten at one anchor, as 0720 did for `visibility`.
+DO $vault_schedule_digest$
+DECLARE
+  target record;
+  definition text;
+  anchor constant text := $a$ARRAY['creator_session_policy'] ELSE ARRAY[]::text[] END)$a$;
+BEGIN
+  FOR target IN
+    SELECT * FROM (VALUES
+      ('scheduled_task_execution_digest(scheduled_tasks)', 'p_task'),
+      ('set_scheduled_task_execution_digest()', 'NEW')
+    ) AS routine(signature, row_name)
+  LOOP
+    definition := pg_catalog.pg_get_functiondef(target.signature::regprocedure);
+    IF (pg_catalog.length(definition)
+        - pg_catalog.length(pg_catalog.replace(definition, anchor, '')))
+        / pg_catalog.length(anchor) <> 1 THEN
+      RAISE EXCEPTION 'scheduled task digest definition changed: %', target.signature;
+    END IF;
+    EXECUTE pg_catalog.replace(definition, anchor, anchor || pg_catalog.format($f$
+          - (CASE WHEN %1$s.vault_policy = '{"mode":"all"}'::jsonb
+              THEN ARRAY['vault_policy'] ELSE ARRAY[]::text[] END)$f$, target.row_name));
+  END LOOP;
+END
+$vault_schedule_digest$;
+
+DO $vault_schedule_digest_check$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM vault_schedule_digests_before prior
+    JOIN scheduled_tasks task ON task.id = prior.id
+    WHERE task.execution_digest IS DISTINCT FROM scheduled_task_execution_digest(task)
+  ) THEN
+    RAISE EXCEPTION '0739 would change an accepted scheduled-task execution digest';
+  END IF;
+END
+$vault_schedule_digest_check$;
+ALTER TABLE scheduled_tasks FORCE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------------
 -- 3. Copy active variable sets into vaults (same IDs, byte-identical values)

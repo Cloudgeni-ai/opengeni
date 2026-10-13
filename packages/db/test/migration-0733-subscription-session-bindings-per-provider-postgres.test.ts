@@ -38,7 +38,11 @@ import {
   readSubscriptionSessionBinding,
   writeSubscriptionSessionBinding,
 } from "../src/subscription-core-repository";
-import { stageVaultPolicyColumns, withoutAbsentVaultPosture } from "./vault-policy-column-fixture";
+import {
+  stageVaultPolicyColumns,
+  withoutAbsentVaultPosture,
+  stageConnectionAccountIntentColumns,
+} from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
 
@@ -249,6 +253,7 @@ beforeAll(async () => {
       await staging`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
+    await stageConnectionAccountIntentColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();

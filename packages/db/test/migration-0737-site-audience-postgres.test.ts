@@ -14,7 +14,10 @@ import postgres from "postgres";
 import { createDb, createSession, ensureManagedAccessForUser, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { stageVaultPolicyColumns } from "./vault-policy-column-fixture";
+import {
+  stageVaultPolicyColumns,
+  stageConnectionAccountIntentColumns,
+} from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
 
@@ -41,6 +44,7 @@ beforeAll(async () => {
       await staging`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
+    await stageConnectionAccountIntentColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
     });

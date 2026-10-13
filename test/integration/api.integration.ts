@@ -3546,10 +3546,12 @@ describe("API component integration", () => {
     );
 
     // Scheduled tasks mirror sessions: an absent agentConfig.tools key means
-    // "give me the workspace's enabled capability MCP servers", an explicit
-    // list (even empty) is taken verbatim. Without this, a task created
-    // toolless runs with no MCP servers at all (live customer-one lesson:
-    // maintenance tasks that cannot reach the workspace notebook MCP).
+    // "follow the workspace's default connectors at each run" (stored as
+    // toolPolicy workspace_default, so a connector added later still reaches
+    // the next run); an explicit list (even empty) is taken verbatim. Without
+    // this, a task created toolless runs with no MCP servers at all (live
+    // customer-one lesson: maintenance tasks that cannot reach the workspace
+    // notebook MCP).
     const omittedTaskResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3562,13 +3564,13 @@ describe("API component integration", () => {
     expect(omittedTaskResponse.status).toBe(201);
     const omittedTask = (await omittedTaskResponse.json()) as {
       id: string;
-      agentConfig: { tools: unknown[] };
+      agentConfig: { tools: unknown[]; toolPolicy?: unknown };
     };
-    expect(omittedTask.agentConfig.tools).toContainEqual({
-      kind: "mcp",
-      id: "cap-route-mcp",
-      optional: true,
+    expect(omittedTask.agentConfig.toolPolicy).toEqual({
+      mode: "workspace_default",
+      excludedMcpServerIds: [],
     });
+    expect(omittedTask.agentConfig.tools).toEqual([]);
 
     const explicitEmptyTaskResponse = await app.request(
       workspacePath(workspaceId, "/scheduled-tasks"),
@@ -3585,9 +3587,10 @@ describe("API component integration", () => {
     expect(explicitEmptyTaskResponse.status).toBe(201);
     const explicitEmptyTask = (await explicitEmptyTaskResponse.json()) as {
       id: string;
-      agentConfig: { tools: unknown[] };
+      agentConfig: { tools: unknown[]; toolPolicy?: unknown };
     };
     expect(explicitEmptyTask.agentConfig.tools).toEqual([]);
+    expect(explicitEmptyTask.agentConfig.toolPolicy).toBeUndefined();
 
     // Updates follow the same contract when agentConfig is replaced.
     const patchedDefault = await app.request(
@@ -3599,9 +3602,15 @@ describe("API component integration", () => {
       },
     );
     expect(patchedDefault.status).toBe(200);
-    expect(
-      ((await patchedDefault.json()) as { agentConfig: { tools: unknown[] } }).agentConfig.tools,
-    ).toContainEqual({ kind: "mcp", id: "cap-route-mcp", optional: true });
+    const patchedDefaultTask = (await patchedDefault.json()) as {
+      agentConfig: { tools: unknown[]; toolPolicy?: unknown };
+    };
+    // An edit that omits tools follows the workspace defaults again.
+    expect(patchedDefaultTask.agentConfig.toolPolicy).toEqual({
+      mode: "workspace_default",
+      excludedMcpServerIds: [],
+    });
+    expect(patchedDefaultTask.agentConfig.tools).toEqual([]);
     const patchedExplicit = await app.request(
       workspacePath(workspaceId, `/scheduled-tasks/${omittedTask.id}`),
       {
@@ -3613,9 +3622,16 @@ describe("API component integration", () => {
       },
     );
     expect(patchedExplicit.status).toBe(200);
-    expect(
-      ((await patchedExplicit.json()) as { agentConfig: { tools: unknown[] } }).agentConfig.tools,
-    ).toEqual([]);
+    const patchedExplicitTask = (await patchedExplicit.json()) as {
+      agentConfig: { tools: unknown[]; toolPolicy?: unknown };
+    };
+    // An edit that names tools but no policy keeps the policy the schedule
+    // already follows; the tools are additions on top of the defaults.
+    expect(patchedExplicitTask.agentConfig.toolPolicy).toEqual({
+      mode: "workspace_default",
+      excludedMcpServerIds: [],
+    });
+    expect(patchedExplicitTask.agentConfig.tools).toEqual([]);
     await dbClient.db.execute(dbSql`
       update capability_installations
       set status = 'disabled', updated_at = now()

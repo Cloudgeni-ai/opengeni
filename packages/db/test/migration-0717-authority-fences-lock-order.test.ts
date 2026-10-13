@@ -33,7 +33,10 @@ import {
 import { withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { stageVaultPolicyColumns } from "./vault-policy-column-fixture";
+import {
+  stageVaultPolicyColumns,
+  stageConnectionAccountIntentColumns,
+} from "./vault-policy-column-fixture";
 
 const FENCES = "0717_subscription_authority_fences.sql";
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -367,6 +370,7 @@ beforeAll(async () => {
     for (const name of heldBack) await owner`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
+    await stageConnectionAccountIntentColumns(database.ownerUrl);
     await owner`delete from schema_migrations where name = any(${heldBack}::text[])`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {

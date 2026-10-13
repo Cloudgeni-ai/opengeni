@@ -18,7 +18,11 @@ import {
   setSubjectRlsContext,
   withSessionActivityRlsContext,
 } from "../src";
-import { stageVaultPolicyColumns } from "./vault-policy-column-fixture";
+import {
+  stageVaultPolicyColumns,
+  stageConnectionAccountIntentColumns,
+  dropConnectionAccountIntentColumns,
+} from "./vault-policy-column-fixture";
 
 const repair = "0552_usage_allowances.sql";
 // Current adapters require the actual nullable agent config and canonical
@@ -96,6 +100,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
     await stageVaultPolicyColumns(owned.ownerUrl);
+    await stageConnectionAccountIntentColumns(owned.ownerUrl);
     // Current adapters need nullable reader fields, not the deferred import
     // lifecycle. Remove these before the real ordered migration replay.
     await owner`ALTER TABLE sessions
@@ -352,6 +357,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     for (const table of v2CarrierTables)
       await owner.unsafe(`ALTER TABLE ${table} DROP COLUMN subscription_authority`);
     await owner`ALTER TABLE scheduled_tasks DROP COLUMN visibility`;
+    await dropConnectionAccountIntentColumns(owned.ownerUrl);
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);
