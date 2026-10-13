@@ -49129,6 +49129,63 @@ export async function listEndedEpochWorkspaceBlockers(
   }));
 }
 
+export type EndedEpochSandboxSetupUncertainty = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  sandboxGroupId: string;
+  box: TerminatedSandboxSetupBox;
+};
+
+/**
+ * Recovering turns whose sandbox setup start outcome is unknown and whose
+ * every setup request ran on one exact Modal box the lease has since moved
+ * past. Lease succession is not proof the box is gone: the caller inspects the
+ * exact historical sandbox and passes it to `reconcileCompletedSandboxSetup`
+ * only on a terminated observation. Directly paused sessions are not listed.
+ */
+export async function listEndedEpochSandboxSetupUncertainties(
+  db: Database,
+  input: { limit: number },
+): Promise<EndedEpochSandboxSetupUncertainty[]> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 500) {
+    throw new Error("Ended-epoch setup batch is invalid");
+  }
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    session_id: string;
+    turn_id: string;
+    attempt_id: string;
+    lease_id: string;
+    sandbox_group_id: string;
+    lease_epoch: number | string;
+    provider_backend: string;
+    provider_instance_id: string;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_sandbox_ended_epoch_setup_uncertainties(${input.limit}::integer)`,
+  );
+  return rows
+    .filter((row) => row.provider_backend === "modal")
+    .map((row) => ({
+      accountId: row.account_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      turnId: row.turn_id,
+      attemptId: row.attempt_id,
+      sandboxGroupId: row.sandbox_group_id,
+      box: {
+        leaseId: row.lease_id,
+        leaseEpoch: Number(row.lease_epoch),
+        providerBackend: "modal" as const,
+        providerInstanceId: row.provider_instance_id,
+      },
+    }));
+}
+
 /**
  * Settle the open requests and PTYs of one listed tuple after the caller
  * observed its exact Modal box terminated. Requests are rejected (never
@@ -76599,9 +76656,24 @@ async function hasWaitingSandboxSetupForWriterTx(
   return row?.waiting === true;
 }
 
+/** The exact provider box every setup request of an uncertain attempt ran on,
+ * observed terminated by the provider after its lease moved to a later epoch. */
+export type TerminatedSandboxSetupBox = {
+  leaseId: string;
+  leaseEpoch: number;
+  providerBackend: "modal";
+  providerInstanceId: string;
+};
+
 /** Retire an uncertainty marker after physical completion, not after a timeout.
  * Setup reruns its idempotent preparation; this does not declare setup successful
- * or replay an uncertain provider command. Peek itself remains read-only. */
+ * or replay an uncertain provider command. Peek itself remains read-only.
+ *
+ * Physical completion is either the exit of the setup's retained process, or a
+ * caller's terminated observation of the exact box every setup request of the
+ * attempt ran on (`terminatedBox`): nothing can still run on a terminated box,
+ * including a start whose process was never recorded. Missing provider state,
+ * NotFound, lease succession or time alone is never proof. */
 export async function reconcileCompletedSandboxSetup(
   db: Database,
   input: {
@@ -76610,8 +76682,19 @@ export async function reconcileCompletedSandboxSetup(
     sessionId: string;
     turnId: string;
     attemptId: string;
+    terminatedBox?: TerminatedSandboxSetupBox;
   },
 ): Promise<{ reconciled: boolean; events: SessionEvent[] }> {
+  const box = input.terminatedBox ?? null;
+  if (
+    box &&
+    (box.providerBackend !== "modal" ||
+      !Number.isSafeInteger(box.leaseEpoch) ||
+      box.leaseEpoch < 0 ||
+      box.providerInstanceId.length === 0)
+  ) {
+    throw new Error("Terminated sandbox setup box is invalid");
+  }
   return withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
       const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
@@ -76653,15 +76736,43 @@ export async function reconcileCompletedSandboxSetup(
       if (control.state !== "active") return { reconciled: false, events: [] };
       // Closed attempt + canonical session/attempt locks prevent new admissions.
       // Terminal rows cannot revert to active, so no provider or lease I/O is needed.
+      // A terminated box is the caller's provider observation; the lease row
+      // only confirms the box is no longer current (epochs never go back).
+      const setupAdmission = sql`
+        a.account_id = ${input.accountId} and a.workspace_id = ${input.workspaceId}
+        and a.session_id = ${input.sessionId} and a.attempt_id = ${attempt.id}
+        and a.turn_id = ${turn.id} and a.execution_generation = ${turn.executionGeneration}
+        and a.actor_kind = 'turn' and a.actor_id = ${attempt.id}
+        and a.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+        and a.route_kind = 'home' and a.route_target_id is null`;
+      const onTerminatedBox = (alias: "a" | "p") =>
+        box
+          ? sql`${sql.raw(alias)}.lease_id = ${box.leaseId}
+              and ${sql.raw(alias)}.lease_epoch = ${box.leaseEpoch}
+              and ${sql.raw(alias)}.provider_backend = ${box.providerBackend}
+              and ${sql.raw(alias)}.provider_instance_id = ${box.providerInstanceId}`
+          : sql`false`;
+      const setupPhysicallyEnded = box
+        ? sql`(
+            exists (
+              select 1 from sandbox_workspace_mutation_admissions a
+              where ${setupAdmission} and ${onTerminatedBox("a")}
+            ) and not exists (
+              select 1 from sandbox_workspace_mutation_admissions a
+              where ${setupAdmission} and not (${onTerminatedBox("a")})
+            ) and exists (
+              select 1 from sandbox_leases l
+              where l.id = ${box.leaseId} and l.workspace_id = ${input.workspaceId}
+                and l.backend = ${box.providerBackend}
+                and l.lease_epoch > ${box.leaseEpoch}
+                and l.instance_id is distinct from ${box.providerInstanceId}
+            )
+          )`
+        : sql`false`;
       const [proof] = await tx.execute<{ completed: boolean }>(sql`
-        select exists (
+        select (exists (
           select 1 from sandbox_workspace_mutation_admissions a
-          where a.account_id = ${input.accountId} and a.workspace_id = ${input.workspaceId}
-            and a.session_id = ${input.sessionId} and a.attempt_id = ${attempt.id}
-            and a.turn_id = ${turn.id} and a.execution_generation = ${turn.executionGeneration}
-            and a.actor_kind = 'turn' and a.actor_id = ${attempt.id}
-            and a.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
-            and a.route_kind = 'home' and a.route_target_id is null
+          where ${setupAdmission}
             and exists (
               select 1 from sandbox_retained_processes p
               where p.parent_admission_id = a.id and p.owner_attempt_id = ${attempt.id}
@@ -76669,7 +76780,7 @@ export async function reconcileCompletedSandboxSetup(
                 and p.lease_epoch = a.lease_epoch and p.provider_instance_id = a.provider_instance_id
                 and p.state = 'exited' and p.exit_code is not null
             )
-        ) and not exists (
+        ) or ${setupPhysicallyEnded}) and not exists (
           select 1 from sandbox_workspace_mutation_admissions a
           where a.workspace_id = ${input.workspaceId} and a.session_id = ${input.sessionId}
             and (a.attempt_id = ${attempt.id} or (a.actor_kind = 'process' and exists (
@@ -76682,6 +76793,8 @@ export async function reconcileCompletedSandboxSetup(
           where p.workspace_id = ${input.workspaceId} and p.session_id = ${input.sessionId}
             and p.owner_attempt_id = ${attempt.id}
             and (p.state <> 'exited' or p.exit_code is null)
+            -- A process recorded as lost on the terminated box cannot run.
+            and not (p.state = 'lost' and ${onTerminatedBox("p")})
         ) as completed
       `);
       if (!proof?.completed) return { reconciled: false, events: [] };

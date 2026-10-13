@@ -197,6 +197,24 @@ did not prove it gone is retried with exponential backoff (5 minutes doubling to
 every tick. Tuples with an active process stay with retained-process
 reconciliation.
 
+**Unknown sandbox setup on a retired box resumes once the box is proven gone.**
+A turn whose setup start outcome is unknown waits, recovering, for physical
+proof that nothing it may have started still runs. The exit of the setup's
+retained process is one proof. A start that failed before any process was
+recorded leaves nothing to exit, so the same terminated observation of the
+exact historical box is the other: the reaper lists such turns through
+`opengeni_private.list_sandbox_ended_epoch_setup_uncertainties(limit)` (an
+active recovering turn of a directly unpaused session, its closed and quiesced
+attempt, no active process, and every setup request on one Modal box whose
+lease has a later epoch and a different instance), probes that box with the
+same per-box backoff, and on a terminated observation calls
+`reconcileCompletedSandboxSetup` with that exact box. It revalidates every
+condition under the canonical locks, retires the marker, appends
+`turn.recovery.requested` (`sandbox_setup_physically_settled`) and wakes the
+session, so the same turn reruns its idempotent setup. Nothing is replayed.
+Running, NotFound, a different box, or a lease still on that epoch is never
+proof, and a refused reconciliation backs off by turn.
+
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
 own batch's durable history-item receipt; a turn-wide update query can therefore
