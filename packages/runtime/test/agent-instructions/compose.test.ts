@@ -580,8 +580,12 @@ describe("modular composer: prompt-cache stability", () => {
     expect(String(modular.instructions)).toStartWith(DEFAULT_AGENT_IDENTITY);
     expect(String(modular.instructions)).toContain("# Links and rendering");
     expect(String(modular.instructions)).not.toMatch(MARKERS.knowledge!);
+    // A capability-free modular prompt is a little over half the legacy one
+    // (17.1k vs 34.2k chars). The bound was "< half" until the secrets overhaul
+    // trimmed 329 chars of retired Variable Set text from the legacy prompt
+    // alone; the modular prompt did not grow.
     expect(String(modular.instructions).length).toBeLessThan(
-      String(legacy.instructions).length / 2,
+      String(legacy.instructions).length * 0.55,
     );
   });
 });

@@ -1113,17 +1113,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "createVariableSet",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/variable-sets",
-    "request": [
-      "CreateVariableSetRequest"
-    ],
-    "response": [
-      "VariableSet"
-    ]
-  },
-  {
     "id": "createVideoArtifactPlaybackSource",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source",
@@ -1248,20 +1237,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "DELETE /v1/workspaces/:workspaceId/environments/:variableSetId",
-    "method": "DELETE",
-    "path": "/v1/workspaces/:workspaceId/environments/:variableSetId",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "DELETE /v1/workspaces/:workspaceId/environments/:variableSetId/variables/:name",
-    "method": "DELETE",
-    "path": "/v1/workspaces/:workspaceId/environments/:variableSetId/variables/:name",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
@@ -1273,7 +1248,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
@@ -1435,25 +1419,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "deleteVariableSet",
-    "method": "DELETE",
-    "path": "/v1/workspaces/:workspaceId/variable-sets/:variableSetId",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "deleteVariableSetVariable",
-    "method": "DELETE",
-    "path": "/v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "deleteWorkspace",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "deleteWorkspaceClaudeCustomModel",
@@ -1742,7 +1721,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "EnsureWorkspaceRequest"
     ],
     "response": [
-      "EnsureWorkspaceResponse"
+      "EnsureWorkspaceResponse",
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
     ]
   },
   {
@@ -1966,6 +1953,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/connections/:connectionId/provider-vaults",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/provider-vaults",
+    "request": [],
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/connections/accounts",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/accounts",
@@ -1986,20 +1989,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/enrollments",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/enrollments",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/environments",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/environments",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/environments/:variableSetId",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/environments/:variableSetId",
     "request": [],
     "response": []
   },
@@ -2105,7 +2094,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/secrets",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/slack-task-policy",
@@ -2150,14 +2148,32 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/vaults",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/vaults/:vaultId/items",
@@ -2419,7 +2435,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ConnectionMetadata",
-      "ConnectionResponse"
+      "ConnectionResponse",
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
     ]
   },
   {
@@ -3109,24 +3133,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "getVariableSet",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/variable-sets/:variableSetId",
-    "request": [],
-    "response": [
-      "VariableSet"
-    ]
-  },
-  {
-    "id": "getVariableSetVariable",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name",
-    "request": [],
-    "response": [
-      "VariableSetSecret"
-    ]
-  },
-  {
     "id": "getVideoGenerationOperation",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/video-generation/operations/:operationId",
@@ -3150,6 +3156,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId",
     "request": [],
     "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary",
       "Workspace"
     ]
   },
@@ -4441,15 +4455,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "listVariableSets",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/variable-sets",
-    "request": [],
-    "response": [
-      "VariableSet"
-    ]
-  },
-  {
     "id": "listWorkspaceArtifacts",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts",
@@ -4840,18 +4845,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "PATCH /v1/workspaces/:workspaceId/environments/:variableSetId",
-    "method": "PATCH",
-    "path": "/v1/workspaces/:workspaceId/environments/:variableSetId",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
@@ -4969,6 +4976,38 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults",
+    "request": [],
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/connections/1password/install",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/connections/1password/install",
+    "request": [],
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/connections/atlassian/install",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connections/atlassian/install",
@@ -4993,13 +5032,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/document-bases/:baseId/search",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "POST /v1/workspaces/:workspaceId/environments",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/environments",
     "request": [],
     "response": []
   },
@@ -5189,7 +5221,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/vaults",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items",
@@ -5225,6 +5266,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/restore",
     "request": [],
     "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/:vaultId/sync",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/sync",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults/link",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults/link",
+    "request": [],
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "POST /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/grants",
@@ -5405,16 +5469,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "PUT /v1/workspaces/:workspaceId/environments/:variableSetId/variables/:name",
+    "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
     "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/environments/:variableSetId/variables/:name",
+    "path": "/v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
     "request": [],
     "response": []
   },
   {
-    "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
+    "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
     "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
     "request": [],
     "response": []
   },
@@ -5423,7 +5487,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/vault-policy",
     "request": [],
-    "response": []
+    "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/slack-task-policy",
@@ -5801,17 +5874,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InteractionInterventionMutationResponse"
-    ]
-  },
-  {
-    "id": "resolveVariableSetAttachments",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/variable-sets/resolve-attachments",
-    "request": [
-      "ResolveVariableSetAttachmentsRequest"
-    ],
-    "response": [
-      "ResolveVariableSetAttachmentsResponse"
     ]
   },
   {
@@ -6336,15 +6398,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SubscriptionRotationSettingsRequest"
     ],
     "response": []
-  },
-  {
-    "id": "setVariableSetVariable",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name",
-    "request": [],
-    "response": [
-      "VariableSetVariableMetadata"
-    ]
   },
   {
     "id": "setWorkspaceAllowance",
@@ -7312,17 +7365,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "updateSessionVariableSets",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
-    "request": [
-      "UpdateSessionVariableSetsRequest"
-    ],
-    "response": [
-      "Session"
-    ]
-  },
-  {
     "id": "updateSessionVisibility",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/visibility",
@@ -7367,17 +7409,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "updateVariableSet",
-    "method": "PATCH",
-    "path": "/v1/workspaces/:workspaceId/variable-sets/:variableSetId",
-    "request": [
-      "UpdateVariableSetRequest"
-    ],
-    "response": [
-      "VariableSet"
-    ]
-  },
-  {
     "id": "updateVideoGenerationPolicy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/video-generation/policy",
@@ -7396,6 +7427,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "UpdateWorkspaceRequest"
     ],
     "response": [
+      "InstallOnePasswordResponse",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultSummary",
       "Workspace"
     ]
   },

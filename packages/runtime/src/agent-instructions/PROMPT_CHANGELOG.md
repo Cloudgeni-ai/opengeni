@@ -209,13 +209,10 @@ from any session, so there is nothing to attach and no `variable_set_list`
 tool. Integration setup discovery starts at the capability catalog, and the
 child-session Variable Set workaround is gone. The legacy operational prompt
 gets the same two edits, because it would otherwise name a removed tool and a
-field that now returns 422.
-
-```diff
-- If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.
-- A session cannot gain a Variable Set while it works, so when even a short step needs one from `variable_set_list` that this session lacks and the request calls for it, run that step in a child created with those `variableSetIds` instead of asking the user to attach it.
-+ If access is missing, search `capability_catalog_search`.
-```
+field that now returns 422. Because both prompts changed identically, this is
+not a modular-vs-legacy difference and has no diff block: the "check
+`variable_set_list`" step was dropped from the integration-setup sentence, and
+the Variable Set child-session sentence was deleted (legacy locks updated).
 
 Workspace environment retired. Vaults replace variable sets and environment
 export is gone: secrets are written as references where they are used, so no
