@@ -62,4 +62,25 @@ describe("completed turn physical finalization", () => {
     expect(result.stdout).not.toContain("graceful_drain_requested");
     expect(result.stdout).not.toContain("host_exit_backstop");
   }, 30_000);
+  test("final cleanup releases a holder before disposing its host wrapper", async () => {
+    const result = await finalize("host-close");
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout.indexOf("holder_released")).toBeGreaterThanOrEqual(0);
+    expect(result.stdout.indexOf("host_handle_close")).toBeGreaterThan(
+      result.stdout.indexOf("holder_released"),
+    );
+    expect(result.stdout).toContain("finalizer_returned false");
+    expect(result.stdout).not.toContain("host_exit_backstop");
+  }, 30_000);
+  test("stalled host-wrapper disposal enters existing finalizer containment", async () => {
+    const result = await finalize("host-close-stalled");
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("host_handle_close");
+    expect(result.stdout).toContain('"reason":"sandbox_release"');
+    expect(result.stdout).toContain("graceful_drain_requested");
+    expect(result.stdout).toContain("host_exit_backstop");
+    expect(result.stdout).not.toContain("finalizer_returned");
+  }, 30_000);
 });

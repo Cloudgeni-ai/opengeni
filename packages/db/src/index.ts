@@ -60,6 +60,7 @@ import {
   parseSecretReference,
   type SecretReference,
   ToolReviewContext,
+  NativeBrokerCreatePlan,
   WorkspaceModelCompactionThresholdsPatch,
   cleanStoredSessionTitle,
   workspaceSettingsAllowCreditModels,
@@ -234,6 +235,10 @@ import {
 } from "./credit-debit-attribution";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { readSessionFileAttachments } from "./session-file-attachments";
+import {
+  loadNativeCommandBirthQualification,
+  validateQualifiedNativeBrokerPlan,
+} from "./native-command-qualification";
 export {
   acceptSessionFileAttachments,
   readSessionFileAttachments,
@@ -264,6 +269,7 @@ import {
   type SandboxRecoveryProjection,
   type SandboxRecoveryRequest,
   ModalRouterProviderCommand,
+  ModalBrokerProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
   sessionTurnSurfaceOrNull,
@@ -294,6 +300,11 @@ import {
 import { createRetryFailedSessionInTransaction } from "./session-retry";
 export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
 import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
+import {
+  NativeBrokerLaunchRejectionProof,
+  requireNativeBrokerLaunchRejection,
+} from "./native-broker-launch-rejection";
+export * from "./native-command-qualification";
 export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
   sessionEffectiveSandboxRecoveryBlocked,
 );
@@ -1213,6 +1224,7 @@ export * from "./model-catalog";
 
 import {
   dbBindingFor,
+  isTransactionHandle,
   rawRows,
   retryRlsPersistence,
   retryWorkspacePersistence,
@@ -41513,6 +41525,24 @@ export type SandboxProviderCreateAttempt = {
   requestSha256: string;
   startedAt: string;
   instanceId: string | null;
+  /** Trusted immutable group qualification selected before provider dispatch.
+   * Legacy creators omit it and cannot enroll a born-qualified physical box. */
+  nativeCommandQualification?: {
+    qualificationId: string;
+    activationGeneration: number;
+    sourceSha: string;
+    imageRef: string;
+    providerImageId: string;
+    providerBindingKey: string;
+    acceptanceEvidenceHash: string;
+  };
+  nativeImageSource?: {
+    kind: "stock-registry" | "qualified-filesystem-snapshot";
+    imageId: string;
+    checkpointArtifactId: string | null;
+  };
+  /** Exact original physical request recipe, not a metadata enrollment flag. */
+  nativeBroker?: NativeBrokerCreatePlan;
 };
 
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
@@ -46414,8 +46444,22 @@ export async function beginModalProviderCreate(
     appId: string;
     providerName: string;
     requestSha256: string;
+    /** Immutable server build identity read from the installed source file.
+     * Never supplied by a public request, session metadata or telemetry env. */
+    nativeSourceSha?: string;
+    /** Comes only from the actual canonical Modal selector/build boundary.
+     * The worker obtains it through the original intent's opaque preparation
+     * record, never from settings or serialized caller metadata. */
+    nativeImagePreparation?:
+      | { kind: "registry-import"; imageRef: string; imageId: string }
+      | { kind: "provider-image-id" | "unqualified-image"; imageId: string };
+    /** Read from the original physical intent's private issuance only. */
+    nativeBroker?: NativeBrokerCreatePlan;
   },
 ): Promise<void> {
+  // Copy before any await; caller mutation cannot change the admitted recipe.
+  const selectedBroker =
+    input.nativeBroker === undefined ? undefined : NativeBrokerCreatePlan.parse(input.nativeBroker);
   if (
     !input.operationId ||
     !input.providerBindingKey ||
@@ -46456,6 +46500,83 @@ export async function beginModalProviderCreate(
       ) {
         throw new Error("provider_create_outcome_unknown: provider attempt cannot be replayed");
       }
+      const qualification = await loadNativeCommandBirthQualification(tx, input);
+      const nativeBroker = validateQualifiedNativeBrokerPlan(qualification, selectedBroker);
+      if (
+        qualification &&
+        (qualification.sourceSha !== input.nativeSourceSha ||
+          qualification.imageRef !== input.imageRef ||
+          qualification.providerBindingKey !== input.providerBindingKey)
+      ) {
+        throw new Error(
+          "Native command qualified create requires its exact installed source and stock image",
+        );
+      }
+      let nativeImageSource: SandboxProviderCreateAttempt["nativeImageSource"];
+      if (qualification) {
+        const preparation = input.nativeImagePreparation;
+        if (!preparation || preparation.imageId !== input.imageId)
+          throw new Error("Native command create requires its actual canonical image preparation");
+        const archive = current.archive.current;
+        const nativeArchive =
+          archive?.version === 2 &&
+          (archive.provider === "modal_snapshot_filesystem" ||
+            archive.provider === "modal_snapshot_directory");
+        if (nativeBroker && nativeArchive)
+          throw new Error(
+            "Native broker snapshot creation requires separate preservation qualification",
+          );
+        let artifact: { id: string; object_id: string; object_kind: string } | undefined;
+        if (nativeArchive) {
+          if (
+            !input.rematerializationId ||
+            !input.selectedRevision ||
+            !row.current_checkpoint_artifact_id
+          )
+            throw new Error(
+              "Native command snapshot create requires the canonical selected checkpoint",
+            );
+          [artifact] = await tx.execute<{ id: string; object_id: string; object_kind: string }>(sql`
+            select id, object_id, object_kind from sandbox_checkpoint_artifacts
+            where id = ${row.current_checkpoint_artifact_id}::uuid and account_id = ${input.accountId}::uuid
+              and workspace_id = ${input.workspaceId}::uuid and sandbox_group_id = ${input.sandboxGroupId}::uuid
+              and source_lease_id = ${row.id}::uuid and state = 'current' and provenance = 'native_capture'
+              and provider_backend = 'modal' and provider_binding_key = ${qualification.providerBindingKey}
+              and object_id = ${archive.snapshotId} and descriptor_revision = ${input.selectedRevision}
+              and descriptor_revision = ${archive.revision}
+          `);
+          if (!artifact) throw new Error("Native command snapshot lineage is unqualified");
+        }
+        if (nativeArchive && archive.provider === "modal_snapshot_filesystem") {
+          if (
+            preparation.kind !== "provider-image-id" ||
+            artifact?.object_kind !== "modal_filesystem_snapshot" ||
+            artifact.object_id !== input.imageId
+          )
+            throw new Error(
+              "Native command filesystem restore must use its exact selected snapshot image",
+            );
+          nativeImageSource = {
+            kind: "qualified-filesystem-snapshot",
+            imageId: preparation.imageId,
+            checkpointArtifactId: artifact.id,
+          };
+        } else {
+          if (
+            preparation.kind !== "registry-import" ||
+            preparation.imageRef !== qualification.imageRef ||
+            preparation.imageId !== qualification.providerImageId
+          )
+            throw new Error(
+              "Native command stock create requires its exact authenticated registry image",
+            );
+          nativeImageSource = {
+            kind: "stock-registry",
+            imageId: preparation.imageId,
+            checkpointArtifactId: artifact?.id ?? null,
+          };
+        }
+      }
       const attempt: SandboxProviderCreateAttempt = {
         version: 1,
         operationId: input.operationId,
@@ -46470,6 +46591,21 @@ export async function beginModalProviderCreate(
         requestSha256: input.requestSha256,
         startedAt: new Date().toISOString(),
         instanceId: null,
+        ...(qualification
+          ? {
+              nativeCommandQualification: {
+                qualificationId: qualification.id,
+                activationGeneration: qualification.activationGeneration,
+                sourceSha: qualification.sourceSha,
+                imageRef: qualification.imageRef,
+                providerImageId: qualification.providerImageId,
+                providerBindingKey: qualification.providerBindingKey,
+                acceptanceEvidenceHash: qualification.acceptanceEvidenceHash,
+              },
+            }
+          : {}),
+        ...(nativeImageSource ? { nativeImageSource } : {}),
+        ...(nativeBroker ? { nativeBroker } : {}),
       };
       await tx.execute(sql`
         update sandbox_leases set provider_create_attempt = ${JSON.stringify(attempt)}::jsonb,
@@ -54978,6 +55114,35 @@ export async function rejectRetainedSupervisedLaunch(
   );
 }
 
+/** Native cancellation positively closed this exact command before spawning a
+ * supervisor. Only retained channel evidence can authorize this distinct lost
+ * outcome; no fake exit, EOF or quiescence receipt is created. */
+export async function rejectRetainedBrokerLaunch(
+  db: Database,
+  scope: { accountId: string; workspaceId: string; sessionId: string; processId: string },
+  command: ModalBrokerProviderCommand,
+  proof: NativeBrokerLaunchRejectionProof,
+): Promise<void> {
+  if (isTransactionHandle(db))
+    throw new Error("Native broker launch rejection requires an outer commit boundary");
+  const expectedCommand = ModalBrokerProviderCommand.parse(command);
+  const evidence = NativeBrokerLaunchRejectionProof.parse(proof);
+  const process = await getRetainedProcess(db, scope);
+  if (!process) throw new Error("Retained broker launch is unavailable");
+  await settleRetainedProcessWithAuthority(
+    db,
+    {
+      ...scope,
+      expected: process,
+      outcome: "lost",
+      reason: "provider_start_rejected",
+      idleGraceMs: 0,
+    },
+    expectedCommand,
+    evidence,
+  );
+}
+
 /** Compose the leaf cursor/proof persistence with canonical settlement. The
  * leaf subpath cannot import this root without reversing the DB boundary. */
 export function retainedProviderCommandPersistence(
@@ -54987,6 +55152,10 @@ export function retainedProviderCommandPersistence(
     ...retainedProviderCommandState(db, scope, publish),
     rejectSupervisedLaunch: (command: ModalRouterProviderCommand) =>
       rejectRetainedSupervisedLaunch(db, scope, command),
+    rejectBrokerLaunch: (
+      command: ModalBrokerProviderCommand,
+      proof: NativeBrokerLaunchRejectionProof,
+    ) => rejectRetainedBrokerLaunch(db, scope, command, proof),
   };
 }
 
@@ -54995,7 +55164,8 @@ export function retainedProviderCommandPersistence(
 async function settleRetainedProcessWithAuthority(
   db: Database,
   input: Parameters<typeof settleRetainedProcess>[1],
-  rejectedLaunch?: ModalRouterProviderCommand,
+  rejectedLaunch?: ModalRouterProviderCommand | ModalBrokerProviderCommand,
+  brokerRejection?: NativeBrokerLaunchRejectionProof,
 ): ReturnType<typeof settleRetainedProcess> {
   const reason = normalizeRetainedProcessSettlementReason(input.reason);
   const exitCode = input.outcome === "exited" ? (input.exitCode ?? null) : null;
@@ -55036,6 +55206,10 @@ async function settleRetainedProcessWithAuthority(
         );
       }
       if (rejectedLaunch) {
+        if (rejectedLaunch.kind === "modal-broker-v1") {
+          if (!brokerRejection) throw new Error("Broker rejection requires committed native proof");
+          await requireNativeBrokerLaunchRejection(tx, input, brokerRejection);
+        } else if (brokerRejection) throw new Error("Router rejection cannot carry broker proof");
         if (
           input.outcome !== "lost" ||
           reason !== "provider_start_rejected" ||
@@ -55044,6 +55218,8 @@ async function settleRetainedProcessWithAuthority(
           process.supervisionOutputCaptured ||
           process.reconcileProofOutcome !== null ||
           process.providerCommandInputIndex !== 0 ||
+          (rejectedLaunch.kind === "modal-broker-v1" &&
+            rejectedLaunch.capture.receiptAckObserved) ||
           !Object.values(rejectedLaunch.streams).every(
             (stream) =>
               stream.byteOffset === 0 &&
@@ -55119,7 +55295,8 @@ async function settleRetainedProcessWithAuthority(
       }
       const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
       if (
-        process.providerCommand?.kind === "modal-router-v1" &&
+        (process.providerCommand?.kind === "modal-router-v1" ||
+          process.providerCommand?.kind === "modal-broker-v1") &&
         process.providerCommand.supervision &&
         !rejectedLaunch &&
         (input.outcome !== "exited" ||
@@ -55224,6 +55401,15 @@ async function settleRetainedProcessWithAuthority(
         select set_config('opengeni.supervised_launch_rejection_binding',
           ${JSON.stringify({ processId: process.id, command: rejectedLaunch })}, true)
       `);
+      const [priorBrokerRejectionProof] = brokerRejection
+        ? await tx.execute<{ value: string | null }>(sql`
+          select current_setting('opengeni.native_broker_launch_rejection_proof', true) as value
+        `)
+        : [];
+      if (brokerRejection)
+        await tx.execute(
+          sql`select set_config('opengeni.native_broker_launch_rejection_proof', ${JSON.stringify(brokerRejection)}, true)`,
+        );
       const [updated] = await tx
         .update(schema.sandboxRetainedProcesses)
         .set({
@@ -55253,6 +55439,10 @@ async function settleRetainedProcessWithAuthority(
         await tx.execute(sql`
         select set_config('opengeni.supervised_launch_rejection_binding', ${priorRejectionBinding?.value ?? ""}, true)
       `);
+      if (brokerRejection)
+        await tx.execute(
+          sql`select set_config('opengeni.native_broker_launch_rejection_proof', ${priorBrokerRejectionProof?.value ?? ""}, true)`,
+        );
       if (!updated) {
         throw new SandboxWorkspaceMutationFencedError(
           "process_fenced",

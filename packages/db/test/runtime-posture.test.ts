@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
+import { nativeCommandQualificationTriggerBindings } from "../src/native-command-readiness";
 import {
   evaluateRuntimeDatabasePosture,
   FORCE_RLS_TABLES,
@@ -17,6 +18,8 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+  NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES,
+  NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES,
   SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
   SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
   SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
@@ -418,6 +421,20 @@ function safePosture(): RuntimeDatabasePosture {
     ownedSchemas: [],
     ownedRelations: [],
     sessionVariableSetAttachmentsCutoverPresent: true,
+    nativeCommandQualificationTriggers: nativeCommandQualificationTriggerBindings("public").map(
+      (binding) => ({
+        ...binding,
+        enabled: "O",
+        functionArguments: "",
+        unconditional: true,
+        noArguments: true,
+        internal: false,
+        nonDeferred: true,
+        relationOwner: "opengeni_migrator",
+        functionOwner: "opengeni_migrator",
+        configuration: ["search_path=pg_catalog"],
+      }),
+    ),
     retiredSubscriptionObjects: [],
     subscriptionCodexCutoverActivationPresent: true,
     subscriptionProviderCutoverReceipts: ["claude", "codex", "xai"],
@@ -478,6 +495,17 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateTables: [
+      ...NATIVE_COMMAND_QUALIFICATION_PRIVATE_TABLES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+        references: false,
+        trigger: false,
+      })),
       {
         name: "modal_native_origin_read_capabilities",
         owner: "opengeni_migrator",
@@ -552,6 +580,9 @@ function safePosture(): RuntimeDatabasePosture {
         securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
           name,
         ),
+        ...((NATIVE_COMMAND_QUALIFICATION_RUNTIME_ROUTINES as readonly string[]).includes(name)
+          ? { configuration: ["search_path=pg_catalog"] }
+          : {}),
       })),
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
         name,
@@ -642,11 +673,62 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
       },
+      ...["native_command_qualification_guard()", "native_command_receipt_immutable()"].map(
+        (name) => ({
+          name,
+          owner: "opengeni_migrator",
+          execute: false,
+          publicExecute: false,
+          securityDefiner: false,
+        }),
+      ),
     ],
   };
 }
 
 describe("runtime database posture evaluator", () => {
+  test("native qualification ledgers and owner guards reject runtime authority and read RPC hijacking", () => {
+    const posture = safePosture();
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    const ledger = posture.privateTables.find(
+      (table) => table.name === "native_command_qualifications",
+    )!;
+    for (const privilege of [
+      "select",
+      "insert",
+      "update",
+      "delete",
+      "truncate",
+      "references",
+      "trigger",
+    ] as const) {
+      ledger[privilege] = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "Native command qualification ledger native_command_qualifications is missing or has runtime authority",
+      );
+      ledger[privilege] = false;
+    }
+    ledger.extraPrivileges = ["MAINTAIN"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Native command qualification ledger native_command_qualifications is missing or has runtime authority",
+    );
+    delete ledger.extraPrivileges;
+    const guard = posture.privateRoutines.find(
+      (routine) => routine.name === "native_command_qualification_guard()",
+    )!;
+    guard.execute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Native command qualification owner-only guard native_command_qualification_guard() is missing or executable",
+    );
+    guard.execute = false;
+    const reader = posture.targetRoutines.find(
+      (routine) => routine.name === "native_command_birth_qualification(uuid, uuid, uuid)",
+    )!;
+    reader.configuration = ["search_path=public"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Native command qualification capability native_command_birth_qualification(uuid, uuid, uuid) owner is unsafe",
+    );
+  });
   test("rejects a runtime role that can execute an owner-only M3 helper", () => {
     for (const name of SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES) {
       const revoked = safePosture();
@@ -1569,6 +1651,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0744 adds one mutable transport head and one append-only inbox/outbox.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 2
+            : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+              ? 1
+              : 0) +
           // 0725 adds organization privacy preferences with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -1674,7 +1762,14 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
+      expect(RUNTIME_TABLE_PRIVILEGES.native_command_broker_entries).toEqual(["SELECT", "INSERT"]);
+      expect(RUNTIME_TABLE_PRIVILEGES.native_command_broker_transports).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+      ]);
       const tableCount =
+        2 + // 0744 encrypted native broker head and append-only receipts.
         (hasCurrentMainActivityLedger ? 341 : 218) +
         9 +
         12 +
@@ -1938,6 +2033,12 @@ describe("runtime database posture evaluator", () => {
       }
     }
     routine.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
+    for (const trigger of posture.nativeCommandQualificationTriggers) {
+      if (trigger.schema === "public") {
+        trigger.schema = "tenantx";
+        trigger.functionSchema = "tenantx";
+      }
+    }
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "tenantx" }),
     ).toEqual([]);
@@ -1954,6 +2055,12 @@ describe("runtime database posture evaluator", () => {
       }
     }
     routine.configuration = ['search_path=pg_catalog, "Tenant Space", pg_temp'];
+    for (const trigger of posture.nativeCommandQualificationTriggers) {
+      if (trigger.schema === "tenantx") {
+        trigger.schema = "Tenant Space";
+        trigger.functionSchema = "Tenant Space";
+      }
+    }
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "Tenant Space" }),
     ).toEqual([]);
@@ -2377,6 +2484,12 @@ describe("runtime database posture evaluator", () => {
   test("keeps dedicated-schema same-owner authority accepted", () => {
     const posture = safePosture();
     posture.schemas[0]!.name = "tenantx";
+    for (const trigger of posture.nativeCommandQualificationTriggers) {
+      if (trigger.schema === "public") {
+        trigger.schema = "tenantx";
+        trigger.functionSchema = "tenantx";
+      }
+    }
     for (const routine of posture.privateRoutines) {
       if (
         (SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(routine.name)
@@ -3187,6 +3300,48 @@ describe("runtime database posture evaluator", () => {
         targetSchema: "embedded",
       }),
     ).toEqual([]);
+  });
+
+  test("native qualification requires every enabled trigger with its exact relation and function", () => {
+    const safe = safePosture();
+    for (let index = 0; index < safe.nativeCommandQualificationTriggers.length; index++) {
+      const original = safe.nativeCommandQualificationTriggers[index]!;
+      const violation = `Native command qualification trigger ${original.schema}.${original.name} is missing or unsafe`;
+      const missing = safePosture();
+      missing.nativeCommandQualificationTriggers.splice(index, 1);
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(violation);
+      const corruptions = [
+        { enabled: "D" },
+        { enabled: "R" },
+        { relation: "other_relation" },
+        { functionSchema: "other_schema" },
+        { functionName: "other_guard" },
+        { functionArguments: "text" },
+        { type: 0 },
+        { updateColumns: ["unrelated_field"] },
+        { unconditional: false },
+        { noArguments: false },
+        { internal: true },
+        { nonDeferred: false },
+        { functionOwner: "other_owner" },
+        { securityDefiner: !original.securityDefiner },
+        { configuration: ["search_path=public"] },
+      ];
+      for (const corruption of corruptions) {
+        const unsafe = safePosture();
+        Object.assign(unsafe.nativeCommandQualificationTriggers[index]!, corruption);
+        expect(evaluateRuntimeDatabasePosture(unsafe, options)).toContain(violation);
+      }
+      const duplicate = safePosture();
+      duplicate.nativeCommandQualificationTriggers.push({
+        ...original,
+        relation: "other_relation",
+      });
+      expect(evaluateRuntimeDatabasePosture(duplicate, options)).toContain(violation);
+      const always = safePosture();
+      always.nativeCommandQualificationTriggers[index]!.enabled = "A";
+      expect(evaluateRuntimeDatabasePosture(always, options)).toEqual([]);
+    }
   });
 
   test("session-tenancy activation is universal and no longer has a startup interlock", () => {

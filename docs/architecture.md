@@ -55,6 +55,107 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
+The in-progress native command broker transport journal is separate from
+command admission: `packages/db/src/native-command-broker-transport.ts` owns
+scoped encrypted input/output custody, while the runtime's broker transport
+coordinator applies framing/replay rules and core composes the two packages.
+`native-command-broker-driver.ts` joins committed intent/capture with the
+separately owned Modal initial-process channel; broker bootstrap and per-command
+projection readers verify distinct artifact, receipt, output and exit facts.
+`native-command-broker-bootstrap-capture.ts` verifies a bounded read-only initial
+prefix before registration. Core commits its complete frame/page receipts and
+cursor with the transport atomically; exact registration replay never rewinds
+progress or retrofits missing evidence. The qualified core composition derives
+the original broker identity and artifact from the scoped immutable physical
+enrollment (`native_broker_bootstrap_admission`, migration `0763`), before any
+provider reads and again after capture. Warm recovery requires existing durable
+evidence; it cannot register an old running box. The separate initial-stderr
+observer in `native-command-broker-diagnostics.ts` never advances stdout state.
+Core retains its first definite fault in the encrypted append-only transport
+journal (migration `0764`); the transport then refuses new work and pending
+work dispatch while preserving exact cancellation, observation and receipt
+retirement. Clean queries cannot erase that fault. Query failure alone is
+unavailability, not a fabricated permanent fault; neither clean observations nor
+bootstrap registration grants command authority. The shared
+`native-command-broker-diagnostics-owner.ts` owns one bounded initial-stderr
+query across attached session surfaces, including periods without stdout
+waiters. New work checks share a fresh query before entering the input queue;
+recovery controls remain independent. Last release aborts and joins the actual
+read before replacement ownership can observe again. This adapter lifecycle
+is not application installation or physical provider qualification.
+`native-command-broker-coordinator.ts` shares one demand-driven collector and
+serializes input through native acceptance. It never automatically replays an
+unknown dispatch. Explicit global output ACK is limited to the committed prefix
+by the transport itself and is not command settlement. The idle-start primitive
+in `native-command-broker-start.ts` requires private exact-protocol context and a
+committed canonical reservation before prepare/definition/launch.
+`NativeBrokerCommandSession` provides the distinct retained-handle/banner
+surface without a legacy fallback. It captures output before presentation,
+preserves pages when a global ACK becomes unknown, and keeps the shared physical
+coordinator alive when one session surface closes. Positive native prelaunch
+cancellation settles through `rejectRetainedBrokerLaunch` and the independent
+journal-hash guard in migration `0765`, without fabricated exit or quiescence.
+Unknown starts retain custody. Application selection and setup ownership remain
+open; the router refuses broker-only admission rather than its older launcher.
+`retained-provider-commands.ts` atomically captures the versioned broker locator
+and session output under the canonical native receipt/holder/settlement guards;
+the task-router adapter explicitly refuses that separate locator.
+`NativeBrokerRetainedCommand` joins protected persistence to bounded committed
+output and exact control requests. A request-keyed immutable control-reply index
+distinguishes positive pre-dispatch rejection from unknown control outcomes.
+New worker/API command routing selects its pipe/PTY protocol from the frozen
+birth and exact physical qualification, never from provider capability fallback.
+`selectNativeCommandProviderProtocol` is distinct from exact-protocol inspection
+of an already retained command. Broker session creation/setup installation is
+qualified separately below; protocol selection alone is not activation.
+`modal-native-broker-session.ts` redirects the SDK's hidden foreground execs
+and cached list-directory runner through exact-backend synchronous routing.
+Helpers receive distinct canonical pipe admissions and retained output; file
+writes still need their enclosing mutation admission. Unscoped helpers and
+unqualified SDK restore/readiness paths refuse. Adapter close is host-only and
+preserves the physical snapshot wrapper's identity. Core connects this bridge
+to fresh/warm application establishment only for the original qualified birth.
+Core's `native-command-broker-session.ts` provides the qualified composition:
+original physical creation and authenticated namespace, immutable source,
+retained bootstrap, one shared coordinator per physical broker and host-only
+wrapper disposal. Fresh creation can defer its empty initial manifest until
+ordinary warm admission. Worker finalization separates eager holder release
+from host-only wrapper disposal. API `host-handle-cache.ts` gives each request
+an idempotent borrow and joins disposal only after eviction/idle expiry and the
+last borrower; legacy SDK close remains forbidden. Viewer setup takes an
+exact-instance direct holder and home-only canonical command routing, refusing
+active-machine drift rather than setting up a different box than its tunnel.
+This composition is not live activation or snapshot-restore qualification.
+The retained-input transaction locks an existing stdin admission and commits
+its command byte offset with the encrypted request. Larger writes retain one
+complete encrypted payload plan and storage pages (`0766`) before dispatch;
+derived frame UUIDs do not create child admissions. Each next frame waits for
+the previous native delivery reply, while the full reserved byte range fences
+other writers. Unknown chunks are not silently replayed. Standalone offset allocation
+and generic broker dispatch refuse this path; recovery retains the exact bytes.
+An immutable per-command reservation/reply index requires complete native stdin
+delivery before another byte range is reserved, independently of provider ACK.
+Already-retained broker routes carry server-created stdin admission in private
+runtime context, require atomic capture and reject legacy PID/marker controls.
+This bridge does not yet select a protocol or admit application commands.
+The internal Modal creation opt-in binds a fixed image-owned initial broker to
+the actual physical request and requires durable admission and post-receipt
+bootstrap gates before manifest setup (`modal-native-broker-create.ts`). This
+request binding is not qualification; application selection remains disabled.
+The broker protocol has its own operator-only artifact qualification; the
+canonical create ledger and an independent SQL guard bind the original recipe
+and reject reused physical broker identities. Router qualifications and old
+births cannot enroll this path (`native-command-qualification.ts`, migration
+`0762`). Snapshot retention remains valid, but broker snapshot restore needs
+separate preservation qualification.
+The native supervisor's distinct `broker` mode multiplexes initial-process
+input/output and launches sealed per-command supervisors through its private
+`launch-channel` primitive, not a guest-path authentication fallback. Its native
+implementation and host driver are still separate from application command admission;
+it is not wired into application command execution. See
+[`native-command-broker.md`](design/native-command-broker.md) for its remaining
+qualification, lifecycle and activation requirements.
+
 `session_event_cursors` transactionally verifies appends/monotonic sequencing/public
 `lastSequence`; `sessions.last_sequence` is compatibility-only. Semantic writers
 lock sessions for atomic state/events. Exact-attempt raw batches fence attempts,
@@ -605,8 +706,10 @@ then releases the fenced host workspace directory, because the cold commit is
 archive-only and nothing references it afterwards. Canonical leaf:
 packages/runtime/src/sandbox/providers/docker-workspace-drain.ts.
 
-Pending cancellation accepts non-dispatch only from call-scoped routing admission
-proof or typed provider rejection. Credential command decorators preserve these
+Pending cancellation accepts non-dispatch only from call-scoped routing preparation
+or admission proof, or typed provider rejection. Preparation proof ends before
+the original provider start invocation; generic provider errors cannot prove
+non-dispatch. Credential command decorators preserve these
 invocation options up to routing, which never forwards proof callbacks to the
 provider. Issued helpers retain independent physical joins after original retained
 registration. See [run lifecycle](run-lifecycle.md).
@@ -623,6 +726,27 @@ there is no provider call, closed-origin maintenance authority, budget reset or
 native producer activation in this seam.
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
+Permanently turn-owned bare shells require native ownership independently of
+the default-off background-launch flag. PTYs use `native-subreaper-pty-v1`, with
+an inherited controlling terminal and a separate child foreground group;
+pipe-mode shells retain v1. The forward PTY database guard and exact-instance
+protocol capability must pass before admission, with no legacy PGID fallback.
+Operator qualification records bind exact source, stock desktop digest, the
+actual authenticated Modal provider-image ID/namespace, native acceptance
+evidence, and one exact authenticated human/create-key pair. Canonical session
+INSERT freezes only the matching new explicit Modal self-group birth, copying
+its original creator kind, subject and key into an immutable receipt. Other
+users, service actors and probe keys remain unenrolled. Original provider-create
+receipts bind each physical box.
+Fresh boxes require canonical registry preparation; snapshot restores require
+the selected immutable checkpoint's qualified predecessor lineage in the same
+group and namespace. Unsupported image selectors fail before provider dispatch
+while preserving checkpoint data.
+Those groups require native ownership for every new turn command while the
+global flag stays false. Read-only scoped RPCs inspect the owner-only ledger;
+existing groups never gain retrospective qualification. Canonical source:
+`packages/db/src/native-command-qualification.ts` and maintenance migrations
+`0758`/`0759`.
 Exact-instance capability verification precedes admission; durable invocation
 retention precedes dispatch. The supervisor starts idle. Only original launch
 releases user code; reconstructed observers never release abandoned reservations.

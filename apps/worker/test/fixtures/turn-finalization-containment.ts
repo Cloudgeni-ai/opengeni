@@ -22,6 +22,15 @@ if (mode === "writers") {
   };
 }
 if (mode === "snapshot") context.sandboxState.snapshotInFlight = pending;
+if (mode === "host-close" || mode === "host-close-stalled") {
+  context.sandboxState.lateSandboxesAwaitingWriterDrain.add({
+    release: async () => { console.log("holder_released"); },
+    closeHostHandle: async () => {
+      console.log("host_handle_close");
+      if (mode === "host-close-stalled") await pending;
+    },
+  } as never);
+}
 let held = true;
 const keepAlive = setInterval(() => {}, 1_000);
 const observability = {

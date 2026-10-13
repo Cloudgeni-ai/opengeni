@@ -44,6 +44,11 @@ export * from "./domain/vaults/provider-sync";
 export * from "./workflow-wake-contract";
 export * from "./user-presence";
 export * from "./product-usage-metrics";
+export {
+  attachQualifiedModalNativeBrokerSession,
+  closeQualifiedModalNativeBrokerSession,
+  qualifiedModalNativeBrokerCreateLifecycle,
+} from "./native-command-broker-session";
 
 // Boundary type slots referenced by dependencies.ts. The IMPLEMENTATIONS that
 // construct these (the real sandbox client / Better Auth instance) stay in

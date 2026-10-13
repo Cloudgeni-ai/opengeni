@@ -99,6 +99,19 @@ function fixture(verification = false) {
   };
 }
 
+test("router session capability checks never admit the distinct broker protocol", async () => {
+  const f = fixture();
+  const session = f.session();
+  for (const protocol of [
+    "native-subreaper-broker-channel-v1",
+    "native-subreaper-broker-channel-pty-v1",
+  ] as const)
+    await expect(session.verifyCommandSupervisionCapability!(protocol)).rejects.toThrow(
+      "cannot qualify",
+    );
+  expect(f.starts()).toBe(0);
+});
+
 test("fresh adapters retain the original handle and replay pages until protected acknowledgment", async () => {
   const f = fixture();
   const owner = f.session();

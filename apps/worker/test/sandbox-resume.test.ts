@@ -20,7 +20,8 @@
 // fns connect as opengeni_app (non-superuser, so FORCE RLS applies). Container
 // torn down in afterAll regardless of outcome.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, spyOn } from "bun:test";
+import * as core from "@opengeni/core";
 import postgres from "postgres";
 import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import {
@@ -185,6 +186,40 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real lease + RLS)", () => {
+  test("eager cancellation releases the holder without disposing a still-used host handle", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const controller = new AbortController();
+    const close = spyOn(core, "closeQualifiedModalNativeBrokerSession");
+    let resumed: Awaited<ReturnType<typeof resumeBoxForTurn>> | undefined;
+    try {
+      resumed = await resumeBoxForTurn(
+        { db, settings, cancellationSignal: controller.signal },
+        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("host-close-cancel"),
+      );
+      controller.abort(new Error("cancelled turn"));
+      await resumed.release();
+      expect(close).not.toHaveBeenCalled();
+      expect((await readRow(workspaceId, groupId))?.turn_holders).toBe(0);
+      await resumed.closeHostHandle?.();
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledWith(resumed.established.session);
+      // The real core disposer recognizes no broker attachment and never calls
+      // this ordinary local SDK wrapper's terminating close.
+      expect(
+        await (
+          resumed.established.session as { pathExists(path: string): Promise<boolean> }
+        ).pathExists("/workspace"),
+      ).toBe(true);
+    } finally {
+      close.mockRestore();
+      await resumed?.release();
+      if (resumed) await dropSession(resumed.established);
+    }
+  }, 60_000);
   test("(1) FLAG-ON slice: spawner wins cold->warming, establishes (box manifest carries the threaded env), commits warm, returns a LIVE session; release -> draining", async () => {
     if (!available) return;
     const settings = settingsFor(true);

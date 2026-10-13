@@ -1,8 +1,14 @@
 import type { Settings } from "@opengeni/config";
+import { readImmutableServerSourceSha } from "@opengeni/config/server-source-identity";
+import {
+  closeQualifiedModalNativeBrokerSession,
+  qualifiedModalNativeBrokerCreateLifecycle,
+} from "@opengeni/core";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  beginModalProviderCreate,
   commitWarmingToWarm,
   failSandboxRematerialization,
   failWarmingToCold,
@@ -20,9 +26,12 @@ import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
   modalSessionMatchesCheckpointProviderBinding,
+  modalCommandStartCleanupIsSafe,
   parseWorkspaceArchiveDescriptor,
   requirePersistableReplacementSandboxEnvelope,
   resolveModalCheckpointProviderBindingForSession,
+  readModalCreateImagePreparation,
+  readModalNativeBrokerCreate,
   serializeReplacementSandboxEnvelope,
   SandboxProviderContinuityUnavailableError,
   tagModalSandbox,
@@ -138,6 +147,8 @@ export async function establishApiSandboxSpawner(input: {
   fallbackEnvelope: Record<string, unknown> | null;
   dataPlaneUrl: string | null;
   objectStorage?: ObjectStorage | null;
+  /** Isolated provider conformance seam; ordinary API callers use the registry. */
+  clientFactory?: Parameters<typeof establishSandboxSessionFromEnvelope>[2]["clientFactory"];
 }): Promise<{ established: EstablishedSandboxSession; lease: LeaseSnapshot }> {
   // An audited decision to continue a definitively lost workspace on a new
   // EMPTY box: hydrate nothing, including a per-session legacy archive, and
@@ -167,6 +178,9 @@ export async function establishApiSandboxSpawner(input: {
       ? fallbackArchiveEnvelope
       : input.acquiredLease.resumeState;
   let established: EstablishedSandboxSession | null = null;
+  let transferred = false;
+  let providerCreateOperationId: string | undefined;
+  let providerCreateBindingKey: string | undefined;
   let rematerialization: {
     id: string;
     selectedRevision: string;
@@ -242,11 +256,24 @@ export async function establishApiSandboxSpawner(input: {
     }
 
     const hydrateEnvelope = await materializeArchiveObjectRef(spawnEnvelope, input.objectStorage);
+    const modalNativeBroker =
+      input.backend === "modal"
+        ? await qualifiedModalNativeBrokerCreateLifecycle({
+            db: input.db,
+            settings: input.settings,
+            scope: {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: input.sandboxGroupId,
+            },
+          })
+        : undefined;
 
     const providerCreateStartedAt = new Date();
     established = await establishSandboxSessionFromEnvelope(input.settings, hydrateEnvelope, {
       sessionId: input.sessionId,
       recovery: "create-or-restore",
+      ...(modalNativeBroker ? { modalNativeBroker } : {}),
       ...(input.objectStorage
         ? {
             loadHostWorkspaceArchive: async (ref) => {
@@ -271,8 +298,51 @@ export async function establishApiSandboxSpawner(input: {
         : {}),
       backendOverride: input.backend as never,
       environment: input.environment,
+      ...(input.clientFactory ? { clientFactory: input.clientFactory } : {}),
+      onBeforeSandboxCreate: async (createSettings, intent, providerContext) => {
+        if (input.backend !== "modal") return;
+        if (!intent || !providerContext)
+          throw new Error("Modal create requires the provider dispatch boundary");
+        const binding = await resolveModalCheckpointProviderBindingForSession(
+          createSettings,
+          providerContext,
+        );
+        const nativeSourceSha = await readImmutableServerSourceSha();
+        const nativeImagePreparation = readModalCreateImagePreparation(intent);
+        const nativeBroker = readModalNativeBrokerCreate(intent)?.plan;
+        await beginModalProviderCreate(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: input.sandboxGroupId,
+          expectedEpoch: input.expectedEpoch,
+          operationId: intent.operationId,
+          providerBindingKey: binding.key,
+          rematerializationId: rematerialization?.id ?? null,
+          selectedRevision: rematerialization?.selectedRevision ?? null,
+          imageId: intent.imageId,
+          imageRef: createSettings.modalImageRef ?? null,
+          appId: intent.appId,
+          providerName: intent.name,
+          requestSha256: intent.requestSha256,
+          ...(nativeSourceSha ? { nativeSourceSha } : {}),
+          ...(nativeImagePreparation ? { nativeImagePreparation } : {}),
+          ...(nativeBroker ? { nativeBroker } : {}),
+        });
+        providerCreateOperationId = intent.operationId;
+        providerCreateBindingKey = binding.key;
+      },
       onSandboxCreated: async (created) => {
         established = created;
+        if (
+          providerCreateBindingKey &&
+          !(await modalSessionMatchesCheckpointProviderBinding(
+            input.settings,
+            created.session,
+            providerCreateBindingKey,
+          ))
+        ) {
+          throw new Error("Modal creation receipt crossed the fenced provider namespace");
+        }
         if (
           rematerialization &&
           (rematerialization.providerBindingKey || rematerialization.legacyCheckpoint)
@@ -314,6 +384,7 @@ export async function establishApiSandboxSpawner(input: {
           sandboxGroupId: input.sandboxGroupId,
           expectedEpoch: input.expectedEpoch,
           rematerializationId: rematerialization?.id ?? null,
+          ...(providerCreateOperationId ? { providerCreateOperationId } : {}),
           ...(created.providerContinuity ? { continuityRecovery: created.providerContinuity } : {}),
           instanceId: created.instanceId,
           resumeBackendId: created.backendId,
@@ -447,9 +518,13 @@ export async function establishApiSandboxSpawner(input: {
       }
       throw new SandboxLeaseSupersededError(input.sandboxGroupId, input.expectedEpoch);
     }
+    transferred = true;
     return { established, lease: committed.lease };
   } catch (error) {
     if (error instanceof SandboxLeaseSupersededError) throw error;
+    // SDK setup can still be writing after its Start acknowledgement is lost.
+    // Preserve the attributed box and warming fence for exact reconciliation.
+    if (!modalCommandStartCleanupIsSafe(error)) throw error;
     const terminated = await terminateCreated(established);
     if (terminated) {
       const continuityUnavailable = error instanceof SandboxProviderContinuityUnavailableError;
@@ -483,5 +558,7 @@ export async function establishApiSandboxSpawner(input: {
       }
     }
     throw error;
+  } finally {
+    if (!transferred) await closeQualifiedModalNativeBrokerSession(established?.session);
   }
 }

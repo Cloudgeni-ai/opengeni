@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -g
 WARNINGS = -std=c11 -Wall -Wextra -Werror -Wformat=2 -Wshadow -Wconversion
 BUILD ?= build
 
-.PHONY: all test clean
+.PHONY: all static test test-static test-definition-parity test-broker-codec-parity clean
 all: $(BUILD)/opengeni-command-supervisor
 
 $(BUILD):
@@ -18,9 +18,49 @@ $(BUILD)/fixture: tests/fixture.c | $(BUILD)
 $(BUILD)/kernel: tests/kernel.c supervisor.c | $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) -o $@ $<
 
-test: all $(BUILD)/fixture $(BUILD)/kernel
+$(BUILD)/definition: tests/definition.c supervisor.c | $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ $<
+
+$(BUILD)/broker-wire: tests/broker-wire.c supervisor.c | $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ $<
+
+$(BUILD)/broker-input: tests/broker-input.c supervisor.c | $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ $<
+
+$(BUILD)/broker-output: tests/broker-output.c supervisor.c | $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ $<
+
+test: all $(BUILD)/fixture $(BUILD)/kernel $(BUILD)/definition $(BUILD)/broker-wire $(BUILD)/broker-input $(BUILD)/broker-output
 	$(BUILD)/kernel
 	python3 tests/test_supervisor.py $(abspath $(BUILD))
+	python3 tests/test_broker_channel.py $(abspath $(BUILD))
+	python3 tests/test_broker_definition.py $(abspath $(BUILD))
+	python3 tests/test_broker_wire.py $(abspath $(BUILD))
+	python3 tests/test_broker_input.py $(abspath $(BUILD))
+	python3 tests/test_broker_output.py $(abspath $(BUILD))
+
+static: | $(BUILD)
+	sh build-static.sh $(abspath supervisor.c) $(abspath $(BUILD))
+
+# The keeper owns exclusive root paths, so skipping its tests is not success.
+test-static: static $(BUILD)/fixture $(BUILD)/kernel $(BUILD)/definition $(BUILD)/broker-wire $(BUILD)/broker-input $(BUILD)/broker-output
+	test "$$(id -u)" = 0
+	$(BUILD)/kernel
+	python3 tests/test_supervisor.py $(abspath $(BUILD))
+	python3 tests/test_keeper.py $(abspath $(BUILD))
+	python3 tests/test_broker_preflight.py $(abspath $(BUILD))
+	python3 tests/test_broker_channel.py $(abspath $(BUILD))
+	python3 tests/test_broker_definition.py $(abspath $(BUILD))
+	python3 tests/test_broker_wire.py $(abspath $(BUILD))
+	python3 tests/test_broker_input.py $(abspath $(BUILD))
+	python3 tests/test_broker_output.py $(abspath $(BUILD))
+	python3 tests/test_broker.py $(abspath $(BUILD))
+
+test-definition-parity: $(BUILD)/definition
+	bun tests/definition-parity.ts $(abspath $(BUILD))
+
+test-broker-codec-parity: test-definition-parity $(BUILD)/broker-wire
+	bun tests/wire-parity.ts $(abspath $(BUILD))
 
 clean:
-	rm -f $(BUILD)/opengeni-command-supervisor $(BUILD)/fixture $(BUILD)/kernel
+	rm -f $(BUILD)/opengeni-command-supervisor $(BUILD)/fixture $(BUILD)/kernel $(BUILD)/definition $(BUILD)/broker-wire $(BUILD)/broker-input $(BUILD)/broker-output

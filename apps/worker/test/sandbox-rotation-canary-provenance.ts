@@ -2,10 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { requireCanary } from "./sandbox-rotation-canary-evidence";
 
-const REPOSITORY = "ghcr.io/cloudgeni-ai/opengeni-sandbox";
-const BASE = "https://ghcr.io/v2/cloudgeni-ai/opengeni-sandbox";
-const TOKEN =
-  "https://ghcr.io/token?service=ghcr.io&scope=repository:cloudgeni-ai/opengeni-sandbox:pull";
+export type CanaryImageArtifact = "sandbox" | "desktop" | "api" | "worker";
 const SOURCE = "https://github.com/Cloudgeni-ai/opengeni";
 const MAX_BYTES = 1024 * 1024;
 const INDEX_TYPES = [
@@ -52,18 +49,54 @@ export async function verifyCanaryImageProvenance(
   image: string,
   request: Fetch = fetch,
 ) {
+  return await verifyCanonicalCanaryImageProvenance(sourceSha, image, "sandbox", request);
+}
+
+/** Explicit stock repositories only. Server images and the desktop must have
+ * identical source labels, verified through the immutable OCI byte chain. */
+export async function verifyCanonicalCanaryImageProvenance(
+  sourceSha: string,
+  image: string,
+  artifact: CanaryImageArtifact,
+  request: Fetch = fetch,
+  pullTokens: { ghcr?: string; acr?: string } = {},
+) {
   requireCanary(/^[a-f0-9]{40}$/.test(sourceSha), "invalid provenance source SHA");
   requireCanary(
-    image.startsWith(`${REPOSITORY}@`),
-    "only canonical GHCR sandbox provenance is supported",
+    ["sandbox", "desktop", "api", "worker"].includes(artifact),
+    "unsupported canonical image artifact",
   );
-  const imageDigest = Digest.parse(image.slice(REPOSITORY.length + 1));
-  const tokenResponse = await readBounded(TOKEN, {}, request);
-  const { token } = z.object({ token: z.string().min(1) }).parse(parseRegistryJson(tokenResponse));
-  // Token is anonymous pull-only and never leaves GHCR or enters the receipt.
+  const acr = image.startsWith("opengenipublicneuacr.azurecr.io/");
+  requireCanary(!acr || artifact === "desktop", "ACR is supported only for the stock desktop");
+  const registry = acr ? "opengenipublicneuacr.azurecr.io" : "ghcr.io";
+  const path = acr ? "opengeni-desktop" : `cloudgeni-ai/opengeni-${artifact}`;
+  const repository = `${registry}/${path}`;
+  const base = `https://${registry}/v2/${path}`;
+  const tokenUrl = acr
+    ? `https://${registry}/oauth2/token?service=${registry}&scope=repository:${path}:pull`
+    : `https://ghcr.io/token?service=ghcr.io&scope=repository:${path}:pull`;
+  const hosts = acr
+    ? [registry, "opengenipublicneuacr.northeurope.data.azurecr.io"]
+    : [registry, "pkg-containers.githubusercontent.com"];
+  requireCanary(
+    image.startsWith(`${repository}@`),
+    "only the selected canonical GHCR artifact provenance is supported",
+  );
+  const imageDigest = Digest.parse(image.slice(repository.length + 1));
+  let token = acr ? pullTokens.acr : pullTokens.ghcr;
+  if (!token) {
+    const tokenResponse = await readBounded(tokenUrl, {}, request, registry, hosts);
+    const parsed = z
+      .object({ token: z.string().optional(), access_token: z.string().optional() })
+      .parse(parseRegistryJson(tokenResponse));
+    token = parsed.token ?? parsed.access_token;
+    requireCanary(token && !/[\r\n]/u.test(token), "registry did not return a pull token");
+  }
+  // Optional authenticated tokens are fixture-only, scoped to fixed registries,
+  // never accepted from a challenge/redirect and never included in evidence.
   const headers = { Authorization: `Bearer ${token}`, Accept: ACCEPT };
   const readObject = async (kind: "manifests" | "blobs", digest: string, size?: number) => {
-    const bytes = await readBounded(`${BASE}/${kind}/${digest}`, headers, request);
+    const bytes = await readBounded(`${base}/${kind}/${digest}`, headers, request, registry, hosts);
     requireCanary(size === undefined || bytes.byteLength === size, "OCI descriptor size mismatch");
     requireCanary(
       `sha256:${createHash("sha256").update(bytes).digest("hex")}` === digest,
@@ -118,6 +151,8 @@ async function readBounded(
   url: string,
   headers: Record<string, string>,
   request: Fetch,
+  registry = "ghcr.io",
+  hosts = ["ghcr.io", "pkg-containers.githubusercontent.com"],
 ): Promise<Buffer> {
   const signal = AbortSignal.timeout(30_000);
   for (let redirects = 0; redirects <= 2; redirects++) {
@@ -127,13 +162,13 @@ async function readBounded(
         !parsed.username &&
         !parsed.password &&
         !parsed.port &&
-        ["ghcr.io", "pkg-containers.githubusercontent.com"].includes(parsed.hostname),
+        hosts.includes(parsed.hostname),
       "untrusted registry redirect",
     );
     let response: Response;
     try {
       response = await request(url, {
-        headers: parsed.hostname === "ghcr.io" ? headers : {},
+        headers: parsed.hostname === registry ? headers : {},
         redirect: "manual",
         signal,
       });

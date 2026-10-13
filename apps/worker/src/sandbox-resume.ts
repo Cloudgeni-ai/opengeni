@@ -30,6 +30,12 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { randomUUID } from "node:crypto";
+import { readImmutableServerSourceSha } from "@opengeni/config/server-source-identity";
+import {
+  attachQualifiedModalNativeBrokerSession,
+  closeQualifiedModalNativeBrokerSession,
+  qualifiedModalNativeBrokerCreateLifecycle,
+} from "@opengeni/core";
 import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
@@ -79,6 +85,8 @@ import {
   renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
+  readModalCreateImagePreparation,
+  readModalNativeBrokerCreate,
   serializeReplacementSandboxEnvelope,
   tagModalSandbox,
   terminateUnpublishedSandboxSession,
@@ -247,6 +255,10 @@ export type ResumedTurnSandbox = {
    * ordinary form—to repair null-outcome admissions only after every exact
    * attempt-owned workspace writer has physically drained. NEVER stops the box. */
   release: (options?: { workspaceWritersQuiesced?: boolean }) => Promise<void>;
+  /** Release only this host wrapper after the caller has stopped using it.
+   * This neither terminates the physical box nor proves writer quiescence.
+   * Kept separate from eager cancellation's holder release. */
+  closeHostHandle?: () => Promise<void>;
 };
 
 /**
@@ -1310,6 +1322,11 @@ async function resumeBoxForTurnOnce(
   const os = ids.os ?? "linux";
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
   const cancellationSignal = services.cancellationSignal;
+  let ownedHostSession: unknown;
+  let hostOwnershipTransferred = false;
+  const closeHostHandle = async (): Promise<void> => {
+    await closeQualifiedModalNativeBrokerSession(ownedHostSession);
+  };
 
   // The release closure is created eagerly so the caller can always release in
   // finally, even if establish/commit throws after the holder was registered.
@@ -1765,9 +1782,23 @@ async function resumeBoxForTurnOnce(
         hydrateEnvelopeRaw && typeof hydrateEnvelopeRaw === "object"
           ? (hydrateEnvelopeRaw as Record<string, unknown>)
           : null;
+      const modalNativeBroker =
+        ids.backend === "modal"
+          ? await qualifiedModalNativeBrokerCreateLifecycle({
+              db,
+              settings,
+              scope: {
+                accountId: ids.accountId,
+                workspaceId: ids.workspaceId,
+                sandboxGroupId: ids.sandboxGroupId,
+              },
+              ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+            })
+          : undefined;
       const established = await establishSandboxSessionFromEnvelope(settings, hydrateEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
+        ...(modalNativeBroker ? { modalNativeBroker } : {}),
         ...(services.objectStorage
           ? {
               loadHostWorkspaceArchive: async (ref) => {
@@ -1806,6 +1837,9 @@ async function resumeBoxForTurnOnce(
             providerContext,
           );
           const operationId = intent.operationId;
+          const nativeSourceSha = await readImmutableServerSourceSha();
+          const nativeImagePreparation = readModalCreateImagePreparation(intent);
+          const nativeBroker = readModalNativeBrokerCreate(intent)?.plan;
           await beginModalProviderCreate(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -1820,12 +1854,16 @@ async function resumeBoxForTurnOnce(
             appId: intent.appId,
             providerName: intent.name,
             requestSha256: intent.requestSha256,
+            ...(nativeSourceSha ? { nativeSourceSha } : {}),
+            ...(nativeImagePreparation ? { nativeImagePreparation } : {}),
+            ...(nativeBroker ? { nativeBroker } : {}),
           });
           providerCreateOperationId = operationId;
           providerCreateBindingKey = binding.key;
         },
         onSandboxCreated: async (created) => {
           createdEstablished = created;
+          ownedHostSession = created.session;
           providerRenewalTarget = {
             backend: ids.backend,
             instanceId: created.instanceId,
@@ -2083,7 +2121,8 @@ async function resumeBoxForTurnOnce(
       };
       await services.onSpawnedSandboxPublished?.();
       throwIfReleasedOrCancelled();
-      return { established, leaseEpoch: committed.lease.leaseEpoch, release };
+      hostOwnershipTransferred = true;
+      return { established, leaseEpoch: committed.lease.leaseEpoch, release, closeHostHandle };
     } catch (error) {
       if (published) {
         // The published warm box stays for the replacement attempt to resume
@@ -2146,6 +2185,11 @@ async function resumeBoxForTurnOnce(
         disposedUnreadyFreshSandboxErrors.add(error);
       }
       throw sandboxProvisionStageError(rematerialization ? "archive_recovery" : "create", error);
+    } finally {
+      // A failure never returned this wrapper to a command caller. Publication
+      // alone does not transfer host ownership, and physical retirement remains
+      // the exact lease-owned cleanup above.
+      if (!hostOwnershipTransferred) await closeHostHandle();
     }
   }
 
@@ -2185,6 +2229,20 @@ async function resumeBoxForTurnOnce(
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
       });
+      ownedHostSession = established.session;
+      if (ids.backend === "modal") {
+        await attachQualifiedModalNativeBrokerSession({
+          db,
+          settings,
+          scope: {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          session: established.session,
+          ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+        });
+      }
       throwIfReleasedOrCancelled();
       // A durable `warm` row is an ownership assertion, not provider liveness.
       // A provider may have ended the exact box while Opengeni was idle. Prove
@@ -2244,11 +2302,14 @@ async function resumeBoxForTurnOnce(
       );
     }
     throwIfReleasedOrCancelled();
-    return { established, leaseEpoch, release };
+    hostOwnershipTransferred = true;
+    return { established, leaseEpoch, release, closeHostHandle };
   } catch (error) {
     await release();
     recordSandboxWarmingTimeout(services.sandboxMetrics, error);
     throw error;
+  } finally {
+    if (!hostOwnershipTransferred) await closeHostHandle();
   }
 }
 

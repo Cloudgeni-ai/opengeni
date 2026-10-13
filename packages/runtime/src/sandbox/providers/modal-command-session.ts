@@ -82,10 +82,12 @@ export function installModalCommandSession(
       }
     };
   }
-  session.verifyCommandSupervisionCapability = async () => {
+  session.verifyCommandSupervisionCapability = async (protocol) => {
+    if (protocol && protocol !== "native-subreaper-v1" && protocol !== "native-subreaper-pty-v1")
+      throw new Error("Task-router session cannot qualify an initial-process broker protocol");
     if (!control.verifySupervisionCapability)
       throw new Error("Modal instance lacks supervised command capability verification");
-    return await control.verifySupervisionCapability();
+    return await control.verifySupervisionCapability(protocol);
   };
   session.verifyMaterializedPath = (path, workdir) =>
     verifyModalMaterializedPath(control, path, workdir, pendingStarts);
@@ -132,7 +134,7 @@ export function installModalCommandSession(
   const captureRouterPage = async (entry: Entry, page: ProviderCommandOutput): Promise<boolean> => {
     if (
       page.command.kind !== "modal-router-v1" ||
-      !page.expected ||
+      page.expected?.kind !== "modal-router-v1" ||
       !entry.persistence?.captureRouterPage
     )
       throw new Error("Modal byte-offset output requires atomic retained capture");
@@ -330,6 +332,8 @@ export function installModalCommandSession(
     return true;
   };
   session.bindProviderCommand = (handle, command, persistence) => {
+    if (command.kind === "modal-broker-v1")
+      throw new Error("Initial-process broker commands require their own session adapter");
     if (!Number.isSafeInteger(handle) || handle <= 0 || handle > MAX_PROVIDER_COMMAND_HANDLE)
       throw new Error("Invalid retained Modal command handle");
     const existing = entries.get(handle);
@@ -360,7 +364,7 @@ export function installModalCommandSession(
       return true;
     }
     const entry = entries.get(receipt.handle);
-    if (!entry?.persistence?.captureRouterPage || !receipt.page.expected)
+    if (!entry?.persistence?.captureRouterPage || receipt.page.expected?.kind !== "modal-router-v1")
       throw new Error("Modal byte-offset output requires atomic retained capture");
     if (!(await captureRouterPage(entry, receipt.page))) {
       const target = receipt.page.command;

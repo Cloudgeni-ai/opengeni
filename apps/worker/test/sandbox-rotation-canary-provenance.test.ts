@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { verifyCanaryImageProvenance } from "./sandbox-rotation-canary-provenance";
+import {
+  verifyCanaryImageProvenance,
+  verifyCanonicalCanaryImageProvenance,
+  type CanaryImageArtifact,
+} from "./sandbox-rotation-canary-provenance";
 
 const sha = "a".repeat(40);
 const repository = "ghcr.io/cloudgeni-ai/opengeni-sandbox";
@@ -15,8 +19,13 @@ function fixture(
     redirect?: string;
     oversized?: boolean;
     direct?: boolean;
+    artifact?: CanaryImageArtifact;
+    acr?: boolean;
   } = {},
 ) {
+  const fixtureRepository = options.acr
+    ? "opengenipublicneuacr.azurecr.io/opengeni-desktop"
+    : `ghcr.io/cloudgeni-ai/opengeni-${options.artifact ?? "sandbox"}`;
   const config = JSON.stringify({
     os: "linux",
     architecture: options.architecture ?? "amd64",
@@ -43,18 +52,22 @@ function fixture(
     mediaType: "application/vnd.oci.image.index.v1+json",
     manifests: options.duplicate ? [entry, entry] : [entry],
   });
-  const image = `${repository}@${digest(options.direct ? manifest : index)}`;
+  const image = `${fixtureRepository}@${digest(options.direct ? manifest : index)}`;
   const calls: Array<{ url: string; authorization: string | null }> = [];
   const request = async (url: string, init?: RequestInit) => {
     calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
     if (url.startsWith("https://ghcr.io/token?"))
       return Response.json({ token: "test-anonymous-pull-token" });
+    if (url.startsWith("https://opengenipublicneuacr.azurecr.io/oauth2/token?"))
+      return Response.json({ access_token: "test-anonymous-acr-pull-token" });
     if (url.includes("/blobs/")) {
       if (options.redirect)
         return new Response(null, { status: 307, headers: { location: options.redirect } });
       return new Response(options.corrupt === "config" ? config.replace("linux", "linuz") : config);
     }
     if (url.startsWith("https://pkg-containers.githubusercontent.com/"))
+      return new Response(config);
+    if (url.startsWith("https://opengenipublicneuacr.northeurope.data.azurecr.io/"))
       return new Response(config);
     if (url.endsWith(digest(index)))
       return new Response(
@@ -88,6 +101,60 @@ test("supports a digest-pinned single-platform manifest too", async () => {
   expect((await verifyCanaryImageProvenance(sha, f.image, f.request)).manifestDigest).toBe(
     f.image.split("@")[1]!,
   );
+});
+for (const artifact of ["desktop", "api", "worker"] as const)
+  test(`verifies exact ${artifact} candidate source without relying on a tag`, async () => {
+    const f = fixture({ artifact });
+    const proof = await verifyCanonicalCanaryImageProvenance(sha, f.image, artifact, f.request);
+    expect(proof.sourceSha).toBe(sha);
+    expect(proof.image).toBe(f.image);
+    await expect(verifyCanaryImageProvenance(sha, f.image, f.request)).rejects.toThrow();
+  });
+test("supports authoritative stock ACR desktop without requiring its GHCR mirror", async () => {
+  const f = fixture({ acr: true });
+  const proof = await verifyCanonicalCanaryImageProvenance(sha, f.image, "desktop", f.request);
+  expect(proof.image).toBe(f.image);
+  expect(
+    f.calls.every((call) => new URL(call.url).hostname === "opengenipublicneuacr.azurecr.io"),
+  ).toBe(true);
+  expect(JSON.stringify(proof)).not.toContain("test-anonymous-acr-pull-token");
+});
+test("private candidate token stays on the fixed registry and out of receipts", async () => {
+  const f = fixture({
+    artifact: "worker",
+    redirect: "https://pkg-containers.githubusercontent.com/config",
+  });
+  const proof = await verifyCanonicalCanaryImageProvenance(sha, f.image, "worker", f.request, {
+    ghcr: "test-private-pull-token",
+  });
+  expect(f.calls.some((call) => call.url.includes("/token?"))).toBe(false);
+  expect(f.calls.at(-1)?.authorization).toBeNull();
+  expect(JSON.stringify(proof)).not.toContain("test-private-pull-token");
+});
+test("ACR pull token is stripped from the exact allowlisted regional data host", async () => {
+  const f = fixture({
+    acr: true,
+    redirect: "https://opengenipublicneuacr.northeurope.data.azurecr.io/config",
+  });
+  await verifyCanonicalCanaryImageProvenance(sha, f.image, "desktop", f.request, {
+    acr: "test-private-acr-token",
+  });
+  expect(f.calls.at(-1)?.authorization).toBeNull();
+});
+test("rejects other ACR repos and credential redirect authority before sending credentials", async () => {
+  const f = fixture({ acr: true, redirect: "https://evil.azurecr.io/config" });
+  await expect(
+    verifyCanonicalCanaryImageProvenance(sha, f.image, "worker", f.request, {
+      acr: "test-private-acr-token",
+    }),
+  ).rejects.toThrow();
+  expect(f.calls).toHaveLength(0);
+  await expect(
+    verifyCanonicalCanaryImageProvenance(sha, f.image, "desktop", f.request, {
+      acr: "test-private-acr-token",
+    }),
+  ).rejects.toThrow("untrusted registry redirect");
+  expect(f.calls.every((call) => new URL(call.url).hostname !== "evil.azurecr.io")).toBe(true);
 });
 for (const [name, options] of [
   ["stale image", { revision: "b".repeat(40) }],

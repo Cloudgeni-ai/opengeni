@@ -100,6 +100,100 @@ Then open the smallest source files that answer the question:
   boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
   capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never
   reinterpret a legacy batch locator or infer exit from missing output.
+  The in-progress native initial-process broker is a separate versioned path:
+  inspect `sandbox/providers/native-command-broker-driver.ts`, its bootstrap and
+  per-command projection readers, and `packages/db/src/native-command-broker-transport.ts`.
+  Initial prefix capture is read-only in `native-command-broker-bootstrap-capture.ts`;
+  core registers its verified frame/page receipts and cursor atomically. Exact
+  replay cannot rewind state or retrofit missing evidence. Creation authority,
+  initial stderr and qualified application selection remain separate gates.
+  `registerQualifiedNativeBrokerBootstrap` derives its pin and broker identity
+  through the immutable physical-enrollment reader (migration `0763`), rechecks
+  after capture, and requires existing durable evidence for warm recovery.
+  Initial stderr has a separate bounded observer in
+  `native-command-broker-diagnostics.ts`. Core retains the first definite fault
+  in the encrypted append-only journal (migration `0764`), and transport refuses
+  new work without clearing uncertain input or blocking exact cancellation and
+  output retirement. A completed empty query is not durable health or command
+  authority. `native-command-broker-diagnostics-owner.ts` shares one owned live
+  query across attached session surfaces, with paced bounded reads and a fresh
+  check before new work joins the input queue. Exact recovery controls bypass
+  that observation gate, not the canonical input state machine. Last release
+  aborts and joins the read; closing a sibling does not terminate another owner.
+  Application installation uses the qualified core composition below; physical
+  provider qualification remains open.
+  Worker/API new-command routing uses `selectNativeCommandProviderProtocol` in
+  `packages/db/src/native-command-qualification.ts` to select the original
+  frozen tuple's pipe/PTY protocol. Retained exact-protocol inspection remains
+  separate; neither adapter capability nor launch failure permits a fallback.
+  The selector does not install broker creation or its setup-command ownership.
+  `modal-native-broker-session.ts` bridges SDK-internal foreground execs and
+  cached list helpers to exact-backend synchronous routing, with distinct
+  canonical pipe admissions and retained output. Unscoped calls and unsupported
+  SDK restore and unqualified readiness refuse; file writes retain enclosing mutation authority.
+  Host-only close preserves physical ownership and snapshot-wrapper identity.
+  Qualified fresh/warm application installation is composed in core; it is not
+  an enrollment switch or a substitute for remote physical qualification.
+  Core's `native-command-broker-session.ts` composes those pieces with one shared
+  physical coordinator, immutable birth/source/namespace checks, retained warm
+  bootstrap and host-only disposal. Its fresh-create selector defers only the
+  empty canonical initial manifest until warm routing. Callers must explicitly
+  own wrapper disposal. Worker cancellation drops its holder without closing a
+  still-used connection; finalization joins host-only disposal. API cache entries
+  have separate request borrows, last-borrower eviction and idle cleanup. Viewer
+  setup uses an exact-instance direct holder and canonical home-only routing,
+  never a bare SDK exec or an active-machine fallback. Snapshot restoration
+  remains unqualified. Do not equate composition fixtures with live activation.
+  `native-command-broker-coordinator.ts` shares one demand-driven output reader,
+  serializes input through native acceptance and never silently replays uncertain
+  dispatch. Explicit global output ACK retires only the committed transport
+  prefix, not canonical command custody. `native-command-broker-start.ts`
+  requires private protocol/handle context and durable reservation before an
+  idle native launch. Partial starts preserve their original locator. These
+  primitives do not activate application routing; the task router rejects
+  broker-only admission. Positive prelaunch cancellation now uses
+  `rejectRetainedBrokerLaunch` with exact immutable request/reply/frame evidence
+  and the independent SQL hash guard in migration `0765`. It creates no exit or
+  quiescence proof; uncertain input and `command_unknown` remain retained.
+  `native-command-broker-session.ts` supplies the distinct retained-handle/banner
+  surface without a legacy setup or TaskExec fallback. Output commits before
+  presentation, and an uncertain global ACK retains the captured page without
+  replaying input. Session-surface close does not close the shared coordinator.
+  Application installation uses the qualified core composition; do not confuse
+  adapter tests with activation or cancellation ACKs with settlement.
+  Its distinct broker command locator and atomic retained output live in
+  `packages/contracts/src/sandbox-provider-command.ts` and
+  `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse
+  that locator. Canonical retention is not bootstrap or release authority.
+  `native-command-broker-retained-command.ts` owns bounded capture and exact
+  retained controls. Its immutable `control_reply` journal index permits only
+  explicitly proven pre-dispatch rejection successors, never unknown replay.
+  Broker stdin uses the transport's retained-input transaction to commit its
+  exact existing child admission's byte reservation and encrypted request
+  together; never call the legacy standalone input-index allocator for it.
+  Its reservation/reply indexes gate the next byte range on complete native
+  stdin delivery, not provider acknowledgement or broker acceptance.
+  Larger writes use `native-command-broker-stdin.ts` and immutable scoped
+  `stdin_plan` / `stdin_page` entries (migration `0766`). One original admission
+  reserves the complete byte range and bytes before frame dispatch; derived
+  chunk UUIDs are not new admissions. Delivery replies gate each successor,
+  unknown dispatch never replays automatically, and cancellation remains usable
+  while a command's stdin is blocked. Keep the 32 MiB input ceiling distinct
+  from the 8 KiB native frame and 64 KiB encrypted storage page boundaries.
+  The retained route carries that admission in private runtime context, not
+  command arguments, and requires atomic output and native cancellation.
+  `modal-native-broker-create.ts` binds the internal fixed initial-process
+  recipe to the physical create wire request. Its lifecycle requires separate
+  durable admission and post-receipt bootstrap gates before manifest setup;
+  the operator ledger and independent SQL guard bind the distinct broker tuple,
+  artifact pin and original create recipe without enrolling old groups. See
+  `native-command-qualification.ts` and migration `0762`; snapshot capture/drain
+  remains separate from as-yet-unqualified broker snapshot restore.
+  Application selection requires the original qualified birth; physical
+  qualification remains an incomplete gate.
+  Journal capture/dispatch and a passing native fixture do not imply canonical
+  application admission or old-group enrollment. Follow the remaining gates in
+  `docs/design/native-command-broker.md` before enabling that path.
   `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
   layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
   exposes on-demand filesystem copies. Repository Skill discovery is independent.

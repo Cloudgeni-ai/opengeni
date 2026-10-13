@@ -17,6 +17,7 @@ on:
       - "docker/opengeni-git-askpass"
       - "docker/browserd-THIRD-PARTY-NOTICES"
       - "packages/browserd/**"
+      - "agent/native/command-supervisor/**"
       - "packages/artifact-tool/**"
       - "packages/artifact-kernel-wasm-document/**"
       - "packages/artifact-kernel-wasm-presentation/**"

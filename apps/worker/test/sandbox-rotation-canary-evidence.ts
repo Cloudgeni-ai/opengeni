@@ -45,7 +45,10 @@ export function assertSupervisedCanaryCommand(value: unknown): {
   return { protocol: "native-subreaper-v1", invocationId: descriptor.invocationId };
 }
 
-export function canaryConfiguration(env: Record<string, string | undefined>) {
+export function canaryConfiguration(
+  env: Record<string, string | undefined>,
+  imageKind: "headless" | "desktop" = "headless",
+) {
   requireCanary(env.OPENGENI_SANDBOX_ROTATION_CANARY === "1", "explicit live opt-in is required");
   requireCanary(
     env.OPENGENI_SANDBOX_ROTATION_CANARY_AUTHORIZATION === "ISOLATED_MODAL_CANARY_ONLY",
@@ -56,8 +59,11 @@ export function canaryConfiguration(env: Record<string, string | undefined>) {
   const environment = env.OPENGENI_SANDBOX_ROTATION_MODAL_ENVIRONMENT ?? "";
   requireCanary(/^[a-f0-9]{40}$/.test(sourceSha), "pin the integrated source SHA");
   requireCanary(
-    /^ghcr\.io\/cloudgeni-ai\/opengeni-sandbox@sha256:[a-f0-9]{64}$/.test(image),
-    "pin the canonical GHCR sandbox image digest",
+    (imageKind === "desktop"
+      ? /^(?:ghcr\.io\/cloudgeni-ai|opengenipublicneuacr\.azurecr\.io)\/opengeni-desktop@sha256:[a-f0-9]{64}$/
+      : /^ghcr\.io\/cloudgeni-ai\/opengeni-sandbox@sha256:[a-f0-9]{64}$/
+    ).test(image),
+    `pin the canonical GHCR ${imageKind === "desktop" ? "desktop" : "sandbox"} image digest`,
   );
   requireCanary(
     /^sandbox-rotation-canary-[a-z0-9-]{8,48}$/.test(environment),

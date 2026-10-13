@@ -15,13 +15,32 @@ import {
   type Entry,
 } from "@openai/agents/sandbox";
 import { materializeEnvironment, readOptionalString } from "@openai/agents-core/sandbox/internal";
-import { ModalClient, Sandbox, type Image, type CloudBucketMount } from "modal";
-import { createModalProviderCreateBoundary, type ModalCreateIntent } from "./modal-create-boundary";
+import { ModalClient, Sandbox, type CloudBucketMount } from "modal";
+import {
+  createModalProviderCreateBoundary,
+  type ModalCreateIntent,
+  type ModalCreateImagePreparation,
+} from "./modal-create-boundary";
+import { prepareCanonicalModalCreateImage } from "./modal-registry-image";
 import { modalCommandStartCleanupIsSafe } from "./modal-command-start-errors";
+import {
+  modalNativeBrokerInitialCommand,
+  parseModalNativeBrokerCreatePlan,
+  type ModalNativeBrokerCreatePlan,
+} from "./modal-native-broker-create";
 
 export type ModalCreateLifecycle = {
   beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
   onCreated: (session: ModalSandboxSession, intent: ModalCreateIntent) => Promise<void>;
+  /** Internal opt-in only, not a create option. Both extra gates are required:
+   * persist qualified broker creation after ordinary lease admission, then
+   * verify/retain authenticated initial bootstrap before lease publication.
+   * SDK command setup is deferred until ordinary warm mutation admission. */
+  nativeBroker?: {
+    plan: ModalNativeBrokerCreatePlan;
+    beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
+    verifyCreated: (session: ModalSandboxSession, intent: ModalCreateIntent) => Promise<void>;
+  };
 };
 
 /** Release local transport after a failed create, but never stop a box whose
@@ -114,6 +133,19 @@ export async function createModalSessionWithLifecycle(
   lifecycle: ModalCreateLifecycle,
   installPolicy: (session: ModalSandboxSession) => ModalSandboxSession,
 ): Promise<ModalSandboxSession> {
+  const nativeBroker = lifecycle.nativeBroker
+    ? {
+        plan: parseModalNativeBrokerCreatePlan(lifecycle.nativeBroker.plan),
+        beforeDispatch: lifecycle.nativeBroker.beforeDispatch,
+        verifyCreated: lifecycle.nativeBroker.verifyCreated,
+      }
+    : undefined;
+  if (
+    nativeBroker &&
+    (typeof nativeBroker.beforeDispatch !== "function" ||
+      typeof nativeBroker.verifyCreated !== "function")
+  )
+    throw new Error("Modal native broker creation requires durable admission and bootstrap gates");
   const create = normalizeSandboxClientCreateArgs(args);
   if (create.snapshot !== undefined) unsupported("snapshot");
   const overrides = create.options as Partial<ModalSandboxClientOptions> | undefined;
@@ -148,6 +180,9 @@ export async function createModalSessionWithLifecycle(
   }
   const manifest = create.manifest;
   validateManifest(manifest);
+  if (nativeBroker && (manifest.root !== "/workspace" || Object.keys(manifest.entries).length))
+    unsupported("native broker initial manifest entries or noncanonical root");
+  if (nativeBroker && manifest.mountTargets().length) unsupported("native broker initial mounts");
   // Validate mount configuration before any provider resource is requested.
   for (const { entry } of manifest.mountTargets()) {
     buildModalCloudBucketMountConfig(
@@ -165,6 +200,7 @@ export async function createModalSessionWithLifecycle(
   let cloudBucketMounts: Record<string, CloudBucketMount> | undefined;
   let state: Omit<ModalSandboxSessionState, "sandboxId">;
   let app: Awaited<ReturnType<ModalClient["apps"]["fromName"]>>;
+  let imagePreparation: ModalCreateImagePreparation | undefined;
   const modal = new ModalClient(
     defined({
       tokenId: options.tokenId,
@@ -174,9 +210,16 @@ export async function createModalSessionWithLifecycle(
       grpcMiddleware: [
         createModalProviderCreateBoundary({
           operationId: crypto.randomUUID(),
+          imagePreparation: () => imagePreparation,
+          ...(nativeBroker ? { nativeBroker: nativeBroker.plan } : {}),
           beforeDispatch: async (intent) => {
             if (timedOut) throw new Error("Modal create expired before provider dispatch");
             await lifecycle.beforeDispatch(intent, { modal });
+            if (nativeBroker) {
+              if (timedOut) throw new Error("Modal broker create expired before durable admission");
+              await nativeBroker.beforeDispatch(intent, { modal });
+            }
+            if (timedOut) throw new Error("Modal create expired during durable admission");
           },
           onReceipt: async (receipt) => {
             const constructorArgs = {
@@ -206,6 +249,11 @@ export async function createModalSessionWithLifecycle(
               modal.close();
             };
             await lifecycle.onCreated(session, receipt);
+            if (nativeBroker) {
+              if (timedOut) throw new Error("Modal broker receipt arrived after create timeout");
+              await nativeBroker.verifyCreated(session, receipt);
+              if (timedOut) throw new Error("Modal broker bootstrap exceeded create containment");
+            }
           },
         }),
       ],
@@ -257,15 +305,15 @@ export async function createModalSessionWithLifecycle(
     const environment = await materializeEnvironment(manifest, options.env);
     const selector =
       options.image ?? ModalImageSelector.fromTag(options.imageTag ?? "debian:bookworm-slim");
-    let image: Image;
-    if (selector.kind === "image") image = selector.value as Image;
-    else if (typeof selector.value !== "string" || !selector.value.trim())
-      throw new Error("Modal image identity must be non-empty");
-    else if (selector.kind === "id") image = await modal.images.fromId(selector.value);
-    else if (selector.kind === "tag") image = modal.images.fromRegistry(selector.value);
-    else throw new Error("Unsupported Modal image selector");
-    if (typeof image?.build !== "function")
-      throw new Error("Modal image selector requires a native Image");
+    const prepared = await prepareCanonicalModalCreateImage(modal, app, selector);
+    const image = prepared.image;
+    imagePreparation = prepared.preparation;
+    if (
+      nativeBroker &&
+      (prepared.preparation.kind === "unqualified-image" ||
+        prepared.preparation.imageId !== nativeBroker.plan.imageId)
+    )
+      throw new Error("Modal native broker creation selected an unqualified physical image");
     cloudBucketMounts = await resolveMounts(manifest);
     state = {
       manifest,
@@ -290,15 +338,19 @@ export async function createModalSessionWithLifecycle(
       endpoint: options.endpoint,
       imageBuilderVersion: options.imageBuilderVersion,
       nativeCloudBucketSecretName: options.nativeCloudBucketSecretName,
-      useSleepCmd: options.useSleepCmd ?? true,
+      useSleepCmd: nativeBroker ? false : (options.useSleepCmd ?? true),
     };
     const physicalCreate = modal.sandboxes.create(
       app,
       image,
       defined({
-        workdir: manifest.root,
+        workdir: nativeBroker ? "/" : manifest.root,
         env: environment,
-        command: state.useSleepCmd ? ["sleep", "infinity"] : undefined,
+        command: nativeBroker
+          ? modalNativeBrokerInitialCommand(nativeBroker.plan)
+          : state.useSleepCmd
+            ? ["sleep", "infinity"]
+            : undefined,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
         cpu: options.cpu,
@@ -345,7 +397,12 @@ export async function createModalSessionWithLifecycle(
           .finally(() => modal.close());
     }
     if (!session) throw new Error("Modal create bypassed the required physical receipt boundary");
-    await session.applyManifest(withoutMounts(manifest));
+    // The qualified stock image contains /workspace. Applying even an empty
+    // SDK manifest runs mkdir through TaskExec while the lease is warming,
+    // before ordinary mutation admission exists. Broker bootstrap establishes
+    // readiness; the provided-session manifest is applied through routing only
+    // after the lease is warm. No entries or mounts may be skipped here.
+    if (!nativeBroker) await session.applyManifest(withoutMounts(manifest));
     return session;
   } catch (error) {
     // Timed-out work still owns its transport until its late receipt settles.

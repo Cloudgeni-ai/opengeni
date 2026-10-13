@@ -2,13 +2,16 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   SandboxProviderCommand,
   ModalRouterProviderCommand,
+  ModalBrokerProviderCommand,
   CommandSupervisionReceipt,
+  CommandSupervisionProtocol,
+  NativeBrokerCommandProtocol,
 } from "@opengeni/contracts";
 
 export type ProviderCommandOutput = {
   command: SandboxProviderCommand;
   /** Exact read baseline for atomic byte-offset capture; absent for legacy pages. */
-  expected?: ModalRouterProviderCommand;
+  expected?: ModalRouterProviderCommand | ModalBrokerProviderCommand;
   chunks: Array<{ stream: "stdout" | "stderr"; chunkId: string; text: string }>;
   exitCode: number | null;
   /** The provider reports the process exited; only unread output may remain. */
@@ -20,6 +23,16 @@ export type ProviderCommandOutput = {
  * retention/adoption. They are never accepted as command arguments. */
 export type ProviderCommandPersistence = {
   rejectSupervisedLaunch?(command: ModalRouterProviderCommand): Promise<void>;
+  /** Exact retained native cancel reply, not a caller assertion of absence. */
+  rejectBrokerLaunch?(
+    command: ModalBrokerProviderCommand,
+    proof: {
+      requestId: string;
+      ownerEpoch: number;
+      inputSequence: number;
+      responseSequence: number;
+    },
+  ): Promise<void>;
   load(): Promise<SandboxProviderCommand | null>;
   acknowledge(command: SandboxProviderCommand): Promise<SandboxProviderCommand>;
   reserveInput(byteLength?: number): Promise<number>;
@@ -33,6 +46,12 @@ export type ProviderCommandPersistence = {
     stdout: string;
     stderr: string;
   }): Promise<{ command: ModalRouterProviderCommand; captured: boolean }>;
+  captureBrokerPage?(page: {
+    expected: ModalBrokerProviderCommand;
+    command: ModalBrokerProviderCommand;
+    stdout: string;
+    stderr: string;
+  }): Promise<{ command: ModalBrokerProviderCommand; captured: boolean }>;
 };
 
 export class ProviderCommandStartRejectedError extends Error {
@@ -46,7 +65,7 @@ export class ProviderCommandStartRejectedError extends Error {
  * The client-chosen locator is reconciliation authority, never replay authority. */
 export class ProviderCommandStartOutcomeUnknownError extends Error {
   constructor(
-    readonly command: ModalRouterProviderCommand,
+    readonly command: ModalRouterProviderCommand | ModalBrokerProviderCommand,
     cause: unknown,
   ) {
     super("Provider command Start outcome is unknown; the invocation was not replayed", { cause });
@@ -113,7 +132,9 @@ export function isProviderCommandObservationUnavailableError(error: unknown): bo
 }
 
 export type ProviderCommandSession = {
-  verifyCommandSupervisionCapability?(): Promise<{ sandboxId: string; taskId: string }>;
+  verifyCommandSupervisionCapability?(
+    protocol?: AdmittedCommandSupervisionProtocol,
+  ): Promise<{ sandboxId: string; taskId: string }>;
   releaseSupervisedCommand?(handle: number): Promise<void>;
   cancelSupervisedCommand?(
     handle: number,
@@ -135,22 +156,117 @@ export type ProviderCommandSession = {
 };
 
 const admission = new AsyncLocalStorage<number | undefined>();
-export type PendingCommandSupervision = { managed: boolean };
-const pendingSupervision = new AsyncLocalStorage<PendingCommandSupervision>();
+export type ProviderCommandInputAdmission = Readonly<{
+  sessionId: string;
+  processId: string;
+  admissionId: string;
+  commandId: string;
+}>;
+const inputAdmission = new AsyncLocalStorage<ProviderCommandInputAdmission | undefined>();
+/** Internal route context, not an authorization from command arguments. The DB
+ * adapter still checks the exact existing admission and retained process. */
+export function withProviderCommandInputAdmission<T>(
+  input: ProviderCommandInputAdmission | undefined,
+  fn: () => T,
+): T {
+  const canonical = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  if (
+    input &&
+    [input.sessionId, input.processId, input.admissionId, input.commandId].some(
+      (id) => !canonical.test(id),
+    )
+  )
+    throw new Error("Invalid retained command input admission");
+  return inputAdmission.run(input ? Object.freeze({ ...input }) : undefined, fn);
+}
+export function admittedProviderCommandInput(): ProviderCommandInputAdmission | undefined {
+  return inputAdmission.getStore();
+}
+export type PendingCommandSupervision = {
+  managed: boolean;
+  preparing?: boolean;
+  notDispatched?: boolean;
+  preparationSettled?: Promise<void>;
+  settlePreparation?: () => void;
+};
+const pendingSupervision = new AsyncLocalStorage<PendingCommandSupervision | undefined>();
 export function withPendingCommandSupervision<T>(
   state: PendingCommandSupervision | undefined,
   fn: () => T,
 ): T {
-  return state ? pendingSupervision.run(state, fn) : fn();
+  return pendingSupervision.run(state, fn);
+}
+/** Routing invokes this before resolving or admitting THIS original command.
+ * Preparation can run read-only probes, but cannot dispatch user code. */
+export function beginPendingCommandPreparation(): void {
+  const state = pendingSupervision.getStore();
+  if (state) state.preparing = true;
+}
+export function markPendingCommandNotDispatched(): void {
+  const state = pendingSupervision.getStore();
+  if (!state) return;
+  state.notDispatched = true;
+  state.preparing = false;
+  state.settlePreparation?.();
+}
+export async function preparePendingCommandStart<T>(prepare: () => Promise<T>): Promise<T> {
+  try {
+    return await prepare();
+  } catch (error) {
+    // This wrapper ends before the user-command provider function is invoked.
+    // This is call-scoped dispatch proof, not an inference from an error name.
+    markPendingCommandNotDispatched();
+    throw error;
+  }
+}
+export function completePendingCommandPreparation(managed: boolean): void {
+  const state = pendingSupervision.getStore();
+  if (!state) return;
+  state.managed = managed;
+  state.preparing = false;
+  state.settlePreparation?.();
 }
 /** Called only by the provider adapter before dispatching an idle supervisor. */
 export function markPendingCommandSupervised(): void {
   const state = pendingSupervision.getStore();
-  if (state) state.managed = true;
+  if (state) {
+    state.managed = true;
+    state.preparing = false;
+    state.settlePreparation?.();
+  }
 }
-const supervisionReady = new AsyncLocalStorage<boolean>();
+/** Private admission context spans distinct protocols; this does not widen the
+ * router's public descriptor, path schema or qualification contract. */
+export type AdmittedCommandSupervisionProtocol =
+  | CommandSupervisionProtocol
+  | NativeBrokerCommandProtocol;
+const supervisionReady = new AsyncLocalStorage<AdmittedCommandSupervisionProtocol | undefined>();
+const requiredSupervision = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
+const turnCommandSupervision = new AsyncLocalStorage<CommandSupervisionProtocol | undefined>();
+/** Shape of a trusted turn command, not an enrollment or model-supplied
+ * qualification. Only the server's immutable group birth may opt it in. */
+export function withTurnCommandSupervision<T>(
+  protocol: CommandSupervisionProtocol | undefined,
+  fn: () => T,
+): T {
+  return turnCommandSupervision.run(protocol, fn);
+}
+export function turnCommandSupervisionProtocol(): CommandSupervisionProtocol | undefined {
+  return turnCommandSupervision.getStore();
+}
+/** Only trusted turn ownership selects this requirement, before provider Start.
+ * It is not a model argument or permission to adopt a background command. */
+export function withRequiredCommandSupervision<T>(
+  protocol: CommandSupervisionProtocol | undefined,
+  fn: () => T,
+): T {
+  return requiredSupervision.run(protocol, fn);
+}
+export function requiredCommandSupervisionProtocol(): CommandSupervisionProtocol | undefined {
+  return requiredSupervision.getStore();
+}
 type SupervisedLaunchReservation = {
-  reserve(command: ModalRouterProviderCommand): Promise<void>;
+  reserve(command: ModalRouterProviderCommand | ModalBrokerProviderCommand): Promise<void>;
 };
 const supervisedLaunch = new AsyncLocalStorage<SupervisedLaunchReservation>();
 export function withSupervisedLaunchReservation<T>(
@@ -159,16 +275,30 @@ export function withSupervisedLaunchReservation<T>(
 ): T {
   return supervisedLaunch.run(reservation, fn);
 }
-export async function reserveSupervisedLaunch(command: ModalRouterProviderCommand): Promise<void> {
+export function requireSupervisedLaunchReservation(): SupervisedLaunchReservation {
   const reservation = supervisedLaunch.getStore();
   if (!reservation) throw new Error("Supervised launch requires durable pre-dispatch reservation");
-  await reservation.reserve(command);
+  return reservation;
 }
-export function withCommandSupervisionReady<T>(ready: boolean, fn: () => T): T {
-  return supervisionReady.run(ready, fn);
+export async function reserveSupervisedLaunch(
+  command: ModalRouterProviderCommand | ModalBrokerProviderCommand,
+): Promise<void> {
+  await requireSupervisedLaunchReservation().reserve(command);
+}
+export function withCommandSupervisionReady<T>(
+  ready: boolean,
+  fn: () => T,
+  protocol: AdmittedCommandSupervisionProtocol = "native-subreaper-v1",
+): T {
+  return supervisionReady.run(ready ? protocol : undefined, fn);
 }
 export function admittedCommandSupervisionReady(): boolean {
-  return supervisionReady.getStore() === true;
+  return supervisionReady.getStore() !== undefined;
+}
+export function admittedCommandSupervisionProtocol():
+  | AdmittedCommandSupervisionProtocol
+  | undefined {
+  return supervisionReady.getStore();
 }
 export const MAX_PROVIDER_COMMAND_HANDLE = 2147483647;
 
@@ -188,5 +318,11 @@ export function admittedProviderCommandHandle(): number | undefined {
 /** Private staging and read-only commands are not the surrounding workspace
  * mutation. Do not lend them its one-shot retained invocation alias. */
 export function withoutProviderCommandHandle<T>(fn: () => T): T {
-  return admission.run(undefined, () => withCommandSupervisionReady(false, fn));
+  return admission.run(undefined, () =>
+    withProviderCommandInputAdmission(undefined, () =>
+      withTurnCommandSupervision(undefined, () =>
+        withRequiredCommandSupervision(undefined, () => withCommandSupervisionReady(false, fn)),
+      ),
+    ),
+  );
 }

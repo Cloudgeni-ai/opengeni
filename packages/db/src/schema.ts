@@ -10495,6 +10495,90 @@ export const sandboxLeaseHolders = pgTable(
   }),
 );
 
+// Encrypted transport custody, separate from native qualification/admission.
+export const nativeCommandBrokerTransports = pgTable(
+  "native_command_broker_transports",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    leaseId: uuid("lease_id").notNull(),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    binding: jsonb("binding").$type<Record<string, unknown>>().notNull(),
+    initialStateSha256: text("initial_state_sha256").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    writerId: uuid("writer_id"),
+    writerEpoch: bigint("writer_epoch", { mode: "number" }).notNull().default(1),
+    writerUntil: timestamp("writer_until", { withTimezone: true }),
+    stateEncrypted: text("state_encrypted").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    scope: uniqueIndex("native_command_broker_transport_scope").on(
+      table.id,
+      table.accountId,
+      table.workspaceId,
+    ),
+    leaseScope: foreignKey({
+      columns: [table.accountId, table.workspaceId, table.leaseId],
+      foreignColumns: [sandboxLeases.accountId, sandboxLeases.workspaceId, sandboxLeases.id],
+    }),
+    creation: uniqueIndex("native_command_broker_creation").on(
+      table.leaseId,
+      sql`(${table.binding}->>'createOperationId')`,
+    ),
+    physical: uniqueIndex("native_command_broker_physical_instance").on(
+      sql`(${table.binding}->>'providerBindingKey')`,
+      sql`(${table.binding}->>'sandboxId')`,
+    ),
+  }),
+);
+
+export const nativeCommandBrokerEntries = pgTable(
+  "native_command_broker_entries",
+  {
+    brokerId: uuid("broker_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    kind: text("kind", {
+      enum: [
+        "request",
+        "frame",
+        "page",
+        "eof",
+        "control_reply",
+        "request_reply",
+        "stdin_reservation",
+      ],
+    }).notNull(),
+    entryKey: text("entry_key").notNull(),
+    sequence: bigint("sequence", { mode: "number" }),
+    sha256: text("sha256").notNull(),
+    valueEncrypted: text("value_encrypted").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.brokerId, table.kind, table.entryKey] }),
+    sequence: uniqueIndex("native_command_broker_entry_sequence").on(
+      table.brokerId,
+      table.kind,
+      table.sequence,
+    ),
+    brokerScope: foreignKey({
+      columns: [table.brokerId, table.accountId, table.workspaceId],
+      foreignColumns: [
+        nativeCommandBrokerTransports.id,
+        nativeCommandBrokerTransports.accountId,
+        nativeCommandBrokerTransports.workspaceId,
+      ],
+    }),
+  }),
+);
+
 export const sandboxWorkspaceMutationActorKindValues = ["turn", "direct", "process"] as const;
 export const sandboxWorkspaceMutationHolderKindValues = ["turn", "direct", "process"] as const;
 // The causal principal behind an admitted workspace writer. `subject`/`service`
@@ -10887,7 +10971,7 @@ export const sandboxRetainedProcesses = pgTable(
       sql`${table.providerCommand} IS NULL OR ((
         ${table.providerBackend} = 'modal'
         AND jsonb_typeof(${table.providerCommand}) = 'object'
-        AND ${table.providerCommand}->>'kind' IN ('modal-control-v1', 'modal-router-v1')
+        AND ${table.providerCommand}->>'kind' IN ('modal-control-v1', 'modal-router-v1', 'modal-broker-v1')
         AND ${table.providerCommand}->>'sandboxId' = ${table.providerInstanceId}
         AND length(${table.providerCommand}->>'taskId') > 0
         AND length(${table.providerCommand}->>'execId') > 0
@@ -10897,6 +10981,12 @@ export const sandboxRetainedProcesses = pgTable(
       "sandbox_retained_processes_provider_input_index_chk",
       sql`${table.providerCommandInputIndex} BETWEEN 0 AND 9007199254740991`,
     ),
+    nativeBrokerCommandIdentity: uniqueIndex("native_broker_retained_command_identity")
+      .on(
+        sql`(${table.providerCommand}->'supervision'->>'brokerId')`,
+        sql`(${table.providerCommand}->>'execId')`,
+      )
+      .where(sql`${table.providerCommand}->>'kind' = 'modal-broker-v1'`),
     holder: uniqueIndex("sandbox_retained_processes_holder_uq").on(table.leaseId, table.holderId),
     active: index("sandbox_retained_processes_active_idx")
       .on(table.workspaceId, table.sessionId, table.startedAt)

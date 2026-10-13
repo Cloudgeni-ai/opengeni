@@ -5,7 +5,7 @@ import { defineConfig } from "tsup";
 // by the consumer, not inlined. zod stays a normal runtime `dependencies` entry
 // and is externalized for dedupe.
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/server-source-identity.ts", "src/server-native-artifact.ts"],
   format: ["esm"],
   target: "es2022",
   dts: true,

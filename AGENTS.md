@@ -388,6 +388,7 @@ Three principles here are load-bearing and easy to break by accident:
 - **Durably adopted background commands are session-owned, not attempt-owned.** Adoption must commit the exact provider locator under the canonical control + exact-attempt fence before a session-owned live command ID is returned. Docker/local SDK handles are explicitly turn-scoped instead: return them after the requested bounded wait, keep them on the turn cancellation fence, and stop/settle them on ordinary completion or interruption before capture. They never become durable background rows or terminal notifications. A yielded managed `exec_command` whose final step is a bare stdin-driven shell (`bash`, `sh -i`, `bash --noprofile --norc`; no `-c`, script, or other argument, see `isBareInteractiveShellCommand`) is turn-scoped the same way on every backend: it never exits by itself, so adopting it would keep the sandbox busy forever after the turn. During Connected Machine adoption, the op-stream yield path temporarily owns exact failure cancellation so Steer cannot cancel after the transfer begins and a rejected adoption still exact-cancels. Normal turn completion and Steer detach from durably adopted commands without cancellation. Session/workspace Pause and terminal Cancel atomically move matching commands to `stopping`; Resume never revives them. Managed commands retain their exact process holder and sandbox, while Connected Machine commands retain the physical control workspace, enrollment, connection instance, and op ID. Session/workspace deletion blocks on active command authority; successful source-workspace deletion alone prunes settled cross-workspace origin history. Reconciliation accepts only typed terminal provider proof, checkpoints it before settlement, and never rebinds to a successor or infers death from age/offline state.
 - **The pre-deadline save is mandatory.** Inside `sandboxDeadlineMandatoryCaptureLeadMs` before a requested provider deadline, deadline containment and the zero-holder drain stop waiting for command stop grace, owner quiescence, sibling inactivity or open requests; only live non-process holders, supervised commands and operator reaper holds still block. Open requests are recorded in `deadline_forced_admission_ids` (0676), excluded from drain publication and rejected only in the cold commit after exact termination. See `docs/run-lifecycle.md`.
 - **Idle-command containment has an explicit opt-out, not a deadline bypass.** `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS=0` normalizes to the existing absent runtime window and disables only new idle-command enrollments. Unset/blank inputs still derive the default and positive windows retain their bounds. Never pass zero into the database inventory, undo an enrolled drain, or disable provider deadlines, capture, ordinary idle-lease reaping, or turn/wait/holder fences as part of this opt-out. See `docs/run-lifecycle.md`.
+- **Bare Modal shells require native ownership before Start.** Trusted turn context selects `native-subreaper-pty-v1` for PTYs and v1 for pipes independently of the default-off background-launch flag. Exact-instance capability and canonical protocol-specific database fences precede admission; missing helpers never fall back to a process-group cancellation claim. Retained native identity, receipt-before-ACK, complete output capture and provider termination remain required. See `docs/command-supervision.md`.
 - **Stream cancellation must not accumulate losing promise reactions.** Temporal's `Context.cancelled` intentionally never settles when an activity completes normally. A long token/event loop must therefore await its iterator through `Context.cancellationSignal` with a listener removed after each successful read; never `Promise.race` every event against the lifetime cancellation promise. Preserve the exact cancellation reason and one-pending-read behavior.
 - **Session replay must bound upstream payload reads.** SSE uses byte-selected durable pages before formatting frames. Interactive page planning sizes only the selected prefix; one oversized event stays complete and travels alone. A short page is not EOF, and the downstream one-frame queue is not a substitute for an upstream byte bound.
 - **Accepted direction wake delivery is admission-aware.** Temporal accepting `queueChanged` or `sessionControl` is transport evidence, not proof that a closing or continuing workflow observed Postgres. While effective control is active, the current coalesced wake revision remains unacknowledged while an accepted human/API turn is still queued, and any wake remains unacknowledged while an `agent_steer_instruction` is pending; the bounded dispatcher keeps retrying until the attempt-fenced claim adopts each direction exactly once. An older acknowledgement may advance only its own revision and cannot hide newer queued work. Duplicate signals remain wake hints and cannot duplicate inference. A real Pause is a truthful admission blocker and may acknowledge the old revision; Resume must commit a fresh wake revision for the still-pending direction.
@@ -555,6 +556,10 @@ Modal Start transport errors are not rejection proof, including DNS-shaped
 `UNAVAILABLE`. Only locally constructed pre-dispatch readiness proof permits
 recovery. Function tools return explicit outcome-unknown results without replay;
 retain the exact invocation and its writer fence until terminal provider proof.
+The separate initial-process broker can settle a partial launch only from its
+committed native cancel/launch-closed reply and the `0765` journal-hash guard.
+That is never-started evidence, not an exit code or fabricated quiescence;
+unknown input and missing commands remain retained. See `docs/design/native-command-broker.md`.
 SDK setup observes/adopts only its original invocation while the helper frame
 is alive. If setup unwinds with a genuine unknown outcome, retain its command
 or unresolved admission and park the exact turn as recovering with the durable
@@ -577,6 +582,54 @@ An unknown outcome must retain its epoch/checkpoint even after expiry. Recovery
 requires positive historical provider identity in the same authenticated
 namespace; absence never licenses another create. Only ordinary holder-fenced
 draining may stop a recovered instance. See `docs/run-lifecycle.md`.
+
+The in-progress native broker bootstrap derives its artifact and broker identity
+from the original private physical enrollment, not a shaped lease or guest
+report. Its qualified core composition refuses fresh registration on a warm
+instance and rechecks the live creation after capture. This is not command
+admission or initial-stderr verification; see `docs/design/native-command-broker.md`.
+
+The broker coordinator's diagnostics owner is shared across attached session
+surfaces, not one polling task per command. New work needs a fresh bounded
+query outside the input queue; exact cancellation and output retirement do not
+depend on that query succeeding. Retain definite faults before refusal, never
+turn timeout into fault or exit proof, and abort/join the final owner's actual
+read before replacement. Application installation still requires the original
+qualified broker birth; no deployment or enrollment follows from a source edit.
+
+New command routing must select its pipe/PTY protocol from the original frozen
+qualification before admission. Keep exact-protocol retained inspection separate;
+never infer broker selection from adapter presence or retry a rejected broker
+launch through the router. Worker and API-direct starts use the same selector.
+
+The broker SDK bridge routes internal helper execs through the enclosing
+operation's exact backend with separate canonical pipe admissions. Do not let
+SDK path, editor, archive or cached list helpers regain TaskExec. File writes
+need the enclosing mutation admission. Preserve the sandbox object's identity
+for snapshot wrappers; closing the bridge never terminates the physical box.
+Fresh/warm application installation uses the qualified core composition below;
+snapshot restoration and full remote qualification remain separate gates.
+
+Core's `native-command-broker-session.ts` composes qualified bootstrap with one
+shared physical coordinator and exact SDK wrappers. Warm attachment requires
+the retained original prefix, source and provider namespace. Close joins host
+observers without deleting the box. Its create selector accepts only the frozen
+broker birth; the runtime skips only an empty initial manifest at `/workspace`,
+deferring setup commands until warm routing. Worker and API spawners select that
+recipe before the original lease-owned create; warm callers attach before
+readiness or commands. Pair every wrapper with explicit host ownership: eager
+turn cancellation drops only the holder, while finalization closes the wrapper
+after its users leave. API cache borrows are separate tokens; eviction and idle
+expiry close only after the last borrower. Never call legacy SDK close. Viewer
+desktop/terminal setup takes an exact-instance direct holder and canonical
+home-only routing, refusing an active-machine change. These application seams
+do not qualify snapshot restore, legacy physical replacement or a live release.
+
+Broker stdin framing preserves one canonical child admission for the full
+write. Retain the complete payload and byte range before chunk dispatch; frame
+UUIDs are transport identities, not new authority. Require exact native
+delivery before advancing a chunk, preserve unknown indexes for explicit
+recovery, and leave cancellation independent of a blocked stdin consumer.
 
 Public historical checkpoint consent (0495) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy

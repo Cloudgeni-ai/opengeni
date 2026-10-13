@@ -12,11 +12,13 @@
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import { readImmutableServerSourceSha } from "@opengeni/config/server-source-identity";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import {
   createProviderCommandRetainer,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
+import { selectNativeCommandProviderProtocol } from "@opengeni/db";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   retainedProviderCommandPersistence,
@@ -44,6 +46,7 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   RoutingSandboxSession,
+  RoutingActiveRouteChangedError,
   RoutingMutationOutputRejectedError,
   resolveModalCheckpointProviderBindingForSession,
   type ControlRpc,
@@ -237,6 +240,9 @@ export function wrapChannelABoxWithRouting(
     workspaceId: string;
     sessionId: string;
     resourceSubjectId: string;
+    /** Placement-bound setup (desktop/terminal) must reject an active-machine
+     * change instead of running against a different box than its tunnel. */
+    homeOnly?: boolean;
     homeLease?: {
       sandboxGroupId: string;
       leaseEpoch: number;
@@ -259,6 +265,8 @@ export function wrapChannelABoxWithRouting(
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
   const homeLease = ids.homeLease;
+  if (ids.homeOnly && (!homeLease || ids.pinnedSelfhosted))
+    throw new Error("Home-only setup requires an exact provider home lease");
   const beforeMutation = homeLease
     ? async ({
         op,
@@ -589,6 +597,19 @@ export function wrapChannelABoxWithRouting(
   const proxy = new RoutingSandboxSession({
     providerSupervisionReady: async () =>
       settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
+    requiredProviderSupervisionReady: (protocol) => supervisedCommandProtocolReady(db, protocol),
+    qualifiedProviderSupervision: async (backend, protocol) => {
+      if (!homeLease || backend.sandboxId !== null) return { status: "legacy" };
+      return selectNativeCommandProviderProtocol(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: homeLease.sandboxGroupId,
+        providerInstanceId: backend.providerInstanceId ?? "",
+        leaseEpoch: backend.leaseEpoch ?? -1,
+        protocol,
+        sourceSha: (await readImmutableServerSourceSha()) ?? "",
+      });
+    },
     providerCommandHandle: (value) =>
       value && typeof value === "object"
         ? (value as PersistableMutationAdmission).admission?.workspaceGeneration
@@ -631,10 +652,16 @@ export function wrapChannelABoxWithRouting(
         : {}),
     },
     readPointer: async () => {
-      if (!routingEnabled(settings)) {
+      if (!routingEnabled(settings) && !ids.homeOnly) {
         return { activeSandboxId: null, activeEpoch: 0 };
       }
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
+      if (ids.homeOnly && pointer?.activeSandboxId) {
+        throw new RoutingActiveRouteChangedError(
+          { activeSandboxId: null, activeEpoch: pointer.activeEpoch },
+          pointer,
+        );
+      }
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,

@@ -777,6 +777,17 @@ async function finalizeTurnAttemptSteps(
         await sandboxToRelease.release().catch(() => undefined);
       }
     }
+    // All wrapper users have left the finalization boundary. Dispose only our
+    // broker transport, even when physical writer proof was unavailable; this
+    // must not call the SDK's legacy close or settle those fenced admissions.
+    for (const sandboxToRelease of sandboxReleaseTargets) {
+      try {
+        await sandboxToRelease.closeHostHandle?.();
+      } catch (closeError) {
+        finalizationError ??= closeError;
+        console.error("sandbox host handle close failed", safeErrorDiagnostic(closeError));
+      }
+    }
     // Close provisioning after consuming the currently known targets. A
     // provider result that races in later is routed through releaseLateSandbox;
     // targets already released above synchronously removed their listener.

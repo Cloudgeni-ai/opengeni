@@ -37,6 +37,46 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("registers immutable native broker stdin payload plans as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0766_native_broker_stdin_plans.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "rolling" });
+  });
+  test("registers native broker never-started settlement as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0765_native_broker_launch_rejection.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+  test("registers the native broker diagnostic writer fence as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0764_native_broker_diagnostic_fault.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+  test("registers the read-only native broker bootstrap admission seam as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0763_native_broker_bootstrap_admission.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "rolling" });
+  });
+  test("registers distinct broker creation qualification as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0762_native_broker_creation_qualification.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
   test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -211,6 +251,66 @@ describe("release schema contract", () => {
     });
     expect(contractMigrationPaths).toEqual(sourceMigrationPaths);
     expect(new Set(contractMigrationPaths).size).toBe(contractMigrationPaths.length);
+  });
+
+  test("registers native PTY command supervision as a maintenance forward migration", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0758_native_pty_command_supervision.sql",
+      ),
+    ).toMatchObject({
+      path: "0758_native_pty_command_supervision.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
+  test("registers native command qualification as a maintenance forward migration", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0759_native_command_qualification.sql",
+      ),
+    ).toMatchObject({
+      path: "0759_native_command_qualification.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
+  test("registers native broker transport as an additive rolling migration", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0757_native_command_broker_transport.sql",
+      ),
+    ).toMatchObject({
+      path: "0757_native_command_broker_transport.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers native broker control reply indexing as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0760_native_command_broker_control_replies.sql",
+      ),
+    ).toMatchObject({
+      path: "0760_native_command_broker_control_replies.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers native broker stdin and operation replies as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0761_native_command_broker_input_replies.sql",
+      ),
+    ).toMatchObject({
+      path: "0761_native_command_broker_input_replies.sql",
+      deploymentMode: "rolling",
+    });
   });
 
   test("installs the workspace activity initializer before its conflict-safe backfill", async () => {
@@ -2329,6 +2429,17 @@ describe("release schema contract", () => {
       "0702_subscription_codex_access_editor.sql",
       "0701_quiescence_receipt_wake_repair.sql",
       "0700_codex_ownerless_person_refresh.sql",
+      "0734_connected_output_reachable_due.sql",
+      "0758_native_pty_command_supervision.sql",
+      "0759_native_command_qualification.sql",
+      "0757_native_command_broker_transport.sql",
+      "0760_native_command_broker_control_replies.sql",
+      "0761_native_command_broker_input_replies.sql",
+      "0762_native_broker_creation_qualification.sql",
+      "0763_native_broker_bootstrap_admission.sql",
+      "0764_native_broker_diagnostic_fault.sql",
+      "0765_native_broker_launch_rejection.sql",
+      "0766_native_broker_stdin_plans.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
       "0698_codex_ownerless_person_turns.sql",
       "0697_codex_retry_after_unknown_outcome.sql",

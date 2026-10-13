@@ -45,6 +45,30 @@ class ModalCommandClient extends ModalClientBase {
 }
 const controlClients = new WeakMap<object, PublicModalClient>();
 
+/** A separately owned client with exactly one physical dispatch per call.
+ * Initial-process broker transport uses the same verified retry boundary but
+ * owns/ closes its client independently from legacy command observers. */
+export function createModalSingleDispatchClient(client: CommandClient): PublicModalClient {
+  if (
+    client.version() !== "0.9.0" ||
+    typeof Reflect.get(ModalClient.prototype, "retryMiddleware") !== "function"
+  )
+    throw new Error("Verified Modal command cancellation contract is unavailable");
+  const profile = client.profile;
+  if (!profile?.tokenId || !profile.tokenSecret)
+    throw new Error("Modal command control requires its original authenticated profile");
+  return new ModalCommandClient({
+    tokenId: profile.tokenId,
+    tokenSecret: profile.tokenSecret,
+    endpoint: profile.serverUrl,
+    environment: profile.environment ?? "",
+    ...(profile.maxThrottleWaitSecs !== undefined
+      ? { maxThrottleWaitSecs: profile.maxThrottleWaitSecs }
+      : {}),
+    ...(client.logger ? { logger: client.logger } : {}),
+  });
+}
+
 export function commandControlPlane(client: CommandClient): ControlPlane {
   // Minimal injected control planes are used by deterministic unit tests.
   // Production installation requires the authenticated SDK profile below.
@@ -53,19 +77,7 @@ export function commandControlPlane(client: CommandClient): ControlPlane {
     throw new Error("Verified Modal command cancellation contract is unavailable");
   let controlled = controlClients.get(client);
   if (!controlled) {
-    const profile = client.profile;
-    if (!profile.tokenId || !profile.tokenSecret)
-      throw new Error("Modal command control requires its original authenticated profile");
-    controlled = new ModalCommandClient({
-      tokenId: profile.tokenId,
-      tokenSecret: profile.tokenSecret,
-      endpoint: profile.serverUrl,
-      environment: profile.environment ?? "",
-      ...(profile.maxThrottleWaitSecs !== undefined
-        ? { maxThrottleWaitSecs: profile.maxThrottleWaitSecs }
-        : {}),
-      ...(client.logger ? { logger: client.logger } : {}),
-    });
+    controlled = createModalSingleDispatchClient(client);
     controlClients.set(client, controlled);
   }
   return controlled.cpClient;

@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ModalClient } from "modal";
+import {
+  bindModalNativeBrokerCreate,
+  parseModalNativeBrokerCreatePlan,
+  retainModalNativeBrokerCreateReceipt,
+  type ModalNativeBrokerCreatePlan,
+} from "./modal-native-broker-create";
 
 type ModalMiddleware = NonNullable<
   NonNullable<ConstructorParameters<typeof ModalClient>[0]>["grpcMiddleware"]
@@ -15,6 +21,19 @@ export type ModalCreateIntent = {
   imageId: string;
   requestSha256: string;
 };
+
+export type ModalCreateImagePreparation =
+  | { kind: "registry-import"; imageRef: string; imageId: string }
+  | { kind: "provider-image-id" | "unqualified-image"; imageId: string };
+const imagePreparations = new WeakMap<ModalCreateIntent, Readonly<ModalCreateImagePreparation>>();
+
+/** Actual boundary object only. A copied intent or caller metadata has no
+ * preparation authority; the canonical selector/build owns the proof. */
+export function readModalCreateImagePreparation(
+  intent: ModalCreateIntent,
+): Readonly<ModalCreateImagePreparation> | undefined {
+  return imagePreparations.get(intent);
+}
 
 export function modalCreateOperationName(operationId: string): string {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(operationId)) {
@@ -39,8 +58,13 @@ export function createModalProviderCreateBoundary(input: {
   operationId: string;
   beforeDispatch: (intent: ModalCreateIntent) => Promise<void>;
   onReceipt: (receipt: ModalCreateIntent & { instanceId: string }) => Promise<void>;
+  imagePreparation?: () => ModalCreateImagePreparation | undefined;
+  nativeBroker?: ModalNativeBrokerCreatePlan;
 }): ModalMiddleware {
   const name = modalCreateOperationName(input.operationId);
+  const nativeBroker = input.nativeBroker
+    ? parseModalNativeBrokerCreatePlan(input.nativeBroker)
+    : undefined;
   let attempted = false;
   return async function* modalProviderCreateBoundary(call, options) {
     if (call.method.path !== CREATE_PATH) return yield* call.next(call.request, options);
@@ -75,15 +99,29 @@ export function createModalProviderCreateBoundary(input: {
         { tagName: OPERATION_TAG, tagValue: input.operationId },
       ],
     };
-    const intent: ModalCreateIntent = {
+    const intent: ModalCreateIntent = Object.freeze({
       operationId: input.operationId,
       name,
       appId: request.appId,
       imageId: request.definition.imageId,
       requestSha256: createHash("sha256").update(JSON.stringify(wireRequest)).digest("hex"),
-    };
+    });
+    const preparation = input.imagePreparation?.();
+    if (preparation) {
+      if (preparation.imageId !== intent.imageId)
+        throw new Error("Modal create image disagrees with its actual native preparation");
+      imagePreparations.set(intent, Object.freeze({ ...preparation }));
+    }
+    if (nativeBroker) bindModalNativeBrokerCreate(intent, wireRequest.definition, nativeBroker);
     attempted = true;
     await input.beforeDispatch(intent);
+    // Admission may await storage. Never dispatch a mutable SDK request whose
+    // bytes changed while its original digest was being persisted.
+    if (
+      createHash("sha256").update(JSON.stringify(wireRequest)).digest("hex") !==
+      intent.requestSha256
+    )
+      throw new Error("Modal create wire request changed after durable admission");
     // Middleware is generic over every Modal RPC. The exact method/path and
     // validated request above narrow this one operation's protobuf boundary.
     const dispatchOptions = { ...options, retries: 0 };
@@ -96,7 +134,9 @@ export function createModalProviderCreateBoundary(input: {
     }
     // Persist even if the caller has since cancelled. Cancellation cannot erase
     // an already-created provider instance or turn it into a never-sent request.
-    await input.onReceipt({ ...intent, instanceId });
+    const receipt = Object.freeze({ ...intent, instanceId });
+    retainModalNativeBrokerCreateReceipt(intent, receipt);
+    await input.onReceipt(receipt);
     return response;
   };
 }
