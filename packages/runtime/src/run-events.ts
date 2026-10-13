@@ -25,6 +25,7 @@ import {
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
+import { execFullOutputFromCustomData } from "./sandbox/exec-output-spill";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
 
@@ -595,6 +596,9 @@ export function normalizeSdkEvent(
     });
   } else if (item.type === "tool_call_output_item") {
     const retainedMcpResult = mcpResultFromCustomData(item.customData);
+    // A spilled exec response keeps its full text for the timeline; the model
+    // and history see the shorter projection in `item.output`.
+    const spilledExecOutput = execFullOutputFromCustomData(item.customData);
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
@@ -604,7 +608,7 @@ export function normalizeSdkEvent(
         output:
           "toolOutputOverride" in options
             ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(retainedMcpResult ?? item.output),
+            : normalizeToolOutputForEvent(retainedMcpResult ?? spilledExecOutput ?? item.output),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }

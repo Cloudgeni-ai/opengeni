@@ -6,6 +6,7 @@ import {
 import { UserError, type MCPServer } from "@openai/agents";
 import { randomUUID } from "node:crypto";
 import { normalizeProtocolJsonValue } from "./protocol-json";
+import { EXEC_OUTPUT_SPILL_CUSTOM_DATA_KEY } from "./sandbox/exec-output-spill";
 
 export const OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY = "__opengeniMcpResultV1" as const;
 export const OPENGENI_INNER_MCP_CUSTOM_DATA_KEY = "__opengeniInnerMcpCustomData" as const;
@@ -367,11 +368,22 @@ export function unwrapSdkMcpResultProjection(value: unknown): unknown {
   return exact === undefined ? value : exact;
 }
 
+// Opengeni's duplicate full-result markers: the exact MCP result and the full
+// text of a spilled exec response. Both exist only for the durable event.
+const DURABLE_EVENT_ONLY_CUSTOM_DATA_KEYS = [
+  OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
+  EXEC_OUTPUT_SPILL_CUSTOM_DATA_KEY,
+] as const;
+
 function stripMcpResultMarkerFromCustomData(customData: unknown): boolean {
   if (!isPlainRecord(customData)) return false;
-  if (!Object.hasOwn(customData, OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY)) return false;
-  delete customData[OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY];
-  return true;
+  let stripped = false;
+  for (const key of DURABLE_EVENT_ONLY_CUSTOM_DATA_KEYS) {
+    if (!Object.hasOwn(customData, key)) continue;
+    delete customData[key];
+    stripped = true;
+  }
+  return stripped;
 }
 
 function compactSerializedRunItem(item: unknown): boolean {

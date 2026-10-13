@@ -869,6 +869,9 @@ const SettingsSchema = z.object({
   // Lean non-strict `exec_command` schema: only `cmd` and `max_output_tokens`
   // are required (on by default after an A/B; set false to disable).
   experimentOutputCost: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_OUTPUT_COST
+  // Spill large `exec_command`/`write_stdin` output bodies to a sandbox file and
+  // show the model a head/tail preview with the file path (off by default).
+  experimentExecOutputSpill: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_EXEC_OUTPUT_SPILL
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -4653,6 +4656,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
+    experimentExecOutputSpill: optional("OPENGENI_EXPERIMENT_EXEC_OUTPUT_SPILL"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(

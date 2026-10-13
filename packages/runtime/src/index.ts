@@ -493,6 +493,7 @@ import {
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import { withLeanExecCommandArguments } from "./sandbox/lean-exec-arguments";
+import { withExecOutputSpill } from "./sandbox/exec-output-spill";
 export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
 export {
   classifyModelStreamIdleTimeoutError,
@@ -4427,6 +4428,27 @@ function buildAgentCapabilitiesFromComposition(
       const original = target.tools;
       target.tools = function () {
         return withLeanExecCommandArguments(original.call(this));
+      };
+    }
+  }
+  // Large exec output spills to a sandbox file (settings.experimentExecOutputSpill,
+  // off by default). Outermost, so every inner layer sees the full response and
+  // only the model's projection changes; see `sandbox/exec-output-spill.ts`.
+  if (settings.experimentExecOutputSpill) {
+    for (const capability of caps) {
+      const target = capability as unknown as {
+        tools(): Tool<unknown>[];
+        _session?: SandboxSessionLike;
+        _runAs?: string;
+      };
+      const original = target.tools;
+      target.tools = function (this: typeof target) {
+        const session = this._session;
+        const runAs = this._runAs;
+        return withExecOutputSpill(original.call(this), () => {
+          const editor = session?.createEditor?.(runAs);
+          return session && editor ? { session, editor } : null;
+        });
       };
     }
   }

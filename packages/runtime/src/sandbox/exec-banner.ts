@@ -75,6 +75,18 @@ export function parseExecResponseBanner(raw: string): ExecResponseBanner {
   return { kind: "exited", exitCode: value };
 }
 
+/** Split a valid SDK exec response into its metadata header (through the
+ * `Output:` delimiter line, inclusive) and its command-controlled output body.
+ * Returns null unless the header carries exactly one valid terminal status. */
+export function splitExecResponse(raw: string): { header: string; body: string } | null {
+  const banner = parseExecResponseBanner(raw);
+  if (banner.kind !== "running" && banner.kind !== "exited") return null;
+  const delimiter = OUTPUT_DELIMITER.exec(raw);
+  if (!delimiter) return null;
+  const bodyStart = delimiter.index + delimiter[0].length;
+  return { header: raw.slice(0, bodyStart), body: raw.slice(bodyStart) };
+}
+
 export function parseExecBannerSessionId(raw: string): number | null {
   const banner = parseExecResponseBanner(raw);
   return banner.kind === "running" ? banner.sessionId : null;

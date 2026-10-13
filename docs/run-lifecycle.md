@@ -2427,6 +2427,20 @@ omitted `login`, `tty` or `yield_time_ms` is filled with `false`, `false` and
 `10000` before every inner layer, so execution matches the values models chose
 under the strict schema; `shell` and `workdir` keep their absent meaning.
 
+An opt-in experiment (`OPENGENI_EXPERIMENT_EXEC_OUTPUT_SPILL=true`,
+settings.experimentExecOutputSpill, off by default) spills large shell output
+(`sandbox/exec-output-spill.ts`). When one `exec_command` or `write_stdin`
+result carries more than 10,000 bytes of output body after the model's own
+`max_output_tokens`, the outermost tool wrapper writes the body through the
+sandbox editor to `tool-results/exec-<call id>.txt` (cwd-relative, with a
+`tool-results/.gitignore` of `*`) and returns the unchanged banner, a notice
+line, the first 60 and last 25 lines (character-bounded) and an elision marker.
+That projection is the SDK tool output, so history and replays match the live
+request. The full response rides on the run item's `customData` only for the
+durable `agent.toolCall.output` event and is released with the MCP result
+marker after the append. Smaller output, errors and a failed file write keep
+today's output.
+
 Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
 to collect complete output from the same invocation until provider terminal/EOF
 proof. Routing retains and atomically captures the raw initial receipt before

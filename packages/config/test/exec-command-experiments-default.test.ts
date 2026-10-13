@@ -13,3 +13,11 @@ test("cut polling and lean exec_command arguments are on by default and can be t
   expect(disabled.experimentCutPolling).toBe(false);
   expect(disabled.experimentOutputCost).toBe(false);
 });
+
+test("exec output spill is off by default and can be turned on", () => {
+  expect(getSettings({ OPENGENI_ENV: "test" }).experimentExecOutputSpill).toBe(false);
+  expect(
+    getSettings({ OPENGENI_ENV: "test", OPENGENI_EXPERIMENT_EXEC_OUTPUT_SPILL: "true" })
+      .experimentExecOutputSpill,
+  ).toBe(true);
+});
