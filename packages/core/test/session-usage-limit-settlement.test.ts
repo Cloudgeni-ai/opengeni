@@ -252,4 +252,71 @@ describe("per-task usage limit settlement across funding paths", () => {
     const usageEvents = active.calls.filter((call) => call.fn === "usage");
     for (const event of usageEvents) expect(event.input.sessionId).toBeUndefined();
   });
+
+  test("a response that reported no usage is an unknown amount, never known free", async () => {
+    for (const reported of [
+      normalizeModelCallUsage({ inputTokens: 0, outputTokens: 0, totalTokens: 0 }),
+      normalizeModelCallUsage({}),
+    ]) {
+      active = spyWrites();
+      const record = await settleModelUsage(
+        testSettings({ billingMode: "disabled", modelPricingJson: PRICED }),
+        db,
+        {
+          ...settlementInput({ model: "priced-model", chargesOpenGeniCredits: false }, "session-1"),
+          normalizedUsage: reported,
+        },
+      );
+      const receipt = active.calls.find((call) => call.fn === "receipt")!;
+      expect(receipt.input).toMatchObject({ amountMicros: null, pricingSource: null });
+      // Billing and Insights keep their own estimate unchanged.
+      expect(
+        record.estimatedProviderCostMicros === null || record.estimatedProviderCostMicros === 0,
+      ).toBe(true);
+      active.restore();
+      active = null;
+    }
+  });
+
+  test("a known free model with reported tokens stays known free", async () => {
+    active = spyWrites();
+    await settleModelUsage(
+      testSettings({ billingMode: "disabled", modelPricingJson: PRICED }),
+      db,
+      {
+        ...settlementInput({ model: "free-model", chargesOpenGeniCredits: false }, "session-1"),
+      },
+    );
+    expect(active.calls.find((call) => call.fn === "receipt")!.input).toMatchObject({
+      amountMicros: 0,
+      pricingSource: "configured_list_price",
+    });
+  });
+
+  test("with custody, a failed receipt write is handed over and credit settlement continues", async () => {
+    active = spyWrites({ settleFails: true });
+    const held: unknown[] = [];
+    const counters: string[] = [];
+    await settleModelUsage(testSettings({ billingMode: "stripe", modelPricingJson: PRICED }), db, {
+      ...settlementInput({ model: "priced-model" }, "session-1"),
+      receiptCustody: (receipt) => void held.push(receipt),
+      usageLimitMetrics: {
+        incrementCounter: (metric) => void counters.push(metric.labels?.outcome ?? ""),
+      },
+    });
+    expect(held).toEqual([
+      {
+        sessionId: "session-1",
+        sourceId: "turn-1:priced-model",
+        turnId: "turn-1",
+        amountMicros: 6_000,
+        pricingSource: "configured_list_price",
+        model: "priced-model",
+      },
+    ]);
+    expect(counters).toEqual(["held"]);
+    // The receipt came first; the credit debit and usage writes still ran.
+    expect(active.calls[0]!.fn).toBe("receipt");
+    expect(active.calls.some((call) => call.fn === "debit")).toBe(true);
+  });
 });

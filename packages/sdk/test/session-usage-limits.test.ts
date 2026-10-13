@@ -4,6 +4,7 @@ import {
   OpenGeniAllowanceExhaustedError,
   OpenGeniApiError,
   OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
   sessionUsageLimitReachedFields,
 } from "../src/errors";
@@ -102,9 +103,53 @@ describe("createSession usage limit echo", () => {
   });
 
   test("no requested limit needs no echo (old servers keep working)", async () => {
-    const { og } = client(() => created());
+    const { og, requests } = client(() => created());
     const session = await og.createSession(WORKSPACE_ID, { initialMessage: "hi" });
     expect(session.id).toBe(SESSION_ID);
+    expect(requests[0]!.body).not.toHaveProperty("startMode");
+  });
+
+  test("a limited create spells out startMode standard; an explicit realtime is kept", async () => {
+    const { og, requests } = client(() => created(state(5)));
+    await og.createSession(WORKSPACE_ID, { initialMessage: "hi", usageLimitMicros: 5 });
+    expect(requests[0]!.body).toMatchObject({ startMode: "standard", usageLimitMicros: 5 });
+    const realtime = client(() => created(state(5)));
+    await realtime.og.createSession(WORKSPACE_ID, { startMode: "realtime", usageLimitMicros: 5 });
+    expect(realtime.requests[0]!.body).toMatchObject({ startMode: "realtime" });
+  });
+
+  test("an older server rejects the whole limited create before starting work: typed, no session", async () => {
+    // An older server accepts only `realtime` and answers with its ordinary
+    // request-body validation envelope; nothing is created or dispatched.
+    const { og, requests } = client(() =>
+      Response.json(
+        {
+          error: {
+            message: "Invalid request body",
+            details: {
+              code: "invalid_request_body",
+              issues: [{ path: "startMode", message: 'Invalid input: expected "realtime"' }],
+            },
+          },
+        },
+        { status: 400 },
+      ),
+    );
+    const error = await og
+      .createSession(WORKSPACE_ID, { initialMessage: "hi", usageLimitMicros: 5 })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(OpenGeniSessionUsageLimitUnsupportedError);
+    expect(error).toMatchObject({ code: "session_usage_limit_unsupported", sessionId: null });
+    expect(requests).toHaveLength(1);
+  });
+
+  test("an unconfirmed echo names the created session in a typed error", async () => {
+    const { og } = client(() => created());
+    const error = await og
+      .createSession(WORKSPACE_ID, { initialMessage: "hi", usageLimitMicros: 5 })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(OpenGeniSessionUsageLimitUnsupportedError);
+    expect(error).toMatchObject({ sessionId: SESSION_ID });
   });
 });
 

@@ -62,13 +62,21 @@ function harness(
   }));
   const settle = spy(core, "settleModelUsage", async () => ({}));
   const check = spy(opengeniDb, "checkSessionUsageLimitAdmission", async () => admission);
+  const receipt = spy(opengeniDb, "settleSessionUsageReceipt", async () => ({
+    outcome: "recorded",
+    state: null,
+  }));
+  const fence = spy(opengeniDb, "fenceSessionUsageReceipt", async () => ({ outcome: "fenced" }));
+  const release = spy(opengeniDb, "releaseSessionUsageReceipt", async () => ({
+    outcome: "released",
+  }));
   const pending = new PendingUsageSettlements({ schedule: () => undefined });
   const service = createModelCallService({
     db: {} as Database,
     settings,
     pendingUsageSettlements: pending,
   });
-  return { service, admit, provider, settle, check, pending };
+  return { service, admit, provider, settle, check, receipt, fence, release, pending };
 }
 
 function call(
@@ -156,102 +164,188 @@ describe("single-model calls and task usage limits", () => {
     },
   );
 
-  test("a database failure while settling blocks the task's next call until DB-only recovery", async () => {
+  test("admission is runtime and opens this call's durable custody marker", async () => {
     const h = harness({ allowed: true, state: null });
-    const outage = Object.assign(new Error("connection terminated"), { code: "08006" });
-    h.settle.mockImplementationOnce(async () => {
-      throw outage;
+    await call(h.service, "agent_attempt", "req-9");
+    expect(h.check.mock.calls[0]![1]).toMatchObject({
+      sessionId: SESSION,
+      runtime: true,
+      openSourceId: "model_call:req-9",
     });
-    // The completed answer is still returned; the receipt is retained.
-    const first = await call(h.service, "agent_attempt", "req-1");
-    expect(first.result).toMatchObject({ text: "answer" });
-    expect(h.pending.has(SESSION)).toBe(true);
-
-    // While the database is still failing, the next call is refused before
-    // admission or any provider request: never admitted on an undercount.
-    h.settle.mockImplementationOnce(async () => {
-      throw outage;
-    });
-    const blocked = await call(h.service, "agent_attempt", "req-2").catch(
-      (caught: unknown) => caught,
-    );
-    expect(blocked).toMatchObject({ status: 503, code: "session_usage_limit_unavailable" });
-    expect(h.provider).toHaveBeenCalledTimes(1);
-    expect(h.check).toHaveBeenCalledTimes(1);
-
-    // Recovery replays only the database settlement (same source id), then admits.
-    await call(h.service, "agent_attempt", "req-3");
-    expect(h.provider).toHaveBeenCalledTimes(2);
-    const sources = h.settle.mock.calls.map((args) => (args[2] as { sourceId: string }).sourceId);
-    expect(sources).toEqual([
-      "model_call:req-1",
-      "model_call:req-1",
-      "model_call:req-1",
-      "model_call:req-3",
-    ]);
-    expect(h.pending.has(SESSION)).toBe(false);
+    expect(h.release).not.toHaveBeenCalled();
+    expect(h.fence).not.toHaveBeenCalled();
   });
 
-  test("a deterministic settlement error is not retained and does not block the task", async () => {
+  test("a provider failure releases the marker: no response, no usage", async () => {
+    const h = harness({ allowed: true, state: null });
+    h.provider.mockImplementationOnce(async () => {
+      throw new Error("upstream reset");
+    });
+    await call(h.service, "agent_attempt", "req-1").catch(() => undefined);
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release.mock.calls[0]![1]).toMatchObject({
+      sessionId: SESSION,
+      sourceId: "model_call:req-1",
+    });
+    expect(h.settle).not.toHaveBeenCalled();
+  });
+
+  test("an allowance denial after the marker opened releases it", async () => {
+    const h = harness({ allowed: true, state: null });
+    h.admit.mockImplementationOnce(async () => ({
+      allowed: false,
+      denial: "insufficient_credits",
+      message: "No credits",
+    }));
+    const error = await call(h.service, "agent_attempt").catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ status: 402, code: "insufficient_credits" });
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.provider).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["a connection loss", Object.assign(new Error("connection terminated"), { code: "08006" })],
+    ["a permission error", Object.assign(new Error("permission denied"), { code: "42501" })],
+    ["an unclassified error", new Error("unexpected")],
+  ])(
+    "%s writing the receipt retains it, fences the marker and blocks the task's next call until DB-only recovery",
+    async (_label, failure) => {
+      const h = harness({ allowed: true, state: null });
+      const held = {
+        sessionId: SESSION,
+        sourceId: "model_call:req-1",
+        turnId: null,
+        amountMicros: 1_234,
+        pricingSource: "configured_list_price",
+        model: "scripted-model",
+      };
+      h.settle.mockImplementationOnce(async (_s: unknown, _d: unknown, input: unknown) => {
+        (input as { receiptCustody: (r: unknown, e: unknown) => void }).receiptCustody(
+          held,
+          failure,
+        );
+        return {};
+      });
+      // The completed answer is still returned; the exact receipt is owed.
+      const first = await call(h.service, "agent_attempt", "req-1");
+      expect(first.result).toMatchObject({ text: "answer" });
+      expect(h.pending.has(SESSION)).toBe(true);
+      expect(h.fence).toHaveBeenCalledTimes(1);
+      expect(h.fence.mock.calls[0]![1]).toMatchObject({ sourceId: "model_call:req-1" });
+
+      // Still failing: the next call is refused before admission or provider.
+      h.receipt.mockImplementationOnce(async () => {
+        throw failure;
+      });
+      const blocked = await call(h.service, "agent_attempt", "req-2").catch(
+        (caught: unknown) => caught,
+      );
+      expect(blocked).toMatchObject({ status: 503, code: "session_usage_limit_unavailable" });
+      expect(h.provider).toHaveBeenCalledTimes(1);
+      expect(h.check).toHaveBeenCalledTimes(1);
+
+      // Recovery writes only the original receipt, then admits.
+      await call(h.service, "agent_attempt", "req-3");
+      expect(h.provider).toHaveBeenCalledTimes(2);
+      expect(h.receipt.mock.calls.map((args) => args[1])).toEqual([
+        expect.objectContaining({ sourceId: "model_call:req-1", amountMicros: 1_234 }),
+        expect.objectContaining({ sourceId: "model_call:req-1", amountMicros: 1_234 }),
+      ]);
+      expect(h.pending.has(SESSION)).toBe(false);
+    },
+  );
+
+  test("a response without a usage report is an unpriced receipt, never free", async () => {
+    const h = harness({ allowed: true, state: null });
+    h.provider.mockImplementationOnce(async () => ({ text: "answer" }) as never);
+    await call(h.service, "agent_attempt", "req-1");
+    expect(h.settle).not.toHaveBeenCalled();
+    expect(h.receipt.mock.calls[0]![1]).toMatchObject({
+      sourceId: "model_call:req-1",
+      amountMicros: null,
+      pricingSource: null,
+    });
+  });
+
+  test("a settlement error before the receipt discloses the call as unpriced and does not block", async () => {
     const h = harness({ allowed: true, state: null });
     h.settle.mockImplementationOnce(async () => {
       throw new Error("AI Gateway reported unapproved provider");
     });
     await call(h.service, "agent_attempt", "req-1");
+    expect(h.receipt.mock.calls[0]![1]).toMatchObject({
+      sourceId: "model_call:req-1",
+      amountMicros: null,
+    });
     expect(h.pending.size).toBe(0);
     await call(h.service, "agent_attempt", "req-2");
     expect(h.provider).toHaveBeenCalledTimes(2);
   });
+
+  test("a process at its retained-receipt capacity refuses new task calls instead of dropping one", async () => {
+    const h = harness({ allowed: true, state: null });
+    const full = new PendingUsageSettlements({ maxEntries: 1, schedule: () => undefined });
+    full.retain("other-session", "model_call:x", async () => {
+      throw new Error("down");
+    });
+    const service = createModelCallService({
+      db: {} as Database,
+      settings: testSettings(),
+      pendingUsageSettlements: full,
+    });
+    const error = await call(service, "agent_attempt").catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ status: 503, code: "session_usage_limit_unavailable" });
+    expect(h.check).not.toHaveBeenCalled();
+    expect(h.provider).not.toHaveBeenCalled();
+    expect(full.size).toBe(1);
+  });
 });
 
 describe("PendingUsageSettlements", () => {
-  test("retries in the background with bounded backoff and expires after its maximum age", async () => {
-    let now = 0;
+  test("retries in the background with bounded backoff and never expires a receipt", async () => {
     const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
-    const dropped: string[] = [];
     const pending = new PendingUsageSettlements({
       initialDelayMs: 100,
       maxDelayMs: 400,
-      maxAgeMs: 5_000,
-      now: () => now,
       schedule: (fn, delayMs) => void scheduled.push({ fn, delayMs }),
-      onDropped: (reason) => void dropped.push(reason),
     });
     let attempts = 0;
     pending.retain("s1", "src", async () => {
       attempts += 1;
-      throw new Error("still down");
+      if (attempts < 6) throw new Error("still down");
     });
-    for (let i = 0; i < 4; i += 1) {
+    const delays: number[] = [];
+    while (scheduled.length > 0) {
       const next = scheduled.shift()!;
-      now += next.delayMs;
+      delays.push(next.delayMs);
       next.fn();
       await Bun.sleep(0);
     }
-    expect(attempts).toBe(4);
-    expect(scheduled.at(-1)?.delayMs ?? 0).toBeLessThanOrEqual(400);
-    expect(dropped).toEqual([]);
-    now += 5_000;
-    scheduled.shift()!.fn();
-    await Bun.sleep(0);
-    expect(dropped).toEqual(["expired"]);
+    expect(attempts).toBe(6);
+    expect(Math.max(...delays)).toBeLessThanOrEqual(400);
     expect(pending.size).toBe(0);
   });
 
-  test("is bounded: the oldest retained receipt is evicted and reported", () => {
-    const dropped: string[] = [];
-    const pending = new PendingUsageSettlements({
-      maxEntries: 2,
-      schedule: () => undefined,
-      onDropped: (reason, sessionId) => void dropped.push(`${reason}:${sessionId}`),
-    });
-    pending.retain("a", "1", async () => undefined);
-    pending.retain("b", "1", async () => undefined);
-    pending.retain("a", "1", async () => undefined);
-    pending.retain("c", "1", async () => undefined);
-    expect(pending.size).toBe(2);
-    expect(dropped).toEqual(["evicted:a"]);
+  test("at capacity it refuses to retain more instead of evicting", () => {
+    const pending = new PendingUsageSettlements({ maxEntries: 2, schedule: () => undefined });
+    expect(pending.retain("a", "1", async () => undefined)).toBe(true);
+    expect(pending.retain("b", "1", async () => undefined)).toBe(true);
+    expect(pending.retain("a", "1", async () => undefined)).toBe(true);
+    expect(pending.full).toBe(true);
+    expect(pending.retain("c", "1", async () => undefined)).toBe(false);
+    expect(pending.has("a")).toBe(true);
     expect(pending.has("b")).toBe(true);
-    expect(pending.has("c")).toBe(true);
+  });
+
+  test("flush records the session's receipts and rethrows a failure, keeping it", async () => {
+    const pending = new PendingUsageSettlements({ schedule: () => undefined });
+    pending.retain("s", "ok", async () => undefined);
+    pending.retain("s", "bad", async () => {
+      throw new Error("down");
+    });
+    pending.retain("t", "other", async () => undefined);
+    await expect(pending.flush("s")).rejects.toThrow("down");
+    expect(pending.size).toBe(2);
+    expect(pending.has("s")).toBe(true);
   });
 });

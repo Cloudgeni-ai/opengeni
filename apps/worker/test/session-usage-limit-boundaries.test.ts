@@ -51,7 +51,7 @@ test("the remote compaction boundary turns a reached limit into the typed betwee
     expect(error).toBeInstanceOf(BudgetExhaustedError);
     expect(error).toMatchObject({ sessionUsageLimit: refusal, allowance: null });
     expect(check).toHaveBeenCalledTimes(1);
-    expect(check.mock.calls[0]![1]).toEqual(input);
+    expect(check.mock.calls[0]![1]).toEqual({ ...input, runtime: true });
   } finally {
     check.mockRestore();
   }

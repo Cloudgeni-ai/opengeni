@@ -295,7 +295,25 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             },
             debitMetadata: { modelCallId: input.requestId },
           }),
-        ).catch(logSettlementFailure);
+        ).catch(async (error: unknown) => {
+          logSettlementFailure(error);
+          if (!usageLimitSessionId || owedReceipt) return;
+          // Settlement failed before or after the task receipt; the amount
+          // is unknown here. An unpriced receipt fills a still-open marker
+          // (disclosed, never free); a receipt already recorded for this
+          // source is kept and this write is a no-op conflict.
+          const unknownAmount: HeldSessionUsageReceipt = {
+            sessionId: usageLimitSessionId,
+            sourceId,
+            turnId: null,
+            amountMicros: null,
+            pricingSource: null,
+            model: model.id,
+          };
+          await writeOwedReceipt(deps.db, input, unknownAmount).catch(() => {
+            owedReceipt = unknownAmount;
+          });
+        });
       } else if (usageLimitSessionId) {
         // A response without a usage report is an unknown amount for the
         // task: disclosed as unpriced, never counted as free.
