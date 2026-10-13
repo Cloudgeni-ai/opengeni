@@ -234,6 +234,7 @@ const VAULT_ERROR_CODES: ReadonlySet<string> = new Set<VaultErrorCode>([
   "invalid_secret_name",
   "secret_value_too_large",
   "human_auth_required",
+  "secret_search_cursor_invalid",
 ]);
 
 /**

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as C from "@opengeni/contracts";
 import type { z } from "zod";
-import { VAULT_ITEM_PAGE_LIMIT } from "@opengeni/react";
+import { VAULT_ITEM_PAGE_LIMIT, vaultErrorCode } from "@opengeni/react";
 import type * as R from "@opengeni/react";
 
 // @opengeni/react mirrors the vault wire types by hand (it ships no contracts
@@ -56,6 +56,12 @@ assert<
 >();
 
 describe("vault wire types", () => {
+  test("every error code the API can send is recognized at runtime", () => {
+    for (const code of C.VaultErrorCode.options) {
+      expect(vaultErrorCode({ code })).toBe(code);
+    }
+  });
+
   test("the item page size is one the items route accepts", () => {
     expect(C.ListVaultItemsQuery.safeParse({ limit: String(VAULT_ITEM_PAGE_LIMIT) }).success).toBe(
       true,

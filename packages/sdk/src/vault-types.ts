@@ -289,4 +289,5 @@ export type VaultErrorCode =
   | "secret_save_forbidden"
   | "invalid_secret_name"
   | "secret_value_too_large"
-  | "human_auth_required";
+  | "human_auth_required"
+  | "secret_search_cursor_invalid";
