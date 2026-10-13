@@ -43,7 +43,11 @@ export type {
   ModalRawOutputExit,
 } from "./providers/modal-command-raw-page";
 import type { WorkspaceArchiveSpool } from "./archive-spool";
-import { restoreHostWorkspaceArchive } from "./host-archive-spool";
+import {
+  convertHostWorkspaceArchiveToTar,
+  restoreHostWorkspaceArchive,
+  type PortableWorkspaceTar,
+} from "./host-archive-spool";
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
@@ -88,6 +92,8 @@ import {
   decodeNativeSnapshotRef,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
+  verifyRestoredWorkspaceContents,
+  workspaceArchiveExcludedPaths,
   WorkspaceArchiveIntegrityError,
   type VerifiedWorkspaceArchive,
   type WorkspaceArchiveDescriptor,
@@ -2057,18 +2063,21 @@ export async function establishSandboxSessionFromEnvelope(
       objectDescriptor.workspace.projection === "sdk_local_archive_v1" &&
       opts.loadHostWorkspaceArchive
     ) {
+      // Local/Docker restore a host-backed archive natively. Any other backend
+      // hydrates a portable tar converted from it, so a deployment that changes
+      // sandbox backend can still continue chats archived before the change.
       if (
-        (backend !== "local" && backend !== "docker") ||
         objectRef.sha256 !== objectDescriptor.archiveSha256 ||
         objectRef.bytes !== objectDescriptor.archiveBytes
       ) {
         throw new WorkspaceArchiveIntegrityError(
           "archive_metadata_invalid",
-          "Host archive object reference does not match its provider and descriptor",
+          "Host archive object reference does not match its descriptor",
         );
       }
       workspaceArchive = { kind: "host_spool", descriptor: objectDescriptor, ref: objectRef };
     }
+    const hostBackedBackend = backend === "local" || backend === "docker";
     if (objectRef && !workspaceArchive) {
       throw new WorkspaceArchiveIntegrityError(
         "archive_hydration_failed",
@@ -2282,12 +2291,16 @@ export async function establishSandboxSessionFromEnvelope(
         }
       }
       let hydrationApplied = false;
+      // A host-backed archive hydrated into a remote sandbox: what the converted
+      // tar materializes, verified after hydration instead of the archive's
+      // host-only fingerprint projection.
+      let portableContents: PortableWorkspaceTar["contents"] | null = null;
       if (workspaceArchive) {
         const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
           .hydrateWorkspace;
         if (
           !createdFromFilesystemSnapshot &&
-          workspaceArchive.kind !== "host_spool" &&
+          (workspaceArchive.kind !== "host_spool" || !hostBackedBackend) &&
           typeof hydrate !== "function"
         ) {
           await terminateCreatedSandbox(createdClient, restored, restoredState);
@@ -2308,7 +2321,7 @@ export async function establishSandboxSessionFromEnvelope(
             );
           }
           // Directory/tar hydration operates on the attributed destination.
-          if (workspaceArchive.kind === "host_spool") {
+          if (workspaceArchive.kind === "host_spool" && hostBackedBackend) {
             // This is the exact newly-created, unpublished destination. The lease
             // restore fence must exclude admitted writers until verification ends;
             // descriptor-relative filesystem access alone is not writer isolation.
@@ -2322,6 +2335,27 @@ export async function establishSandboxSessionFromEnvelope(
             await restoreHostWorkspaceArchive(root, hostSpool!, {
               archiveLimits: Reflect.get(restored as object, "archiveLimits"),
             });
+          } else if (workspaceArchive.kind === "host_spool") {
+            const portable = await convertHostWorkspaceArchiveToTar(hostSpool!, {
+              excludedPaths: workspaceArchiveExcludedPaths(restored),
+              mtimeSeconds: Date.parse(workspaceArchive.descriptor.capturedAt) / 1000,
+            });
+            // The descriptor was fingerprinted from the source tree when it was
+            // captured; the archive must still be exactly that tree.
+            const expected = workspaceArchive.descriptor.workspace;
+            if (
+              portable.fingerprint.sha256 !== expected.sha256 ||
+              portable.fingerprint.entryCount !== expected.entryCount ||
+              portable.fingerprint.fileCount !== expected.fileCount ||
+              portable.fingerprint.totalFileBytes !== expected.totalFileBytes
+            ) {
+              throw new WorkspaceArchiveIntegrityError(
+                "archive_hash_mismatch",
+                `workspace archive revision ${workspaceArchive.descriptor.revision} does not match its recorded fingerprint`,
+              );
+            }
+            await hydrate!.call(restored, portable.bytes);
+            portableContents = portable.contents;
           } else if (!createdFromFilesystemSnapshot) {
             await hydrate!.call(restored, workspaceArchive.bytes);
           }
@@ -2388,7 +2422,15 @@ export async function establishSandboxSessionFromEnvelope(
         // image. Tar archives remain content-verified after hydration.
         if (workspaceArchive.kind === "tar" || workspaceArchive.kind === "host_spool") {
           try {
-            await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+            if (portableContents) {
+              await verifyRestoredWorkspaceContents(
+                restored,
+                portableContents,
+                workspaceArchive.descriptor.revision,
+              );
+            } else {
+              await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+            }
           } catch (error) {
             await terminateCreatedSandbox(
               createdClient,
