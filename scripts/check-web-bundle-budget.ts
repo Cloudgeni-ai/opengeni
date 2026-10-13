@@ -698,6 +698,13 @@ const effectiveBudgets = {
     // apps/web/vite-eager-graph.ts): 2,933,830 raw / 838,954 gzip / 52 files on
     // Bun 1.4 Linux/x64. Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(2_933_830, 1.5 * kib),
+    // Per-task usage limits: the composer notice, the one-line timeline stop
+    // marker, the shared usage read and the new chat's limit setting load with
+    // every chat (the editor stays in the lazy Agent tab and the allowance pages
+    // stay lazy). Bun 1.4 Linux/x64 on merged main 4fa68d538 measures
+    // 2,927,652 -> 2,951,651 raw (+23,999) and 836,027 -> 845,410 gzip
+    // (+9,383), 51 files. Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(2_951_651, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
@@ -797,6 +804,8 @@ const effectiveBudgets = {
     wholeKibEnvelope(726_074, 1.5 * kib),
     // Same feature growth, measured with the misplaced lazy code removed.
     wholeKibEnvelope(838_954, 1.5 * kib),
+    // Per-task usage limits, as measured in the raw bound above.
+    wholeKibEnvelope(845_410, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
