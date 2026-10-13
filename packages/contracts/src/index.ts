@@ -11386,7 +11386,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
  * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
  * (terminal) and
- * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
+ * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`,
+ * `session_usage_limit` (an existing-session task reached its per-task usage
+ * limit; admitted again once a person raises or clears it)
  * (transient). Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ z
@@ -17539,7 +17541,12 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // Creates the durable session shell without fabricating a user message or
       // starting an underlying agent turn. Realtime can then become the first
       // interaction and use the ordinary Send/Steer path when it delegates.
-      startMode: z.literal("realtime").optional(),
+      // `standard` is the explicit spelling of the default (omitted) mode. A
+      // client that sends a task usage limit also sends `standard`, so an
+      // older server that predates usage limits (and accepts only
+      // `realtime`) rejects the whole create before creating or starting
+      // anything, instead of silently starting uncapped work.
+      startMode: z.enum(["realtime", "standard"]).optional(),
       // Model-visible application context attached to the initial user message.
       // Standard timeline rendering omits it, while full event/audit reads retain
       // it. This is ordinary user-role content, not secret or privileged input.

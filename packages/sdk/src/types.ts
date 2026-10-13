@@ -3497,17 +3497,24 @@ export type CreateSessionRequest = {
   /**
    * Optional usage limit for a new root task in USD micros of API-equivalent
    * model usage (null/omitted: no limit; 0: stop before the first model
-   * request). Person or trusted host only. Servers without usage limits ignore
-   * the field; `OpenGeniClient.createSession` rejects a response that does not
-   * echo a requested limit.
+   * request). Person or trusted host only. `OpenGeniClient.createSession`
+   * sends a limited create with `startMode: "standard"`, which servers that
+   * predate usage limits reject before creating or starting anything; it then
+   * throws `OpenGeniSessionUsageLimitUnsupportedError`, as it does for a
+   * response that does not echo the requested limit.
    */
   usageLimitMicros?: number | null | undefined;
   visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
-  /** Create an idle session shell so realtime voice can be the first interaction. */
-  startMode?: "realtime" | undefined;
+  /**
+   * `realtime` creates an idle session shell so realtime voice can be the
+   * first interaction. `standard` is the explicit default; `createSession`
+   * sends it with a usage limit so servers that predate limits reject the
+   * create instead of starting uncapped work.
+   */
+  startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a

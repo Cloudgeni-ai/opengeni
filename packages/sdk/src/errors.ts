@@ -127,6 +127,24 @@ export class OpenGeniSessionUsageLimitReachedError extends OpenGeniApiError {
   }
 }
 
+/**
+ * The server did not accept or confirm a requested task usage limit, so it
+ * predates usage limits (or limits are not enabled there). `sessionId` is null
+ * when the server rejected the create before creating anything; otherwise the
+ * session exists without a confirmed limit and no initial work was started by
+ * this SDK's request (an older server rejects it up front).
+ */
+export class OpenGeniSessionUsageLimitUnsupportedError extends Error {
+  readonly code = "session_usage_limit_unsupported";
+  readonly sessionId: string | null;
+
+  constructor(message: string, options: { sessionId?: string | null; cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "OpenGeniSessionUsageLimitUnsupportedError";
+    this.sessionId = options.sessionId ?? null;
+  }
+}
+
 /** Parse a session usage limit refusal from an API error envelope body. */
 export function sessionUsageLimitReachedFields(
   body: string,

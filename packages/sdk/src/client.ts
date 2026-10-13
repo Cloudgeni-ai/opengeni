@@ -79,6 +79,7 @@ import {
   OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
   OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
   sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
@@ -1324,11 +1325,35 @@ export class OpenGeniClient {
     workspaceId: string,
     request: CreateSessionRequest,
   ): Promise<CreateSessionResponse> {
-    const created = await this.requestJson<CreateSessionResponse>(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
-      request,
-    );
+    const limited = request.usageLimitMicros !== undefined && request.usageLimitMicros !== null;
+    // A limited create spells out the default start mode. Servers that
+    // predate usage limits accept only `realtime` there, so they reject the
+    // whole request before creating or starting anything, rather than
+    // dropping the unknown limit and starting uncapped work.
+    const body: CreateSessionRequest =
+      limited && request.startMode === undefined ? { ...request, startMode: "standard" } : request;
+    let created: CreateSessionResponse;
+    try {
+      created = await this.requestJson<CreateSessionResponse>(
+        "POST",
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+        body,
+      );
+    } catch (error) {
+      if (
+        limited &&
+        body.startMode === "standard" &&
+        error instanceof OpenGeniApiError &&
+        error.status === 400 &&
+        error.body.includes("startMode")
+      ) {
+        throw new OpenGeniSessionUsageLimitUnsupportedError(
+          "This server does not support task usage limits, so the session was not created. Create it without a usage limit, or upgrade the server.",
+          { sessionId: null, cause: error },
+        );
+      }
+      throw error;
+    }
     assertSessionUsageLimitEcho(request.usageLimitMicros, created);
     return created;
   }
@@ -10537,8 +10562,9 @@ function assertSessionUsageLimitEcho(
 ): void {
   if (requested === undefined || requested === null) return;
   if (created.usageLimit?.limitMicros === requested) return;
-  throw new Error(
+  throw new OpenGeniSessionUsageLimitUnsupportedError(
     `The session ${created.id} was created, but the server did not confirm its usage limit; it may not support usage limits. Set the limit with setSessionUsageLimit before sending work, or treat the task as unlimited.`,
+    { sessionId: created.id },
   );
 }
 
