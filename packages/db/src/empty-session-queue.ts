@@ -98,7 +98,7 @@ export async function repairEmptyQueuedSessionProjection(
               and type = 'session.created')
           or exists (select 1 from scheduled_task_runs
             where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
-              and status in ('queued', 'running')) as started`,
+              and status in ('queued', 'dispatched')) as started`,
       );
       if (started?.started)
         throw new Error("Empty queued session repair requires an uninitialized session");

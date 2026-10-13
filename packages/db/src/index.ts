@@ -20186,10 +20186,11 @@ export async function failScheduledGeneratedSessionRoute(
         session.metadata?.scheduledTaskRunId === input.runId;
       const reclaimSession =
         schedulerCreatedForRun &&
-        session.status === "queued" &&
+        (session.status === "queued" || session.status === "idle") &&
         session.activeTurnId === null &&
         existingTurn === undefined &&
-        existingSystemUpdate === undefined;
+        existingSystemUpdate === undefined &&
+        (await sessionQueueIsEmptyInTransaction(scopedDb, input.workspaceId, input.sessionId));
 
       let events: SessionEvent[] = [];
       if (reclaimSession) {
