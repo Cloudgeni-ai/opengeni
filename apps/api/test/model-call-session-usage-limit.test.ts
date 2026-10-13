@@ -6,6 +6,7 @@ import type { Database } from "@opengeni/db";
 import * as runtimeModelCall from "@opengeni/runtime/model-call";
 import { testSettings } from "@opengeni/testing";
 import * as rls from "../src/access-grant-rls";
+import { PendingUsageSettlements } from "../src/model-calls/pending-usage-settlements";
 import { createModelCallService } from "../src/model-calls/service";
 
 // OPE-798 AC06: an attempt-authenticated single-model call (an agent's code
@@ -61,13 +62,19 @@ function harness(
   }));
   const settle = spy(core, "settleModelUsage", async () => ({}));
   const check = spy(opengeniDb, "checkSessionUsageLimitAdmission", async () => admission);
-  const service = createModelCallService({ db: {} as Database, settings });
-  return { service, admit, provider, settle, check };
+  const pending = new PendingUsageSettlements({ schedule: () => undefined });
+  const service = createModelCallService({
+    db: {} as Database,
+    settings,
+    pendingUsageSettlements: pending,
+  });
+  return { service, admit, provider, settle, check, pending };
 }
 
 function call(
   service: ReturnType<typeof createModelCallService>,
   principalKind: "agent_attempt" | "human_session" | "api_key",
+  requestId = "req-1",
 ) {
   return service.call({
     grant: {
@@ -85,7 +92,7 @@ function call(
     subjectId: "user:alice",
     model: "scripted-model",
     request: { messages: [{ role: "user", content: "hi" }] } as never,
-    requestId: "req-1",
+    requestId,
   });
 }
 
@@ -148,4 +155,103 @@ describe("single-model calls and task usage limits", () => {
       expect(h.settle.mock.calls[0]![2]).not.toHaveProperty("usageLimitSessionId");
     },
   );
+
+  test("a database failure while settling blocks the task's next call until DB-only recovery", async () => {
+    const h = harness({ allowed: true, state: null });
+    const outage = Object.assign(new Error("connection terminated"), { code: "08006" });
+    h.settle.mockImplementationOnce(async () => {
+      throw outage;
+    });
+    // The completed answer is still returned; the receipt is retained.
+    const first = await call(h.service, "agent_attempt", "req-1");
+    expect(first.result).toMatchObject({ text: "answer" });
+    expect(h.pending.has(SESSION)).toBe(true);
+
+    // While the database is still failing, the next call is refused before
+    // admission or any provider request: never admitted on an undercount.
+    h.settle.mockImplementationOnce(async () => {
+      throw outage;
+    });
+    const blocked = await call(h.service, "agent_attempt", "req-2").catch(
+      (caught: unknown) => caught,
+    );
+    expect(blocked).toMatchObject({ status: 503, code: "session_usage_limit_unavailable" });
+    expect(h.provider).toHaveBeenCalledTimes(1);
+    expect(h.check).toHaveBeenCalledTimes(1);
+
+    // Recovery replays only the database settlement (same source id), then admits.
+    await call(h.service, "agent_attempt", "req-3");
+    expect(h.provider).toHaveBeenCalledTimes(2);
+    const sources = h.settle.mock.calls.map((args) => (args[2] as { sourceId: string }).sourceId);
+    expect(sources).toEqual([
+      "model_call:req-1",
+      "model_call:req-1",
+      "model_call:req-1",
+      "model_call:req-3",
+    ]);
+    expect(h.pending.has(SESSION)).toBe(false);
+  });
+
+  test("a deterministic settlement error is not retained and does not block the task", async () => {
+    const h = harness({ allowed: true, state: null });
+    h.settle.mockImplementationOnce(async () => {
+      throw new Error("AI Gateway reported unapproved provider");
+    });
+    await call(h.service, "agent_attempt", "req-1");
+    expect(h.pending.size).toBe(0);
+    await call(h.service, "agent_attempt", "req-2");
+    expect(h.provider).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("PendingUsageSettlements", () => {
+  test("retries in the background with bounded backoff and expires after its maximum age", async () => {
+    let now = 0;
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const dropped: string[] = [];
+    const pending = new PendingUsageSettlements({
+      initialDelayMs: 100,
+      maxDelayMs: 400,
+      maxAgeMs: 5_000,
+      now: () => now,
+      schedule: (fn, delayMs) => void scheduled.push({ fn, delayMs }),
+      onDropped: (reason) => void dropped.push(reason),
+    });
+    let attempts = 0;
+    pending.retain("s1", "src", async () => {
+      attempts += 1;
+      throw new Error("still down");
+    });
+    for (let i = 0; i < 4; i += 1) {
+      const next = scheduled.shift()!;
+      now += next.delayMs;
+      next.fn();
+      await Bun.sleep(0);
+    }
+    expect(attempts).toBe(4);
+    expect(scheduled.at(-1)?.delayMs ?? 0).toBeLessThanOrEqual(400);
+    expect(dropped).toEqual([]);
+    now += 5_000;
+    scheduled.shift()!.fn();
+    await Bun.sleep(0);
+    expect(dropped).toEqual(["expired"]);
+    expect(pending.size).toBe(0);
+  });
+
+  test("is bounded: the oldest retained receipt is evicted and reported", () => {
+    const dropped: string[] = [];
+    const pending = new PendingUsageSettlements({
+      maxEntries: 2,
+      schedule: () => undefined,
+      onDropped: (reason, sessionId) => void dropped.push(`${reason}:${sessionId}`),
+    });
+    pending.retain("a", "1", async () => undefined);
+    pending.retain("b", "1", async () => undefined);
+    pending.retain("a", "1", async () => undefined);
+    pending.retain("c", "1", async () => undefined);
+    expect(pending.size).toBe(2);
+    expect(dropped).toEqual(["evicted:a"]);
+    expect(pending.has("b")).toBe(true);
+    expect(pending.has("c")).toBe(true);
+  });
 });

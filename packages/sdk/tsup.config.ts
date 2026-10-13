@@ -34,6 +34,7 @@ export default defineConfig({
     "src/session-history-import.ts",
     "src/session-list-entries.ts",
     "src/usage-allowances.ts",
+    "src/session-usage-limits.ts",
     "src/insights-usage.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
@@ -59,6 +60,7 @@ export default defineConfig({
   external: [/^@opengeni\//],
   noExternal: [
     "@opengeni/contracts/allowance-refusal",
+    "@opengeni/contracts/session-usage-limit-refusal",
     "@opengeni/contracts/browser-storage",
     "@opengeni/contracts/mcp-endpoint",
     "@opengeni/contracts/session-titles",

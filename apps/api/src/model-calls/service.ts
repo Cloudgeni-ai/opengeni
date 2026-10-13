@@ -18,6 +18,7 @@ import {
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceCatalogSettings,
+  recordSessionUsageLimitEvent,
   requireSessionUsageLimitAllows,
   type SessionUsageLimitMetricsSink,
   sessionUsageLimitRefusalFromError,
@@ -43,6 +44,8 @@ import {
   reserveSubscriptionCoreCodexOperationRequest,
   settleSubscriptionCoreCodexOperationRequest,
   withCreditDebitAttribution,
+  isDatabaseConnectionLoss,
+  nestedPostgresSqlState,
   type Database,
   type SubscriptionCoreCodexOperationLeaseRef,
   type SubscriptionCoreCodexOperationScope,
@@ -56,6 +59,7 @@ import {
   type SingleModelCallResult,
 } from "@opengeni/runtime/model-call";
 import { XaiSubscriptionReloginRequired } from "@opengeni/xai-subscription";
+import { PendingUsageSettlements } from "./pending-usage-settlements";
 import {
   creditDebitAttributionForGrant,
   withAccessGrantSessionRlsContext,
@@ -71,12 +75,21 @@ export type ModelCallServiceDeps = {
   log?: (message: string, attributes: Record<string, string | number | boolean>) => void;
   /** Content-free task usage-limit counters (closed-set labels). */
   usageLimitMetrics?: SessionUsageLimitMetricsSink | null;
+  /** Retained task usage receipts awaiting DB-only recovery (tests inject one). */
+  pendingUsageSettlements?: PendingUsageSettlements;
 };
 
 const PROVIDER_MESSAGE_MAX_LENGTH = 512;
 
 export function createModelCallService(deps: ModelCallServiceDeps): ModelCallService {
   const catalogSource = deps.catalogSourceSettings ?? deps.settings;
+  const pendingSettlements =
+    deps.pendingUsageSettlements ??
+    new PendingUsageSettlements({
+      onDropped: (reason) => {
+        deps.log?.("Model call usage receipt dropped before recovery", { reason });
+      },
+    });
 
   async function selections(caller: ModelCallCaller): Promise<{
     catalogSettings: Settings;
@@ -155,6 +168,12 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       // refused once the limit is reached. Other callers have no task.
       const usageLimitSessionId = attemptSessionId(input.grant);
       if (usageLimitSessionId) {
+        try {
+          await pendingSettlements.flush(usageLimitSessionId);
+        } catch {
+          recordSessionUsageLimitEvent(deps.usageLimitMetrics, "single_call", "unavailable");
+          throw sessionUsageUnavailable();
+        }
         await requireSingleCallSessionUsageLimit(deps, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -224,33 +243,59 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       if (usage) {
         // Settlement failure must not discard a completed answer. The usage
         // record is idempotent on the request id; the operator is alerted.
-        await withCreditDebitAttribution(creditDebitAttributionForGrant(input.grant), () =>
-          // Execution settings carry the workspace catalog the price resolves from.
-          settleModelUsage(settings, deps.db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            model: model.id,
-            chargesOpenGeniCredits,
-            countsTowardTokenCap,
-            creditPolicyRevision: admission.creditPolicyRevision,
-            ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
-            normalizedUsage: normalizeModelCallUsage(usage.usage),
-            sourceId: `model_call:${input.requestId}`,
-            ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
-            usageLimitMetrics: deps.usageLimitMetrics ?? null,
-            debitMetadata: { modelCallId: input.requestId },
-          }),
-        ).catch((error: unknown) => {
+        const sourceId = `model_call:${input.requestId}`;
+        const settle = () =>
+          withCreditDebitAttribution(creditDebitAttributionForGrant(input.grant), () =>
+            // Execution settings carry the workspace catalog the price resolves from.
+            settleModelUsage(settings, deps.db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              model: model.id,
+              chargesOpenGeniCredits,
+              countsTowardTokenCap,
+              creditPolicyRevision: admission.creditPolicyRevision,
+              ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
+              normalizedUsage: normalizeModelCallUsage(usage.usage),
+              sourceId,
+              ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
+              usageLimitMetrics: deps.usageLimitMetrics ?? null,
+              debitMetadata: { modelCallId: input.requestId },
+            }),
+          );
+        await settle().catch((error: unknown) => {
           deps.log?.("Model call usage settlement failed", {
             requestId: input.requestId,
             model: model.id,
             errorName: error instanceof Error ? error.name : typeof error,
           });
+          // OPE-798: a transient database failure leaves this task's usage
+          // unrecorded. Retain the exact settlement for DB-only recovery; the
+          // task's next call waits for it instead of being admitted on an
+          // undercount. The provider is never called again for this answer.
+          if (usageLimitSessionId && transientDatabaseFailure(error)) {
+            pendingSettlements.retain(usageLimitSessionId, sourceId, settle);
+          }
         });
       }
       return { model: model.id, result } satisfies ModelCallOutput;
     },
   };
+}
+
+function sessionUsageUnavailable(): ModelCallError {
+  return new ModelCallError({
+    status: 503,
+    type: "service_unavailable",
+    code: "session_usage_limit_unavailable",
+    message: "Usage for this task is temporarily unavailable. Try again shortly.",
+  });
+}
+
+/** Connection loss or a transient SQLSTATE class; deterministic errors are not retried. */
+function transientDatabaseFailure(error: unknown): boolean {
+  if (isDatabaseConnectionLoss(error)) return true;
+  const state = nestedPostgresSqlState(error);
+  return state !== null && ["08", "40", "53", "55", "57", "58"].includes(state.slice(0, 2));
 }
 
 /** The session of a verified live agent attempt, or null for every other caller. */
@@ -283,12 +328,7 @@ async function requireSingleCallSessionUsageLimit(
       });
     }
     // Unreadable usage state is never treated as unlimited.
-    throw new ModelCallError({
-      status: 503,
-      type: "service_unavailable",
-      code: "session_usage_limit_unavailable",
-      message: "Usage for this task is temporarily unavailable. Try again shortly.",
-    });
+    throw sessionUsageUnavailable();
   }
 }
 
