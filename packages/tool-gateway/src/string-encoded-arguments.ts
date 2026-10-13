@@ -2,17 +2,18 @@ import type { ErrorObject, ValidateFunction } from "ajv";
 
 /**
  * Models often send a value as JSON text instead of the value itself: a number
- * as "5", or a nested object or array as '{"kind":"click"}'. JSON Schema
- * validation rightly rejects that, and Ajv's `coerceTypes` would also turn
- * booleans, nulls and arrays into each other. This repair is deliberately
- * narrower. It only rewrites a string at a location the schema reported as
- * needing an `integer` or `number` (when the whole string is a plain decimal
- * literal of that kind) or an `object` or `array` (when the whole string is
- * JSON text of exactly that type). Decoded values can contain the same
- * mistakes, so the repair runs a few bounded passes. The caller uses the
- * repaired call only if it then passes the original validator, and otherwise
- * reports the remaining problems against it. Everything else is rejected as
- * before.
+ * as "5", a flag as "false", or a nested object or array as
+ * '{"kind":"click"}'. JSON Schema validation rightly rejects that, and Ajv's
+ * `coerceTypes` would also turn "1", "" and null into booleans and wrap
+ * scalars in arrays. This repair is deliberately narrower. It only rewrites a
+ * string at a location the schema reported as needing an `integer` or `number`
+ * (when the whole string is a plain decimal literal of that kind), a `boolean`
+ * (when the whole string is exactly `true` or `false`), or an `object` or
+ * `array` (when the whole string is JSON text of exactly that type). Decoded
+ * values can contain the same mistakes, so the repair runs a few bounded
+ * passes. The caller uses the repaired call only if it then passes the
+ * original validator, and otherwise reports the remaining problems against
+ * it. Everything else is rejected as before.
  */
 const INTEGER_LITERAL = /^-?(?:0|[1-9]\d*)$/u;
 const NUMBER_LITERAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/u;
@@ -55,6 +56,9 @@ function stringReplacement(
   if (typeof current !== "string") return NO_REPLACEMENT;
   const numeric = numericReplacement(current, expected);
   if (numeric !== undefined) return numeric;
+  if (expected.includes("boolean") && (current === "true" || current === "false")) {
+    return current === "true";
+  }
   return structuredReplacement(current, expected);
 }
 
