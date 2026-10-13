@@ -618,6 +618,23 @@ async function chooseOnce(
             break;
           }
         }
+        if (!target && receipt && input.provider != null) {
+          // The legacy provider-qualified endpoint keeps its contract: a
+          // connection the choice listing does not offer (a shared account
+          // scoped to chosen people, whose designations this caller cannot
+          // read) goes to the binding guard, which alone judges whether this
+          // session may use it and refuses with 42501 otherwise.
+          target = {
+            provider: input.provider,
+            connectionId:
+              (await resolveSubscriptionConnectionId(tx, {
+                accountId: input.accountId,
+                provider: input.provider,
+                connectionId: input.connectionId,
+              })) ?? input.connectionId,
+            personal: false,
+          };
+        }
         if (!target) return none("not_found");
         if (input.provider != null && input.provider !== target.provider) return none("not_found");
       }
