@@ -2177,6 +2177,13 @@ function SessionChatPane(props: {
   // a message that carries that consent). Other machines only repoint.
   const runsOnAttach = runsOn.fleet.attach;
   const runsOnPreviousSandboxId = runsOn.activeMachine?.sandboxId ?? null;
+  // While the chat runs on the person's own machine (only its owner sees it in
+  // their list), each message renews their consent for this chat, so a chat
+  // whose move message never landed recovers on the next ordinary Send.
+  const runsOnActiveMachineConsent =
+    runsOn.activeMachine && isPersonalMachine(runsOn.activeMachine)
+      ? personalMachineUseIntent(props.session.tenancy)
+      : undefined;
   const runsOnCanMessage =
     context.accessContext === null ||
     context.accessContext === undefined ||
@@ -2472,7 +2479,9 @@ function SessionChatPane(props: {
       ],
       ...(personalAttachment.intent
         ? { personalResourceAttachment: personalAttachment.intent }
-        : {}),
+        : runsOnActiveMachineConsent
+          ? { personalResourceAttachment: runsOnActiveMachineConsent }
+          : {}),
     }),
     sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,

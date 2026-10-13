@@ -98,6 +98,10 @@ export function SessionRunsOnMenuBody(props: {
   const presentation = props.presentation ?? "menu";
   const bodyRef = useRef<HTMLDivElement>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
+  // A move onto the person's own machine is a repoint plus a consent message;
+  // keep the rows locked until both settle so a second pick can't interleave.
+  const [movingSandboxId, setMovingSandboxId] = useState<string | null>(null);
+  const locked = fleet.attaching || movingSandboxId !== null;
   useFocusCheckedRow(bodyRef, presentation);
   const rigs = useWorkspaceRigs({ workspaceId: props.workspaceId, enabled: props.rigId !== null });
   const rig = props.rigId ? rigs.rigs.find((candidate) => candidate.id === props.rigId) : null;
@@ -129,20 +133,26 @@ export function SessionRunsOnMenuBody(props: {
           ) : null}
           {machines.map((machine) => {
             const selectable = isSelectable(machine) && fleet.canAttach;
-            const swapping = fleet.attachingSandboxId === machine.sandboxId;
+            const swapping =
+              fleet.attachingSandboxId === machine.sandboxId ||
+              movingSandboxId === machine.sandboxId;
             return (
               <RadioRow
                 key={machine.sandboxId}
                 value={machine.sandboxId}
-                disabled={!selectable || fleet.attaching}
+                disabled={!selectable || locked}
                 onSelect={() => {
-                  if (machine.active || !selectable || fleet.attaching) return;
+                  if (machine.active || !selectable || locked) return;
                   setMoveError(null);
                   if (!props.move) {
                     void fleet.attach(machine.sandboxId);
                     return;
                   }
-                  void props.move(machine).then(setMoveError, () => setMoveError(null));
+                  setMovingSandboxId(machine.sandboxId);
+                  void props
+                    .move(machine)
+                    .then(setMoveError, () => setMoveError(null))
+                    .finally(() => setMovingSandboxId(null));
                 }}
                 label={machineDisplayName(machine)}
                 meta={
