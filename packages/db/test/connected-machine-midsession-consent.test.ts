@@ -150,7 +150,10 @@ describe("moving a chat onto a personal Connected Machine mid-session", () => {
       await admitAttempt(crypto.randomUUID()).catch((error: unknown) => {
         refused = error;
       });
-      expect((refused as { code?: string } | null)?.code).toBe("42501");
+      expect(refused).toMatchObject({
+        code: "42501",
+        message: "personal machine use requires explicit grant",
+      });
 
       // The message sent with the move carries the owner's session consent.
       await app.begin(async (sql) => {
