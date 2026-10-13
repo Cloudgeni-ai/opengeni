@@ -1,55 +1,64 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
-export const SessionGoalReportRequirement = z
-  .object({
-    id: z
-      .string()
-      .max(64)
-      .describe(
-        "Stable report requirement identifier, at most 64 ASCII characters; not a title or status.",
-      )
-      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
-    title: z
-      .string()
-      .trim()
-      .min(1)
-      .max(512)
-      .describe(
-        "Short human-readable report title, at most 512 UTF-8 bytes. Keep normal spaces; do not put the report or a progress transcript here.",
-      )
-      .refine(
-        (value) => new TextEncoder().encode(value).byteLength <= 512,
-        "Report title exceeds 512 UTF-8 bytes",
-      ),
-  })
-  .strict();
+export const SessionGoalReportRequirement = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z
+        .string()
+        .max(64)
+        .describe(
+          "Stable report requirement identifier, at most 64 ASCII characters; not a title or status.",
+        )
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
+      title: z
+        .string()
+        .trim()
+        .min(1)
+        .max(512)
+        .describe(
+          "Short human-readable report title, at most 512 UTF-8 bytes. Keep normal spaces; do not put the report or a progress transcript here.",
+        )
+        .refine(
+          (value) => new TextEncoder().encode(value).byteLength <= 512,
+          "Report title exceeds 512 UTF-8 bytes",
+        ),
+    })
+    .strict(),
+);
 export type SessionGoalReportRequirement = z.infer<typeof SessionGoalReportRequirement>;
 
-export const SessionGoalReportRequirements = z
-  .array(SessionGoalReportRequirement)
-  .max(16)
-  .superRefine((requirements, context) => {
-    if (new Set(requirements.map((item) => item.id)).size !== requirements.length) {
-      context.addIssue({ code: "custom", message: "Duplicate report requirement IDs" });
-    }
-  });
+export const SessionGoalReportRequirements = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(SessionGoalReportRequirement)
+    .max(16)
+    .superRefine((requirements, context) => {
+      if (new Set(requirements.map((item) => item.id)).size !== requirements.length) {
+        context.addIssue({ code: "custom", message: "Duplicate report requirement IDs" });
+      }
+    }),
+);
 
-export const SessionGoalReportDelivery = z
-  .object({
-    requirementId: SessionGoalReportRequirement.shape.id,
-    artifactId: z
-      .string()
-      .regex(/^[0-9a-f]{32}$/)
-      .refine((value) => !/^0+$/.test(value)),
-    inspectionReceiptId: z.string().uuid(),
-  })
-  .strict();
+export const SessionGoalReportDelivery = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      requirementId: SessionGoalReportRequirement.shape.id,
+      artifactId: z
+        .string()
+        .regex(/^[0-9a-f]{32}$/)
+        .refine((value) => !/^0+$/.test(value)),
+      inspectionReceiptId: z.string().uuid(),
+    })
+    .strict(),
+);
 export type SessionGoalReportDelivery = z.infer<typeof SessionGoalReportDelivery>;
-export const SessionGoalReportDeliveries = z
-  .array(SessionGoalReportDelivery)
-  .max(16)
-  .superRefine((deliveries, context) => {
-    if (new Set(deliveries.map((item) => item.requirementId)).size !== deliveries.length) {
-      context.addIssue({ code: "custom", message: "Duplicate report delivery requirement IDs" });
-    }
-  });
+export const SessionGoalReportDeliveries = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(SessionGoalReportDelivery)
+    .max(16)
+    .superRefine((deliveries, context) => {
+      if (new Set(deliveries.map((item) => item.requirementId)).size !== deliveries.length) {
+        context.addIssue({ code: "custom", message: "Duplicate report delivery requirement IDs" });
+      }
+    }),
+);

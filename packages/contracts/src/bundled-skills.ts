@@ -1,26 +1,31 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
-export const BundledSkillId = z.enum([
-  "builtin:opengeni-help",
-  "builtin:opengeni-client",
-  "builtin:opengeni-visualize",
-  "builtin:document-parsing",
-  "builtin:opengeni-skills",
-  "builtin:opengeni-projects",
-  "builtin:opengeni-schedules",
-  "builtin:opengeni-documents",
-  "builtin:opengeni-spreadsheets",
-  "builtin:opengeni-presentations",
-  "builtin:opengeni-sites",
-  "builtin:opengeni-video-generation",
-  "builtin:opengeni-secrets",
-]);
+export const BundledSkillId = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "builtin:opengeni-help",
+    "builtin:opengeni-client",
+    "builtin:opengeni-visualize",
+    "builtin:document-parsing",
+    "builtin:opengeni-skills",
+    "builtin:opengeni-projects",
+    "builtin:opengeni-schedules",
+    "builtin:opengeni-documents",
+    "builtin:opengeni-spreadsheets",
+    "builtin:opengeni-presentations",
+    "builtin:opengeni-sites",
+    "builtin:opengeni-video-generation",
+    "builtin:opengeni-secrets",
+  ]),
+);
 export type BundledSkillId = z.infer<typeof BundledSkillId>;
-export const BundledSkillSelection = z
-  .array(BundledSkillId)
-  .max(BundledSkillId.options.length)
-  .refine((ids) => new Set(ids).size === ids.length, "bundled Skill ids must be unique")
-  .transform((ids) => [...ids].sort());
+export const BundledSkillSelection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(BundledSkillId)
+    .max(BundledSkillId.options.length)
+    .refine((ids) => new Set(ids).size === ids.length, "bundled Skill ids must be unique")
+    .transform((ids) => [...ids].sort()),
+);
 
 /** Undefined is defaults/inheritance; an explicit empty list disables bundles. */
 export function resolveBundledSkillSelection(
@@ -65,7 +70,7 @@ export function withBundledSkillSelectionMetadata(
  * stored selection and never turns it back into defaults. Input stays strict,
  * and a value that is not a list of id strings still fails.
  */
-const StoredBundledSkillSelection = z.array(z.string());
+const StoredBundledSkillSelection = /* @__PURE__ */ defineSchema(() => z.array(z.string()));
 const knownBundledSkillIds: ReadonlySet<string> = new Set(BundledSkillId.options);
 /**
  * Exact stored selection for keyed create replay identity. Unlike the

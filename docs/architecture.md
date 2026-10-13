@@ -867,6 +867,12 @@ workflow path does not eagerly load its source compiler; explicit compilation
 keeps the existing compiler behavior. Native conversions and role boundaries
 remain unchanged.
 
+Contract schema initializers use pure `defineSchema` factory boundaries so
+release bundlers can omit unused validators, including nested constructors.
+Used validators remain eager and retain their public schemas and parse behavior;
+the helper does not defer work to the first request. Only side-effect-free schema
+construction belongs inside these annotated factories.
+
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
