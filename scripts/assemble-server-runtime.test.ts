@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DATABASE_COMMAND_RUNNERS, finalizeCommandEntry } from "./assemble-server-runtime";
 
 const guardedSource =
@@ -21,7 +24,42 @@ describe("finalizeCommandEntry", () => {
       output,
       runner: DATABASE_COMMAND_RUNNERS.migrate!,
     });
-    expect(finalized.endsWith("\nawait runMigrateCli();\n")).toBe(true);
+    expect(finalized.endsWith("\nif (import.meta.main) await runMigrateCli();\n")).toBe(true);
+  });
+
+  test("runs the command when executed, never when imported", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "finalize-command-entry-"));
+    try {
+      await writeFile(
+        join(directory, "runtime-a.js"),
+        'export async function runMigrateCli() { console.log("COMMAND RAN"); }\n',
+      );
+      const entry = join(directory, "migrate.js");
+      await writeFile(
+        entry,
+        finalizeCommandEntry({
+          command: "migrate",
+          source: guardedSource,
+          output: 'import{runMigrateCli}from"./runtime-a.js";export{runMigrateCli};\n',
+          runner: "runMigrateCli",
+        }),
+      );
+      const executed = Bun.spawnSync([process.execPath, entry], { cwd: directory });
+      expect(executed.exitCode).toBe(0);
+      expect(executed.stdout.toString()).toBe("COMMAND RAN\n");
+      const imported = Bun.spawnSync(
+        [
+          process.execPath,
+          "-e",
+          `const m = await import(${JSON.stringify(entry)}); console.log(typeof m.runMigrateCli);`,
+        ],
+        { cwd: directory },
+      );
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout.toString()).toBe("function\n");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("refuses an entry that would silently do nothing", () => {
