@@ -491,10 +491,14 @@ durable composer using this transport without knowing its execution location.
 transport with `published-artifacts/current/...` paths. A host opts in by
 building its bridge with `createSiteToolBridge({ artifactId, siteVersionId,
 requestedTools, fetchResponse, ... })`: the bridge rewrites `current` to the
-pinned Site, adds `x-opengeni-site-id`/`x-opengeni-site-version`, and the frame
-advertises `siteData: 1`. Hosts without `fetchResponse` or a pinned Site (inline
-HTML, tools-only hosts, local previews) do not advertise it, and Site code gets
-`site_data_unsupported` without a request being sent. `createOpenGeniSessionProxy`
+pinned Site, adds `x-opengeni-site-frame`, `x-opengeni-site-id` and
+`x-opengeni-site-version`, and the frame advertises `siteData: 1`. The API
+gives every framed request viewer reach, whoever is viewing. Hosts without
+`fetchResponse` or a pinned Site (inline HTML, tools-only hosts, local
+previews) do not advertise it, and Site code gets `site_data_unsupported`
+without a request being sent; their bridges also refuse `current` Site Data
+paths. No host forwards an explicit `published-artifacts/<id>/data|files`
+path from a Site. `createOpenGeniSessionProxy`
 does not forward Site Data routes yet.
 
 ### Session Authorization

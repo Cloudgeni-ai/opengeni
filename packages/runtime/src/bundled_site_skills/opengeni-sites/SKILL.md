@@ -301,12 +301,17 @@ Site id), choosing an access mode for viewers (people who can open the Site):
 | `per_viewer` | read and write only their own records | personal trackers, settings |
 | `append_only` | add records, read only their own | forms, feedback, sign-ups |
 
-Managers (the Site's owner, workspace admins, and agents acting for them) read
-everything; set `privateRecords: true` on a `per_viewer` collection to keep
-records private even from managers. Add `uniqueFields` (for example
-`[["email"]]`) to reject duplicates, `jsonSchema` to validate writes, and
-`indexedFields` for numeric range filters you use often. An Only me Site's data
-is reachable only by its owner.
+Managers (the Site's owner, workspace admins, and agents acting for them) read,
+change and delete every record through the Data tab and agent tools; set
+`privateRecords: true` on a `per_viewer` collection to keep records private
+even from managers. The Site page itself always acts as a viewer, even for its
+owner: it sees only that person's `per_viewer` records and cannot write
+`shared_read` collections, so feed those with agent tools. Add `uniqueFields`
+(for example `[["email"]]`) to reject duplicates, `jsonSchema` to validate
+writes, and `indexedFields` for numeric range filters you use often. Schemas
+must be self-contained: no `$id`, `$schema`, `pattern`/`patternProperties`,
+or `$ref` other than `#/...`. Field paths cannot use `__proto__`, `prototype`
+or `constructor`. An Only me Site's data is reachable only by its owner.
 
 In the Site, use the same client:
 
@@ -349,8 +354,8 @@ Render them with `textContent` or React text, never `innerHTML`,
 Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
 schema), `conflict` (stale `expectedVersion` or a duplicate unique value),
 `not_found`, `forbidden` (the access mode does not allow it),
-`quota_exceeded` (records 256 KB each and 100 MB per Site; files 10 MB each and
-1 GB per Site, by default), `rate_limited` (retry later), and
+`quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
+and 100,000 per collection; files 10 MB each and 1 GB per Site, by default), `rate_limited` (retry later), and
 `site_data_unsupported` (a host or local preview without Site Data). Local
 sandbox previews have no Site Data; test the published Site.
 

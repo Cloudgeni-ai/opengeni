@@ -16,7 +16,7 @@ Agents create collections (ask Opengeni, or use the `site_data_define_collection
 | `per_viewer`  | read and change only their own records | personal trackers            |
 | `append_only` | add records and see only their own     | forms and feedback           |
 
-The Site's managers (its owner, workspace admins, and agents acting for them) can read everything, unless a `per_viewer` collection is marked private. An **Only me** Site's data is reachable only by its owner. Collections can also require unique values (for example one record per email) and validate records with a JSON Schema.
+The Site's managers (its owner, workspace admins, and agents acting for them) can read and change everything from the **Data** tab and agent tools, unless a `per_viewer` collection is marked private. The Site page itself always acts as a viewer, even for its owner, so a page someone else republished cannot read everyone's records. An **Only me** Site's data is reachable only by its owner. Collections can also require unique values (for example one record per email) and validate records with a JSON Schema.
 
 ## In Site code
 
@@ -43,7 +43,7 @@ Agents use `site_data_describe`, `site_data_query`, `site_data_write`, `site_dat
 
 ## Limits and usage
 
-By default a Site can hold 100 MB of records (256 KB each), 50 collections and 1 GB of files (10 MB each), and a workspace 1 GB of Site data in total. Self-hosted deployments change these with the `OPENGENI_SITE_DATA_*` settings. Writes are rate limited per person and per Site. Usage is recorded for the workspace, which pays for what viewers do; it is not charged yet.
+By default a Site can hold 100 MB of records (256 KB each, each charged an extra 512 bytes), 100,000 records per collection, 50 collections and 1 GB of files (10 MB each), and a workspace 1 GB of Site data in total. Self-hosted deployments change these with the `OPENGENI_SITE_DATA_*` settings. Writes are rate limited per person and per Site, and reads from a Site page per person. Usage is recorded for the workspace, which pays for what viewers do; it is not charged yet.
 
 ## Managing data
 

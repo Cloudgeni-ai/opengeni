@@ -1915,8 +1915,8 @@ Site Data gives each published Site persistent JSON collections and files
 (Postgres `site_data_*` tables behind the backend-neutral `SiteDataStore`,
 bytes in object storage). Data belongs to the Site, not a version; collection
 access modes are enforced only in the API, Site frames reach it through the
-existing Site HTTP channel with host-pinned `current` routes, and managers see
-it in the Site page's Data tab. See [`site-data.md`](site-data.md).
+existing Site HTTP channel with host-pinned `current` routes only and always
+with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
 
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
