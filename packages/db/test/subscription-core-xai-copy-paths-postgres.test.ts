@@ -439,6 +439,7 @@ beforeAll(async () => {
     withheldMigrations: [
       "0747_subscription_core_xai_cutover.sql",
       "0748_subscription_core_claude_cutover.sql",
+      "0751_subscription_core_legacy_retirement.sql",
     ],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");

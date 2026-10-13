@@ -194,7 +194,10 @@ let beforeReceipt: { v2: unknown; xai: unknown } | null = null;
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("subscription-core-xai-acceptance", {
-    withheldMigrations: ["0747_subscription_core_xai_cutover.sql"],
+    withheldMigrations: [
+      "0747_subscription_core_xai_cutover.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+    ],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });
@@ -231,8 +234,8 @@ describe.skipIf(!realDb)("SuperGrok on the shared core's writers (M4 X2b)", () =
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
   });
 
-  test("production registers Codex and SuperGrok", () => {
-    expect(realRegistry.subscriptionCoreProviderIds()).toEqual(["codex", "xai"]);
+  test("production registers Claude, Codex and SuperGrok", () => {
+    expect(realRegistry.subscriptionCoreProviderIds()).toEqual(["claude", "codex", "xai"]);
   });
 
   test("even before the receipt, acceptance writes xai's v1 default, never live state", () => {

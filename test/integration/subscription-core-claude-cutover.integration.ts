@@ -27,7 +27,6 @@ import {
   createDb,
   createSession,
   peekSessionWork,
-  subscriptionPoolWorkerSubject,
   wakeSubscriptionCoreProviderCapacityWaiters,
   withSessionActivityRlsContext,
   type DbClient,
@@ -35,6 +34,7 @@ import {
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { restorePreRetirementGrants } from "../../packages/db/test/fixtures/pre-retirement-grants";
+import { subscriptionPoolWorkerSubject } from "../../packages/db/test/fixtures/legacy-subscription-session-access";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
 // The legacy Claude runtime is deleted (design 5.3, C4). The pre-cutover world
 // is staged with the retired account writers (now only a test fixture), the
