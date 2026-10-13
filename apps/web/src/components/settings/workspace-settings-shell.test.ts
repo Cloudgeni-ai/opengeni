@@ -79,16 +79,24 @@ mock.module("@tanstack/react-router", () => ({
     to,
     params,
     search: _search,
+    state,
     ...props
   }: {
     children?: ReactNode;
     to: string;
-    params?: { workspaceId?: string };
+    params?: { workspaceId?: string; sessionId?: string };
     search?: unknown;
+    state?: { restoredSessionId?: string };
   }) =>
     createElement(
       "a",
-      { ...props, href: to.replace("$workspaceId", params?.workspaceId ?? "") },
+      {
+        ...props,
+        href: to
+          .replace("$workspaceId", params?.workspaceId ?? "")
+          .replace("$sessionId", params?.sessionId ?? ""),
+        "data-restored-session": state?.restoredSessionId,
+      },
       children,
     ),
   useNavigate: () => navigate,
@@ -109,6 +117,7 @@ const {
   workspaceManagementLocation,
   workspaceSettingsSectionFromSearch,
 } = await import("./workspace-settings-shell");
+const { forgetLastSessionId, lastSessionMemoryId } = await import("@/lib/last-session-memory");
 
 const base = `/workspaces/${workspaceId}`;
 
@@ -123,6 +132,7 @@ beforeEach(() => {
   workspacePermissions = [];
   acmeRole = "owner";
   document.body.replaceChildren();
+  window.sessionStorage.clear();
 });
 
 async function renderShell(
@@ -200,7 +210,7 @@ describe("settings rail", () => {
         "API keys",
         "Developer",
         "Insights",
-        "Variable sets",
+        "Secrets",
         "Sandbox environments",
         "Machines",
       ]);
@@ -307,6 +317,50 @@ describe("settings rail", () => {
       expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
     } finally {
       await view.unmount();
+    }
+  });
+
+  test("Back to sessions reopens the session last open in this workspace", async () => {
+    const sessionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    window.sessionStorage.setItem(lastSessionMemoryId("user:alex", workspaceId), sessionId);
+    // Another person's or workspace's memory never leaks into this rail.
+    window.sessionStorage.setItem(lastSessionMemoryId("user:sam", workspaceId), "other-person");
+    window.sessionStorage.setItem(
+      lastSessionMemoryId("user:alex", northwindWorkspaceId),
+      "other-workspace",
+    );
+    const backLinks = (view: Awaited<ReturnType<typeof renderShell>>) =>
+      Array.from(view.container.querySelectorAll("a")).filter(
+        (link) =>
+          link.textContent === "Back to sessions" ||
+          link.getAttribute("aria-label") === "Back to sessions",
+      );
+    const remembered = await renderShell({ kind: "settings", section: "general" });
+    try {
+      const back = backLinks(remembered);
+      expect(back.length).toBeGreaterThan(0);
+      for (const link of back) {
+        expect(link.getAttribute("href")).toBe(`${base}/sessions/${sessionId}`);
+        // Marks the restore, so a session that is gone returns to sessions.
+        expect(link.getAttribute("data-restored-session")).toBe(sessionId);
+      }
+      // "Opengeni home" stays an explicit new session.
+      const home = remembered.container.querySelector('a[aria-label="Opengeni home"]');
+      expect(home?.getAttribute("href")).toBe(`${base}/sessions`);
+    } finally {
+      await remembered.unmount();
+    }
+
+    // After the new-session page forgets it, Back opens a new session again.
+    forgetLastSessionId(lastSessionMemoryId("user:alex", workspaceId));
+    const forgotten = await renderShell({ kind: "settings", section: "general" });
+    try {
+      for (const link of backLinks(forgotten)) {
+        expect(link.getAttribute("href")).toBe(`${base}/sessions`);
+        expect(link.hasAttribute("data-restored-session")).toBe(false);
+      }
+    } finally {
+      await forgotten.unmount();
     }
   });
 
@@ -455,7 +509,7 @@ describe("settings rail", () => {
       kind: "organization",
       section: null,
     });
-    for (const route of ["insights", "variable-sets", "rigs", "machines"]) {
+    for (const route of ["insights", "secrets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
     expect(workspaceManagementLocation(`${base}/rigs/rig-123`, workspaceId)).toEqual({
@@ -514,7 +568,7 @@ describe("settings rail", () => {
         `${base}/organization`,
       );
       expect(rendered.rail().textContent).not.toContain("API keys");
-      expect(rendered.rail().textContent).not.toContain("Variable sets");
+      expect(rendered.rail().textContent).not.toContain("Secrets");
     } finally {
       await rendered.unmount();
     }

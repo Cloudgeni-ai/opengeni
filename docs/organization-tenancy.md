@@ -1806,7 +1806,24 @@ The activated database contract is intentionally narrow:
   receipt. A receipt stranded by a completed turn cannot be resumed or
   resolved, so it no longer blocks transitions, whole-session forks or
   Variable Set changes. This is the same predicate Retry already uses.
-- Transition-to-private additionally requires a singleton sandbox group. A
+- Who can read a session and who can use its sandbox are separate. Since
+  rolling migration 0738, a session may become private, or be created private,
+  while it shares a sandbox group or Connected Machine with other sessions.
+  The session's conversation, events, command records, terminals and stream
+  access stay scoped to its audience through the per-session visibility
+  policies; files on the box are as shared as the box. Quiescence counts only
+  viewer and interaction holders attributed to the session itself, so a
+  sibling's open terminal does not block. A top-level private create may join a
+  group only when the creator can already see a session on it. Whole-session
+  forks no longer require a singleton source either; the destination is always
+  a fresh singleton group. Variable Set changes still require a singleton
+  group, counted across every member including private ones, because a box's
+  Variable Sets are fixed and homogeneous across its group. Effective control
+  walks the complete ancestry, so a paused private ancestor still pauses a
+  visible descendant; a viewer who cannot read that ancestor sees it only as
+  "An ancestor session", without its title, actor or reason. The
+  shared-exposure disclosure counts every member of the group while listing
+  only the ids the caller can read. A
   fresh transition to private in a shared workspace also requires the 0323
   organization setting. Migration 0344 fences the actual visibility update,
   after the lifecycle function's applied-receipt replay return, so a committed

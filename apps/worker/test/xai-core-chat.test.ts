@@ -12,7 +12,6 @@ import {
   createTurnCredentialLeases,
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
-import * as xaiCapacity from "../src/activities/agent-turn/xai-capacity";
 import {
   buildXaiCoreRequestAuthorization,
   selectXaiTurnCapacityByRoute,
@@ -22,7 +21,10 @@ import {
   XAI_CORE_TURN_PROVIDER,
 } from "../src/activities/agent-turn/xai-core";
 import { isCoreSourceDisconnectedError } from "../src/activities/agent-turn/subscription-core-capacity";
-import { sessionTitleXaiRequestContext } from "../src/activities/agent-turn/run";
+import {
+  sessionTitleXaiRequestContext,
+  xaiModelRequestEventPayload,
+} from "../src/activities/agent-turn/run";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 import { testSettings } from "@opengeni/testing";
 
@@ -90,8 +92,6 @@ function capacityDeps(overrides: { source?: string; isXaiTurn?: boolean } = {}) 
     eventing: { publish: async () => [], settle: async () => true },
     providerTurn: {
       effectiveXaiCredentialId: null,
-      xaiRotationEnabled: true,
-      xaiAuthoritySnapshot: { version: 1 },
       xaiSubscriptionCore: null,
       codexSubscriptionCore: null,
     },
@@ -117,14 +117,19 @@ function route(value: db.SubscriptionCoreProviderRoute) {
   return spy(db, "readSubscriptionCoreProviderRoute").mockResolvedValue(value);
 }
 
-function coreTurns(placement: db.SubscriptionCorePlacement) {
+function coreTurns(
+  placement: db.SubscriptionCorePlacement,
+  evaluation: unknown = { kind: "run", connectionId: "connection-core", switch: "initial" },
+) {
   const place = spyOn({ place: async () => placement }, "place");
   const recover = spyOn({ recover: async () => 0 }, "recover");
+  const evaluate = spyOn({ evaluate: async () => evaluation }, "evaluate");
   spy(db, "subscriptionCoreTurns").mockReturnValue({
     placeSubscriptionCoreTurn: place,
     recoverSubscriptionCoreConnectionHealth: recover,
+    evaluateSubscriptionCorePlacement: evaluate,
   } as never);
-  return { place, recover };
+  return { place, recover, evaluate };
 }
 
 const runPlacement = {
@@ -143,16 +148,17 @@ const runPlacement = {
 } as unknown as db.SubscriptionCorePlacement;
 
 describe("SuperGrok capacity by provider route", () => {
-  test("legacy runs the legacy selection unchanged after exactly one route read", async () => {
+  test("a legacy route fails closed exactly as maintenance after exactly one route read", async () => {
+    // The legacy SuperGrok selector was deleted (M4 X4): after the X3 receipt
+    // nothing but the core may fund a SuperGrok turn.
     const read = route("legacy");
-    const legacy = spy(xaiCapacity, "selectXaiTurnCapacity").mockResolvedValue({ ok: true });
     const { place } = coreTurns(runPlacement);
     const deps = capacityDeps();
-    expect(await selectXaiTurnCapacityByRoute(deps)).toEqual({ ok: true });
+    await expect(selectXaiTurnCapacityByRoute(deps)).rejects.toMatchObject({
+      payload: { code: "subscription_core_cutover_disabled", retryable: false },
+    });
     expect(read).toHaveBeenCalledTimes(1);
     expect(read.mock.calls[0]![1]).toEqual({ accountId: "account-1", provider: "xai" });
-    expect(legacy).toHaveBeenCalledTimes(1);
-    expect(legacy.mock.calls[0]![0]).toBe(deps);
     expect(place).not.toHaveBeenCalled();
     expect(deps.leases.xai.holderId).toBeNull();
   });
@@ -165,21 +171,17 @@ describe("SuperGrok capacity by provider route", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
-  test("maintenance fails closed and reads neither selector", async () => {
+  test("maintenance fails closed and never places", async () => {
     route("maintenance");
-    const legacy = spy(xaiCapacity, "selectXaiTurnCapacity");
     const { place } = coreTurns(runPlacement);
     await expect(selectXaiTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
       payload: { code: "subscription_core_cutover_disabled", retryable: false },
     });
-    expect(legacy).not.toHaveBeenCalled();
     expect(place).not.toHaveBeenCalled();
   });
 
-  test("core places the accepted turn and adopts the core lease, never the legacy rotation", async () => {
+  test("core places the accepted turn and adopts the core lease", async () => {
     route("core");
-    const legacy = spy(xaiCapacity, "selectXaiTurnCapacity");
-    const legacyLease = spy(db, "acquireXaiCredentialLease");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const { place, recover } = coreTurns(runPlacement);
     const deps = capacityDeps();
@@ -203,39 +205,112 @@ describe("SuperGrok capacity by provider route", () => {
       });
       expect(deps.providerTurn.codexSubscriptionCore).toBeNull();
       expect(deps.providerTurn.effectiveXaiCredentialId).toBe("connection-core");
-      expect(deps.providerTurn.xaiRotationEnabled).toBe(false);
-      expect(deps.providerTurn.xaiAuthoritySnapshot).toBeNull();
       expect(deps.leases.xai.subscriptionCoreConnection).toBe("connection-core");
-      expect(deps.leases.xai.subjectId).toBeNull();
       expect(deps.leases.xai.generation).toBe(3);
       expect(deps.leases.xai.held).toBe(true);
-      expect(legacy).not.toHaveBeenCalled();
-      expect(legacyLease).not.toHaveBeenCalled();
     } finally {
       deps.leases.xai.stopHeartbeat();
     }
   });
 
-  test("a core wait is a terminal capacity failure until SuperGrok waits exist", async () => {
+  test("a core wait parks the same turn on its SuperGrok core waiter and re-evaluates it", async () => {
     route("core");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue({
+      productModelId: "supergrok/grok-4.7",
+      reasoningLevel: "medium",
+    });
+    spy(db, "getSessionGoal").mockResolvedValue(null);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
     const resetAt = new Date(Date.now() + 3_600_000);
-    coreTurns({
-      kind: "wait",
-      reason: "all_accounts_exhausted",
+    const { evaluate } = coreTurns(
+      {
+        kind: "wait",
+        reason: "no_eligible_capacity",
+        earliestResetAt: resetAt,
+        healthRetryAt: null,
+        explicitConnectionId: null,
+      } as unknown as db.SubscriptionCorePlacement,
+      {
+        kind: "wait",
+        reason: "no_eligible_capacity",
+        earliestResetAt: resetAt,
+        healthRetryAt: null,
+        explicitConnectionId: null,
+      },
+    );
+    const waiter = {
+      waiterId: "waiter-1",
+      provider: "xai",
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      blockedTurnId: "turn-1",
+      blockedTurnGeneration: 3,
+      generation: 1,
+      wakeRevision: 1,
+      observedWakeRevision: 1,
+      waitReason: "no_eligible_capacity",
+      resetKind: "authoritative",
+      refreshAttempt: 0,
       earliestResetAt: resetAt,
-      healthRetryAt: null,
-      explicitConnectionId: null,
-    } as unknown as db.SubscriptionCorePlacement);
+      nextCheckAt: resetAt,
+      goalId: null,
+      goalVersion: null,
+      lastWakeReason: "capacity_wait_armed",
+    } satisfies db.SubscriptionCoreCodexCapacityWait;
+    const arm = spy(db, "armSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
+    });
+    const codexArm = spy(db, "armSubscriptionCoreCodexCapacityWait");
+    spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(waiter);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter,
+      events: [],
+    });
     const deps = capacityDeps();
-    await expect(selectXaiTurnCapacityByRoute(deps)).rejects.toMatchObject({
-      payload: { code: "subscription_capacity_unavailable" },
+    expect(await selectXaiTurnCapacityByRoute(deps)).toEqual({
+      exit: {
+        status: "waiting_capacity",
+        capacityWait: {
+          provider: "xai",
+          waiterId: "waiter-1",
+          generation: 1,
+          nextCheckAt: resetAt.toISOString(),
+          wakeRevision: 1,
+        },
+        turnId: "turn-1",
+      },
+    });
+    expect(arm).toHaveBeenCalledTimes(1);
+    expect(arm.mock.calls[0]![1]).toBe("xai");
+    expect(arm.mock.calls[0]![2]).toMatchObject({
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: resetAt,
+      failurePayload: { code: "subscription_capacity_unavailable" },
+    });
+    expect(
+      String((arm.mock.calls[0]![2] as { failurePayload: { error: string } }).failurePayload.error),
+    ).toContain("SuperGrok");
+    expect(codexArm).not.toHaveBeenCalled();
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0]![1]).toMatchObject({
+      waiterId: "waiter-1",
+      generation: 1,
+      provider: "xai",
+      evaluation: { kind: "wait", waitReason: "no_eligible_capacity" },
     });
     expect(deps.leases.xai.held).toBe(false);
   });
 
   test("a core wait for compaction defers with its request preserved, never parks", async () => {
     route("core");
+    const arm = spy(db, "armSubscriptionCoreCapacityWait");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     coreTurns({
       kind: "wait",
@@ -254,6 +329,8 @@ describe("SuperGrok capacity by provider route", () => {
       exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
     });
     expect(JSON.stringify(settled)).toContain('"requestPreserved":true');
+    // SuperGrok parks chat turns on the core (X1b); maintenance never parks.
+    expect(arm).not.toHaveBeenCalled();
   });
 });
 
@@ -287,10 +364,14 @@ function placedCore(options: { fence?: () => Promise<void> } = {}) {
   spy(db, "buildSubscriptionCoreXaiTokenResolver").mockImplementation(((...args: unknown[]) => {
     resolverInputs.push(args);
     return {
-      getToken: async () => ({ accessToken: "core-access", userId: "subject-1" }),
+      getToken: async () => ({
+        accessToken: "core-access",
+        userId: "subject-1",
+        credentialVersion: 4,
+      }),
       refresh: async () => {
         refreshes += 1;
-        return { accessToken: "core-fresh", userId: "subject-1" };
+        return { accessToken: "core-fresh", userId: "subject-1", credentialVersion: 5 };
       },
     };
   }) as never);
@@ -371,11 +452,21 @@ const completed = () =>
 
 describe("SuperGrok request custody on the core", () => {
   test("the bearer comes from the core resolver for the exact turn and lease", async () => {
-    const { authorization, resolverInputs } = placedCore();
+    const { authorization, resolverInputs, core } = placedCore();
     expect(await authorization.getToken()).toEqual({
       accessToken: "core-access",
       userId: "subject-1",
     });
+    // The refusal fence moves only when a main-lane request is dispatched,
+    // to the generation of the bearer that request carries.
+    expect(core.credentialVersion).toBeUndefined();
+    await authorization.beforeProviderDispatch({
+      requestId: "attempt-1:1:1:xai:1",
+      transportAttempt: 1,
+    } as never);
+    expect(core.credentialVersion).toBe(4);
+    await authorization.refresh();
+    expect(core.credentialVersion).toBe(4);
     expect((resolverInputs[0] as unknown[])[2]).toEqual(identity);
     expect((resolverInputs[0] as unknown[])[3]).toEqual({
       connectionId: "connection-core",
@@ -405,6 +496,8 @@ describe("SuperGrok request custody on the core", () => {
     expect(sent.calls()).toBe(2);
     expect(refreshes()).toBe(1);
     expect(sent.tokens).toEqual(["Bearer core-access", "Bearer core-fresh"]);
+    // The refreshed retry was dispatched with the refreshed bearer's generation.
+    expect(core.credentialVersion).toBe(5);
     expect(order).toEqual([
       "fence",
       "reserve:attempt-1:1:1:xai:1:1",
@@ -430,6 +523,20 @@ describe("SuperGrok request custody on the core", () => {
     ]);
     await (await sent.response).text().catch(() => undefined);
     expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1", "settle:operation-1:refused"]);
+  });
+
+  test("a title-lane refresh after a main-lane refusal keeps the refused bearer's generation", async () => {
+    const { core, authorization } = placedCore();
+    const refused = send(authorization, [
+      () => new Response(JSON.stringify({ error: "rate limited" }), { status: 429 }),
+    ]);
+    await refused.response.then((response) => response.text()).catch(() => undefined);
+    expect(core.credentialVersion).toBe(4);
+    // The title lane refreshes (generation 5) before failure settlement reads the fence.
+    const title = xaiCoreTitleCustody(core, authorization)!;
+    await title.getToken();
+    await title.refresh();
+    expect(core.credentialVersion).toBe(4);
   });
 
   test("an unknown outcome is settled unknown and never replayed", async () => {
@@ -568,11 +675,12 @@ describe("SuperGrok request custody on the core", () => {
   });
 });
 
-test("no SuperGrok turn on the legacy route touches durable events through the core", async () => {
+test("no SuperGrok turn on the legacy route touches durable events", async () => {
   route("legacy");
   const publish = spy(events, "publishDurableSessionEvents");
-  spy(xaiCapacity, "selectXaiTurnCapacity").mockResolvedValue({ ok: true });
-  await selectXaiTurnCapacityByRoute(capacityDeps());
+  await expect(selectXaiTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
+    payload: { code: "subscription_core_cutover_disabled" },
+  });
   expect(publish).not.toHaveBeenCalled();
 });
 
@@ -601,8 +709,7 @@ test("a core-placed SuperGrok turn never reaches the legacy image or video crede
     .replace(/^\s*\/\/.*$/gm, "")
     .replace(/\s+/g, " ");
   const source = file.slice(file.indexOf("export async function buildTurnAgent("));
-  // Image: a core turn returns the core operation path before any legacy
-  // image authority is read.
+  // Image: a core turn uses the operation path; retired authority is absent.
   const imageCore =
     'if (resolvedModel?.provider.kind === "xai-subscription") { const core = providerTurn.xaiSubscriptionCore; if (core) {';
   expect(source.includes(imageCore)).toBe(true);
@@ -613,19 +720,70 @@ test("a core-placed SuperGrok turn never reaches the legacy image or video crede
     xaiImage,
   );
   expect(coreImageCall).toBeGreaterThan(xaiImage);
-  expect(legacyImageAuthority).toBeGreaterThan(coreImageCall);
-  // Video: the legacy credential reads run only on the legacy route for a turn
-  // the core did not place.
+  expect(legacyImageAuthority).toBe(-1);
+  // Video: there is no legacy credential branch after retirement.
   const videoGate =
     'if (route === "legacy" && !providerTurn.xaiSubscriptionCore && encryptionKey && subjectId) {';
-  expect(source.includes(videoGate)).toBe(true);
-  // The legacy credential reads exist only behind that gate.
+  expect(source.includes(videoGate)).toBe(false);
   for (const legacy of [
     "materializeXaiCredentialForRun(",
     "resolveXaiProviderAccountAuthoritySnapshotForAcceptance(",
     "getXaiSessionAccountPin(",
   ]) {
-    expect(source.split(legacy).length).toBe(2);
-    expect(source.indexOf(legacy)).toBeGreaterThan(source.indexOf(videoGate));
+    expect(source.includes(legacy)).toBe(false);
   }
+});
+
+test("a productive SuperGrok request reaches its durable event with the breaker's progress flag", async () => {
+  const requestEvents: Array<Record<string, unknown>> = [];
+  const fetch = xaiSubscriptionFetch(async () =>
+    sse({
+      type: "response.completed",
+      response: {
+        id: "r1",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "done" }],
+          },
+        ],
+      },
+    }),
+  );
+  const context: XaiSubscriptionRequestContext = {
+    clientVersion: "1.0.1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    getToken: async () => ({ accessToken: "access", userId: "subject-1" }),
+    refresh: async () => ({ accessToken: "fresh", userId: "subject-1" }),
+    resolveModel: (slug) => slug,
+    nextRequestId: () => "attempt-1:1:1:xai:1",
+    onModelRequestEvent: (event) => {
+      requestEvents.push(
+        xaiModelRequestEventPayload(event, {
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+          dispatchId: "dispatch-1",
+          executionGeneration: 3,
+        }),
+      );
+    },
+  };
+  const response = await xaiSubscriptionRequestStorage.run(context, () =>
+    fetch("https://cli-chat-proxy.grok.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "supergrok/grok-4.7", input: "hello" }),
+    }),
+  );
+  await response.text();
+  expect(requestEvents.find((event) => event.phase === "completed")).toMatchObject({
+    phase: "completed",
+    meaningfulOutput: true,
+    provider: "supergrok-subscription",
+    turnId: "turn-1",
+    attemptId: "attempt-1",
+    executionGeneration: 3,
+  });
 });

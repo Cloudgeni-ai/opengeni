@@ -77,7 +77,7 @@ describe("lazy provisioning synthetic manifest", () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = {
       HOME: "/workspace",
-      DEPLOY_TARGET: "lazy-test",
+      OPENGENI_DEPLOY_TARGET: "lazy-test",
       GIT_ASKPASS: "/workspace/.opengeni/askpass",
     };
     const agent = buildOpenGeniAgent(settings, [], {
@@ -114,7 +114,7 @@ describe("lazy provisioning synthetic manifest", () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = {
       HOME: "/workspace",
-      DEPLOY_TARGET: "lazy-test",
+      OPENGENI_DEPLOY_TARGET: "lazy-test",
       GIT_ASKPASS: "/workspace/.opengeni/askpass",
     };
     const agent = buildOpenGeniAgent(settings, [], {

@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
-import { compactionSkipSubtitle } from "../src/timeline/compaction-copy";
+import {
+  compactionFailureDetails,
+  compactionSkipSubtitle,
+  presentTurnFailureText,
+} from "../src/timeline/compaction-copy";
+import { readableWorkStatus } from "../src/timeline/work-presentation";
 import {
   buildTimeline,
   creditExhaustedFromEvents,
@@ -69,6 +74,38 @@ describe("toolDisplayName", () => {
 });
 
 let sequence = 0;
+
+describe("SUB-FAIL-06 serving switch presentation", () => {
+  test("one identity-free notice survives replay without duplicating provider aliases", () => {
+    const recorded = [
+      event("subscription.account.switched", {
+        reason: "failover_cross_provider",
+        fromAccountId: "secret-owner",
+        toAccountId: "secret-account",
+        accountEmail: "private@example.test",
+      }),
+      event("subscription.account.selected", { provider: "claude", modelId: "fallback-model" }),
+      event("codex.account.switched", { accountEmail: "private@example.test" }),
+    ];
+    const items = buildTimeline(JSON.parse(JSON.stringify(recorded)));
+    expect(items.filter((item) => item.kind === "notice")).toMatchObject([
+      { kind: "notice", tone: "input", text: "Switched to a fallback model." },
+    ]);
+    expect(JSON.stringify(items)).not.toContain("secret-");
+    expect(JSON.stringify(items)).not.toContain("private@example.test");
+  });
+
+  test("same-provider rotation and return to preferred have distinct quiet notices", () => {
+    const items = buildTimeline([
+      event("subscription.account.switched", { reason: "failover_same_provider" }),
+      event("subscription.account.switched", { reason: "return_to_preferred" }),
+    ]);
+    expect(items.filter((item) => item.kind === "notice").map((item) => item.text)).toEqual([
+      "Switched to another subscription account.",
+      "Returned to your preferred model.",
+    ]);
+  });
+});
 
 function event(
   type: string,
@@ -285,11 +322,11 @@ describe("buildTimeline", () => {
     expect(item).toMatchObject({
       kind: "notice",
       tone: "waiting",
-      text: "Limit reached. Continues automatically when capacity is available.",
+      text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
       capacityWait: {
         turnId: "turn-1",
-        label: "Limit reached",
-        detail: "Continues automatically when capacity is available.",
+        label: "Usage limit reached",
+        detail: "Try again after your quota resets, or switch to another model or provider.",
       },
     });
   });
@@ -334,7 +371,7 @@ describe("buildTimeline", () => {
       text: error,
       capacityWait: { label: "Waiting", detail: error },
     });
-    expect(JSON.stringify(item)).not.toContain("Limit reached");
+    expect(JSON.stringify(item)).not.toMatch(/limit reached/i);
   });
 
   test("a rate-limited subscription account wait reads as a reached limit", () => {
@@ -348,9 +385,71 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(item).toMatchObject({
-      text: "Limit reached. Continues automatically when capacity is available.",
-      capacityWait: { label: "Limit reached" },
+      text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
+      capacityWait: { label: "Usage limit reached" },
     });
+  });
+
+  test.each([
+    [{ waitReason: "no_eligible_capacity" }],
+    [{ waitReason: "pinned_account_unavailable" }],
+    [{ waitReason: "compaction_provider_locked" }],
+    [{ code: "claude_account_rate_limited", provider: "claude" }],
+  ] as const)("a limit wait for %j never promises to continue by itself", (payload) => {
+    reset();
+    for (const type of ["codex.capacity.waiting", "turn.capacity_waiting"]) {
+      const [item] = buildTimeline([event(type, payload)]);
+      expect(item).toMatchObject({
+        text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
+        capacityWait: { label: "Usage limit reached" },
+      });
+      expect(JSON.stringify(item)).not.toMatch(/automatic|continues/i);
+    }
+  });
+
+  test("a capacity wait row has no clock; approval and agent waits keep theirs", () => {
+    reset();
+    const workOf = (events: SessionEvent[]) => {
+      const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+      const work = groups.find((group) => group.kind === "activity" && group.work);
+      if (!work || work.kind !== "activity" || !work.work)
+        throw new Error(`expected work: ${JSON.stringify(groups).slice(0, 600)}`);
+      return { ...work, work: work.work };
+    };
+    for (const payload of [
+      { waitReason: "no_eligible_capacity" },
+      { waitReason: "pinned_account_ineligible", error: "Choose another account." },
+      { code: "claude_relogin_required", error: "Reconnect your Claude account." },
+    ]) {
+      const status = readableWorkStatus(
+        workOf([
+          event("turn.started", {}),
+          event("codex.capacity.waiting", payload),
+          event("session.status.changed", { status: "waiting_capacity" }),
+        ]),
+      );
+      expect(status.kind).toBe("waiting");
+      expect(status).not.toHaveProperty("since");
+      expect(status).not.toHaveProperty("untimed");
+    }
+    const approval = readableWorkStatus(
+      workOf([
+        event("turn.started", {}),
+        event("agent.toolCall.created", { id: "a", name: "exec_command", arguments: {} }),
+        event("session.requiresAction", {}),
+        event("session.status.changed", { status: "requires_action" }),
+      ]),
+    );
+    expect(approval).toMatchObject({ kind: "waiting", label: "Waiting for you" });
+    expect(typeof approval.since).toBe("string");
+    const working = readableWorkStatus(
+      workOf([
+        event("turn.started", {}),
+        event("agent.toolCall.created", { id: "w", name: "exec_command", arguments: {} }),
+      ]),
+    );
+    expect(working.kind).toBe("working");
+    expect(typeof working.since).toBe("string");
   });
 
   test.each([
@@ -368,7 +467,7 @@ describe("buildTimeline", () => {
     ]);
     const wait = items.find((item) => item.kind === "notice" && item.capacityWait);
     expect(wait).toMatchObject({
-      text: "Limit reached. Continues automatically when capacity is available.",
+      text: "Usage limit reached. Try again after your quota resets, or switch to another model or provider.",
     });
     expect(wait && "resolvedAt" in wait ? wait.resolvedAt : undefined).toBe(
       new Date(1718000000000 + 3000).toISOString(),
@@ -400,7 +499,7 @@ describe("buildTimeline", () => {
       event("turn.completed", {}),
     ]);
     for (const groups of [groupTimeline(items), groupTimeline(items, { readableTurns: true })]) {
-      expect(JSON.stringify(groups)).not.toContain("Limit reached");
+      expect(JSON.stringify(groups)).not.toMatch(/limit reached/i);
       expect(JSON.stringify(groups)).toContain("You're welcome!");
     }
   });
@@ -421,9 +520,10 @@ describe("buildTimeline", () => {
     const liveWork = live.find((group) => group.kind === "activity" && group.work);
     expect(live.some((group) => group.kind === "item" && group.item.kind === "notice")).toBe(false);
     expect(liveWork && liveWork.kind === "activity" ? liveWork.work?.waiting : null).toEqual({
-      label: "Limit reached",
+      label: "Usage limit reached",
       since: new Date(1718000000000 + 2000).toISOString(),
-      detail: "Continues automatically when capacity is available.",
+      detail: "Try again after your quota resets, or switch to another model or provider.",
+      untimed: true,
     });
 
     const hours = 4 * 3600;
@@ -443,7 +543,7 @@ describe("buildTimeline", () => {
     );
     const work = settled.find((group) => group.kind === "activity" && group.work);
     expect(work && work.kind === "activity" ? work.work?.pausedMs : null).toBe((hours - 2) * 1000);
-    expect(JSON.stringify(settled)).not.toContain("Limit reached");
+    expect(JSON.stringify(settled)).not.toMatch(/limit reached/i);
   });
 
   test("accepts every typed admission reason with its matching event semantics", () => {
@@ -2150,11 +2250,32 @@ describe("buildTimeline", () => {
     const projected = items[0];
     if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
     expect(compactionSkipSubtitle("summarization_failed", projected.providerRejection)).toBe(
-      "The model provider rejected the compaction request (HTTP 400 invalid_request_error, param input[12].encrypted_content). Chat history is unchanged. Repeating it fails the same way until the conversation changes; if a new message fails again, start a new session.",
+      "Chat history is unchanged. If your next message fails too, start a new session.",
     );
+    // Identifiers move behind Details instead of the subtitle.
+    expect(compactionFailureDetails(projected)).toEqual({
+      note: "The provider rejects this request the same way until the conversation changes.",
+      facts: [
+        { label: "Response", value: "HTTP 400 · invalid_request_error" },
+        { label: "Parameter", value: "input[12].encrypted_content" },
+        { label: "Request ID", value: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f" },
+      ],
+    });
     expect(compactionSkipSubtitle("summarization_failed", null)).toBe(
       "Request it again to retry. Chat history is unchanged.",
     );
+    expect(compactionFailureDetails({ ...projected, providerRejection: null })).toBeNull();
+    // Any other failure shows the turn's recorded text instead.
+    expect(
+      compactionFailureDetails({
+        ...projected,
+        providerRejection: null,
+        failureDetail: "compaction summarization failed: timeout",
+      }),
+    ).toEqual({
+      note: null,
+      facts: [{ label: "Error", value: "compaction summarization failed: timeout" }],
+    });
     // A malformed record without a numeric status is not a rejection.
     const malformed = buildTimeline([
       event("session.context.compaction.skipped", {
@@ -2163,6 +2284,78 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(malformed[0]).toMatchObject({ providerRejection: null });
+  });
+
+  test("names a compaction turn failure and keeps the recorded text as detail", () => {
+    const recorded =
+      "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+    expect(presentTurnFailureText(recorded)).toEqual({
+      summary: "Couldn’t compact conversation history",
+      detail: recorded,
+    });
+    // Every other reason passes through as-is.
+    expect(presentTurnFailureText("Model request rejected")).toEqual({
+      summary: "Model request rejected",
+    });
+    expect(presentTurnFailureText("  ")).toBeNull();
+    expect(presentTurnFailureText(undefined)).toBeNull();
+  });
+
+  test("a compaction turn failure is shown once, on its own landmark", () => {
+    reset();
+    const recorded = "compaction summarization failed: 400 Missing required parameter.";
+    const failed = { error: recorded, code: "context_compaction_failed" };
+    // Its own landmark names the failure and receives the recorded text.
+    const withLandmark = buildTimeline([
+      event("session.context.compaction.skipped", { reason: "summarization_failed" }),
+      event("turn.failed", failed),
+    ]);
+    expect(withLandmark.filter((item) => item.kind === "notice")).toEqual([]);
+    expect(withLandmark.find((item) => item.kind === "context-compaction")).toMatchObject({
+      phase: "skipped",
+      failureDetail: recorded,
+    });
+    // Another turn's landmark is not this failure.
+    reset();
+    const otherTurn = buildTimeline([
+      event(
+        "session.context.compaction.skipped",
+        { reason: "summarization_failed" },
+        { turnId: "turn-0" },
+      ),
+      event("turn.failed", failed),
+    ]);
+    expect(otherTurn.find((item) => item.kind === "context-compaction")).not.toHaveProperty(
+      "failureDetail",
+    );
+    expect(otherTurn.find((item) => item.kind === "notice")).toMatchObject({
+      id: "evt-2",
+      text: "Couldn’t compact conversation history",
+    });
+    // Without one, the notice is short and keeps the recorded text as details.
+    reset();
+    const alone = buildTimeline([event("turn.failed", failed)]);
+    expect(alone.find((item) => item.kind === "notice")).toMatchObject({
+      tone: "failed",
+      text: "Couldn’t compact conversation history",
+      details: { label: "Details", value: recorded },
+    });
+    // Retry reopens the turn: an earlier attempt's landmark never owns a newer
+    // failure, which keeps its own notice.
+    reset();
+    const newer = "compaction summarization failed: 500 upstream";
+    const retried = buildTimeline([
+      event("session.context.compaction.skipped", { reason: "summarization_failed" }),
+      event("turn.failed", failed),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      event("turn.failed", { ...failed, error: newer }),
+    ]);
+    expect(retried.find((item) => item.kind === "context-compaction")).toMatchObject({
+      failureDetail: recorded,
+    });
+    expect(retried.filter((item) => item.kind === "notice")).toMatchObject([
+      { id: "evt-4", details: { label: "Details", value: newer } },
+    ]);
   });
 
   test("hides same-turn recovery control evidence from the user timeline", () => {

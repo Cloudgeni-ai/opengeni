@@ -416,8 +416,10 @@ body {
   overflow-x: auto;
 }
 
+/* Shrink to fit, then wrap cells within the (possibly widened) table wrapper
+   instead of forcing one-line rows and horizontal scrolling. */
 .markdown-stream table {
-  width: max-content;
+  width: auto;
   min-width: min(100%, 32rem);
 }
 
@@ -451,8 +453,8 @@ body {
 }
 @container og-composer (max-width: 39.999rem) {
   /* A split desktop pane needs the same overflow menu as a phone. These
-     hooks also cover the compact variable-set picker, without duplicating
-     controls or changing their keyboard/menu behavior. */
+     hooks keep the compact controls without duplicating them or changing
+     their keyboard/menu behavior. */
   .console-composer-wide-control { display: none; }
   .console-composer-compact-control { display: inline-flex; }
   .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }

@@ -5,6 +5,7 @@ import {
   classifySessionTenancyFailure,
   isCurrentSessionTenancyTarget,
   prepareSessionVisibilityAttempt,
+  privateSessionSandboxNote,
   retryableSessionTenancyReconciliationFailure,
   sessionTenancyBlockerMessage,
   visibilityAttemptReachedAuthoritativeState,
@@ -99,7 +100,17 @@ describe("session tenancy browser operation state", () => {
       retainAttempt: true,
       reconcile: true,
     });
-    expect(sessionTenancyBlockerMessage("shared_sandbox_group")).toContain("own sandbox");
+    expect(sessionTenancyBlockerMessage("shared_sandbox_group")).toBe(
+      "This session shares its sandbox with other sessions. Fork it into a separate session to make this change.",
+    );
+    // Privacy no longer requires an own sandbox: the dialog says what stays shared.
+    expect(privateSessionSandboxNote("selfhosted")).toBe(
+      " Files on its connected machine stay available to whoever can use that machine.",
+    );
+    expect(privateSessionSandboxNote("modal")).toBe(
+      " Files in its sandbox stay available to other sessions that share it.",
+    );
+    expect(privateSessionSandboxNote("none")).toBe("");
 
     const epoch = new OpenGeniApiError(
       409,

@@ -274,7 +274,13 @@ export const subscriptionSessionBindings = pgTable(
     version: bigint("version", { mode: "number" }).notNull().default(1),
   },
   (table) => ({
-    identity: primaryKey({ columns: [table.workspaceId, table.sessionId] }),
+    // One binding per session and provider (0733, D-32).
+    identity: primaryKey({ columns: [table.workspaceId, table.sessionId, table.provider] }),
+    // Rolling window of 0733 only; the next drained provider cutover drops it.
+    rollingSession: uniqueIndex("subscription_session_bindings_rolling_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
     placement: index("subscription_session_bindings_connection_idx").on(
       table.accountId,
       table.provider,
@@ -378,6 +384,8 @@ export const subscriptionCapacityWaiters = pgTable(
     sessionId: uuid("session_id").notNull(),
     turnId: uuid("turn_id").notNull(),
     provider: text("provider").notNull(),
+    /** NULL is home-only; even an empty failover-aware set needs bounded refresh. */
+    candidateProviders: text("candidate_providers").array(),
     waitReason: text("wait_reason").notNull(),
     policyHash: text("policy_hash"),
     resetKind: text("reset_kind"),
@@ -405,6 +413,16 @@ export const subscriptionCapacityWaiters = pgTable(
       table.provider,
       table.earliestResetAt,
       table.wakeRevision,
+    ),
+    candidates: index("subscription_capacity_waiters_candidates_idx").using(
+      "gin",
+      table.candidateProviders,
+    ),
+    homeScope: index("subscription_capacity_waiters_home_scope_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.provider,
+      table.sessionId,
     ),
   }),
 );

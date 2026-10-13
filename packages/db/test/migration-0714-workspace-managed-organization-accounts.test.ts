@@ -14,7 +14,12 @@ import {
 } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
-import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
+import {
+  createDb,
+  ensureManagedAccessForUser,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+  type DbClient,
+} from "../src";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
@@ -28,6 +33,13 @@ const API_KEY_CONNECTIONS = "0715_subscription_core_api_key_connections.sql";
 // The format-aware personal connect writer is built from the live connect
 // writer 0715 rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.sql";
+// The personal version reader is built from the owner reader withheld 0715
+// rewrites: held back with 0715 and replayed after it.
+const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
+// ...and before the drained retirement migration, which drops the Codex
+// reach twin 0714 rewrites: held back for good, so replaying 0714 cannot
+// recreate a retired routine.
+const RETIREMENT = SUBSCRIPTION_RETIREMENT_MIGRATION;
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 83);
 const MODEL = "codex/gpt-5.5";
@@ -94,7 +106,8 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${MIGRATION}), (${API_KEY_CONNECTIONS}),
-      (${PERSONAL_CONNECT_FORMAT})`;
+      (${PERSONAL_CONNECT_FORMAT}),
+      (${PERSONAL_CONNECTION_VERSIONS}), (${RETIREMENT}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -197,7 +210,8 @@ beforeAll(async () => {
   const applying = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await applying`delete from schema_migrations where name in (${MIGRATION}, ${API_KEY_CONNECTIONS},
-      ${PERSONAL_CONNECT_FORMAT})`;
+      ${PERSONAL_CONNECT_FORMAT},
+      ${PERSONAL_CONNECTION_VERSIONS}, '0752_subscription_personal_sharing.sql')`;
     await migrate(database.ownerUrl);
     const [applied] = await applying<{ count: number }[]>`
       select count(*)::int as count from schema_migrations where name = ${MIGRATION}`;

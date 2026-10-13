@@ -6,7 +6,6 @@ test("each synchronous composer blocker identifies its recovery reason", () => {
     uploadPending: false,
     repositoryError: null,
     policyValid: true,
-    variableSetBlocked: false,
     personalDecision: false,
     personalLoading: false,
   };
@@ -16,7 +15,6 @@ test("each synchronous composer blocker identifies its recovery reason", () => {
     [{ repositoryError: "Repository access expired" }, "repository"],
     [{ repositoryError: "" }, "repository"],
     [{ policyValid: false }, "policy"],
-    [{ variableSetBlocked: true }, "variable_sets"],
     [{ personalDecision: true }, "personal_decision"],
     [{ personalLoading: true }, "personal_loading"],
   ] as const) {

@@ -3,6 +3,8 @@ import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianTask,
 } from "@opengeni/contracts/atlassian-native-retirement";
+import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
+import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -17,10 +19,13 @@ import {
   normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  resolveWorkspaceSessionToolDefaults,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   TurnExecutionPolicyV1,
+  type McpConnectionAccountSelection,
   type ScheduledTask,
+  type ScheduledTaskDegradedAccount,
   type ScheduledTaskRun,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
@@ -38,6 +43,7 @@ import {
   ConnectionAccountSelectionError,
   scheduledConnectionSurfaceEligibility,
   scheduledConnectionTools,
+  scheduledTaskRunTools,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
@@ -566,7 +572,24 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         settings.openaiReasoningEffort;
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
       let sandboxOs: "linux" | "macos" | "windows" = "linux";
-      let taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
+      // A schedule that follows the workspace defaults gets them as they are
+      // now, from the owner's registry; nothing about them was saved with it.
+      const runTools = task.agentConfig.toolPolicy
+        ? scheduledTaskRunTools({
+            agentConfig: task.agentConfig,
+            settings,
+            runtimeSettings: await settingsWithEnabledCapabilityMcpServers(
+              db,
+              task.workspaceId,
+              settings,
+              taskAuthoritySubjectId ? { subjectId: taskAuthoritySubjectId } : {},
+            ),
+            workspaceDefaults: resolveWorkspaceSessionToolDefaults(
+              (await requireWorkspace(db, task.workspaceId)).settings,
+            ),
+          })
+        : task.agentConfig.tools;
+      let taskTools = withFirstPartyTools(settings, runTools);
       // A task created by a live agent attempt froze its creator's effective
       // first-party selection, permission set, and session access policy;
       // its generated sessions inherit that boundary under today's
@@ -609,7 +632,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             firstPartyMcpTools,
             tools: taskTools,
             toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
-            productServerIds: task.agentConfig.tools.map((tool) => tool.id),
+            productServerIds: runTools.map((tool) => tool.id),
           });
           firstPartyMcpTools = written.firstPartyMcpTools;
           taskTools = written.tools;
@@ -640,7 +663,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? await requireSession(db, task.workspaceId, acceptedTargetSessionId)
           : null;
       const toolWorkspaceSettings = (await requireWorkspace(db, task.workspaceId)).settings;
-      const connectionTools = await scheduledConnectionTools(
+      let connectionTools = await scheduledConnectionTools(
         db,
         task.workspaceId,
         connectionSettings,
@@ -648,32 +671,84 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskTools,
         taskAuthoritySubjectId ?? undefined,
       );
-      const taskConnections = await freezeConnectionAccounts({
-        db,
-        accountId: task.accountId,
-        workspaceId: task.workspaceId,
-        settings: connectionTarget
-          ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
-          : connectionSettings,
-        tools: connectionTools,
-        resources: mergeResourceRefs(connectionTarget?.resources ?? [], task.agentConfig.resources),
-        source: taskAuthoritySubjectId
-          ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
-          : { kind: "none" },
-        authoritySelections: task.agentConfig.connectionAccounts ?? [],
-        authoritySelectionsFrozen: task.agentConfig.connectionAccountsFrozen === true,
-        ...scheduledConnectionSurfaceEligibility(
-          settings,
-          connectionTarget ?? {
-            firstPartyMcpTools,
-            firstPartyMcpPermissions,
-          },
-          toolWorkspaceSettings,
-        ),
-      }).catch((error: unknown) => {
-        if (error instanceof ConnectionAccountSelectionError) return error;
-        throw error;
-      });
+      // Connector accounts resolve live at each fresh occurrence: every
+      // connector uses the owner's current accounts. Only an account a person
+      // pinned on a schedule that starts its own session narrows its
+      // connector. An existing-chat schedule never pins; that chat supplies
+      // its connectors and the owner's current accounts.
+      let runPins: McpConnectionAccountSelection[] =
+        task.runMode === "existing_session" ? [] : [...(task.agentConfig.pinnedAccounts ?? [])];
+      const surfaceEligibility = scheduledConnectionSurfaceEligibility(
+        settings,
+        connectionTarget ?? {
+          firstPartyMcpTools,
+          firstPartyMcpPermissions,
+        },
+        toolWorkspaceSettings,
+      );
+      const resolveTaskConnections = () =>
+        freezeConnectionAccounts({
+          db,
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          settings: connectionTarget
+            ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
+            : connectionSettings,
+          tools: connectionTools,
+          resources: mergeResourceRefs(
+            connectionTarget?.resources ?? [],
+            task.agentConfig.resources,
+          ),
+          source: taskAuthoritySubjectId
+            ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
+            : { kind: "none" },
+          authoritySelections: runPins,
+          ...surfaceEligibility,
+        }).catch((error: unknown) => {
+          if (error instanceof ConnectionAccountSelectionError) return error;
+          throw error;
+        });
+      let taskConnections = await resolveTaskConnections();
+      // A pinned account that can no longer be used is never replaced by
+      // another account. Unless the schedule requires its pinned accounts,
+      // the occurrence goes ahead without that connector and records what it
+      // ran without, so its owner can be told; a connector keeps any of its
+      // pins that still work.
+      const degradedAccounts: ScheduledTaskDegradedAccount[] = [];
+      while (
+        taskConnections instanceof ConnectionAccountSelectionError &&
+        task.agentConfig.pinnedAccountsRequired !== true
+      ) {
+        const failure: ConnectionAccountSelectionError = taskConnections;
+        const stale = scheduledStalePins(runPins, failure);
+        // A personal repository pin is bound to the schedule's repository
+        // resources; there is no connector to leave out, so it cannot degrade.
+        if (
+          stale.length === 0 ||
+          stale.some((pin) => pin.serverId === PERSONAL_GITHUB_CONNECTION_SURFACE_ID)
+        ) {
+          break;
+        }
+        degradedAccounts.push(...stale);
+        const staleKeys = new Set(stale.map(scheduledPinKey));
+        const staleServerIds = new Set(stale.map((pin) => pin.serverId));
+        runPins = runPins.filter((pin) => !staleKeys.has(scheduledPinKey(pin)));
+        const droppedServerIds = new Set(
+          [...staleServerIds].filter(
+            (serverId) => !runPins.some((pin) => pin.serverId === serverId),
+          ),
+        );
+        if (droppedServerIds.has(GOOGLE_DRIVE_PUBLICATION_SERVER_ID)) {
+          surfaceEligibility.googleDrivePublicationEnabled = false;
+        }
+        connectionTools = connectionTools.filter(
+          (tool) => !(tool.kind === "mcp" && droppedServerIds.has(tool.id)),
+        );
+        taskTools = taskTools.filter(
+          (tool) => !(tool.kind === "mcp" && droppedServerIds.has(tool.id)),
+        );
+        taskConnections = await resolveTaskConnections();
+      }
       if (taskConnections instanceof ConnectionAccountSelectionError) {
         const receipt = await recordScheduledTaskAdmissionFailure(db, {
           workspaceId: task.workspaceId,
@@ -694,6 +769,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const {
         personalConnectionDelegations: taskPersonalConnectionDelegations,
         mcpAccountBindings: taskMcpAccountBindings,
+        connectionAccountIntent: taskConnectionAccountIntent,
       } = taskConnections;
       const taskConnectionAuthoritySubjectId =
         taskPersonalConnectionDelegations.length > 0 ? taskAuthoritySubjectId : null;
@@ -923,6 +999,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           task,
           session: responderSession,
           personalConnectionDelegations: taskPersonalConnectionDelegations,
+          plannedTools: taskTools,
           personalResourceAuthoritySubjectId: taskAuthoritySubjectId,
           executionPolicy: targetSessionExecution
             ? {
@@ -931,10 +1008,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   targetSessionExecution.effectiveFirstPartyMcpTools ??
                   targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions: targetSessionExecution.firstPartyMcpPermissions,
-                variableSetIds: targetSessionExecution.variableSets.map(
-                  (variableSet) => variableSet.id,
-                ),
-                variableSetId: targetSessionExecution.variableSetId,
                 rigId: targetSessionExecution.rigId,
                 rigVersionId: targetSessionExecution.rigVersionId,
                 toolPolicy: targetSessionExecution.toolPolicy,
@@ -945,7 +1018,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 tools: taskTools,
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
-                variableSetId: acceptedVariableSet?.id ?? null,
                 rigId: acceptedRig?.id ?? null,
                 rigVersionId: acceptedRig?.activeVersion?.id ?? null,
                 toolPolicy: responderSession?.toolPolicy ?? {
@@ -1225,6 +1297,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           xaiAuthoritySubjectId,
           claudeAuthoritySubjectId,
           connectionAuthoritySubjectId: taskConnectionAuthoritySubjectId,
+          ...(degradedAccounts.length > 0 ? { degradedAccounts } : {}),
+          connectionAccountIntent: taskConnectionAccountIntent,
           triggerInitiator: input.initiator ?? { kind: "service", subjectId: "scheduler" },
           agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey ?? null,
           incidentPreflightRequired,
@@ -1448,6 +1522,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 sandboxBackend,
                 sandboxOs,
                 variableSetId: task.variableSetId ?? null,
+                // The schedule's vault narrowing lives on the run session so every
+                // later turn and every child inherits it through the policy chain.
+                ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
                 rigId: frozenRigId,
                 rigVersionId: frozenRigVersionId,
                 personalConnectionDelegations: [],
@@ -1483,7 +1560,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                         tools: exactSession.tools,
                         firstPartyMcpTools: exactSession.firstPartyMcpTools,
                         firstPartyMcpPermissions: exactSession.firstPartyMcpPermissions,
-                        variableSetId: exactSession.variableSetId,
                         rigId: exactSession.rigId,
                         rigVersionId: exactSession.rigVersionId,
                         toolPolicy: exactSession.toolPolicy,
@@ -1737,6 +1813,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   taskTools,
                   task.id,
                   run.id,
+                  degradedAccounts,
                 ),
                 lineage: {
                   scheduledTaskId: task.id,
@@ -1870,6 +1947,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   taskTools,
                   task.id,
                   run.id,
+                  degradedAccounts,
                 ),
                 lineage: {
                   scheduledTaskId: task.id,
@@ -2158,6 +2236,35 @@ function scheduledRunRecoveryTerminalError(
   return null;
 }
 
+function scheduledPinKey(pin: { serverId: string; connectionId: string | null }): string {
+  return JSON.stringify([pin.serverId, pin.connectionId]);
+}
+
+/**
+ * The pinned accounts an account-selection failure names. When the owner lost
+ * workspace access, none of their pinned accounts can be used.
+ */
+function scheduledStalePins(
+  pins: readonly McpConnectionAccountSelection[],
+  failure: ConnectionAccountSelectionError,
+): ScheduledTaskDegradedAccount[] {
+  const pinKeys = new Set(pins.map(scheduledPinKey));
+  const named = failure.diagnostic.accounts.flatMap((account) =>
+    pinKeys.has(scheduledPinKey(account))
+      ? [{ serverId: account.serverId, connectionId: account.connectionId, reason: account.reason }]
+      : [],
+  );
+  if (named.length > 0) return named;
+  if (failure.diagnostic.reason === "owner_access_unavailable") {
+    return pins.map((pin) => ({
+      serverId: pin.serverId,
+      connectionId: pin.connectionId,
+      reason: "owner_access_unavailable" as const,
+    }));
+  }
+  return [];
+}
+
 /** The blocked result of a diagnostic (refused) run receipt, fresh or replayed. */
 function scheduledAdmissionRefusalResult(
   run: Pick<ScheduledTaskRun, "id" | "admissionDiagnostic" | "admissionRefusal">,
@@ -2233,10 +2340,6 @@ async function prepareIncidentTelemetrySource(input: {
             input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
           firstPartyMcpPermissions:
             input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
-          variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
-            (variableSet) => variableSet.id,
-          ),
-          variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
           rigId: input.acceptedExecution.targetSessionExecution.rigId,
           rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,
           toolPolicy: input.acceptedExecution.targetSessionExecution.toolPolicy,
@@ -2247,7 +2350,6 @@ async function prepareIncidentTelemetrySource(input: {
           tools: input.acceptedExecution.resolvedTools,
           firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
           firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
-          variableSetId: input.acceptedExecution.resolvedVariableSet?.id ?? null,
           rigId: input.acceptedExecution.resolvedRig?.id ?? null,
           rigVersionId: input.acceptedExecution.resolvedRig?.versionId ?? null,
           toolPolicy: session.toolPolicy,
@@ -2542,6 +2644,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         ? { instructions: input.acceptedExecution.resolvedAgentInstructions }
         : {}),
       ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
+      ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
       ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
       task.visibility === "private"
         ? {
@@ -2831,6 +2934,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         input.acceptedExecution.resolvedTools,
         task.id,
         input.run.id,
+        input.acceptedExecution.degradedAccounts ?? [],
       ),
       lineage: {
         scheduledTaskId: task.id,

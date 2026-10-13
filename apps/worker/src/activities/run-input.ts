@@ -3,6 +3,8 @@ import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   FileResourceRef,
   resourceMountPath,
+  readTurnExecutionPolicyV1,
+  readTurnServingPolicyV1,
   type FileAsset,
   type ResourceRef,
 } from "@opengeni/contracts";
@@ -14,6 +16,7 @@ import {
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
   listTurnOpenSuffixToolCalls,
+  readSubscriptionHistoryProvenance,
   type Database,
 } from "@opengeni/db";
 import {
@@ -25,6 +28,66 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
+
+/** D-37 request-copy projection. C1 is deliberately not wired into turnInput;
+ * C2 must supply scoped turn metadata and the D-43 deployment gate. The API
+ * alone cannot establish provenance: different providers may share a wire API.
+ */
+export function projectServingProviderArtifacts(
+  rows: ReadonlyArray<{
+    item: Record<string, unknown>;
+    turnId?: string | null;
+    position: number;
+    providerArtifactInvalidatedAt?: Date | null;
+  }>,
+  options: {
+    enabled?: boolean;
+    servingProviderId: string;
+    turnMetadata: ReadonlyMap<string, unknown>;
+  },
+): Array<Record<string, unknown>> {
+  if (options.enabled !== true) return projectRejectedProviderArtifacts(rows);
+  const providers = new Map<string, ReturnType<typeof readTurnServingPolicyV1> | null>();
+  const acceptedProviders = new Map<string, string | null>();
+  return rows.flatMap((row) => {
+    let provider: string | null = null;
+    if (row.turnId) {
+      if (!providers.has(row.turnId)) {
+        try {
+          const metadata = options.turnMetadata.get(row.turnId);
+          const accepted = readTurnExecutionPolicyV1(metadata);
+          providers.set(row.turnId, readTurnServingPolicyV1(metadata));
+          acceptedProviders.set(
+            row.turnId,
+            accepted.kind === "valid" ? accepted.policy.providerId : null,
+          );
+        } catch {
+          // Unattributable legacy/fork history keeps today's projection. This
+          // does not authorize executing an unreadable serving policy.
+          providers.set(row.turnId, null);
+          acceptedProviders.set(row.turnId, null);
+        }
+      }
+      provider = acceptedProviders.get(row.turnId) ?? null;
+      const read = providers.get(row.turnId);
+      if (read?.kind === "valid") {
+        for (const revision of read.revisions) {
+          if (revision.historyPosition >= row.position) break;
+          provider = revision.policy.providerId;
+        }
+      }
+    }
+    if (
+      provider !== null &&
+      provider !== options.servingProviderId &&
+      hasOpaqueProviderArtifact(row.item)
+    ) {
+      if (row.item.type === "compaction") return [];
+      return [projectRejectedReasoningArtifact(row.item)];
+    }
+    return projectRejectedProviderArtifacts([row]);
+  });
+}
 
 /** Project only artifacts explicitly rejected by the provider out of its next view. */
 export function projectRejectedProviderArtifacts(
@@ -86,6 +149,7 @@ export type TurnInputOptions = {
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   providerApi: HistoryProviderApi;
+  servingProviderId?: string;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -665,7 +729,7 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
-  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase"> = {},
+  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase" | "servingProviderId"> = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [stored, envelope] = await Promise.all([
@@ -680,7 +744,28 @@ async function messageInput(
     preparationOptions,
     "canonical_projection",
     async () => {
-      const active = projectRejectedProviderArtifacts(stored);
+      const provenance = preparationOptions.servingProviderId
+        ? await readSubscriptionHistoryProvenance(
+            db,
+            trigger.workspaceId,
+            trigger.sessionId,
+            stored.map((row) => row.id),
+          )
+        : null;
+      const active =
+        provenance && preparationOptions.servingProviderId
+          ? projectServingProviderArtifacts(
+              stored.map((row) => ({
+                ...row,
+                turnId: provenance.turnByHistoryId.get(row.id) ?? null,
+              })),
+              {
+                enabled: true,
+                servingProviderId: preparationOptions.servingProviderId,
+                turnMetadata: provenance.turnMetadata,
+              },
+            )
+          : projectRejectedProviderArtifacts(stored);
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );

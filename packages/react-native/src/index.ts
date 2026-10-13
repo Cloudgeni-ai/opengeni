@@ -3,6 +3,7 @@ export type {
   NativeCryptoAdapter,
   NativeFileAdapter,
   NativeLifecycleAdapter,
+  NativeLinkAdapter,
   NativeLifecycleState,
   NativePersistenceAdapter,
   NativePickedFile,
@@ -16,6 +17,7 @@ export {
   type NativeEnvironmentContextValue,
   type OpenGeniReactNativeProviderProps,
 } from "./environment";
+export { useOpenNativeLink } from "./links";
 export {
   NATIVE_ATTACHMENT_PREPARATION_TIMEOUT_MS,
   prepareNativeAttachmentUpload,

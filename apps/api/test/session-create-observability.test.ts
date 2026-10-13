@@ -4,6 +4,11 @@ import { parseSync } from "oxc-parser";
 import { currentTraceContext, withTraceContext, type Span } from "@opengeni/observability";
 import { measureSessionCreatePhase } from "../src/session-create-observability";
 import {
+  legacyVariableSetFields,
+  variableSetsRemovedResponse,
+  withoutEmptyLegacyVariableSetFields,
+} from "../src/http/variable-sets-removed";
+import {
   sessionCreationMetadata,
   withSiteSessionOrigin,
 } from "../../../packages/core/src/site-session-origin";
@@ -74,7 +79,8 @@ function productionRoute() {
     `
     const { requireAccessGrantAuthorization, CreateSessionRequest, resolveSiteSessionOrigin,
       withSiteSessionOrigin, createSessionForRequest, sessionCreateErrorResponse,
-      withEffectivePolicy, measureSessionCreatePhase } = ports;
+      withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
+      variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields } = ports;
     ${code}
     return handler;
   `,
@@ -110,6 +116,9 @@ function routeFixture() {
   };
   const ports = {
     measureSessionCreatePhase,
+    legacyVariableSetFields,
+    variableSetsRemovedResponse,
+    withoutEmptyLegacyVariableSetFields,
     requireAccessGrantAuthorization: (...args: unknown[]) => {
       calls.push({ name: "authorization", args });
       return hold.authorization.promise;

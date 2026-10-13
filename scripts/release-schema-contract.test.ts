@@ -41,7 +41,7 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0753_native_broker_stdin_plans.sql",
+        (migration) => migration.path === "0766_native_broker_stdin_plans.sql",
       ),
     ).toMatchObject({ deploymentMode: "rolling" });
   });
@@ -49,7 +49,7 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0752_native_broker_launch_rejection.sql",
+        (migration) => migration.path === "0765_native_broker_launch_rejection.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
   });
@@ -57,7 +57,7 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0751_native_broker_diagnostic_fault.sql",
+        (migration) => migration.path === "0764_native_broker_diagnostic_fault.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
   });
@@ -65,7 +65,7 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0750_native_broker_bootstrap_admission.sql",
+        (migration) => migration.path === "0763_native_broker_bootstrap_admission.sql",
       ),
     ).toMatchObject({ deploymentMode: "rolling" });
   });
@@ -73,7 +73,7 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0749_native_broker_creation_qualification.sql",
+        (migration) => migration.path === "0762_native_broker_creation_qualification.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
   });
@@ -171,6 +171,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers private sessions on shared sandboxes as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0738_private_sessions_share_sandboxes.sql",
+      ),
+    ).toMatchObject({
+      path: "0738_private_sessions_share_sandboxes.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers proven built-in default intent as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -245,10 +257,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0745_native_pty_command_supervision.sql",
+        (migration) => migration.path === "0758_native_pty_command_supervision.sql",
       ),
     ).toMatchObject({
-      path: "0745_native_pty_command_supervision.sql",
+      path: "0758_native_pty_command_supervision.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -257,10 +269,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0746_native_command_qualification.sql",
+        (migration) => migration.path === "0759_native_command_qualification.sql",
       ),
     ).toMatchObject({
-      path: "0746_native_command_qualification.sql",
+      path: "0759_native_command_qualification.sql",
       deploymentMode: "maintenance",
     });
   });
@@ -269,10 +281,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0744_native_command_broker_transport.sql",
+        (migration) => migration.path === "0757_native_command_broker_transport.sql",
       ),
     ).toMatchObject({
-      path: "0744_native_command_broker_transport.sql",
+      path: "0757_native_command_broker_transport.sql",
       deploymentMode: "rolling",
     });
   });
@@ -281,10 +293,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0747_native_command_broker_control_replies.sql",
+        (migration) => migration.path === "0760_native_command_broker_control_replies.sql",
       ),
     ).toMatchObject({
-      path: "0747_native_command_broker_control_replies.sql",
+      path: "0760_native_command_broker_control_replies.sql",
       deploymentMode: "rolling",
     });
   });
@@ -293,10 +305,10 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0748_native_command_broker_input_replies.sql",
+        (migration) => migration.path === "0761_native_command_broker_input_replies.sql",
       ),
     ).toMatchObject({
-      path: "0748_native_command_broker_input_replies.sql",
+      path: "0761_native_command_broker_input_replies.sql",
       deploymentMode: "rolling",
     });
   });
@@ -2364,6 +2376,27 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0756_turn_connection_account_intent_schema.sql",
+      "0755_turn_connection_account_intent.sql",
+      "0754_schedule_connectors_follow_workspace_defaults.sql",
+      "0753_schedule_live_connector_accounts.sql",
+      "0752_subscription_personal_sharing.sql",
+      "0734_connected_output_reachable_due.sql",
+      "0746_subscription_failover_readiness_and_request_fence.sql",
+      "0749_subscription_shared_personal_choice.sql",
+      "0750_subscription_waiter_candidates.sql",
+      "0738_private_sessions_share_sandboxes.sql",
+      "0737_site_audience.sql",
+      "0734_connected_output_reachable_due.sql",
+      "0733_subscription_session_bindings_per_provider.sql",
+      "0732_sandbox_maintenance_work_probes.sql",
+      "0731_published_site_versions_workspace_visible.sql",
+      "0730_maintenance_work_probes.sql",
+      "0735_subscription_core_owned_connection_usage.sql",
+      "0730_subscription_core_personal_connection_versions.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+      "0747_subscription_core_xai_cutover.sql",
+      "0748_subscription_core_claude_cutover.sql",
       "0729_subscription_person_preferences_owner.sql",
       "0728_subscription_core_personal_connect_format.sql",
       "0727_subscription_core_ownerless_video_operations.sql",
@@ -2395,16 +2428,16 @@ describe("release schema contract", () => {
       "0701_quiescence_receipt_wake_repair.sql",
       "0700_codex_ownerless_person_refresh.sql",
       "0734_connected_output_reachable_due.sql",
-      "0745_native_pty_command_supervision.sql",
-      "0746_native_command_qualification.sql",
-      "0744_native_command_broker_transport.sql",
-      "0747_native_command_broker_control_replies.sql",
-      "0748_native_command_broker_input_replies.sql",
-      "0749_native_broker_creation_qualification.sql",
-      "0750_native_broker_bootstrap_admission.sql",
-      "0751_native_broker_diagnostic_fault.sql",
-      "0752_native_broker_launch_rejection.sql",
-      "0753_native_broker_stdin_plans.sql",
+      "0758_native_pty_command_supervision.sql",
+      "0759_native_command_qualification.sql",
+      "0757_native_command_broker_transport.sql",
+      "0760_native_command_broker_control_replies.sql",
+      "0761_native_command_broker_input_replies.sql",
+      "0762_native_broker_creation_qualification.sql",
+      "0763_native_broker_bootstrap_admission.sql",
+      "0764_native_broker_diagnostic_fault.sql",
+      "0765_native_broker_launch_rejection.sql",
+      "0766_native_broker_stdin_plans.sql",
       "0699_codex_recovery_after_interrupted_attempt.sql",
       "0698_codex_ownerless_person_turns.sql",
       "0697_codex_retry_after_unknown_outcome.sql",
@@ -2803,6 +2836,8 @@ describe("release schema contract", () => {
       "0684_claude_haiku_5_5_default_model.sql",
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
+      "0736_notification_webhook_content.sql",
+      "0739_vaults.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

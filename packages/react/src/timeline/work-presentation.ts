@@ -80,10 +80,37 @@ export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptio
 }
 
 /**
+ * Whether a readable turn's work row has anything to reveal when expanded.
+ * Unless the host shows startup phases as details, the work row's rail only
+ * renders failed or cancelled preparation steps, so a detail made only of
+ * completed or still-running steps (for example the queue phase before a turn
+ * was parked on a usage limit) renders nothing and does not make the row
+ * expandable.
+ */
+export function readableWorkHasDetails(
+  group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
+  options: Pick<ReadableWorkOptions, "startupDetails">,
+): boolean {
+  return group.work.details.some(
+    (detail) =>
+      options.startupDetails ||
+      detail.kind !== "activity" ||
+      Boolean(detail.work) ||
+      !detail.items.every(
+        (item) =>
+          (item.kind === "startup-phase" &&
+            item.status !== "failed" &&
+            item.status !== "cancelled") ||
+          (item.kind === "reasoning" && !item.text.trim()),
+      ),
+  );
+}
+
+/**
  * Status of a readable turn's work row, minus the host-rendered live preview.
  * Time spent waiting for model capacity is not work: the worked duration and
- * the live working clock exclude it. A wait's `detail` is its one quiet
- * secondary line.
+ * the live working clock exclude it, and the wait itself shows no clock. A
+ * wait's `detail` is its one quiet secondary line.
  */
 export function readableWorkStatus(
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
@@ -100,7 +127,10 @@ export function readableWorkStatus(
       durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
     };
   }
-  if (group.work.waiting) return { kind: "waiting", ...group.work.waiting };
+  if (group.work.waiting) {
+    const { untimed, since, ...waiting } = group.work.waiting;
+    return { kind: "waiting", ...waiting, ...(untimed ? {} : { since }) };
+  }
   const started = Date.parse(group.work.startedAt);
   return {
     kind: "working",

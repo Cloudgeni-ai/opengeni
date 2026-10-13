@@ -6,20 +6,10 @@ import { PreferenceToggleRow } from "@/components/transcription-settings";
 import {
   SessionStatus as SessionStatusBadge,
   type SessionEventsConnectionState,
-  useVariableSets,
 } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import { useNavigate } from "@tanstack/react-router";
-import {
-  ChevronDownIcon,
-  ChevronUpIcon,
-  CopyIcon,
-  FileJsonIcon,
-  Loader2Icon,
-  RotateCcwIcon,
-  SaveIcon,
-  XIcon,
-} from "lucide-react";
+import { CopyIcon, FileJsonIcon, Loader2Icon, RotateCcwIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -39,10 +29,8 @@ import {
   retainSessionRestartAttemptAfterFailure,
   sessionRestartOperationController,
 } from "@/lib/session-restart-operation-controller";
-import { userErrorText } from "@/lib/api-error";
 import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
-import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
 import type { Session, SessionEvent } from "@/types";
 
 export function SessionInspector(props: {
@@ -58,17 +46,8 @@ export function SessionInspector(props: {
   );
   const context = useAppContext();
   const navigate = useNavigate();
-  const variableSets = useVariableSets({ workspaceId: props.session.workspaceId });
   const rigs = useWorkspaceRigs({ workspaceId: props.session.workspaceId });
-  const sessionVariableSetIds = useMemo(
-    () =>
-      props.session.variableSetIds ??
-      (props.session.variableSetId ? [props.session.variableSetId] : []),
-    [props.session.variableSetId, props.session.variableSetIds],
-  );
-  const [selectedVariableSetIds, setSelectedVariableSetIds] = useState(sessionVariableSetIds);
   const [selectedRigId, setSelectedRigId] = useState(props.session.rigId ?? "");
-  const [savingVariableSets, setSavingVariableSets] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [runtimeFailure, setRuntimeFailure] = useState<string | null>(null);
   const restartScope = useMemo(
@@ -86,34 +65,8 @@ export function SessionInspector(props: {
   );
   const pendingRestartAttempt = sessionRestartOperationController.snapshot(restartScope);
   useEffect(() => {
-    setSelectedVariableSetIds(sessionVariableSetIds);
     setSelectedRigId(props.session.rigId ?? "");
-  }, [props.session.id, props.session.rigId, sessionVariableSetIds]);
-  const selectedChanged =
-    selectedVariableSetIds.join("\u0000") !== sessionVariableSetIds.join("\u0000");
-  const availableVariableSets = variableSets.variableSets.filter(
-    (variableSet) => !selectedVariableSetIds.includes(variableSet.id),
-  );
-  const saveVariableSets = async () => {
-    if (sessionHasVariableSetBlockingWork(props.session)) return;
-    setSavingVariableSets(true);
-    setRuntimeFailure(null);
-    try {
-      await context.client.updateSessionVariableSets(props.session.workspaceId, props.session.id, {
-        variableSetIds: selectedVariableSetIds,
-      });
-      await props.onReloadSession();
-      toast.success("Variable Sets updated", {
-        description: "The new ordered selection applies to the next turn after sandbox rotation.",
-      });
-    } catch (error) {
-      const message = userErrorText(error);
-      setRuntimeFailure(message);
-      toast.error("Variable Sets were not updated", { description: message });
-    } finally {
-      setSavingVariableSets(false);
-    }
-  };
+  }, [props.session.id, props.session.rigId]);
   const restartWithSetup = async () => {
     if (!props.session.tenancy) return;
     const attempt = sessionRestartOperationController.prepare(
@@ -121,7 +74,6 @@ export function SessionInspector(props: {
       {
         visibility: props.session.tenancy.visibility,
         rigId: selectedRigId || null,
-        variableSetIds: selectedVariableSetIds,
       },
       () => crypto.randomUUID(),
     );
@@ -134,7 +86,6 @@ export function SessionInspector(props: {
         visibility: attempt.visibility,
         workspaceSharedAcknowledged: false,
         rigId: attempt.rigId,
-        variableSetIds: attempt.variableSetIds,
       });
       receiptConfirmed = true;
       const destination = await context.client.getSession(result.workspaceId, result.sessionId, {
@@ -293,135 +244,12 @@ export function SessionInspector(props: {
                 />
                 <InfoRow label={computeLabel} value={computeValue} />
                 <InfoRow label="Sandbox Environment" value={props.session.rigId ?? "none"} />
-                <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">
-                  <div className="text-xs font-medium">Variable Sets</div>
-                  {selectedVariableSetIds.length === 0 ? (
-                    <p className="text-2xs text-fg-subtle">No explicit Variable Sets attached.</p>
-                  ) : (
-                    <div className="space-y-1">
-                      {selectedVariableSetIds.map((variableSetId, index) => {
-                        const variableSet = variableSets.variableSets.find(
-                          (candidate) => candidate.id === variableSetId,
-                        );
-                        return (
-                          <div
-                            key={variableSetId}
-                            className="flex min-w-0 items-center gap-1 rounded border border-border px-1.5 py-1"
-                          >
-                            <span className="w-4 text-center font-mono text-2xs text-fg-subtle">
-                              {index + 1}
-                            </span>
-                            <span className="min-w-0 flex-1 truncate text-xs">
-                              {variableSet?.name ?? variableSetId}
-                            </span>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label="Move Variable Set earlier"
-                              disabled={
-                                index === 0 ||
-                                savingVariableSets ||
-                                restarting ||
-                                Boolean(pendingRestartAttempt)
-                              }
-                              onClick={() => {
-                                const next = [...selectedVariableSetIds];
-                                [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
-                                setSelectedVariableSetIds(next);
-                              }}
-                            >
-                              <ChevronUpIcon />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label="Move Variable Set later"
-                              disabled={
-                                index === selectedVariableSetIds.length - 1 ||
-                                savingVariableSets ||
-                                restarting ||
-                                Boolean(pendingRestartAttempt)
-                              }
-                              onClick={() => {
-                                const next = [...selectedVariableSetIds];
-                                [next[index], next[index + 1]] = [next[index + 1]!, next[index]!];
-                                setSelectedVariableSetIds(next);
-                              }}
-                            >
-                              <ChevronDownIcon />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label="Detach Variable Set"
-                              disabled={
-                                savingVariableSets || restarting || Boolean(pendingRestartAttempt)
-                              }
-                              onClick={() =>
-                                setSelectedVariableSetIds((current) =>
-                                  current.filter((id) => id !== variableSetId),
-                                )
-                              }
-                            >
-                              <XIcon />
-                            </Button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {availableVariableSets.length > 0 && selectedVariableSetIds.length < 25 ? (
-                    <Select
-                      value=""
-                      disabled={savingVariableSets || restarting || Boolean(pendingRestartAttempt)}
-                      onChange={(event) => {
-                        if (!event.target.value) return;
-                        setSelectedVariableSetIds((current) => [...current, event.target.value]);
-                      }}
-                      className="h-8 w-full text-xs"
-                    >
-                      <option value="">Attach Variable Set…</option>
-                      {availableVariableSets.map((variableSet) => (
-                        <option key={variableSet.id} value={variableSet.id}>
-                          {variableSet.name} ({variableSet.variables.length} vars)
-                        </option>
-                      ))}
-                    </Select>
-                  ) : null}
-                  <p className="text-2xs text-fg-subtle">
-                    Later sets override earlier sets. Changes are allowed only between turns and
-                    rotate the managed sandbox before reuse.
-                  </p>
-                  {sessionHasVariableSetBlockingWork(props.session) ? (
-                    <p className="text-2xs text-fg-subtle">
-                      Variable Sets can be changed after the current and queued work finishes.
-                    </p>
-                  ) : null}
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={
-                      !selectedChanged ||
-                      sessionHasVariableSetBlockingWork(props.session) ||
-                      savingVariableSets ||
-                      restarting ||
-                      Boolean(pendingRestartAttempt)
-                    }
-                    onClick={() => void saveVariableSets()}
-                  >
-                    {savingVariableSets ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}
-                    Save Variable Sets
-                  </Button>
-                </div>
                 {props.session.tenancy ? (
                   <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">
                     <div className="text-xs font-medium">Restart with sandbox environment</div>
                     <Select
                       value={selectedRigId}
-                      disabled={savingVariableSets || restarting || Boolean(pendingRestartAttempt)}
+                      disabled={restarting || Boolean(pendingRestartAttempt)}
                       onChange={(event) => setSelectedRigId(event.target.value)}
                       className="h-8 w-full text-xs"
                     >
@@ -442,7 +270,7 @@ export function SessionInspector(props: {
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={savingVariableSets || restarting}
+                      disabled={restarting}
                       onClick={() => void restartWithSetup()}
                     >
                       {restarting ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}

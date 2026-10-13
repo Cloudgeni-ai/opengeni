@@ -14,6 +14,7 @@ import {
 } from "@opengeni/react/artifacts";
 import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
+import { useSiteAudience } from "@/components/artifacts/site-audience";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
@@ -58,6 +59,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
 import {
   artifactLibraryFilters,
@@ -69,6 +71,20 @@ import {
 import type { ArtifactCatalogFilters } from "@/lib/artifact-catalog";
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
+// Stands in for the Site while it loads so the audience hook keeps its order.
+const PLACEHOLDER_SITE: WorkspaceArtifactDetailResponse["artifact"] = {
+  id: "00000000-0000-4000-8000-000000000000",
+  accountId: "00000000-0000-4000-8000-000000000000",
+  workspaceId: "00000000-0000-4000-8000-000000000000",
+  slug: "loading",
+  title: "Site",
+  description: null,
+  status: "active",
+  currentVersion: null,
+  createdBySubjectId: "loading",
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString(),
+};
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -463,6 +479,24 @@ function ArtifactDetailPage({
     }
   };
   const archived = detail?.artifact.status === "archived";
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  // A Personal workspace has nobody to share with, so there is no audience.
+  const showAudience = !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const audience = useSiteAudience({
+    client: context.client,
+    workspaceId,
+    workspaceName: workspace?.name ?? "this workspace",
+    artifact: detail?.artifact ?? PLACEHOLDER_SITE,
+    ownedByCurrentUser: Boolean(
+      canPublish &&
+      detail?.artifact.ownerSubjectId &&
+      detail.artifact.ownerSubjectId === context.accessContext.subjectId,
+    ),
+    onChanged: (artifact) => {
+      setDetail((current) => (current ? { ...current, artifact } : current));
+      invalidateArtifactCatalog(context.client, workspaceId);
+    },
+  });
   if (error) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
@@ -476,7 +510,9 @@ function ArtifactDetailPage({
       </ContentPage>
     );
   }
-  if (!detail || !content) {
+  // Content is null once loaded when the Site has no version this person can
+  // open; that is a final state, not a reason to keep showing the skeleton.
+  if (!detail) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
         <DetailPage back={back}>
@@ -497,7 +533,7 @@ function ArtifactDetailPage({
   }
 
   const artifact = detail.artifact;
-  const toolCount = content.requestedTools.length;
+  const toolCount = content?.requestedTools.length ?? 0;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
       <DetailPage back={back}>
@@ -506,10 +542,15 @@ function ArtifactDetailPage({
             leading={<ArtifactKindTile kind="site" />}
             title={artifact.title}
             chips={
-              archived ? (
-                <StatusBadge tone="neutral" icon="auto">
-                  Archived
-                </StatusBadge>
+              showAudience || archived ? (
+                <>
+                  {showAudience ? audience.chip : null}
+                  {archived ? (
+                    <StatusBadge tone="neutral" icon="auto">
+                      Archived
+                    </StatusBadge>
+                  ) : null}
+                </>
               ) : null
             }
             meta={[
@@ -520,6 +561,7 @@ function ArtifactDetailPage({
             actions={
               canPublish ? (
                 <>
+                  {showAudience ? audience.shareButton : null}
                   {archived ? (
                     <Button
                       type="button"
@@ -578,17 +620,34 @@ function ArtifactDetailPage({
                   back an earlier version.
                 </Notice>
               ) : null}
-              <ArtifactSandbox
-                html={content.html}
-                title={artifact.title}
-                versionLabel={
-                  artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
-                }
-                editDisabled={context.busy || archived}
-                onEdit={canPublish ? () => void startEditSession() : undefined}
-                toolBridge={archived ? undefined : siteToolBridge}
-                connectedToolCount={toolCount}
-              />
+              {content ? (
+                <ArtifactSandbox
+                  html={content.html}
+                  title={artifact.title}
+                  versionLabel={
+                    artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
+                  }
+                  editDisabled={context.busy || archived}
+                  onEdit={canPublish ? () => void startEditSession() : undefined}
+                  toolBridge={archived ? undefined : siteToolBridge}
+                  connectedToolCount={toolCount}
+                />
+              ) : (
+                <Notice
+                  tone="failed"
+                  title="There's nothing to show for this Site"
+                  actionLayout="responsive"
+                  action={
+                    <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
+                      <RotateCcwIcon aria-hidden="true" />
+                      Retry
+                    </Button>
+                  }
+                >
+                  It has no published version you can open. Try again, or ask whoever published it
+                  to publish it again.
+                </Notice>
+              )}
             </div>
           </LineTabsContent>
           <LineTabsContent value="versions">
@@ -616,7 +675,7 @@ function ArtifactDetailPage({
                                 workspaceId,
                                 sessionId: version.sourceSessionId,
                               }}
-                              className="relative z-10 font-medium text-fg-muted underline-offset-2 hover:text-fg hover:underline"
+                              className="relative z-10 font-medium og-link text-fg-muted hover:text-fg"
                             >
                               {version.revision === 1 ? "Creation session" : "Publishing session"}
                             </Link>
@@ -650,6 +709,7 @@ function ArtifactDetailPage({
           </LineTabsContent>
         </LineTabs>
       </DetailPage>
+      {showAudience ? audience.dialog : null}
       <ConfirmDialog
         open={archiveDialogOpen}
         onOpenChange={setArchiveDialogOpen}

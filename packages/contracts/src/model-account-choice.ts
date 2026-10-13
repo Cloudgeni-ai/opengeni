@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LatencyMode, ReasoningEffort } from "./index";
 
 /**
  * A person's explicit model-account choice for a session and their own
@@ -9,8 +10,9 @@ import { z } from "zod";
  * The picker lists the shared accounts of the workspace's pool and the
  * caller's own personal accounts (never another person's). A personal
  * account can be chosen only by its owner, in their private session or
- * Personal workspace, while personal accounts are allowed there; the
- * database enforces the same rule when the choice is written.
+ * Personal workspace, or for their own newly accepted sends in a shared
+ * session, while personal accounts are allowed there. Choosing never widens
+ * already accepted work; the database enforces the same authority boundary.
  */
 const ProviderId = z.string().regex(/^[a-z][a-z0-9_]{1,31}$/);
 
@@ -23,6 +25,28 @@ export const ModelAccountChoiceRefusal = z.enum([
   "session_has_no_owner",
 ]);
 export type ModelAccountChoiceRefusal = z.infer<typeof ModelAccountChoiceRefusal>;
+
+/**
+ * Stored observation only, not a live check or a promise of available capacity.
+ * Source/time describe the snapshot, not each retained window. Windows can be
+ * partial, unknown or stale; a past reset does not prove replenishment.
+ */
+export const ModelAccountUsageSnapshot = z.object({
+  observedAt: z.string().datetime().nullable(),
+  source: z.enum(["usage_endpoint", "response_headers", "refusal"]).nullable(),
+  windows: z.array(
+    z.object({
+      id: z.string(),
+      /** Null means unknown; values over 100 can represent overage. */
+      usedPercent: z.number().finite().nonnegative().nullable(),
+      resetsAt: z.string().datetime().nullable(),
+      status: z.enum(["ok", "warning", "exhausted", "unknown"]),
+    }),
+  ),
+  exhaustedUntil: z.string().datetime().nullable(),
+  exhaustedKind: z.enum(["quota", "rate_limit"]).nullable(),
+});
+export type ModelAccountUsageSnapshot = z.infer<typeof ModelAccountUsageSnapshot>;
 
 export const ModelAccountChoiceOption = z.object({
   provider: ProviderId,
@@ -39,22 +63,43 @@ export const ModelAccountChoiceOption = z.object({
   allowedModelIds: z.array(z.string()).nullable(),
   choosable: z.boolean(),
   refusal: ModelAccountChoiceRefusal.nullable(),
+  /** Omitted on older servers; null when this visible account has no decodable snapshot. */
+  usage: ModelAccountUsageSnapshot.nullable().optional(),
 });
 export type ModelAccountChoiceOption = z.infer<typeof ModelAccountChoiceOption>;
 
+/** A session's binding for one provider: its explicit choice or its automatic placement. */
+const SessionModelAccountBinding = z.object({
+  provider: ProviderId,
+  connectionId: z.string().uuid().nullable(),
+  choice: z.enum(["explicit", "automatic"]),
+});
+
+/** Last lease-backed selection, not a queued choice or an unplaced proposal. */
+export const SessionModelAccountServing = z.object({
+  turnId: z.string().uuid(),
+  provider: ProviderId,
+  connectionId: z.string().uuid().nullable(),
+  modelId: z.string().min(1),
+  preferredModelId: z.string().min(1),
+  reasoningEffort: z.lazy(() => ReasoningEffort),
+  latencyMode: z.lazy(() => LatencyMode),
+});
+export type SessionModelAccountServing = z.infer<typeof SessionModelAccountServing>;
+
 export const SessionModelAccountChoiceResponse = z.object({
   /**
-   * The session's current account: `explicit` after a person's choice, else
-   * the account automatic placement last used. `connectionId` is null when
-   * the caller may not see that account.
+   * The session's current account when it has bindings for one provider
+   * only: `explicit` after a person's choice, else the account automatic
+   * placement last used. Null when it has none, or bindings for several
+   * providers (see `bindings`). `connectionId` is null when the caller may
+   * not see that account.
    */
-  binding: z
-    .object({
-      provider: ProviderId,
-      connectionId: z.string().uuid().nullable(),
-      choice: z.enum(["explicit", "automatic"]),
-    })
-    .nullable(),
+  binding: SessionModelAccountBinding.nullable(),
+  /** One binding per provider: a session keeps each provider's choice separately. */
+  bindings: z.array(SessionModelAccountBinding),
+  /** Omitted by older servers. Account identity is withheld under the same visibility rule. */
+  serving: SessionModelAccountServing.nullable().optional(),
   accounts: z.array(ModelAccountChoiceOption),
   personal: z.object({
     /** Personal accounts are allowed in this workspace (effective setting). */
@@ -67,9 +112,14 @@ export const SessionModelAccountChoiceResponse = z.object({
 });
 export type SessionModelAccountChoiceResponse = z.infer<typeof SessionModelAccountChoiceResponse>;
 
-/** `connectionId: null` returns the session to automatic account selection. */
+/**
+ * A connection makes it the session's choice for that connection's provider;
+ * other providers' choices stay. `connectionId: null` returns the session to
+ * automatic account selection: only `provider`'s choice when given, else
+ * every provider's.
+ */
 export const SetSessionModelAccountChoiceRequest = z
-  .object({ connectionId: z.string().uuid().nullable() })
+  .object({ connectionId: z.string().uuid().nullable(), provider: ProviderId.optional() })
   .strict();
 export type SetSessionModelAccountChoiceRequest = z.infer<
   typeof SetSessionModelAccountChoiceRequest

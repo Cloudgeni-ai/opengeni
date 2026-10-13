@@ -273,6 +273,8 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
               },
             }
           : {}),
+        // Recorded on the event so integrations can deliver it themselves.
+        ...(target === null ? { undeliveredReason: "no_human_recipient" as const } : {}),
       });
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
@@ -287,6 +289,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         key: resolvedKey,
         // No person owns this session (a key or service started it): nobody is notified.
         delivered: target !== null,
+        ...(target === null ? { undeliveredReason: "no_human_recipient" } : {}),
         ...(member ? { recipient: member.label } : {}),
         updatedInPlace: Boolean(existing),
       });

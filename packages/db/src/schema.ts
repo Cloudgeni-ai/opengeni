@@ -9,6 +9,7 @@ import type {
   OrganizationAccessPolicy,
   SandboxProviderCommand,
   CommandSupervisionReceipt,
+  ConnectionAccountIntent,
   AutomationAcceptedExecution,
   AutomationSessionTemplate,
   AttemptToolCatalog,
@@ -33,6 +34,7 @@ import type {
   TimelineAnnotation,
   ToolGatewayIdentity,
   UserResourceDelegation,
+  VaultPolicy,
   XaiProviderAccountAuthoritySnapshotV1,
   ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
@@ -249,6 +251,15 @@ export const workspaceArtifacts = pgTable(
     // that table exists. Keeping this pointer here makes reads inexpensive.
     currentVersionId: uuid("current_version_id"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
+    // Who can see the Site (migration 0737), like a chat or a schedule: the
+    // whole workspace (`workspace_shared`) or only its owner (`user_private`).
+    // The owner is the person it was published for and never changes; only
+    // they can change the audience. An Only me Site needs an owner.
+    visibility: text("visibility")
+      .$type<"workspace_shared" | "user_private">()
+      .notNull()
+      .default("workspace_shared"),
+    ownerSubjectId: text("owner_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -268,6 +279,10 @@ export const workspaceArtifacts = pgTable(
       table.workspaceId,
       table.status,
       table.updatedAt,
+    ),
+    visibilityValid: check(
+      "workspace_artifacts_visibility_check",
+      sql`${table.visibility} in ('workspace_shared', 'user_private') and (${table.visibility} = 'workspace_shared' or ${table.ownerSubjectId} is not null)`,
     ),
   }),
 );
@@ -1567,6 +1582,204 @@ export const workspaceVariableSetVariables = pgTable(
       table.workspaceId,
       table.variableSetId,
     ),
+  }),
+);
+
+// Vaults (migration 0739). Every table is FORCE row-security with no runtime
+// role privileges: the application reads and writes only through the
+// SECURITY DEFINER routines in 0739 (see `./vaults.ts`). These definitions
+// exist for typing and Drizzle introspection; the migration owns the exact
+// constraints, partial indexes, composite foreign keys and policies.
+export const vaults = pgTable(
+  "vaults",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    ownerKind: text("owner_kind").notNull(),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
+    rootSessionId: uuid("root_session_id"),
+    name: text("name").notNull(),
+    nameKey: text("name_key").generatedAlwaysAs(sql`vault_name_key(name)`),
+    description: text("description"),
+    source: text("source").notNull().default("opengeni"),
+    mode: text("mode").notNull().default("read_write"),
+    providerConnectionId: uuid("provider_connection_id"),
+    providerVaultRef: text("provider_vault_ref"),
+    providerContentVersion: text("provider_content_version"),
+    syncStatus: text("sync_status").notNull().default("ok"),
+    syncErrorCode: text("sync_error_code"),
+    syncErrorMessage: text("sync_error_message"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    rateLimitedUntil: timestamp("rate_limited_until", { withTimezone: true }),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    isDefault: boolean("is_default").notNull().default(false),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idAccount: uniqueIndex("vaults_id_account_idx").on(table.id, table.accountId),
+    accountOwner: index("vaults_account_owner_idx").on(table.accountId, table.ownerKind),
+    workspace: index("vaults_workspace_idx").on(table.workspaceId),
+    ownerKindValid: check(
+      "vaults_owner_kind_check",
+      sql`${table.ownerKind} in ('user', 'workspace', 'organization', 'task')`,
+    ),
+    authority: foreignKey({
+      name: "vaults_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // The origin-workspace (column-subset SET NULL), root-session and
+    // provider-connection foreign keys are owned by migration 0739.
+  }),
+);
+
+export const vaultItems = pgTable(
+  "vault_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    vaultId: uuid("vault_id").notNull(),
+    type: text("type").notNull(),
+    name: text("name").notNull(),
+    nameKey: text("name_key").generatedAlwaysAs(sql`vault_name_key(name)`),
+    websites: text("websites")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    primaryFieldId: uuid("primary_field_id"),
+    providerItemRef: text("provider_item_ref"),
+    providerVersion: text("provider_version"),
+    passkeySignCount: bigint("passkey_sign_count", { mode: "number" }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    vault: foreignKey({
+      name: "vault_items_vault_fk",
+      columns: [table.vaultId, table.accountId],
+      foreignColumns: [vaults.id, vaults.accountId],
+    }).onDelete("cascade"),
+    activeName: uniqueIndex("vault_items_name_idx")
+      .on(table.vaultId, table.nameKey)
+      .where(sql`${table.archivedAt} is null`),
+    vaultUpdated: index("vault_items_vault_updated_idx").on(table.vaultId, table.updatedAt),
+    nameKey: index("vault_items_name_key_idx").on(table.nameKey),
+  }),
+);
+
+export const vaultItemFields = pgTable(
+  "vault_item_fields",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => vaultItems.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    nameKey: text("name_key").generatedAlwaysAs(sql`vault_name_key(name)`),
+    kind: text("kind").notNull(),
+    position: integer("position").notNull().default(0),
+    // NULL for provider-backed fields.
+    currentVersion: integer("current_version"),
+    providerFieldRef: text("provider_field_ref"),
+    fileName: text("file_name"),
+    fileSize: integer("file_size"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    itemName: uniqueIndex("vault_item_fields_name_idx").on(table.itemId, table.nameKey),
+  }),
+);
+
+export const vaultFieldVersions = pgTable(
+  "vault_field_versions",
+  {
+    fieldId: uuid("field_id")
+      .notNull()
+      .references(() => vaultItemFields.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    accountId: uuid("account_id").notNull(),
+    // v1/v2 envelope from environment-crypto.ts for every field kind. Never
+    // returned by an API except through the audited reveal route.
+    valueEncrypted: text("value_encrypted").notNull(),
+    createdByKind: text("created_by_kind").notNull(),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.fieldId, table.version] }),
+  }),
+);
+
+export const vaultItemNameAliases = pgTable(
+  "vault_item_name_aliases",
+  {
+    vaultId: uuid("vault_id")
+      .notNull()
+      .references(() => vaults.id, { onDelete: "cascade" }),
+    nameKey: text("name_key").notNull(),
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => vaultItems.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.vaultId, table.nameKey] }),
+    item: index("vault_item_name_aliases_item_idx").on(table.itemId),
+  }),
+);
+
+export const vaultNameAliases = pgTable(
+  "vault_name_aliases",
+  {
+    accountId: uuid("account_id").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    nameKey: text("name_key").notNull(),
+    vaultId: uuid("vault_id")
+      .notNull()
+      .references(() => vaults.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.scopeKey, table.nameKey] }),
+    vault: index("vault_name_aliases_vault_idx").on(table.vaultId),
+  }),
+);
+
+export const vaultPasskeyLeases = pgTable(
+  "vault_passkey_leases",
+  {
+    itemId: uuid("item_id")
+      .primaryKey()
+      .references(() => vaultItems.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    holder: text("holder").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    holder: index("vault_passkey_leases_holder_idx").on(table.holder),
   }),
 );
 
@@ -4745,6 +4958,10 @@ export const sessions = pgTable(
     // Composed system-level AFTER the workspace agentInstructions; never emitted
     // as a timeline event.
     instructions: text("instructions"),
+    // Which vaults the agent may resolve secret references from (0739). The
+    // effective policy is this intersected with the parent session's and the
+    // agent config's; `{ mode: "all" }` adds no narrowing.
+    vaultPolicy: jsonb("vault_policy").$type<VaultPolicy>().notNull().default({ mode: "all" }),
     // Immutable normalized prompt-policy role. This is deliberately separate
     // from workspace membership roles and memory selectors. Existing rows keep
     // NULL and use the bounded metadata.role compatibility fallback at the
@@ -4892,6 +5109,12 @@ export const sessions = pgTable(
     initialMcpAccountBindings: jsonb("initial_mcp_account_bindings").$type<
       McpConnectionAccountBinding[] | null
     >(),
+    // Initial-command staging only, copied onto the first turn with the
+    // bindings above: the creating person's account intent. Null is reserved
+    // for writers that predate account intent.
+    initialConnectionAccountIntent: jsonb(
+      "initial_connection_account_intent",
+    ).$type<ConnectionAccountIntent | null>(),
     // Initial accepted-work staging only. The initializer consumes this inside
     // the same transaction that inserts the first logical turn and grant
     // snapshots; runtime never authorizes from the session field.
@@ -5385,6 +5608,10 @@ export const sessionRealtimeModes = pgTable(
     mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     model: text("model").notNull(),
     state: text("state").notNull().default("active"),
+    // The voice owner's account intent, copied onto every turn this lease admits.
+    connectionAccountIntent: jsonb(
+      "connection_account_intent",
+    ).$type<ConnectionAccountIntent | null>(),
     version: integer("version").notNull().default(1),
     connectionEpoch: integer("connection_epoch").notNull().default(1),
     leaseExpiresAt: timestamp("lease_expires_at", {
@@ -7283,6 +7510,15 @@ export const sessionTurns = pgTable(
       .notNull()
       .default([]),
     mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
+    // Immutable account intent of this logical turn: whose personal accounts
+    // it may use and which accounts a person explicitly picked. Autonomous
+    // turns that continue it copy this intent and resolve it again for the
+    // same person instead of copying `mcp_account_bindings`. Null marks turns
+    // accepted before account intent existed; their continuations copy the
+    // exact bindings as before.
+    connectionAccountIntent: jsonb(
+      "connection_account_intent",
+    ).$type<ConnectionAccountIntent | null>(),
     // Credential-free public summary of a turn-bound personal Variable
     // Set/Rig attachment. Exact resource and grant identity lives only in the
     // immutable accepted-work snapshot tables.
@@ -11918,6 +12154,9 @@ export const scheduledTasks = pgTable(
     overlapPolicy: text("overlap_policy").notNull().default("allow_concurrent"),
     action: jsonb("action").$type<unknown>().notNull().default({ kind: "agent_turn" }),
     agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
+    // Vault narrowing for every run (0739), applied when the run resolves
+    // secret references; `{ mode: "all" }` adds no narrowing.
+    vaultPolicy: jsonb("vault_policy").$type<VaultPolicy>().notNull().default({ mode: "all" }),
     createdByKind: text("created_by_kind").notNull().default("service"),
     createdBySubjectId: text("created_by_subject_id").notNull().default("unattributed-legacy"),
     createdByContext: jsonb("created_by_context")

@@ -252,6 +252,10 @@ describe("sandbox reaper per-box timeout contract", () => {
       fileURLToPath(new URL("../src/index.ts", import.meta.url)),
       "utf8",
     );
+    const maintenanceSource = readFileSync(
+      fileURLToPath(new URL("../src/internal-maintenance.ts", import.meta.url)),
+      "utf8",
+    );
     const activitySource = readFileSync(
       fileURLToPath(new URL("../src/activities/sandbox-lease.ts", import.meta.url)),
       "utf8",
@@ -320,8 +324,13 @@ describe("sandbox reaper per-box timeout contract", () => {
     );
     expect(workerSource).toContain('temporal.workflow.start("sandboxReaperWorkflowV2"');
     expect(workerSource).toContain("workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID");
-    expect(workerSource).toContain("Reconciled the global sandbox-lease reaper Schedule");
-    expect(workerSource).toContain("Never move this action off the base queue");
+    // The per-tick reaper Schedule is replaced by a work-checked cadence that
+    // starts the same fixed-id router on the lifecycle queue and deletes the
+    // legacy Schedule at startup.
+    expect(maintenanceSource).toContain('workflowType: "sandboxReaperWorkflowV2"');
+    expect(maintenanceSource).toContain("workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID");
+    expect(maintenanceSource).toContain('"sandbox-lease-reaper": SANDBOX_REAPER_SCHEDULE_ID');
+    expect(maintenanceSource).toContain("assertSandboxReaperActivityTimeout(settings);");
     expect(activitySource).toContain("async function prepareSandboxLeaseSweep()");
     expect(activitySource).toContain("async function drainSandboxLease(");
     expect(activitySource).toContain("captureTimeoutMs: input.captureTimeoutMs");

@@ -27,6 +27,7 @@ One vocabulary everywhere, matching the chat picker: **Only me** or
 | Schedule | Owner sees and manages everything. Admins see that it exists: owner, how often it runs, status, last run and cost. They can pause it. They never see its name, prompt, settings or runs. Other members do not see it. | All members see it; only the owner changes or runs it. (Unchanged.) |
 | Chats a schedule creates | Only me chats owned by the schedule's owner. | Shared chats. |
 | Machine | A personal machine (owner scope `user`). | A workspace or organization machine. |
+| Site | Owner only: its page, versions, content, downloads, Site tools and Site conversations. Admins cannot see it, like an Only me chat. | All members can open it; members who can publish can change it. Only the owner changes who can see it. |
 
 Rules:
 
@@ -87,6 +88,23 @@ everyone using this app."
 - Existing schedules keep their current audience. Schedules that already post
   into an Only me chat, or write to personal knowledge, become Only me, which
   only narrows who can see them.
+- Existing Sites stay shared with the workspace. Migration 0737 records an
+  owner for each (the person whose chat published its first version, or the
+  member who published it directly), so that person can later limit it.
+
+## Sites
+
+A Site's audience (`visibility`: `private` or `workspace`) is stored on the
+Site with its owner, the person it was published for. A new Site takes an
+explicit choice when one is given; otherwise a Site published from an Only me
+chat starts Only me, and anything else starts shared. Only me needs a person
+who may start Only me work here. Sharing is always allowed; limiting a shared
+Site needs Only me to be allowed. Only the owner changes the audience, from
+the Site page (`PUT .../published-artifacts/{id}/visibility`); agents cannot.
+Every read and change of a Site, including the artifact library, Site tools
+and Site conversations, is filtered by the same viewer: the human caller, or
+the human an agent acts for. Anyone else gets the same answer as for a Site
+that does not exist.
 
 ## Delivery
 

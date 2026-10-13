@@ -834,13 +834,13 @@ describe("personal MCP connection delegation", () => {
           principalKind: "human_session",
         },
         existing: task,
-        payload: { connectionAccounts: [] },
+        payload: { pinnedAccounts: [] },
       });
-      // Clearing an override re-resolves the still-selected repository, then
-      // stores its exact account for later occurrences; it is not an empty
-      // frozen snapshot and must not discard the repository's write boundary.
-      expect(resetSelectionTask.agentConfig.connectionAccounts).toEqual([authoritySelection]);
-      expect(resetSelectionTask.agentConfig.connectionAccountsFrozen).toBe(true);
+      // Unpinning stores no account at all: later occurrences resolve the
+      // still-selected repository's account live, and the repository's write
+      // boundary is kept.
+      expect(resetSelectionTask.agentConfig).not.toHaveProperty("pinnedAccounts");
+      expect(resetSelectionTask.agentConfig).not.toHaveProperty("connectionAccounts");
       expect(resetSelectionTask.agentConfig.resources).toEqual([resource]);
       const freezeResetSchedule = () =>
         freezePersonalConnectionDelegations({
@@ -850,8 +850,7 @@ describe("personal MCP connection delegation", () => {
           tools: resetSelectionTask.agentConfig.tools,
           resources: resetSelectionTask.agentConfig.resources,
           source: { kind: "subject", subjectId, accountId: originGrant.accountId },
-          authoritySelections: resetSelectionTask.agentConfig.connectionAccounts,
-          authoritySelectionsFrozen: resetSelectionTask.agentConfig.connectionAccountsFrozen,
+          authoritySelections: resetSelectionTask.agentConfig.pinnedAccounts ?? [],
         });
       expect(await freezeResetSchedule()).toEqual(frozen);
 

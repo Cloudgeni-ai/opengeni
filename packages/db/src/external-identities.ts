@@ -4,8 +4,11 @@ import {
   ExternalIdentity,
   ExternalIdentityReference,
 } from "@opengeni/contracts/external-identities";
-import { rawRows, withAccountRls, type Database } from "./database";
-import { organizationApiKeyAllowsWorkspace } from "./organization-api-key-access";
+import { rawRows, withAccountRls, withRlsContext, type Database } from "./database";
+import {
+  organizationApiKeyAllowsWorkspace,
+  organizationApiKeyWorkspaceAllowedSql,
+} from "./organization-api-key-access";
 export * from "./external-membership-operations";
 
 /** Pass an open transaction to retain the key lock through the protected write. */
@@ -53,6 +56,42 @@ export async function lockActiveExternalOrganizationKeyAuthority(
         )))
     )
       return null;
+    return {
+      permissions: Permission.array().parse(row.permissions),
+      permissionMode: row.permission_mode,
+    };
+  });
+}
+
+/**
+ * Read-only twin of `lockActiveExternalOrganizationKeyAuthority` for a live
+ * request fence: the same key predicates and workspace scope in one statement,
+ * so the key row and its scope rows come from one snapshot. It takes no row
+ * lock and writes nothing (no `last_used_at`); a revocation, expiry, narrowing
+ * or scope change committed before the statement starts is always observed.
+ */
+export async function readActiveExternalOrganizationKeyAuthority(
+  db: Database,
+  accountId: string,
+  keyId: string,
+  workspaceId: string,
+): Promise<{ permissions: Permission[]; permissionMode: "legacy" | "explicit" } | null> {
+  return withRlsContext(db, { accountId, workspaceId }, async (scoped) => {
+    const [row] = await rawRows<{
+      permissions: unknown;
+      permission_mode: "legacy" | "explicit";
+    }>(
+      scoped,
+      sql`select k.permissions, k.permission_mode from api_keys k
+      where k.account_id = ${accountId}::uuid and k.id = ${keyId}::uuid
+        and k.workspace_id is null and k.credential_kind = 'organization'
+        and k.revoked_at is null and (k.expires_at is null or k.expires_at > clock_timestamp())
+        and ${organizationApiKeyWorkspaceAllowedSql(accountId, workspaceId, {
+          id: sql`k.id`,
+          workspaceScope: sql`k.workspace_scope`,
+        })}`,
+    );
+    if (!row) return null;
     return {
       permissions: Permission.array().parse(row.permissions),
       permissionMode: row.permission_mode,

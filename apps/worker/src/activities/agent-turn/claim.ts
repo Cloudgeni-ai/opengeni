@@ -1,4 +1,6 @@
-import { withDirectModelProviders } from "@opengeni/config";
+import { withDirectModelProviders, assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
+import { claimServingAttempt, type ServingAttempt } from "./subscription-serving-claim";
+import { servingTurnProviders } from "./subscription-serving-providers";
 import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
@@ -45,6 +47,7 @@ import {
   assertSessionAllowsProductModel,
   resolveCatalogSettings,
   resolveCodexAppsDesignationForRun,
+  resolveContinuedConnectionAccounts,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
@@ -126,6 +129,7 @@ export type ClaimTurnOk = {
   /** The core Codex Apps designation (enabled Codex cutover only). */
   codexAppsCoreConnectionId?: string | null;
   turnExecutionPolicy: TurnExecutionPolicyV1;
+  servingAttempt?: ServingAttempt;
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
   interactionInterventionResume: Awaited<
@@ -216,6 +220,19 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       sessionId: input.sessionId,
       update,
     });
+  // Work that continues a person's turn resolves that person's current
+  // accounts again inside the claim, as their next message would.
+  const resolveContinuedAccounts: NonNullable<
+    ClaimSessionWorkForAttemptInput["resolveContinuedConnectionAccounts"]
+  > = async (tx, { sessionId, intent }) =>
+    await resolveContinuedConnectionAccounts({
+      db: tx,
+      settings: deploymentCatalogSettings,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId,
+      intent,
+    });
   const claim = await measureTurnStartupPhase(
     observability,
     {
@@ -233,6 +250,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         dispatchId,
         trigger: input.trigger,
         validatePendingSystemUpdateAuthority,
+        resolveContinuedConnectionAccounts: resolveContinuedAccounts,
       }),
   );
   if (claim.action === "unclaimed") {
@@ -250,21 +268,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       : undefined;
   attempt.providerRecoveryObservation = readProviderRecoveryObservation(turn.metadata ?? {});
   attempt.providerRecoveryStartedAt = readProviderRecoveryStartedAt(turn.metadata);
-  const authRecovery = turn.metadata?.claudeAuthRecovery;
-  attempt.claudeAuthRecovery =
-    authRecovery &&
-    typeof authRecovery === "object" &&
-    "credentialId" in authRecovery &&
-    typeof authRecovery.credentialId === "string" &&
-    "credentialVersion" in authRecovery &&
-    typeof authRecovery.credentialVersion === "number" &&
-    Number.isSafeInteger(authRecovery.credentialVersion) &&
-    authRecovery.credentialVersion > 0
-      ? {
-          credentialId: authRecovery.credentialId,
-          credentialVersion: authRecovery.credentialVersion,
-        }
-      : undefined;
   attempt.triggerEventId = turn.triggerEventId;
   attempt.subscriptionLeaseBusy = readSubscriptionLeaseBusyChain(turn.metadata);
   // The durable attempt UUID is stable for a Temporal retry of this activity
@@ -446,8 +449,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // Apply before configuring/resolving clients so main, compaction and title
   // requests all share this policy; standalone runtime consumers keep theirs.
   capabilitySettings = { ...capabilitySettings, openaiMaxRetries: 0 };
-  runtime.configure(capabilitySettings);
-  const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
+  const verifiedAcceptedPolicy = assertTurnExecutionPolicyMatchesConfigV1(
     capabilitySettings,
     installedPolicy.policy,
     {
@@ -456,15 +458,47 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       latencyMode: turn.latencyMode,
     },
   );
+  const servingAttempt = await claimServingAttempt({
+    db,
+    settings: capabilitySettings,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: attempt.executionGeneration,
+    compactionMode: session.codexCompactionMode,
+    source: turn.source,
+    acceptedPolicy: installedPolicy.policy,
+    providerIds: servingTurnProviders().map((provider) => provider.id),
+  });
+  const verifiedExecutionPolicy = servingAttempt?.revision
+    ? assertTurnServingPolicyMatchesConfigV1(
+        capabilitySettings,
+        servingAttempt.revision,
+        installedPolicy.policy,
+      )
+    : verifiedAcceptedPolicy;
   const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+  if (servingAttempt?.revision)
+    capabilitySettings = settingsForAcceptedSubscriptionTurn(
+      capabilitySettings,
+      turnExecutionPolicy,
+      {
+        modelId: turnExecutionPolicy.productModelId,
+        reasoningEffort: turnExecutionPolicy.reasoningEffort,
+        latencyMode: turnExecutionPolicy.latencyMode,
+      },
+    );
+  runtime.configure(capabilitySettings);
   attempt.modelMetricRoute = {
     provider: turnExecutionPolicy.providerId,
     model: turnExecutionPolicy.productModelId,
   };
   attempt.modelRoutePresentation = {
-    model: turnExecutionPolicy.productModelId,
-    modelLabel: verifiedExecutionPolicy.model.label,
-    providerLabel: verifiedExecutionPolicy.model.providerLabel,
+    model: installedPolicy.policy.productModelId,
+    modelLabel: verifiedAcceptedPolicy.model.label,
+    providerLabel: verifiedAcceptedPolicy.model.providerLabel,
   };
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
@@ -504,6 +538,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       dispatchId,
       trigger: input.trigger,
       validatePendingSystemUpdateAuthority,
+      resolveContinuedConnectionAccounts: resolveContinuedAccounts,
       attachPendingUpdatesToRunningAttempt: true,
     });
     return attached.action === "claimed" && attached.turn.id === turn.id;
@@ -673,6 +708,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       events: inputs,
       ...(runState ? { runState } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
+      ...(inputSettlement.notStartedToolCallIds?.length
+        ? { notStartedToolCallIds: inputSettlement.notStartedToolCallIds }
+        : {}),
     });
     if (result.action === "stale") {
       // The terminal write can lose to a control transaction before the
@@ -797,6 +835,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       capabilitySettings,
       codexAppsCoreConnectionId,
       turnExecutionPolicy,
+      ...(servingAttempt ? { servingAttempt } : {}),
       trigger,
       humanInputResume,
       interactionInterventionResume,

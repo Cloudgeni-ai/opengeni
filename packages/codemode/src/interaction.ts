@@ -40,8 +40,6 @@ import type {
   ExternalAuthRunRequest,
   ExternalAuthRunResponse,
   InteractionPlacement,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
   ReportAuthRunRequest,
   RequestHumanInteractionToolInput,
@@ -1072,27 +1070,6 @@ export class CodemodeAuthRun {
       PATH.browserAuth,
       {
         operation: "report",
-        browserSessionId: this.browserSessionId,
-        authRunId: this.id,
-        ...request,
-      },
-      callOptions,
-    );
-    return response.result;
-  }
-
-  async protectedFill(
-    request: Omit<ProtectedAuthFillRequest, "operationId">,
-    callOptions: CodemodeCallOptions = {},
-  ): Promise<ProtectedAuthFillResponse> {
-    const response = await callStructured<{
-      operation: "protected_fill";
-      result: ProtectedAuthFillResponse;
-    }>(
-      this.client,
-      PATH.browserAuth,
-      {
-        operation: "protected_fill",
         browserSessionId: this.browserSessionId,
         authRunId: this.id,
         ...request,

@@ -96,7 +96,6 @@ import {
   readCodexCutoverDisposition,
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
-  workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
@@ -133,6 +132,7 @@ import {
   creditsDefaultSessionModel,
   loadCoreRoutedXaiCatalogReadiness,
   loadWorkspaceClaudeSubscriptionReadiness,
+  loadCoreRoutedClaudeCatalogReadiness,
   withCoreRoutedXaiRestriction,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceModelSelection,
@@ -592,6 +592,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           kind !== "claude_subscription" || resolvedCatalog.settings.claudeSubscriptionEnabled,
       ),
     ];
+    // Claude by its provider route: the shared core's projection (readiness
+    // and both Claude model restrictions) once it has cut over, else legacy.
+    const claudeCore = loadCoreRoutedClaudeCatalogReadiness(deps.db, resolvedCatalog.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
     const [
       currentConnectionModelRestrictions,
       policy,
@@ -603,7 +610,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationProviders,
       workspace,
     ] = await Promise.all([
-      getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
+      claudeCore.then((core) =>
+        getWorkspaceConnectionModelRestrictions(
+          deps.db,
+          workspaceId,
+          grant.subjectId,
+          undefined,
+          core?.restrictions,
+        ),
+      ),
       getWorkspaceModelPolicy(deps.db, workspaceId),
       // By the organization's Codex cutover row: legacy without one, the
       // shared core for the caller when enabled, not ready while disabled.
@@ -613,28 +628,26 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
         { activeSettings: deps.settings },
       ),
-      // By SuperGrok's provider route: the shared core's projection once it
-      // has cut over, else the legacy readiness.
+      // SuperGrok runs only on the shared core: its projection, or not
+      // ready on any other route.
       loadCoreRoutedXaiCatalogReadiness(deps.db, deps.settings, {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
       }).then(async (core) => ({
         core,
-        active:
-          core?.ready ??
-          (await workspaceXaiSubscriptionActive(
-            deps.db,
-            deps.settings,
-            workspaceId,
-            grant.subjectId,
-          )),
+        active: core?.ready ?? false,
       })),
-      loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-      }),
+      // The route read above decides for both Claude readers (read once).
+      claudeCore.then(
+        async (core) =>
+          await loadWorkspaceClaudeSubscriptionReadiness(
+            deps.db,
+            resolvedCatalog.settings,
+            { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+            core,
+          ),
+      ),
       listConnectionsMetadata(deps.db, workspaceId, null),
       listWorkspaceProviderCustomModelsByKind(deps.db, {
         accountId: grant.accountId,

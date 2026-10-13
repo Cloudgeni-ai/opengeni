@@ -7,10 +7,10 @@
  * needs-relogin (the suite's "refused static credential" case) instead of
  * being refreshed. Any call to the token endpoint fails the run.
  *
- * Run this file in its own process: the registration below replaces module
- * bindings for the whole process.
+ * Since the Claude cutover (C3) the binding is registered in production and
+ * the suite runs it with no test registration.
  */
-import { afterAll, expect, mock } from "bun:test";
+import { afterAll, expect } from "bun:test";
 import { createHmac } from "node:crypto";
 import {
   subscriptionCoreClaudeProvider,
@@ -18,10 +18,7 @@ import {
 } from "../src/subscription-core-claude-adapter";
 import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
 import { ScriptedClaudeUpstream } from "./fixtures/subscription-core-claude-upstream";
-import {
-  admitTestSubscriptionCoreProvider,
-  testSubscriptionCoreProviderModules,
-} from "./helpers/subscription-core-test-provider";
+import { describeSubscriptionCoreConformance } from "./helpers/subscription-core-conformance";
 
 // Any token call fails the run: the refresh would swallow a throwing fetch
 // as a retryable failure, so the calls are counted and checked at the end.
@@ -36,11 +33,6 @@ afterAll(() => {
   expect(tokenCalls).toBe(0);
 });
 
-for (const [specifier, factory] of testSubscriptionCoreProviderModules(provider))
-  mock.module(specifier, factory);
-const { describeSubscriptionCoreConformance } =
-  await import("./helpers/subscription-core-conformance");
-
 const upstream = new ScriptedClaudeUpstream([
   "claude-conformance-a",
   "claude-conformance-b",
@@ -50,6 +42,8 @@ const upstream = new ScriptedClaudeUpstream([
 describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   name: "Claude subscription (setup token)",
   databaseLabel: "subscription-core-claude-setup-token-conformance",
+  // The adapter's declared usage-reading completeness (asserted by the suite).
+  usageReadingsComplete: false,
   provider,
   models: [
     {
@@ -84,18 +78,29 @@ describeSubscriptionCoreConformance<SubscriptionCoreClaudeCredential>({
   },
   foreignProvider: "codex",
   async prepareDatabase(shared) {
-    // Every provider list a migration wrote already names Claude: the
-    // registration widens nothing a Claude migration would have to.
-    const lists = await shared.admin<{ definition: string }[]>`
-      select pg_get_constraintdef(oid) as definition from pg_constraint
-      where contype = 'c' and pg_get_constraintdef(oid) like '%''xai''::text]%'`;
-    expect(lists.length).toBeGreaterThan(0);
-    for (const list of lists) expect(list.definition).toContain("'claude'::text");
-    await admitTestSubscriptionCoreProvider(shared.admin, provider);
+    // The cutover migration registered Claude and wrote its receipt;
+    // nothing is admitted or widened for the suite.
+    const [registered] = await shared.admin<{ provider: boolean; receipt: boolean }[]>`
+      select
+        exists (select 1 from opengeni_private.subscription_core_providers
+          where provider = 'claude') as provider,
+        exists (select 1 from opengeni_private.subscription_provider_cutover_receipts
+          where provider = 'claude') as receipt`;
+    expect(registered).toEqual({ provider: true, receipt: true });
   },
   // Setup tokens record no expiry, and never renew.
   expiresAt: () => null,
   renews: false,
   upstream,
   denyNetwork: installNetworkDenialGuard,
+  // The core waiter speaks the legacy Claude wait's session events, so
+  // clients and the workflow see one vocabulary across the cutover.
+  sessionWaits: {
+    provider: "claude",
+    events: {
+      waiting: "turn.capacity_waiting",
+      resumed: "turn.recovery.requested",
+      superseded: "turn.superseded",
+    },
+  },
 });

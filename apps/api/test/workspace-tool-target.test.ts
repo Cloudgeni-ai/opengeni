@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { HTTPException } from "hono/http-exception";
 import { accessGrantAuthorizationFromContext, type ApiRouteDeps } from "@opengeni/core";
-import { ToolGatewayApprovalOperationStartedError } from "@opengeni/db";
+import { ToolGatewayApprovalOperationStartedError, type Database } from "@opengeni/db";
 import { ToolGatewayInvokeRequest, ToolGatewayResolveRequest } from "@opengeni/contracts";
 import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
 import {
@@ -28,7 +29,13 @@ const authorization = accessGrantAuthorizationFromContext(
   grant,
 );
 authorization.canonicalManagedHumanSession = true;
-const deps = {} as ApiRouteDeps;
+// The request fence evaluates its parts in one bounded transaction. These
+// hand-built gateways have no database facts, so an inert handle suffices.
+const inertDb = {
+  transaction: async <T>(fn: (tx: Database) => Promise<T>) => await fn(inertDb),
+  execute: async () => [],
+} as unknown as Database;
+const deps = { db: inertDb } as ApiRouteDeps;
 
 function fixture() {
   const state = {
@@ -42,7 +49,11 @@ function fixture() {
     failClose: false,
   };
   const options: TargetGatewayOptions = {
-    prepare: async () => {
+    // The route's fresh human grant (a person's live caller part).
+    reauthorize: async () => undefined,
+    prepare: async (_deps, _authorization, preparation) => {
+      // No connector route exists here; a targeted fence denies until one is set.
+      preparation?.fence?.setRoute(async () => undefined);
       const { catalog, gateway } = createWorkspaceToolGateway({
         ...grant,
         generation: 1,
@@ -157,13 +168,28 @@ describe("targeted gateway contract and settlement", () => {
       invokeWorkspaceToolTarget(deps, authorization, f.request(), {
         ...f.options,
         reauthorize: async () => {
-          if (++checked > 1) throw new Error("revoked");
+          if (++checked > 1) throw new HTTPException(403, { message: "revoked" });
         },
       }),
-    ).rejects.toThrow("revoked");
+    ).rejects.toMatchObject({ status: 403, message: "revoked" });
+    // Authority that cannot be read is a retryable 503, never a denial or a
+    // provider failure, and it still admits nothing.
+    checked = 0;
+    await expect(
+      invokeWorkspaceToolTarget(deps, authorization, f.request(), {
+        ...f.options,
+        reauthorize: async () => {
+          if (++checked > 1) throw new Error("connection terminated");
+        },
+      }),
+    ).rejects.toMatchObject({
+      status: 503,
+      retryable: true,
+      details: { code: "tool_authority_unavailable" },
+    });
     expect(f.state.effects).toBe(0);
     expect(f.state.admissions).toBe(0);
-    expect(f.state.closes).toBe(2);
+    expect(f.state.closes).toBe(3);
   });
 
   test("target approvals bind executable authority separately and tombstones never invoke", async () => {
@@ -236,6 +262,7 @@ describe("targeted gateway contract and settlement", () => {
       f.state.failClose = true;
       const logs: unknown[] = [];
       const loggingDeps = {
+        db: inertDb,
         observability: { warn: (...args: unknown[]) => logs.push(args) },
       } as unknown as ApiRouteDeps;
       if (failure) {

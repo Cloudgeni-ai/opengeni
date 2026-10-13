@@ -10,7 +10,6 @@ import type {
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
-  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
@@ -56,6 +55,7 @@ export type TurnSettleFn = (input: {
   allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
+  notStartedToolCallIds?: readonly string[];
 }) => Promise<boolean>;
 
 export type TurnControlState = {
@@ -81,7 +81,6 @@ export type AttemptIdentityState = {
   modelMetricRoute?: { provider: string; model: string };
   /** Public display labels of the accepted model route, for recovery copy only. */
   modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
-  claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
   /** The stored shared-core lease-busy chain this turn's previous attempt recorded. */
   subscriptionLeaseBusy?: { startedAt: number; executionGeneration: number } | undefined;
   modelRequestStarted: boolean;
@@ -191,9 +190,26 @@ export type SubscriptionCoreTurn = {
   connectionId: string;
   /** Refresh generation of the connection when it was placed. */
   placedRefreshGeneration: number;
+  /**
+   * Refresh generation of the credential the latest request carried, when
+   * the provider's resolver reports it (SuperGrok and Claude; Codex keeps its
+   * own field).
+   */
+  credentialVersion?: number;
   personal: boolean;
+  /**
+   * The accepted product model id, for a provider whose refusals cool one
+   * model of the connection (Claude's per-model rate limits).
+   */
+  productModelId?: string;
   requests?: import("./subscription-core-requests").CoreSubscriptionRequests;
   titleRequests?: import("./subscription-core-requests").CoreSubscriptionRequests;
+  /**
+   * The turn's quota observations from its responses (usage headers), when
+   * the provider reports them per response (Claude). `settled` joins every
+   * write so far and is true when one ended a stored exhaustion.
+   */
+  quota?: { settled(): Promise<boolean> };
 };
 
 /** A Codex chat turn running on the shared subscription core (M3 name). */
@@ -223,22 +239,21 @@ export type ProviderTurnState = {
   /** Epoch ms of the latest Codex model call that produced a response. */
   lastCodexResponseCompletedAt?: number | null;
   effectiveClaudeCredentialId: string | null;
-  effectiveClaudeCredentialVersion: number | null;
-  claudeUpstreamModelId: string | null;
-  claudeRotationEnabled: boolean;
-  claudeAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
-  effectiveXaiCredentialId: string | null;
-  xaiRotationEnabled: boolean;
-  xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
-  xaiRequestContext: XaiSubscriptionRequestContext | null;
   /**
-   * Set only when this SuperGrok turn was placed by the shared subscription
-   * core (the organization's SuperGrok cutover committed and is enabled).
-   * `effectiveXaiCredentialId` is then a core connection id: legacy SuperGrok
+   * Set only when this Claude turn was placed by the shared subscription core
+   * (the organization's Claude cutover committed and is enabled).
+   * `effectiveClaudeCredentialId` is then a core connection id: legacy Claude
    * tables must never receive it.
    */
+  claudeSubscriptionCore: SubscriptionCoreTurn | null;
+  effectiveXaiCredentialId: string | null;
+  xaiRequestContext: XaiSubscriptionRequestContext | null;
+  /**
+   * Set when this SuperGrok turn was placed by the shared subscription core,
+   * the only SuperGrok path. `effectiveXaiCredentialId` is then its core
+   * connection id.
+   */
   xaiSubscriptionCore: SubscriptionCoreTurn | null;
-  xaiCredentialQuarantined: boolean;
   // The session's Codex credential BEFORE this turn resolved its own — captured
   // before recordSessionActiveCodexCredential overwrites the durable pointer, so
   // a per-call usage log can report whether the serving account CHANGED since the
@@ -252,7 +267,6 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
-  latestClaudeUsage: Map<string, import("./claude-usage-observer").CapturedClaudeUsage>;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
 
@@ -368,19 +382,12 @@ export function createTurnContext(input: {
       codexSubscriptionCore: null,
       lastCodexResponseCompletedAt: null,
       effectiveClaudeCredentialId: null,
-      effectiveClaudeCredentialVersion: null,
-      claudeUpstreamModelId: null,
-      claudeRotationEnabled: false,
-      claudeAuthoritySnapshot: null,
+      claudeSubscriptionCore: null,
       effectiveXaiCredentialId: null,
-      xaiRotationEnabled: false,
-      xaiAuthoritySnapshot: null,
       xaiRequestContext: null,
       xaiSubscriptionCore: null,
-      xaiCredentialQuarantined: false,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
-      latestClaudeUsage: new Map(),
       lastCodexRequestOpaqueArtifacts: [],
     },
   };
@@ -388,7 +395,19 @@ export function createTurnContext(input: {
 
 /** The turn's shared-core placement, whichever provider placed it (at most one does). */
 export function subscriptionCoreTurnOf(
-  providerTurn: Pick<ProviderTurnState, "codexSubscriptionCore" | "xaiSubscriptionCore">,
+  providerTurn: SubscriptionCorePlacedFields,
 ): SubscriptionCoreTurn | null {
-  return providerTurn.codexSubscriptionCore ?? providerTurn.xaiSubscriptionCore ?? null;
+  return (
+    providerTurn.codexSubscriptionCore ??
+    providerTurn.xaiSubscriptionCore ??
+    providerTurn.claudeSubscriptionCore ??
+    null
+  );
 }
+
+/** The provider fields that can hold a turn's shared-core placement. */
+export type SubscriptionCorePlacedFields = Pick<
+  ProviderTurnState,
+  "codexSubscriptionCore" | "xaiSubscriptionCore"
+> &
+  Partial<Pick<ProviderTurnState, "claudeSubscriptionCore">>;

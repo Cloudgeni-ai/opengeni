@@ -215,4 +215,29 @@ export const embeddingMigrationTail = [
   "0728_subscription_core_personal_connect_format.sql",
   // Adds owner policies on the person preferences table from withheld 0642.
   "0729_subscription_person_preferences_owner.sql",
+  // Built from the owner reader withheld 0715 rewrites; it follows 0715.
+  "0730_subscription_core_personal_connection_versions.sql",
+  // Rekeys the session bindings table from withheld 0642.
+  "0733_subscription_session_bindings_per_provider.sql",
+  // Reads withheld 0707/0712's registry/receipt and patches 0691's guard.
+  "0746_subscription_failover_readiness_and_request_fence.sql",
+  // Reads and narrows the personal authority routines withheld with 0642/0667.
+  "0749_subscription_shared_personal_choice.sql",
+  // Reads the Knowledge claim installed by withheld 0461 (and the title/site
+  // claims in historical lifecycle fixtures); preserve its full-name identity.
+  "0730_maintenance_work_probes.sql",
+  // Reads browser/outbox claim routines withheld by historical lifecycle fixtures.
+  "0732_sandbox_maintenance_work_probes.sql",
+  // Owner-only routines over the shared connection table from withheld 0642.
+  "0735_subscription_core_owned_connection_usage.sql",
+  "0747_subscription_core_xai_cutover.sql",
+  "0748_subscription_core_claude_cutover.sql",
+  // Extends the capacity waiter table from withheld shared-core migrations.
+  "0750_subscription_waiter_candidates.sql",
+  // The drained retirement requires both cutovers; it runs after them.
+  "0751_subscription_core_legacy_retirement.sql",
+  "0752_subscription_personal_sharing.sql",
+  // Rewrites the visibility transition and fork routines from withheld 0501
+  // (and 0502/0513) by exact text; replay after them.
+  "0738_private_sessions_share_sandboxes.sql",
 ];

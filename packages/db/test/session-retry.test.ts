@@ -24,7 +24,11 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
+  requestSessionTurnRecovery,
+  readSessionTurnToolProgressRecoveryState,
+  appendSessionEventsForTurnAttempt,
 } from "../src/index";
+import { NOT_STARTED_TOOL_CALL_EVENT_TEXT } from "../src/session-tool-call-settlement";
 import type { SessionRetryRequest } from "@opengeni/contracts";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -57,7 +61,7 @@ const executionPolicy = resolveTurnExecutionPolicyV1(testSettings(), {
 
 async function fixture(
   preclaim = false,
-  tool: "none" | "completed" | "unknown" = "none",
+  tool: "none" | "completed" | "unknown" | "not_started" = "none",
   failureCode?: string,
   sandboxBackend: "none" | "modal" = "none",
 ) {
@@ -119,11 +123,14 @@ async function fixture(
       trigger: { kind: "next" },
       error: "preclaim failure",
     });
-  } else {
+  }
+  let toolCallId: string | null = null;
+  if (!preclaim) {
     const claimed = await claim();
     if (claimed.action !== "claimed") throw new Error("not claimed");
     if (tool !== "none") {
       const callId = crypto.randomUUID();
+      toolCallId = callId;
       const identity = {
         accountId: grant.accountId,
         workspaceId,
@@ -136,7 +143,12 @@ async function fixture(
       await registerPendingSessionToolCall(client.db, {
         ...identity,
         callType: "function_call",
-        callItem: { type: "function_call", callId, name: "completed_work", arguments: "{}" },
+        callItem: {
+          type: "function_call",
+          callId,
+          name: tool === "not_started" ? "exec_command" : "completed_work",
+          arguments: "{}",
+        },
       });
       if (tool === "completed")
         await recordPendingSessionToolCallResult(client.db, {
@@ -164,6 +176,7 @@ async function fixture(
         },
         { type: "session.status.changed", payload: { status: "failed" } },
       ],
+      ...(tool === "not_started" && toolCallId ? { notStartedToolCallIds: [toolCallId] } : {}),
     });
   }
   const failure = (await listSessionEvents(client.db, workspaceId, session.id))
@@ -185,7 +198,17 @@ async function fixture(
         executionPolicy,
       }),
     );
-  return { grant, workspaceId, session, turnId: accepted.turnId, request, retry, claim, scope };
+  return {
+    grant,
+    workspaceId,
+    session,
+    turnId: accepted.turnId,
+    request,
+    retry,
+    claim,
+    scope,
+    toolCallId,
+  };
 }
 
 describe("intent-preserving failed-session retry", () => {
@@ -367,69 +390,78 @@ describe("intent-preserving failed-session retry", () => {
     ).toBe("accepted");
   });
 
-  test("exact capacity Retry replenishes only its budget and suppression; Pause, stale failure and replay cannot reset it", async () => {
-    const f = await fixture(false, "completed", "codex_capacity_recovery_exhausted");
-    const pinnedCredentialId = crypto.randomUUID();
-    const preserved = {
-      codexCredentialPolicyHash: "accepted-manual-policy",
-      codexCredentialPolicySnapshotV1: {
-        schemaVersion: 1,
-        source: "workspace",
-        activeCredentialId: null,
-        rotationEnabled: false,
-        rotationStrategy: "sharded",
-        pinnedCredentialId,
-        pinSource: "manual",
-        lastCredentialId: pinnedCredentialId,
-      },
-      codexCredentialFailedIds: [pinnedCredentialId],
-      codexCredentialFailovers: 2,
-      providerRecoveryCount: 3,
-    };
-    const budget = { falseResumptions: 10, resumeGeneration: null, retryNotBefore: null };
-    await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ ...preserved, [CODEX_CAPACITY_RECOVERY_KEY]: budget })}::jsonb where id = ${f.turnId}`;
-    await shared.admin`insert into session_goals (account_id, workspace_id, session_id, status, text, continuation_suppressed_turn_id) values (${f.grant.accountId}, ${f.workspaceId}, ${f.session.id}, 'active', 'finish', ${f.turnId})`;
-    const control = (action: "pause" | "resume") =>
-      f.scope((db) =>
-        mutateSessionControlInTransaction(db, {
-          accountId: f.grant.accountId,
-          workspaceId: f.workspaceId,
-          sessionId: f.session.id,
-          actor: { type: "human", subjectId: f.grant.subjectId },
-          operationKey: crypto.randomUUID(),
-          action,
-        }),
-      );
-    await control("pause");
-    await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_PAUSED" });
-    expect(
-      readCodexCapacityRecovery(
-        (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
-      ),
-    ).toEqual(budget);
-    await control("resume");
-    await expect(
-      f.retry({ clientEventId: crypto.randomUUID(), failureEventId: crypto.randomUUID() }),
-    ).rejects.toMatchObject({ code: "RETRY_STALE_FAILURE" });
-    expect(await f.retry()).toMatchObject({ outcome: "accepted", turnId: f.turnId });
-    const retried = await getSessionTurn(client.db, f.workspaceId, f.turnId);
-    expect(retried?.metadata).toMatchObject(preserved);
-    expect(retried?.metadata).not.toHaveProperty(CODEX_CAPACITY_RECOVERY_KEY);
-    const [goal] =
-      await shared.admin`select continuation_suppressed_turn_id from session_goals where session_id = ${f.session.id}`;
-    expect(goal!.continuation_suppressed_turn_id).toBeNull();
-    const claim = await f.claim();
-    expect(claim.action).toBe("claimed");
-    if (claim.action !== "claimed") throw new Error("expected same-turn retry");
-    expect(claim.turn.id).toBe(f.turnId);
-    await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { ...budget, falseResumptions: 1 } })}::jsonb where id = ${f.turnId}`;
-    expect(await f.retry()).toMatchObject({ outcome: "replayed", turnId: f.turnId });
-    expect(
-      readCodexCapacityRecovery(
-        (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
-      ).falseResumptions,
-    ).toBe(1);
-  });
+  // Every core waiter's breaker shares the same turn state: a SuperGrok core
+  // or Claude core turn's exhaustion is replenished exactly as a Codex one.
+  test.each([
+    "codex_capacity_recovery_exhausted",
+    "xai_capacity_recovery_exhausted",
+    "claude_capacity_recovery_exhausted",
+  ])(
+    "exact capacity Retry (%s) replenishes only its budget and suppression; Pause, stale failure and replay cannot reset it",
+    async (exhaustedCode) => {
+      const f = await fixture(false, "completed", exhaustedCode);
+      const pinnedCredentialId = crypto.randomUUID();
+      const preserved = {
+        codexCredentialPolicyHash: "accepted-manual-policy",
+        codexCredentialPolicySnapshotV1: {
+          schemaVersion: 1,
+          source: "workspace",
+          activeCredentialId: null,
+          rotationEnabled: false,
+          rotationStrategy: "sharded",
+          pinnedCredentialId,
+          pinSource: "manual",
+          lastCredentialId: pinnedCredentialId,
+        },
+        codexCredentialFailedIds: [pinnedCredentialId],
+        codexCredentialFailovers: 2,
+        providerRecoveryCount: 3,
+      };
+      const budget = { falseResumptions: 10, resumeGeneration: null, retryNotBefore: null };
+      await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ ...preserved, [CODEX_CAPACITY_RECOVERY_KEY]: budget })}::jsonb where id = ${f.turnId}`;
+      await shared.admin`insert into session_goals (account_id, workspace_id, session_id, status, text, continuation_suppressed_turn_id) values (${f.grant.accountId}, ${f.workspaceId}, ${f.session.id}, 'active', 'finish', ${f.turnId})`;
+      const control = (action: "pause" | "resume") =>
+        f.scope((db) =>
+          mutateSessionControlInTransaction(db, {
+            accountId: f.grant.accountId,
+            workspaceId: f.workspaceId,
+            sessionId: f.session.id,
+            actor: { type: "human", subjectId: f.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        );
+      await control("pause");
+      await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_PAUSED" });
+      expect(
+        readCodexCapacityRecovery(
+          (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
+        ),
+      ).toEqual(budget);
+      await control("resume");
+      await expect(
+        f.retry({ clientEventId: crypto.randomUUID(), failureEventId: crypto.randomUUID() }),
+      ).rejects.toMatchObject({ code: "RETRY_STALE_FAILURE" });
+      expect(await f.retry()).toMatchObject({ outcome: "accepted", turnId: f.turnId });
+      const retried = await getSessionTurn(client.db, f.workspaceId, f.turnId);
+      expect(retried?.metadata).toMatchObject(preserved);
+      expect(retried?.metadata).not.toHaveProperty(CODEX_CAPACITY_RECOVERY_KEY);
+      const [goal] =
+        await shared.admin`select continuation_suppressed_turn_id from session_goals where session_id = ${f.session.id}`;
+      expect(goal!.continuation_suppressed_turn_id).toBeNull();
+      const claim = await f.claim();
+      expect(claim.action).toBe("claimed");
+      if (claim.action !== "claimed") throw new Error("expected same-turn retry");
+      expect(claim.turn.id).toBe(f.turnId);
+      await shared.admin`update session_turns set metadata = metadata || ${shared.admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { ...budget, falseResumptions: 1 } })}::jsonb where id = ${f.turnId}`;
+      expect(await f.retry()).toMatchObject({ outcome: "replayed", turnId: f.turnId });
+      expect(
+        readCodexCapacityRecovery(
+          (await getSessionTurn(client.db, f.workspaceId, f.turnId))?.metadata,
+        ).falseResumptions,
+      ).toBe(1);
+    },
+  );
 
   test("an earlier committed retry receipt still replays after a later safety refusal", async () => {
     const f = await fixture();
@@ -578,7 +610,175 @@ describe("intent-preserving failed-session retry", () => {
 
   test("unknown tool outcomes reject retry even after terminal settlement removes pending rows", async () => {
     const f = await fixture(false, "unknown");
-    await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_EXECUTION_UNRESOLVED" });
+    // Permanent, not settling: a distinct code lets the person act on it.
+    await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_TOOL_OUTCOME_UNKNOWN" });
     expect((await getSession(client.db, f.workspaceId, f.session.id))!.status).toBe("failed");
+  });
+
+  test("a call proven not started settles replay safe and does not block Retry", async () => {
+    const f = await fixture(false, "not_started");
+    const output = (await listSessionEvents(client.db, f.workspaceId, f.session.id)).find(
+      (event) => event.type === "agent.toolCall.output",
+    )!;
+    expect(output.payload).toMatchObject({
+      id: f.toolCallId,
+      output: {
+        isError: true,
+        content: [{ type: "text", text: NOT_STARTED_TOOL_CALL_EVENT_TEXT }],
+      },
+      recovery: { interrupted: true, outcome: "not_started", reason: "turn_failed" },
+    });
+    const history = await getActiveSessionHistoryItems(client.db, f.workspaceId, f.session.id);
+    expect(
+      history.flatMap(({ item }) => (item.callId === f.toolCallId ? [item] : [])),
+    ).toMatchObject([
+      { type: "function_call" },
+      {
+        type: "function_call_result",
+        callId: f.toolCallId,
+        output: {
+          type: "text",
+          text: "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run it again.",
+        },
+      },
+    ]);
+    expect((await f.retry()).outcome).toBe("accepted");
+  });
+
+  test("tool-call command-start recovery is bounded by tool progress and stays retryable when exhausted", async () => {
+    const f = await fixture(true);
+    const progress = () =>
+      readSessionTurnToolProgressRecoveryState(client.db, f.workspaceId, {
+        sessionId: f.session.id,
+        turnId: f.turnId,
+      });
+    const runExecThatNeverStarts = async (providerRecoveryCount?: number) => {
+      const claimed = await f.claim();
+      if (claimed.action !== "claimed") throw new Error("not claimed");
+      const callId = crypto.randomUUID();
+      const identity = {
+        accountId: f.grant.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: f.session.id,
+        turnId: claimed.turn.id,
+        executionGeneration: claimed.turn.executionGeneration,
+        attemptId: claimed.turn.activeAttemptId!,
+        callId,
+      };
+      await registerPendingSessionToolCall(client.db, {
+        ...identity,
+        callType: "function_call",
+        callItem: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
+      });
+      expect((await progress()).toolCallInFlight).toBe(true);
+      if (providerRecoveryCount === undefined) return { claimed, identity };
+      const recovery = await requestSessionTurnRecovery(client.db, f.workspaceId, {
+        sessionId: f.session.id,
+        turnId: claimed.turn.id,
+        triggerEventId: claimed.turn.triggerEventId,
+        attemptId: claimed.turn.activeAttemptId!,
+        reason: "sandbox_command_start_unavailable",
+        providerRecoveryCount,
+        notStartedToolCallIds: [callId],
+        detail: { code: "sandbox_command_start_unavailable", retryable: true },
+      });
+      expect(recovery.action).toBe("recovering");
+      expect(recovery.events.map((event) => event.type)).toEqual([
+        "agent.toolCall.output",
+        "turn.recovery.requested",
+        "session.status.changed",
+      ]);
+      expect(recovery.events[0]!.payload).toMatchObject({
+        id: callId,
+        recovery: { outcome: "not_started", reason: "sandbox_command_start_unavailable" },
+      });
+      expect(recovery.events[1]!.payload).toMatchObject({
+        reason: "sandbox_command_start_unavailable",
+        toolCallInterrupted: true,
+      });
+      return { claimed, identity };
+    };
+    // A never-claimed preclaim failure has no started turn; re-accept a turn
+    // by retrying it, then run the tool sequence on its attempts.
+    expect((await f.retry()).outcome).toBe("accepted");
+    expect(await progress()).toEqual({ toolCallInFlight: false, toolInterruptedRecoveries: 0 });
+    await runExecThatNeverStarts(1);
+    expect(await progress()).toEqual({ toolCallInFlight: false, toolInterruptedRecoveries: 1 });
+    await runExecThatNeverStarts(2);
+    expect((await progress()).toolInterruptedRecoveries).toBe(2);
+
+    // A recorded tool result is progress and restarts the bound.
+    const progressed = await runExecThatNeverStarts();
+    const appended = await appendSessionEventsForTurnAttempt(
+      client.db,
+      f.workspaceId,
+      f.session.id,
+      progressed.claimed.turn.id,
+      progressed.claimed.turn.executionGeneration,
+      progressed.claimed.turn.activeAttemptId!,
+      [
+        {
+          type: "agent.toolCall.output",
+          payload: { id: progressed.identity.callId, output: "ok" },
+        },
+      ],
+    );
+    expect(appended.accepted).toBe(true);
+    expect((await progress()).toolInterruptedRecoveries).toBe(0);
+    await recordPendingSessionToolCallResult(client.db, {
+      ...progressed.identity,
+      resultItem: {
+        type: "function_call_result",
+        callId: progressed.identity.callId,
+        name: "exec_command",
+        output: { type: "text", text: "ok" },
+      },
+    });
+    const recovered = await requestSessionTurnRecovery(client.db, f.workspaceId, {
+      sessionId: f.session.id,
+      turnId: progressed.claimed.turn.id,
+      triggerEventId: progressed.claimed.turn.triggerEventId,
+      attemptId: progressed.claimed.turn.activeAttemptId!,
+      reason: "provider_unavailable",
+      providerRecoveryCount: 1,
+    });
+    expect(recovered.action).toBe("recovering");
+    // No call was interrupted, so this recovery does not count toward the bound.
+    expect(recovered.events.at(-2)!.payload).not.toHaveProperty("toolCallInterrupted");
+    expect((await progress()).toolInterruptedRecoveries).toBe(0);
+
+    // Exhaustion: the turn fails with the not-started call, and Retry works.
+    const { claimed, identity } = await runExecThatNeverStarts();
+    const settled = await applySessionTurnSettlement(client.db, f.workspaceId, {
+      sessionId: f.session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.turn.activeAttemptId!,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      notStartedToolCallIds: [identity.callId],
+      events: [
+        {
+          type: "turn.failed",
+          payload: {
+            error: "The sandbox isn't ready yet.",
+            code: "sandbox_command_start_unavailable",
+            retryable: false,
+            recoveryExhausted: true,
+          },
+        },
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+    const failure = (await listSessionEvents(client.db, f.workspaceId, f.session.id))
+      .filter((event) => event.type === "turn.failed")
+      .at(-1)!;
+    expect(
+      (await f.retry({ clientEventId: crypto.randomUUID(), failureEventId: failure.id })).outcome,
+    ).toBe("accepted");
+    // Human Retry restarts the automatic bound.
+    expect((await progress()).toolInterruptedRecoveries).toBe(0);
   });
 });

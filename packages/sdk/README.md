@@ -389,7 +389,7 @@ mints a read-only master key: it inventories shared workspaces and reads their
 sessions, events, and files, but cannot create sessions, send messages, or mint
 keys. This legacy `access: "read"` tier is distinct from the broader explicit
 `read_only` preset, which includes every read/list/view/search permission
-except the secret-value reads `secrets:read` and `variable-sets:read`.
+except the secret-value read `secrets:read`.
 
 Create or edit with `policy: { preset, permissions, workspaceScope }` for exact
 grants. `OrganizationAccessPreset` is `"read_only" | "full" | "custom"`;
@@ -744,7 +744,7 @@ user decision. A quiescence conflict identifies the stable blocker after live
 turns, goals, realtime, schedules, workspace writers, retained processes, and
 sandbox access have been settled. Forks copy exact same-workspace durable
 conversation content but no live turn, goal, credential, Connection/delegation,
-personal grant, Variable Set, Sandbox Environment, MCP server configuration, process, sandbox
+personal grant, vault policy, task vault, Sandbox Environment, MCP server configuration, process, sandbox
 identity, pin, or workflow. Destination visibility and acknowledgement are
 idempotency-bound.
 
@@ -838,7 +838,7 @@ const accounts = await browserClient.listOwnConnectionAccounts(workspaceId);
 const selection = { serverId: "mail", connectionId: accounts[0]!.id };
 ```
 
-General personal-resource grants for documents, variable sets and other resource
+General personal-resource grants for documents and other resource
 kinds remain available through the root/core SDK. They do not authorize native
 connected accounts.
 
@@ -1449,8 +1449,12 @@ selection. The selected policy is revalidated for new admission. A duplicate
 operation replays its receipt even after execution advances.
 
 HTTP 409 codes distinguish `RETRY_STALE_FAILURE`, `RETRY_EXECUTION_UNRESOLVED`,
-`RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and `IDEMPOTENCY_KEY_REUSED`.
-Unresolved tool outcomes cannot be blindly replayed. A deliberate Pause must
+`RETRY_TOOL_OUTCOME_UNKNOWN`, `RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and
+`IDEMPOTENCY_KEY_REUSED`. `RETRY_EXECUTION_UNRESOLVED` is transient: earlier
+execution is still settling. `RETRY_TOOL_OUTCOME_UNKNOWN` is permanent: a tool
+call in the turn has an unknown outcome and cannot be blindly replayed, so
+continue with a new message instead. A call proven never started does not block
+Retry. A deliberate Pause must
 be resumed separately. Failure without a retained logical turn, a settled
 scheduled occurrence, and idle credit exhaustion are not supported retry
 boundaries. See [run lifecycle](../../docs/run-lifecycle.md).
@@ -1623,7 +1627,7 @@ Every public endpoint group has typed methods:
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `findGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns`, `refreshScheduledTaskAccess`, `listScheduledTaskAccessAttention` |
-| Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
+| Vaults | `client.vaults(workspaceId)` returns `listVaults`, `getVault`, `createVault`, `updateVault`, `deleteVault`, `syncVault`, `listItems`, `getItem`, `createItem`, `updateItem`, `deleteItem`, `restoreItem`, `moveItem`, `revealField`, `listFieldVersions`, `restoreFieldVersion`, `getSessionSecrets`, `setSessionVaultPolicy`, `installOnePassword`, `listProviderVaults`, `linkProviderVault` and `createManagedProviderVault`. Reads are metadata-only; `revealField` is the one audited plaintext read. Agents use `{{secret:Vault/Item/field}}` references instead of values. Variable Sets were removed in 2.0.0 |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |

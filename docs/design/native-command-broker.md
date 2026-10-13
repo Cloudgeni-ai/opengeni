@@ -8,8 +8,10 @@ initial-process command multiplexer, journal-backed host transport driver and
 canonical retained-command descriptor/output fences, a retained-command
 control bridge, shared host coordinator, pre-reserved idle-launch primitive and
 dedicated broker command-session surface.
-The native `broker` mode and host driver can launch fixture commands, but the
-application lifecycle does not yet construct an admitted broker session.
+The core application composition installs the broker only for an originally
+qualified physical birth, with worker/API creation, warm attachment and scoped
+viewer setup. It has passed local database/native fixtures; remote physical
+qualification and preservation-safe snapshot restoration remain incomplete.
 These increments do not change a production protocol tuple or qualify an
 existing sandbox. The existing [command supervision](../command-supervision.md)
 and [native keeper](../../agent/native/command-supervisor/README.md) contracts
@@ -95,7 +97,7 @@ bytes after an awaited admission. Late receipts are still recorded; timeouts,
 rejected admission and failed bootstrap never proceed to manifest setup.
 
 The distinct broker protocol tuple now has an operator-only artifact pin in
-the qualification ledger (forward migration `0749`). Existing router rows and
+the qualification ledger (forward migration `0762`). Existing router rows and
 frozen group births remain unchanged. The worker carries the original intent's
 private creation proof to `beginModalProviderCreate`; persistence and an
 independent database trigger require the exact source, provider image, artifact
@@ -108,7 +110,7 @@ qualified; that refusal never discards the snapshot or changes cohort birth.
 
 The core `registerQualifiedNativeBrokerBootstrap` composition reads the exact
 frozen physical enrollment through the scoped `native_broker_bootstrap_admission`
-reader (rolling migration `0750`). It derives the broker identity and artifact
+reader (rolling migration `0763`). It derives the broker identity and artifact
 pin from that record, requires the host source and authenticated namespace to
 match, and rechecks the lease after prefix capture. A warming lease must already
 have the exact physical receipt. Warm recovery requires its existing retained
@@ -454,7 +456,7 @@ a clean result. A clean observation describes only that completed query, never
 future health, command EOF or permission to execute. Neither stderr cursor nor
 its completion advances stdout framing. Core retains the first definite
 diagnostic/protocol fault in the encrypted append-only transport journal before
-reporting it (maintenance migration `0751`). The exact bounded page and checksum
+reporting it (maintenance migration `0764`). The exact bounded page and checksum
 are private evidence; malformed or over-bound pages retain the refusal category
 without storing an unbounded payload. A later clean query or restart cannot
 clear a fault. Query failures and aborts alone remain unavailable, not permanent
@@ -526,7 +528,7 @@ wiring. Retaining an uncertain locator is not never-started proof.
 
 The distinct `rejectRetainedBrokerLaunch` seam consumes the exact committed
 native cancel request and its `not_started` / `launchClosed: true` reply. Forward
-maintenance migration `0752` independently reconstructs both fixed v1 wire hashes
+maintenance migration `0765` independently reconstructs both fixed v1 wire hashes
 and requires their scoped immutable request, control-reply and frame entries.
 The existing pristine-command, child-admission, receipt, lease, holder and atomic
 settlement guards remain in force. Only that positive evidence can settle the
@@ -553,7 +555,7 @@ that locator and the independently persisted native receipt. The existing
 TaskExec/session adapter explicitly rejects this descriptor, rather than treating
 its UUID as a provider execution ID.
 
-The maintenance-only candidate migration `0745` extends the canonical retained
+The maintenance-only candidate migration `0758` extends the canonical retained
 process guard without changing legacy descriptor/path rules. A broker command
 must match its registered account/workspace/group/lease/physical task and provider
 namespace. One native birth cannot own two retained process rows. Its shared
@@ -607,7 +609,7 @@ response is polled with status, not treated as a permanent cached outcome. The
 input coordinator must resolve each pending acceptance before a different
 request; the command bridge cannot skip that shared transport fence.
 
-Rolling migration `0747` adds the `control_reply` journal kind: an immutable,
+Rolling migration `0760` adds the `control_reply` journal kind: an immutable,
 request-keyed copy of a committed control response, bound to the accepted input
 and identical canonical frame. It commits with output and cursor, enabling a
 bounded reconnect lookup without decrypting the entire command history. The
@@ -633,7 +635,7 @@ and exact stored bytes; cancellation/settlement closes new reservations without
 erasing an already committed operation. This permits reconciliation of its
 original outcome, not a new stdin authorization. Single-frame admissions retain
 their original format. Larger writes use `native-command-broker-stdin.ts` and
-rolling migration `0753`: one immutable `stdin_plan` reserves the complete
+rolling migration `0766`: one immutable `stdin_plan` reserves the complete
 canonical byte range and scoped encrypted `stdin_page` entries retain every
 original byte before any dispatch. Storage pages are 64 KiB, native frames remain
 8 KiB, and one input is explicitly limited to the API body's 32 MiB absolute
@@ -657,7 +659,7 @@ composition installs it for the original broker birth, with explicit worker/API
 ownership. Routing's protocol selector cannot authorize a missing session adapter
 or bypass bootstrap/setup ownership, and no live cohort is enabled by this code.
 
-Rolling migration `0748` adds immutable `request_reply` and
+Rolling migration `0761` adds immutable `request_reply` and
 `stdin_reservation` indexes. Native status/error replies commit with their
 original accepted request, exact frame and output cursor. For stdin, the
 reservation index binds the command's reserved end offset to that original

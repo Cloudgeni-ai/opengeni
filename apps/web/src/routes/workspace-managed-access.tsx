@@ -176,7 +176,7 @@ export function OrganizationManagedWorkspaceAccess({
       to="/workspaces/$workspaceId/organization"
       params={{ workspaceId: workspace.id }}
       search={{ section: "people" }}
-      className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+      className="rounded-sm font-medium og-link"
     >
       Invite people
     </Link>
@@ -257,7 +257,7 @@ export function OrganizationManagedWorkspaceAccess({
               to="/workspaces/$workspaceId/organization"
               params={{ workspaceId: workspace.id }}
               search={{ section: "people" }}
-              className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+              className="rounded-sm font-medium og-link"
             >
               Organization {">"} People
             </Link>

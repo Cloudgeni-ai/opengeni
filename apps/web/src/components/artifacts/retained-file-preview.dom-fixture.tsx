@@ -518,3 +518,22 @@ for (const kind of ["wrong workspace", "wrong id", "unavailable", "non-media"]) 
     expect(client.createRetainedArtifactDownloadUrl).not.toHaveBeenCalled();
   });
 }
+
+test("chat images open by click without an Artifacts link; other files keep it", async () => {
+  artifact = { ...artifact, contentType: "image/png" };
+  await act(async () =>
+    root.render(<InlineChatArtifact workspaceId={workspaceId} artifactId={id} alt="Screen" />),
+  );
+  await act(async () => container.querySelector("button")?.click());
+  await waitForPreview(() => expect(client.getRetainedArtifact).toHaveBeenCalled());
+  await waitForPreview(() => expect(container.textContent).not.toContain("Loading artifact"));
+  expect(container.textContent).not.toContain("in Artifacts");
+
+  artifact = { ...artifact, contentType: "video/mp4" };
+  await act(async () => root.render(null));
+  await act(async () =>
+    root.render(<InlineChatArtifact workspaceId={workspaceId} artifactId={id} alt="Demo" />),
+  );
+  await act(async () => container.querySelector("button")?.click());
+  await waitForPreview(() => expect(container.textContent).toContain("Open Demo in Artifacts"));
+});

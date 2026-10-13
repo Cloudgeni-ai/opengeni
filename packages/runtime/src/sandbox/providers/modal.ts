@@ -1308,6 +1308,44 @@ function attributionKey(
   return `${input.workspaceId}:${input.sandboxGroupId}:${input.leaseId}`;
 }
 
+/**
+ * Whether the deployment's Modal app has any unfinished sandbox: the first
+ * page of exactly the listing the orphan sweep walks. When it has none, the
+ * sweep has nothing to terminate or attribute, and its inventory is empty. A
+ * missing app is an empty inventory, as in the sweep.
+ */
+export async function modalAppHasRunningSandboxes(
+  settings: Settings,
+  options: { client?: ModalClientLike } = {},
+): Promise<boolean> {
+  const ownedClient = options.client ? null : await createModalClient(settings);
+  const modal = (options.client ?? ownedClient)! as ModalCpListClient;
+  try {
+    let appId: string | undefined;
+    try {
+      appId = (
+        await modal.apps.fromName(settings.modalAppName, {
+          createIfMissing: false,
+          ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
+        })
+      ).appId;
+    } catch (error) {
+      if (isModalNotFoundError(error)) return false;
+      throw error;
+    }
+    if (!appId) return false;
+    const response = await modal.cpClient.sandboxList({
+      appId,
+      includeFinished: false,
+      ...(settings.modalEnvironment ? { environmentName: settings.modalEnvironment } : {}),
+      tags: [],
+    });
+    return (response.sandboxes ?? []).length > 0;
+  } finally {
+    ownedClient?.close();
+  }
+}
+
 export async function sweepModalOrphanSandboxes(
   settings: Settings,
   liveLeases: LiveModalSandboxLeaseAttribution[],

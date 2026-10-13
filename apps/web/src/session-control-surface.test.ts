@@ -306,119 +306,20 @@ describe("session control surface architecture", () => {
     expect(route.match(/channelId: selectedChannelId/g)).toHaveLength(2);
   });
 
-  test("keeps Variable Sets editable through create and established composer actions", async () => {
-    const [
-      route,
-      establishedRoute,
-      establishedControl,
-      establishedPicker,
-      newPicker,
-      shortlistEditor,
-    ] = await Promise.all([
+  test("Variable Sets are gone from the create and established composers", async () => {
+    const [route, establishedRoute] = await Promise.all([
       source("routes/sessions-index.tsx"),
       source("routes/session.tsx"),
-      source("components/personal-resource-attachment-control.tsx"),
-      source("components/session/session-variable-set-picker.tsx"),
-      source("components/session/new-session-variable-set-picker.tsx"),
-      source("components/session/variable-set-shortlist-editor.tsx"),
     ]);
-    expect(route).toContain("<NewSessionVariableSetPicker");
-    expect(route).toContain("const showVariableSets = props.variableSetsOnly === true");
-    expect(route).toContain("canAttachVariableSets={canAttachVariableSets}");
-    expect(route).toContain("canUseVariableSets={canUseVariableSets}");
-    expect(route).toContain("canAttach={props.canAttachVariableSets === true}");
-    expect(route).toContain("canUse={props.canUseVariableSets === true}");
-    expect(newPicker).toContain("<VariableSetShortlistEditor");
-    expect(newPicker).toContain("const canEnable = props.canAttach && props.canUse");
-    expect(newPicker).toContain("canAdd={!props.disabled && canEnable}");
-    expect(newPicker).toContain("if (props.disabled || unauthorizedAddition) return");
-    expect(newPicker).toContain("props.onChange(variableSetRuntimeIds(rows))");
-    expect(shortlistEditor).toContain("Add variable sets");
-    expect(shortlistEditor).toContain("enabledCount >= 25");
-    expect(shortlistEditor).toContain(
-      "props.disabled || (enabled && (!props.canAdd || enabledCount >= 25))",
-    );
-    expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).not.toContain("PersonalResourceScopeChoice");
-    expect(route).not.toContain("personalScopeChoice");
-    expect(route).not.toContain("setPersonalScopeGeneration");
-    expect(route).toContain("personalResourceCount: selectedPersonalResourceCount");
-    expect(route).toContain("will be available for your work in this session.");
-    expect(route).not.toContain("personalResourceSendBlocker");
-    expect(route).not.toContain("Confirm private credential or resource use before sending");
-    expect(route).not.toContain("PersonalResourceAttachmentControl");
-    expect(route).not.toContain("Your resource access");
-    expect(route).not.toContain("loadPersonalResourceCatalog");
-    expect(route).toContain("reconcileNewSessionFixedResources");
-    expect(route).toContain("newSessionFixedResourceCatalogFailed");
-    expect(route).toContain('"variable-sets:list"');
-    expect(route).toContain('"secrets:list"');
-    expect(route).toContain("resolveVariableSetAttachments");
-    expect(route).toContain("fixedResourceSelection.selectionResolved");
-    expect(route).toContain("personalResourceSelectionIdentityKey");
-    expect(route).toContain("recoverPersonalResourceAttachment(error, request)");
-    expect(route.match(/newSessionDraft\.captureConflict\(error\)/g)).toHaveLength(2);
-    expect(route).toContain("recoverNewSessionPersonalResourceAttachment");
-    expect(route).toContain("refreshPersonalResourceCatalogs");
-    expect(route).toContain("canLoadVariableSetCatalog");
-    expect(route).toContain("canResolveVariableSetAttachments");
-    expect(route).toMatch(
-      /newSessionDraftOptionsFromSessionDraft\(\s*draft,\s*defaultFirstPartyMcpTools,\s*createVisibility/,
-    );
-    expect(route).toContain("const selectedRigDefaultVariableSetIds =");
-    expect(route).toContain("selectedRigDefaultVariableSetIds,");
-    expect(route).toContain(
-      "selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey",
-    );
-    expect(route).toContain("Couldn’t verify the selected Variable Set or Sandbox Environment");
-    expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
-    expect(establishedRoute).toContain("<SessionVariableSetPicker");
-    expect(establishedPicker).toContain("<VariableSetShortlistEditor");
-    expect(establishedPicker).toContain("canAdd={canAdd}");
-    expect(establishedPicker).toContain("all attachments must be removed together");
-    expect(establishedPicker).toContain("The complete attachment selection can still be cleared.");
-    expect(establishedPicker).toContain("The update committed");
-    expect(establishedPicker).toContain("Retry refresh");
-    expect(establishedPicker).toContain("updateSessionVariableSets");
-    expect(establishedPicker.replace(/\s+/g, " ")).toContain(
-      "const visible = refreshRequired || currentIds.length > 0 ||",
-    );
-    expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
-    expect(establishedRoute).toContain("const variableSetComposerBlocked =");
-    expect(establishedRoute).toContain("variableSetPickerState.saving ||");
-    expect(establishedRoute).toMatch(/useSessionVariableSetPickerState\(\s*props\.session,?\s*\)/);
-    expect(establishedRoute).toContain("getComposerSendBlocker({");
-    expect(establishedRoute).toContain("variableSetBlocked: variableSetComposerBlocked,");
-    expect(establishedRoute).toContain("sendBlocked: () => composerSendBlocker() !== null,");
-    expect(establishedPicker).toContain("props.canControl && props.canAttach");
+    for (const text of [route, establishedRoute]) {
+      expect(text).not.toContain("session-variable-set-picker");
+      expect(text).not.toContain("variableSetIds");
+    }
     expect(
-      establishedRoute.match(
-        /<SessionVariableSetPicker\s+session=\{props\.session\}\s+canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
-      ),
-    ).toHaveLength(1);
-    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(1);
-    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(1);
-    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(1);
-    expect(establishedRoute).toContain(
-      "const [variableSetPickerState, setVariableSetPickerState] =",
-    );
-    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(1);
-    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(1);
-    expect(establishedPicker).toContain(
-      "const busy = workPending || props.goalActive || props.voiceActive",
-    );
-    expect(establishedPicker).toContain("sessionHasVariableSetBlockingWork(props.session)");
-    expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
-    expect(establishedPicker).toContain(
-      "Attached Only-me Variable Sets are available for your work in this session.",
-    );
-    expect(establishedControl).not.toContain("PersonalResourceScopeChoice");
-    expect(establishedControl).not.toContain('value: "once"');
-    expect(establishedControl).not.toContain('value: "session"');
-    expect(establishedControl).not.toContain('value: "always"');
-    expect(establishedControl).not.toContain('type="checkbox"');
-    expect(establishedControl).not.toContain("is available in this private session");
-    expect(establishedControl).not.toContain("will be used only for messages you send");
+      await Bun.file(
+        `${import.meta.dir}/components/session/session-variable-set-picker-panel.tsx`,
+      ).exists(),
+    ).toBe(false);
   });
 
   test("announces pin results through an independent live region", async () => {
@@ -496,6 +397,30 @@ describe("session control surface architecture", () => {
     expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
     expect(list).toContain("visibleNodes={visibleNodesForGroup(");
     expect(list).toContain("Show ${revealCount} more");
+  });
+
+  test("fills spare rail height before offering Show more", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    // The window is the manual step plus a measured fill, and fill loads stay quiet.
+    expect(list).toContain("baseCountForGroup(key) + fillCountForGroup(key)");
+    expect(list).toContain(
+      "planSessionGroupFill(fillTargetsRef.current, counts, freeRows, shrink)",
+    );
+    expect(list).toContain('list?.closest<HTMLElement>("[data-rail-scroll-viewport]")');
+    expect(list).toContain(
+      "void loadMoreInGroup(target.group, false, visible - target.loaded, false);",
+    );
+  });
+
+  test("restores manual Show more windows when the rail remounts", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("readSessionGroupWindows(groupWindowMemoryId, paginationKey)");
+    expect(list).toContain(
+      "writeSessionGroupWindows(groupWindowMemoryId, paginationKey, groupWindows.counts)",
+    );
+    expect(list).toContain("sessionGroupWindowMemoryId(\n    context.accessContext.subjectId,");
+    // Restored windows load their rows even with no spare height to fill.
+    expect(list).toContain("const restored = target.base > SESSION_GROUP_VISIBLE_STEP;");
   });
 
   test("separates archive browsing and hydrates sparse creator groups", async () => {
@@ -626,21 +551,6 @@ describe("session control surface architecture", () => {
     expect(rail).toContain("workspaceId={workspaceId}");
     expect(rail).toContain("open={searchOpen}");
     expect(rail).toContain("onOpenChange={changeSearchOpen}");
-  });
-
-  test("the established-session Variable Set editor stays behind its lazy panel", async () => {
-    // A direct session load must not carry the editor: the "+" menu mounts it
-    // on demand (see test/e2e/session-lazy-panels.browser.e2e.ts).
-    const route = await source("routes/session.tsx");
-    expect(route).toContain('from "@/components/session/session-variable-set-picker-panel"');
-    expect(route).not.toContain('from "@/components/session/session-variable-set-picker"');
-    const panel = await source("components/session/session-variable-set-picker-panel.tsx");
-    expect(panel).toContain('import("@/components/session/session-variable-set-picker")');
-    // Only a type-only import of the implementation module is allowed.
-    expect(panel).not.toMatch(
-      /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
-    );
-    expect(panel).toContain(".catch(() => SessionVariableSetPickerLoadFailed)");
   });
 
   test("the retired client-side queue model is gone", async () => {

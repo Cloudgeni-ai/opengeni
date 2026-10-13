@@ -11,6 +11,7 @@ import { router, usePathname } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Linking, Platform } from "react-native";
 import { useAccount } from "@/account";
+import { appSessionPath } from "@/app-links";
 import type { SettingsSection } from "@/settings-model";
 
 /** The rules a person can turn on, in the order Settings shows them. */
@@ -40,6 +41,10 @@ export interface PushData {
 }
 
 function sessionPath(data: PushData): string {
+  // The push names its session's workspace, so the screen does not depend on
+  // the workspace switch below having landed first.
+  if (data.sessionId && data.workspaceId)
+    return appSessionPath(data.sessionId, data.workspaceId, data.sequence ?? null);
   return data.sequence
     ? `/session/${data.sessionId}?at=${data.sequence}`
     : `/session/${data.sessionId}`;
@@ -110,6 +115,9 @@ async function actOnNotification(
   );
   const question = request.questions[0];
   if (request.status !== "pending" || request.questions.length !== 1 || !question) return false;
+  // A secret is never typed into a notification: the inline reply is plain
+  // text, so the reply is dropped and the session opens on the secure card.
+  if (question.kind === "secret") return false;
   if (question.kind === "text") {
     await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
       outcome: "answered",

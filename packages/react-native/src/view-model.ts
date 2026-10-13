@@ -2,6 +2,7 @@ import type { HumanInputAnswer, HumanInputQuestion } from "@opengeni/sdk";
 import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { ActivityItem, TimelineItem } from "@opengeni/react/session";
 import { DEFAULT_OPENGENI_NATIVE_LABELS, type OpenGeniNativeLabels } from "./presentation";
+import { defaultSecretFieldMessages, humanInputAnswerLines } from "./timeline/secret-field-model";
 
 export function nativeKnowledgeOutcomeLabel(
   item: Extract<TimelineItem, { kind: "knowledge" }>,
@@ -317,10 +318,15 @@ export function nativeHumanInputSummary(
     .map((question) => (question.label ? `${question.label}: ${question.prompt}` : question.prompt))
     .join("\n");
   const outcome = labels.humanInputOutcome[item.response.outcome];
-  const answers = item.answers
+  const answers = humanInputAnswerLines(
+    item.answers,
+    item.response,
+    defaultSecretFieldMessages.saved,
+    false,
+  )
     .map(
-      (answer) =>
-        `${answer.label}: ${answer.values.join(", ") || labels.humanInputOutcome.answered}`,
+      (line, index) =>
+        `${item.answers[index]!.label}: ${line.text || labels.humanInputOutcome.answered}`,
     )
     .join("\n");
 

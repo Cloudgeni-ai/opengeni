@@ -58,9 +58,16 @@ Then open the smallest source files that answer the question:
   fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feature subsystems: `docs/secrets.md` (vaults, `{{secret:…}}` references and delivery), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
+- Subscription policy and lifecycle: `packages/subscriptions/` and
+  `packages/db/src/subscription-core/`, with provider bindings registered in
+  `subscription-core-providers.ts`. Session account choice has one transaction
+  in `subscription-core/session-choice.ts`; legacy provider endpoints project
+  their existing receipts, never duplicate its writer. Check the cutover and
+  retirement runbooks before activation; stored legacy rows are not runtime
+  fallbacks. See `docs/subscription-accounts.md`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Command-output collection follows durable custody independently of model
@@ -101,11 +108,11 @@ Then open the smallest source files that answer the question:
   replay cannot rewind state or retrofit missing evidence. Creation authority,
   initial stderr and qualified application selection remain separate gates.
   `registerQualifiedNativeBrokerBootstrap` derives its pin and broker identity
-  through the immutable physical-enrollment reader (migration `0750`), rechecks
+  through the immutable physical-enrollment reader (migration `0763`), rechecks
   after capture, and requires existing durable evidence for warm recovery.
   Initial stderr has a separate bounded observer in
   `native-command-broker-diagnostics.ts`. Core retains the first definite fault
-  in the encrypted append-only journal (migration `0751`), and transport refuses
+  in the encrypted append-only journal (migration `0764`), and transport refuses
   new work without clearing uncertain input or blocking exact cancellation and
   output retirement. A completed empty query is not durable health or command
   authority. `native-command-broker-diagnostics-owner.ts` shares one owned live
@@ -146,7 +153,7 @@ Then open the smallest source files that answer the question:
   primitives do not activate application routing; the task router rejects
   broker-only admission. Positive prelaunch cancellation now uses
   `rejectRetainedBrokerLaunch` with exact immutable request/reply/frame evidence
-  and the independent SQL hash guard in migration `0752`. It creates no exit or
+  and the independent SQL hash guard in migration `0765`. It creates no exit or
   quiescence proof; uncertain input and `command_unknown` remain retained.
   `native-command-broker-session.ts` supplies the distinct retained-handle/banner
   surface without a legacy setup or TaskExec fallback. Output commits before
@@ -167,7 +174,7 @@ Then open the smallest source files that answer the question:
   Its reservation/reply indexes gate the next byte range on complete native
   stdin delivery, not provider acknowledgement or broker acceptance.
   Larger writes use `native-command-broker-stdin.ts` and immutable scoped
-  `stdin_plan` / `stdin_page` entries (migration `0753`). One original admission
+  `stdin_plan` / `stdin_page` entries (migration `0766`). One original admission
   reserves the complete byte range and bytes before frame dispatch; derived
   chunk UUIDs are not new admissions. Delivery replies gate each successor,
   unknown dispatch never replays automatically, and cancellation remains usable
@@ -180,7 +187,7 @@ Then open the smallest source files that answer the question:
   durable admission and post-receipt bootstrap gates before manifest setup;
   the operator ledger and independent SQL guard bind the distinct broker tuple,
   artifact pin and original create recipe without enrolling old groups. See
-  `native-command-qualification.ts` and migration `0749`; snapshot capture/drain
+  `native-command-qualification.ts` and migration `0762`; snapshot capture/drain
   remains separate from as-yet-unqualified broker snapshot restore.
   Application selection requires the original qualified birth; physical
   qualification remains an incomplete gate.
@@ -234,7 +241,11 @@ organization-wide Skill registry or Skill inheritance for this boundary. See
 
 Keep these boundaries explicit:
 
-- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; scoped Variable Sets are selected through that boundary but may be organization-, workspace-, or organization-user-owned.
+- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; vaults are reached through that boundary but may be organization-, workspace-, user- or task-owned.
+- Session authorization classifies model-account writes neutrally inside core,
+  but existing host ports receive the legacy operation name until explicitly
+  opting in after migrating policy keys. Never retry host denials under aliases;
+  inspect `SessionAuthorizationPort` and `docs/embedding.md` before changing it.
 - External product backends use an **organization API key**. Organization key
   administration uses `/v1/organizations/:organizationId/api-keys`; the key is
   server-held and cannot reach Personal workspaces through organization
@@ -283,7 +294,7 @@ Keep these concepts straight while working:
 - **Admission block**: a non-transient preclaim persistence rejection parks accepted work without failing or consuming it. Inspect `sessions.admission_block`, the worker classifier and `docs/run-lifecycle.md`; authorized Resume or new Send/Steer explicitly rechecks, never grants missing authority. Operational DB failures retain timed recovery.
 - **Control observation**: unavailable scoped reads are not deletion or idle truth; exact still-owned attempts are not successor admission. Versioned observers wait on signals/bounded control timers, retain outbox obligations, and inspect exact Temporal identity without replacing physical-writer proof. See `docs/run-lifecycle.md` before changing these paths.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
-- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
+- **Vault**: organization-, workspace-, user- (Only me) or task-owned collection of items with authenticated-encrypted, versioned fields (or a linked 1Password/host provider vault). Agents use values only through `{{secret:…}}` references resolved at the execution boundary under the acting human's reach and the session's vault policy; nothing is injected into sandbox env. Plaintext reveal is a separate `secrets:read` operation with metadata-only audit. See `docs/secrets.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
@@ -460,8 +471,11 @@ effect digest and Site tuple, separately from private authority, and retain the
 v1 operation tombstone namespace.
 For raw/local targets lacking adapter private authority, use the runtime's
 existing executable-authority digest and exact selected configuration, never
-the public-catalog fallback; preserve v1/frozen semantics. Targeted physical callbacks
-recheck caller/Site authority and the selected live action policy; do not change
+the public-catalog fallback; preserve v1/frozen semantics. Targeted requests use one
+live fence (`apps/api/src/workspace-tool-target-fence.ts`): each physical callback
+evaluates caller, Site, selected route (narrow reads) and live action policy once,
+after its last credential step; never share or cache decisions, never lock or
+write the key inside it, and start no further part after its deadline; do not change
 frozen worker/Codemode policy semantics. SDK/Site adoption and explicit legacy mode are documented in
 `packages/sdk/README.md`; local previews retain frozen Codemode authority.
 

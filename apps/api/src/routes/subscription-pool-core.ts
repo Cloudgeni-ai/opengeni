@@ -6,7 +6,9 @@
 //
 // Every pool route reads `subscriptionCoreRoute` first. Without the
 // provider's cutover receipt it is `legacy` after one read and the legacy
-// handler runs unchanged; `maintenance` fails closed with a typed 503; `core`
+// handler runs unchanged (a provider whose legacy runtime was deleted uses
+// `requireSubscriptionCoreRoute`, which fails closed there instead);
+// `maintenance` fails closed with a typed 503; `core`
 // runs the handlers below: the same paths, verbs, request fields and
 // response shapes over core connections and settings, with legacy ids
 // resolved through the cutover's aliases. Authority is the core's own
@@ -62,6 +64,13 @@ export type SubscriptionPoolCore = {
     db: Database,
     input: { organizationId: string; subjectId: string },
   ): Promise<SubscriptionCorePoolProjection>;
+  /**
+   * The JSON of one core account in the listings, when it differs from the
+   * legacy `accountJson` (fields the legacy listing adds beside it, such as
+   * a usage reading). Defaults to the legacy `accountJson`; every other
+   * route answers the legacy `accountJson`.
+   */
+  listedAccountJson?: (account: PoolAccount, activeId: string | null) => Record<string, unknown>;
 };
 
 type PoolContext = {
@@ -69,6 +78,8 @@ type PoolContext = {
   core: SubscriptionPoolCore;
   displayName: string;
   accountJson: (account: PoolAccount, activeId: string | null) => Record<string, unknown>;
+  /** The listings' account JSON (`SubscriptionPoolCore.listedAccountJson`). */
+  listedAccountJson: (account: PoolAccount, activeId: string | null) => Record<string, unknown>;
 };
 
 /**
@@ -94,10 +105,42 @@ export async function subscriptionCoreRoute(
   return route;
 }
 
+/**
+ * The runtime for a provider whose legacy runtime was deleted after its
+ * cutover: only `core` serves. Any other route (maintenance, or no receipt,
+ * which the deployed binary's readiness check refuses) fails closed exactly
+ * as maintenance does.
+ */
+export async function requireSubscriptionCoreRoute(
+  deps: ApiRouteDeps,
+  provider: string,
+  displayName: string,
+  accountId: () => Promise<string>,
+): Promise<"core"> {
+  const route = await subscriptionCoreRoute(deps, provider, displayName, accountId);
+  if (route !== "core") {
+    // Without a receipt the reader returns before resolving the
+    // organization; resolve it here so authorization runs first, as it does
+    // under maintenance, and a stranger learns nothing about the provider.
+    await accountId();
+    throw subscriptionCoreMaintenanceError(displayName);
+  }
+  return route;
+}
+
+/** The typed refusal of a core-only provider that is not on `core`. */
+export function subscriptionCoreMaintenanceError(displayName: string) {
+  return typedHttpError(
+    503,
+    SUBSCRIPTION_CORE_CUTOVER_DISABLED,
+    `${displayName} subscriptions are paused for maintenance in this organization`,
+  );
+}
+
 /** Deliver a committed change's wake; never fails the request (waiters recheck). */
 export async function deliverPoolCoreWake(
   deps: ApiRouteDeps,
-  core: SubscriptionPoolCore,
+  core: Pick<SubscriptionPoolCore, "binding">,
   wake: SubscriptionCoreWake | null,
 ): Promise<void> {
   await deliverSubscriptionCoreWake(
@@ -133,6 +176,10 @@ export function coreConnectRefused(
         SUBSCRIPTION_CORE_CUTOVER_DISABLED,
         `${displayName} subscriptions are paused for maintenance in this organization`,
       );
+    case "changed":
+      return new HTTPException(409, {
+        message: `${displayName} account changed. Reload it before reconnecting.`,
+      });
     default:
       return new HTTPException(personal ? 409 : 403, {
         message: personal
@@ -245,7 +292,7 @@ export async function coreWorkspaceAccounts(c: Context, ctx: PoolContext, worksp
     source: projection.source,
     organizationId: grant.accountId,
     accounts: projection.accounts.map((account) =>
-      ctx.accountJson(account, projection.activeCredentialId),
+      ctx.listedAccountJson(account, projection.activeCredentialId),
     ),
     activeAccountId: projection.activeCredentialId,
     settings: settingsJson(projection),
@@ -406,7 +453,7 @@ export async function coreOrganizationAccounts(
   });
   return c.json({
     accounts: projection.accounts.map((account) =>
-      ctx.accountJson(account, projection.activeCredentialId),
+      ctx.listedAccountJson(account, projection.activeCredentialId),
     ),
     activeAccountId: projection.activeCredentialId,
     source: "organization",

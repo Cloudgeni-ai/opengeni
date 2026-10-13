@@ -39,6 +39,11 @@ export type AgentPromptResources = {
   gitCredentials: boolean;
   /** Files are attached (mounted) for this turn. */
   attachments: boolean;
+  /**
+   * The runtime resolves `{{secret:…}}` references for this attempt. Gates
+   * the secrets prompt module; omitted keeps prompts unchanged.
+   */
+  secretReferences?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
 };
@@ -53,6 +58,14 @@ export type AgentPromptContext = {
    * tool-specific clause renders exactly as before.
    */
   toolAvailability?: AgentPromptToolAvailability | undefined;
+  /** Deployment prompt experiments; omitted renders the default prompt byte for byte. */
+  experiments?: AgentPromptExperiments | undefined;
+};
+
+/** Opt-in prompt variants for A/B evaluation, set from deployment settings. */
+export type AgentPromptExperiments = {
+  /** OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE */
+  knowledgeRetrievalGuidance?: boolean | undefined;
 };
 
 /**

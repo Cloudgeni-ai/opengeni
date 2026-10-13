@@ -1,5 +1,7 @@
-import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
-import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "@opengeni/contracts";
 import {
   receiverSubscriptionAuthorityV2InTransaction,
   receiverSubscriptionAuthorityInTransaction,
@@ -9,8 +11,12 @@ import { acceptSessionFileAttachments } from "./session-file-attachments";
 import { ArchivedSessionImportError } from "./archived-session-imports";
 import { SessionArchivedError } from "./session-archive-errors";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
+import {
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
   McpPersonalConnectionDelegations,
@@ -27,6 +33,7 @@ import {
   type SessionTurnSurface,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
+  type ConnectionAccountIntent,
   type DraftTimelineAnnotation,
   type LatencyMode,
   type ReasoningEffort,
@@ -58,7 +65,7 @@ import {
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
-import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -94,7 +101,6 @@ import {
   initiatorFromStorage,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 import {
   copySubscriptionAuthorityCompatInTransaction,
   coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
@@ -795,23 +801,13 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     })
     .where(eq(schema.sessionTurns.id, current.id));
   if (current.status === "waiting_capacity") {
-    for (const waiters of [schema.xaiCapacityWaiters, schema.claudeCapacityWaiters]) {
-      await db
-        .update(waiters)
-        .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
-        .where(
-          and(
-            eq(waiters.workspaceId, input.workspaceId),
-            eq(waiters.sessionId, input.sessionId),
-            eq(waiters.blockedTurnId, current.id),
-            eq(waiters.status, "waiting"),
-          ),
-        );
-    }
-    // The shared subscription core's Codex waiter exists only while its turn
-    // waits; the Steer ends that wait, so the row goes with it (its pending
-    // wake deliveries cascade).
-    await deleteSubscriptionCoreCodexWaitersForTurns(db, {
+    // SuperGrok's and Claude's legacy waiters are read-only after their
+    // cutover receipts, which this binary requires: none can be waiting (each
+    // cutover moved or superseded every one). The shared subscription core's
+    // waiter (of whichever provider) exists
+    // only while its turn waits; the Steer ends that wait, so the row goes
+    // with it (its pending wake deliveries cascade).
+    await deleteSubscriptionCoreWaitersForTurns(db, null, {
       workspaceId: input.workspaceId,
       turnIds: [current.id],
     });
@@ -1826,6 +1822,8 @@ export async function submitHumanPromptInTransaction(
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
     mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+    /** The sender's account intent: their principal and explicit picks. */
+    connectionAccountIntent?: ConnectionAccountIntent | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     mcpCredentialUpdates?: Array<{
       id: string;
@@ -1837,6 +1835,14 @@ export async function submitHumanPromptInTransaction(
       tx: Database,
       authority: {
         claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+        /**
+         * The accepted source the snapshot was copied from (an edit's source
+         * turn, or the receiving session of agent-submitted work); absent
+         * when the prompt resolved the current source.
+         */
+        claudeAcceptedSource?:
+          | { kind: "session_turn"; turnId: string }
+          | { kind: "receiving_session"; sessionId: string };
       },
     ) => Promise<void>;
     /** Backend-only authority capture, atomic with the newly accepted turn. */
@@ -2195,26 +2201,22 @@ export async function submitHumanPromptInTransaction(
     ? XaiProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.xaiProviderAccountAuthoritySnapshot,
       )
-    : (nonHumanAuthority?.xai ??
-      (await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
-        workspaceId: input.workspaceId,
-      })));
+    : // SuperGrok's v1 value is never computed from live state after its
+      // cutover: a human's new work writes the column default (design 5.3,
+      // "v1 columns after a provider's cutover").
+      (nonHumanAuthority?.xai ?? WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
   const claudeProviderAccountAuthoritySnapshot = editedSourceTurn
     ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.claudeProviderAccountAuthoritySnapshot,
       )
-    : (nonHumanAuthority?.claude ??
-      (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
-        workspaceId: input.workspaceId,
-      })));
-  // v2 accepted authority for every provider on the shared core (M3 PR 2a,
-  // 3b; M4 X2b): an edit keeps its source turn's frozen value; a human
-  // prompt, whether sent or steered, resolves that human's own owner-caused
-  // authority; agent-submitted work copies the receiving session's value
-  // exactly as its v1 pools do (EP-T14); every other actor (service,
-  // operator, API key) freezes none. NULL until some provider's cutover is
-  // enabled for the account. Reads each registered provider's cutover row on
-  // every non-edit prompt (one indexed lookup each).
+    : (nonHumanAuthority?.claude ?? WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
+  // Codex v2 accepted authority (M3 PR 2a, 3b): an edit keeps its source
+  // turn's frozen value; a human prompt, whether sent or steered, resolves
+  // that human's own owner-caused authority; agent-submitted work copies the
+  // receiving session's value exactly as its v1 pools do (EP-T14); every
+  // other actor (service, operator, API key) freezes none. NULL until the
+  // account's Codex cutover is enabled. Reads the cutover row on every
+  // non-edit prompt (one indexed lookup).
   const subscriptionAuthority = editedSourceTurn
     ? (editedSourceTurn.subscriptionAuthority ?? null)
     : input.actor.type === "agent_attempt"
@@ -2231,7 +2233,19 @@ export async function submitHumanPromptInTransaction(
           acceptingSubjectId:
             input.actor.type === "human" ? acceptedInitiatingHumanSubjectId : null,
         });
-  await input.beforeFreshPromptCommit?.(db, { claudeProviderAccountAuthoritySnapshot });
+  await input.beforeFreshPromptCommit?.(db, {
+    claudeProviderAccountAuthoritySnapshot,
+    ...(editedSourceTurn
+      ? { claudeAcceptedSource: { kind: "session_turn" as const, turnId: editedSourceTurn.id } }
+      : input.actor.type === "agent_attempt"
+        ? {
+            claudeAcceptedSource: {
+              kind: "receiving_session" as const,
+              sessionId: input.sessionId,
+            },
+          }
+        : {}),
+  });
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -2328,6 +2342,9 @@ export async function submitHumanPromptInTransaction(
           mcpAccountBindings: editedSourceTurn
             ? editedSourceTurn.mcpAccountBindings
             : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+          connectionAccountIntent: editedSourceTurn
+            ? parseConnectionAccountIntent(editedSourceTurn.connectionAccountIntent)
+            : parseConnectionAccountIntent(input.connectionAccountIntent),
           xaiProviderAccountAuthoritySnapshot,
           claudeProviderAccountAuthoritySnapshot,
           subscriptionAuthority,

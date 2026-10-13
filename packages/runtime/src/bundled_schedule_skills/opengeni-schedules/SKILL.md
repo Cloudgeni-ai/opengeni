@@ -29,14 +29,17 @@ destination or a separate-agent mode.
   details. A list summary is not its complete configuration.
 - If the work needs a repository, use `github_repositories_list` to find the
   authorized repository and select the required resources.
-- If a separate agent needs sandbox credentials, use `variable_set_list` to find the suitable
-  Variable Set. Attach its identifier; do not copy secret values into prompts.
+- If the scheduled agent needs credentials, use `secret_search` to find the saved
+  item and write its reference (for example `{{secret:GitHub/token}}`) in the
+  prompt. Save it to the workspace with `secret_save` or `secret_move` when the
+  schedule runs without you; never copy secret values into prompts.
 - If it needs an integration such as Slack or Sentry, use
   `capability_catalog_search` and the available tool discovery to find the
   capability and exact operations. Follow returned connection/setup and approval
   requirements. Do not claim that discovery means the integration is ready.
 
-Select only the resources, Variable Set, and tools the task needs. Missing
+Select only the resources and tools the task needs; saved secrets are used by
+`{{secret:…}}` reference and need no attachment. Missing
 optional dependencies are not a reason to ask for unnecessary setup. If a
 required capability or authority is unavailable, explain the remaining setup
 briefly instead of inventing a tool or borrowing another person's connection.
@@ -52,7 +55,8 @@ Use `scheduled_tasks_create` with:
 - The requested cadence and time zone. Use the time zone supplied in the
   request unless the user explicitly chooses another. Inspect the current tool
   schema for supported schedule shapes rather than guessing cron fields.
-- For a separate agent, the required repository resources, Variable Set, and tool selections.
+- For a separate agent, the required repository resources, tool selections, and
+  any vault narrowing (`vaultPolicy`).
   Scheduled runs inherit the creating session's tool and permission ceiling;
   this Skill does not grant authority or change approvals.
 

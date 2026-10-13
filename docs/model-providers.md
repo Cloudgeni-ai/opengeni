@@ -1926,6 +1926,15 @@ Registry providers can set `anthropic.auth` (`api-key` or `oauth`), `cacheTtl`
 Up to four cache breakpoints cover tools, instructions, the prefix before the
 latest assistant reply, and current history. The previous prefix remains directly
 addressable when a large tool batch exceeds the server's 20-block lookback.
+With the opt-in experiment `OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT`, the
+instructions split into a session-independent prefix block (identity, the
+contract's non-workspace modules, Codemode/code-search directives) and a
+workspace/session tail; the prefix gets its own breakpoint so a cold session
+reuses it, and the tools breakpoint yields when all five would apply. The
+workspace environment, sandbox environment and attachment modules then render
+after the other contract modules for every provider. Instruction composition
+records the prefix content-addressed (`packages/runtime/src/system-prompt-cache-prefix.ts`);
+the split never changes the instruction text.
 Signed thinking is never marked; canonical history is unchanged. One TTL applies
 to every marker: mixed TTLs and `scope: global` are not implemented. This is not
 a guarantee of a hit: prefix changes, expiration and minimum cache sizes still apply.
@@ -2067,8 +2076,8 @@ receipt. Authority is freshly checked after exchange, before individual account 
 Organization attempts require organization administration and are not readable from
 a shared workspace's runtime scope.
 
-`packages/db/src/claude-subscription-account-tokens.ts` resolves the selected account;
-shared subscription repositories serialize renewal across replicas,
+`packages/db/src/subscription-core-claude.ts` binds Claude to the shared core's
+credential operations. The core serializes renewal across replicas,
 re-reads the captured generation and writes only encrypted token material. Renewal
 keeps connection identity, admission/credential generations, access policy and usage
 cache. Each physical Claude model request resolves its original binding before
@@ -2081,7 +2090,7 @@ sign-in discovers the provider account UUID, email and plan; setup tokens remain
 inference-only and do not expose profile details. Replacing a token targets one
 exact account generation and preserves its access policy.
 
-The worker reuses SuperGrok's scoped account selection, credential leases and
+The worker uses provider-neutral account selection, credential leases and
 durable same-turn capacity wait/resume protocol. Quotas and cooldowns apply to
 the exact upstream model: an Opus restriction need not block Sonnet. A manual
 pin or primary-only pool never silently borrows another subscription. Typed

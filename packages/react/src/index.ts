@@ -225,13 +225,75 @@ export type {
   UseSessionLineageOptions,
   UseSessionLineageResult,
 } from "./hooks/use-session-lineage";
-export { useVariableSets, useEnvironments } from "./hooks/use-environments";
+export {
+  useVaultsApi,
+  useVaults,
+  useVault,
+  useVaultItems,
+  useVaultItem,
+  useVaultFieldVersions,
+  useSessionSecrets,
+  VAULT_ITEM_PAGE_LIMIT,
+} from "./hooks/use-vaults";
+export type { UseVaultQueryOptions } from "./hooks/use-vaults";
+export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "@opengeni/sdk";
+export type { VaultClientLike, VaultsApi } from "@opengeni/sdk";
 export type {
-  UseVariableSetsOptions,
-  UseVariableSetsResult,
-  UseEnvironmentsOptions,
-  UseEnvironmentsResult,
-} from "./hooks/use-environments";
+  VaultPolicy,
+  VaultOwnerKind,
+  VaultSource,
+  VaultMode,
+  VaultSyncStatus,
+  VaultItemType,
+  VaultFieldKind,
+  VaultAvailability,
+  VaultSummary,
+  VaultItemReferences,
+  VaultItemSummary,
+  VaultItemField,
+  PasskeySummary,
+  VaultItem,
+  VaultVersionCreatedByKind,
+  VaultFieldVersionMeta,
+  GeneratePasswordOptions,
+  CreateVaultRequest,
+  UpdateVaultRequest,
+  VaultFieldInput,
+  CreateVaultItemRequest,
+  UpdateVaultItemRequest,
+  MoveVaultItemRequest,
+  RevealVaultFieldResponse,
+  ListVaultItemsQuery,
+  SessionSecretsVault,
+  SessionSecretsView,
+  OnePasswordPlanTier,
+  InstallOnePasswordRequest,
+  ProviderVaultMeta,
+  InstallOnePasswordResponse,
+  LinkProviderVaultRequest,
+  CreateManagedProviderVaultRequest,
+  VaultErrorCode,
+} from "@opengeni/sdk";
+export { SecretsUiProvider, useSecretsUi } from "./secrets-ui";
+export {
+  SecretAnswerChip,
+  SecretRefChip,
+  SecretRefText,
+  secretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretAnswerChipProps,
+  SecretRefChipProps,
+  SecretRefTextProps,
+  SecretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretsUi,
+  SecretReferenceLike,
+  SecretReferenceTargetLike,
+  SecretTextTokenLike,
+  PasswordStrengthLike,
+} from "./secrets-ui";
 export { useChannels } from "./hooks/use-channels";
 export type { UseChannelsOptions, UseChannelsResult } from "./hooks/use-channels";
 export { useRigs, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";
@@ -430,6 +492,7 @@ export {
   TurnSummary,
   BUILT_IN_TURN_SUMMARY_FACET_IDS,
   useLightbox,
+  useLightboxGalleryItem,
   useLightboxOptional,
 } from "./timeline";
 export type {
@@ -446,6 +509,8 @@ export type {
   TurnSummaryProps,
   TurnSummaryStatus,
   LightboxControlLabels,
+  LightboxGalleryEntry,
+  LightboxGalleryImage,
 } from "./timeline";
 
 // Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)
@@ -717,6 +782,13 @@ export type {
   UseCodexAccountsOptions,
   UseCodexAccountsResult,
 } from "./hooks/use-codex-accounts";
+// Model-account choice for every provider on the shared subscription core.
+export { useSessionModelAccount, isModelAccountEvent } from "./hooks/use-session-model-account";
+export type {
+  ModelAccountClientLike,
+  UseSessionModelAccountOptions,
+  UseSessionModelAccountResult,
+} from "./hooks/use-session-model-account";
 export { useSuperGrokAccounts } from "./hooks/use-supergrok-accounts";
 export type {
   SuperGrokAccountsClientLike,

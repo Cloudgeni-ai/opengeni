@@ -1,7 +1,6 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
-import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -55,6 +54,7 @@ import {
   type McpTransportRequestFailureDiagnostic,
 } from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
+import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
 import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
@@ -106,6 +106,7 @@ import {
 import {
   MODEL_PROVIDER_RECOVERY_CODES,
   providerRecoveryExhaustedMessage,
+  providerRecoverySubject,
   type ProviderCondition,
 } from "./provider-recovery-copy";
 import {
@@ -348,6 +349,38 @@ function isProviderCondition(value: unknown): value is ProviderCondition {
     value === "unresponsive" ||
     value === "rate_limited"
   );
+}
+
+/**
+ * A retryable failure whose automatic same-turn recovery was not authorized
+ * (for example, request custody could not be checkpointed). The classifier's
+ * "will retry" sentence would be false on a terminal record, so name the
+ * condition and the person's options instead.
+ */
+export function automaticRecoveryUnavailableFailure<
+  T extends Record<string, unknown> & { error: string },
+>(
+  failure: T,
+): T & {
+  retryable: false;
+  automaticRecovery: "unavailable";
+  lastRetryableError: string;
+} {
+  const subject = providerRecoverySubject({
+    code: typeof failure.code === "string" ? failure.code : null,
+    providerCondition: isProviderCondition(failure.providerCondition)
+      ? failure.providerCondition
+      : null,
+    modelLabel: typeof failure.modelLabel === "string" ? failure.modelLabel : null,
+    providerLabel: typeof failure.providerLabel === "string" ? failure.providerLabel : null,
+  });
+  return {
+    ...failure,
+    error: `${subject}. Opengeni couldn't retry this turn automatically. Try again, or send a message to continue.`,
+    retryable: false,
+    automaticRecovery: "unavailable",
+    lastRetryableError: failure.error,
+  };
 }
 
 /**
@@ -1174,8 +1207,10 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   // request recovers exactly like one on an ordinary request: failure
   // settlement rotates to another account or waits for capacity on the same
   // logical turn. Its wording or retry hint never makes it a terminal quota.
-  if (isClaudeSubscriptionTransportError(error) && classifyClaudeCredentialFailure(error))
-    return true;
+  const claudeRefusal = isClaudeSubscriptionTransportError(error)
+    ? classifyClaudeProviderError(error)
+    : null;
+  if (claudeRefusal?.kind === "unauthorized" || claudeRefusal?.kind === "rate_limited") return true;
   // Codex may reject an opaque artifact it minted itself on the compaction
   // request exactly as it can on an ordinary request. Failure settlement
   // invalidates only the exact participating artifacts and recovers the same
@@ -1443,23 +1478,21 @@ export function isClaudeSubscriptionTransportError(error: unknown): boolean {
   return false;
 }
 
-export type XaiCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit";
-  cooldownMs: number | null;
-};
-
 /**
- * Only definitive SuperGrok account refusals may move the same logical turn to
- * another credential. A marked HTTP 401/403/429, or an HTTP 200 SSE terminal
- * that is a rate-limit/capacity diagnostic, proves inference was refused
- * without an accepted model response; refresh relogin is equally definitive.
+ * SuperGrok's classification of a failed model request as a shared provider
+ * outcome (the adapter's `classifyError`, SuperGrok track X1b): a refresh
+ * relogin or a marked 401 is `unauthorized`, a marked 403 `forbidden`, and a
+ * marked 429 or HTTP 200 SSE capacity terminal `rate_limited` with the
+ * provider's retry time (null when it gave none: the adapter's fallback
+ * applies). Anything else, a provider safety refusal included, is null: not
+ * a refusal of the account.
  */
-export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
+export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
-      return { kind: "auth", cooldownMs: null };
+      return { kind: "unauthorized" };
     }
     relogin = (relogin as Record<string, unknown>).cause;
   }
@@ -1474,10 +1507,10 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
     const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
     const code = String(value.code ?? body?.code ?? "").toLowerCase();
     if (status === 401 || code === "unauthorized" || code === "invalid_token") {
-      return { kind: "auth", cooldownMs: null };
+      return { kind: "unauthorized" };
     }
     if (status === 403) {
-      return { kind: "forbidden", cooldownMs: null };
+      return { kind: "forbidden" };
     }
     const message = String(value.message ?? body?.message ?? "");
     if (
@@ -1487,10 +1520,7 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
         status: Number.isInteger(status) ? status : null,
       })
     ) {
-      return {
-        kind: "rate_limit",
-        cooldownMs: providerRetryAfterMs(error) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-      };
+      return { kind: "rate_limited", retryAfterMs: providerRetryAfterMs(error) };
     }
     current = value.cause;
   }
@@ -1758,9 +1788,6 @@ function baseAgentRunFailurePayload(
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
     };
-  }
-  if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
-    return { error: error.message, code: error.code, retryable: false };
   }
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
@@ -2335,27 +2362,40 @@ export function codexUsageLimitFailurePayload(
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 
-/** Only typed provider backpressure or a verified reconnect requirement can rotate Claude. */
-export function classifyClaudeCredentialFailure(
+/**
+ * Claude's classification of a failed model request as a shared provider
+ * outcome (the adapter's `classifyError`, Claude track C1b), for a request
+ * of the Claude subscription transport only: a reconnect-required refresh or
+ * HTTP 401 is `unauthorized` (the transport already ran the turn's one
+ * forced refresh); 429 is `rate_limited` for the turn's model `modelId`, with
+ * the provider's retry time (null: the adapter's fallback applies); 529 or
+ * `overloaded_error` is `overloaded`, which never moves the turn to another
+ * account; 403 is `fatal`, which never rotates or quarantines the account.
+ * Anything else, a provider safety refusal included, is null: not a refusal
+ * of the account.
+ */
+export function classifyClaudeProviderError(
   error: unknown,
-): (XaiCredentialFailure & { requestId?: string }) | null {
+  modelId?: string,
+): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
-    if (current instanceof ClaudeSubscriptionReconnectRequired)
-      return { kind: "auth", cooldownMs: null };
-    if (current instanceof AnthropicRequestError && current.status === 401)
-      return {
-        kind: "auth",
-        cooldownMs: null,
-        ...(current.request_id ? { requestId: current.request_id } : {}),
-      };
-    if (current instanceof AnthropicRequestError && current.status === 429)
-      return {
-        kind: "rate_limit",
-        cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-        ...(current.request_id ? { requestId: current.request_id } : {}),
-      };
+    if (current instanceof ClaudeSubscriptionReconnectRequired) return { kind: "unauthorized" };
+    if (current instanceof AnthropicRequestError) {
+      if (!current.subscription) return null;
+      if (current.status === 401) return { kind: "unauthorized" };
+      if (current.status === 429)
+        return {
+          kind: "rate_limited",
+          retryAfterMs: providerRetryAfterMs(current),
+          ...(modelId === undefined ? {} : { modelId }),
+        };
+      if (current.status === 529 || current.errorType === "overloaded_error")
+        return { kind: "overloaded" };
+      if (current.status === 403) return { kind: "fatal" };
+      return null;
+    }
     current = current.cause;
   }
   return null;

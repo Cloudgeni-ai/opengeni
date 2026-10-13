@@ -132,6 +132,13 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("computer_"),
   },
   {
+    id: "secrets",
+    name: "Secrets",
+    description: "Find saved logins and keys, use them by reference, and save new ones.",
+    kind: "opengeni",
+    matches: (tool) => tool.startsWith("secret_"),
+  },
+  {
     id: "workspace",
     name: "Workspace operations",
     description: "Use sandboxes, sandbox environments, variables, schedules, and artifacts.",

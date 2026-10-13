@@ -1,4 +1,4 @@
-import { KNOWLEDGE_GUIDANCE } from "./agent-instructions/modules/knowledge";
+import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
@@ -79,6 +79,7 @@ import {
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
+  sandboxManifestEnvironmentNamePredicate,
   configuredProviders,
   McpOperationRecoverySchema,
   firstPartyMcpInternalBaseUrl,
@@ -102,9 +103,11 @@ import {
   type ToolGateway,
   type ToolGatewayAuthorization,
   type ToolGatewayApprovalResolver,
+  type ToolGatewayArgumentResolver,
   type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
+import { createSecretArgumentResolver } from "./secret-argument-resolution";
 import {
   approvalIdentifier,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
@@ -162,8 +165,15 @@ import {
   firstPartyToolFamily,
   integrationToolFamily,
   type ToolFamily,
+  isSecretReferenceError,
+  type SecretResolver,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
+export {
+  createSecretArgumentResolver,
+  secretArgumentMode,
+  type SecretArgumentMode,
+} from "./secret-argument-resolution";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_RESPONSE_BYTES,
@@ -330,12 +340,14 @@ import { gzipSync } from "node:zlib";
 import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   composeModularAgentInstructions,
   resolveAgentIdentity,
   rigInstructions,
   workspaceEnvironmentInstructions,
+  type AgentPromptExperiments,
   type AgentPromptResources,
   type AgentPromptToolAvailability,
   type RigInstructionsContext,
@@ -354,6 +366,7 @@ export {
   rigInstructions,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
+  type AgentPromptExperiments,
   type AgentPromptResources,
   type AgentPromptToolAvailability,
   type AgentPromptToolAvailabilityInput,
@@ -379,6 +392,7 @@ import {
   isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   isRoutingMutationOutputRejectedError,
+  withCommandNotStartedCallProof,
   withRoutingMutationOutputRejectionFence,
   renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
@@ -478,6 +492,7 @@ import {
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
+import { withLeanExecCommandArguments } from "./sandbox/lean-exec-arguments";
 export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
 export {
   classifyModelStreamIdleTimeoutError,
@@ -2101,6 +2116,21 @@ export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
+  /**
+   * Secret facts for this attempt. `referencesEnabled` is true when the host
+   * resolves `{{secret:…}}` references (the secrets prompt module renders
+   * only then). `hasActingHuman` admits Only-me secret questions;
+   * `validateQuestionVault` rejects a named vault that cannot take the answer
+   * (for example a connected 1Password vault, Q-05) with a model-facing reason.
+   */
+  secrets?: {
+    referencesEnabled: boolean;
+    hasActingHuman: boolean;
+    validateQuestionVault?: (input: {
+      vault: string;
+      saveTo: "user" | "task" | "workspace";
+    }) => Promise<string | null>;
+  };
   /** Settled response for the one internal human-input interruption resumed by this run. */
   humanInputResponse?: {
     requestId: string;
@@ -2372,6 +2402,13 @@ export type BuildAgentOptions = {
    * attempt-quiesced receipt.
    */
   onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
+  /**
+   * The attempt's secret resolver (W1 delivery). Sandbox commands, stdin,
+   * patches and image paths holding `{{secret:…}}` / `{{secretfile:…}}`
+   * references are resolved at the physical exec boundary; everything
+   * recorded keeps the references. Omitted: references pass through literally.
+   */
+  secretResolver?: SecretResolver | null;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -2393,11 +2430,12 @@ export type PersistentSessionSettings = {
 export function coreInstructions(
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
+  experiments?: AgentPromptExperiments,
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
     "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
-    ...KNOWLEDGE_GUIDANCE,
+    ...sharedKnowledgeGuidance(experiments?.knowledgeRetrievalGuidance === true),
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2417,8 +2455,9 @@ export function composeAgentInstructions(
   template: string,
   workspaceEnvironment?: WorkspaceEnvironmentContext,
   rig?: RigInstructionsContext,
+  experiments?: AgentPromptExperiments,
 ): string {
-  const core = coreInstructions(workspaceEnvironment, rig).join(" ");
+  const core = coreInstructions(workspaceEnvironment, rig, experiments).join(" ");
   if (template.includes(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER)) {
     return template.split(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER).join(core);
   }
@@ -2491,6 +2530,7 @@ export function agentPromptResourcesFor(
     | "gitTokenSeeds"
     | "workspaceEnvironment"
     | "rig"
+    | "secrets"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2513,7 +2553,17 @@ export function agentPromptResourcesFor(
         (options.fileResourceDownloads?.length ?? 0) > 0),
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
+    ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
   };
+}
+
+/** Deployment prompt experiments; absent when every experiment is off. */
+export function agentPromptExperimentsFor(settings: Settings): {
+  experiments?: AgentPromptExperiments;
+} {
+  return settings.experimentKnowledgeRetrievalGuidance
+    ? { experiments: { knowledgeRetrievalGuidance: true } }
+    : {};
 }
 
 function inspectModularAgentInstructions(
@@ -2534,6 +2584,7 @@ function inspectModularAgentInstructions(
     ...(options.agentPromptToolAvailability
       ? { toolAvailability: options.agentPromptToolAvailability }
       : {}),
+    ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
@@ -2545,7 +2596,9 @@ function inspectModularAgentInstructions(
     workspaceGovernance: options.workspaceGovernance,
     workspaceMemory: options.workspaceMemory,
     sessionInstructions: options.sessionInstructions,
+    ...(settings.experimentSystemPromptCacheSplit ? { stablePrefix: true } : {}),
   });
+  recordStableSystemPromptPrefix(composed.stablePrefix);
   return { layers: composed.layers, composed: composed.composed };
 }
 
@@ -2556,11 +2609,24 @@ export function inspectPersistentAgentInstructions(
   if (options.agentConfig) {
     return inspectModularAgentInstructions(settings, options.agentConfig, options);
   }
+  const personaTemplate = options.instructionsTemplate ?? settings.agentInstructionsTemplate;
   const personaAndCore = composeAgentInstructions(
-    options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+    personaTemplate,
     options.workspaceEnvironment,
     options.rig,
+    agentPromptExperimentsFor(settings).experiments,
   );
+  if (settings.experimentSystemPromptCacheSplit) {
+    // The deployment persona with no workspace environment or sandbox
+    // environment is shared by every session; a workspace persona is not.
+    recordStableSystemPromptPrefix(
+      personaTemplate === settings.agentInstructionsTemplate &&
+        !options.workspaceEnvironment &&
+        !options.rig
+        ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
+        : OPENGENI_OPERATIONAL_INSTRUCTIONS,
+    );
+  }
   const layers: PersistentAgentInstructionLayerDraft[] = [
     {
       id: "operational_contract",
@@ -2741,6 +2807,50 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * identical call would be rejected again. It names the missing or mistyped
  * properties and asks the model to correct them instead of "Please try again".
  */
+const HUMAN_INPUT_TOOL_DESCRIPTION =
+  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.";
+
+const HUMAN_INPUT_SECRET_DESCRIPTION =
+  'For a password, API key, token or one-time setup key, ask with a question of kind "secret" and a secret spec (item, field, saveTo); never use a text question or chat for secrets. The answer is saved to a vault and you receive a reference such as {{secret:GitHub/password}} plus the plain username, never the value; use the reference right away.';
+
+/**
+ * Secret-question rules the schema cannot express (AC-1): the capability is
+ * on, Only-me saves have an acting human, and a named vault can take the answer.
+ * Returns a model-facing reason, or null when the request may proceed.
+ */
+export async function secretQuestionRejection(
+  input: RequestHumanInputToolInput,
+  context: {
+    enabled: boolean;
+    hasActingHuman: boolean;
+    validateQuestionVault?: (input: {
+      vault: string;
+      saveTo: "user" | "task" | "workspace";
+    }) => Promise<string | null>;
+  },
+): Promise<string | null> {
+  const secretQuestions = input.questions.filter((question) => question.kind === "secret");
+  if (secretQuestions.length === 0) return null;
+  if (!context.enabled) {
+    return 'Secrets are turned off for this agent, so questions of kind "secret" are not available. Ask for something else or continue without the secret.';
+  }
+  for (const question of secretQuestions) {
+    const spec = question.secret;
+    if (!spec) continue;
+    const saveTo = spec.saveTo ?? "user";
+    if (saveTo === "user" && !context.hasActingHuman) {
+      return `Question "${question.id}" saves to "Only me", but no person is acting in this run. Use saveTo "task" or "workspace" and call request_human_input again.`;
+    }
+    if (spec.vault && context.validateQuestionVault) {
+      const reason = await context.validateQuestionVault({ vault: spec.vault, saveTo });
+      if (reason) {
+        return `Question "${question.id}" names vault "${spec.vault}": ${reason} Omit vault to use the default vault for saveTo, then call request_human_input again.`;
+      }
+    }
+  }
+  return null;
+}
+
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
@@ -2749,6 +2859,11 @@ export function mcpToolErrorOutput(error: unknown): {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
+  // Nothing ran; the output names each failure and, for a missing secret,
+  // carries the ready request_human_input call (never a value).
+  if (isSecretReferenceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
+  }
   const text =
     invalidToolArgumentsText(error) ??
     (error instanceof SynchronousCommandOutcomeUnknownError ? error.message : null) ??
@@ -2867,6 +2982,7 @@ export function buildOpenGeniAgent(
     defaults: !hostSuppliedSkillCatalog,
     editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
     sites: !hostSuppliedSkillCatalog && filesystemAvailable,
+    secrets: !hostSuppliedSkillCatalog && options.agentConfig?.capabilities.secrets === true,
     videoGeneration: !hostSuppliedSkillCatalog && Boolean(options.videoGeneration),
   });
   const skillCatalog = hostSuppliedSkillCatalog
@@ -2972,8 +3088,9 @@ export function buildOpenGeniAgent(
     ? null
     : agentTool({
         name: HUMAN_INPUT_TOOL_NAME,
-        description:
-          "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
+        description: toolFamilies.secrets
+          ? `${HUMAN_INPUT_TOOL_DESCRIPTION} ${HUMAN_INPUT_SECRET_DESCRIPTION}`
+          : HUMAN_INPUT_TOOL_DESCRIPTION,
         parameters: RequestHumanInputToolInput,
         needsApproval: true,
         inputGuardrails: [
@@ -2988,10 +3105,21 @@ export function buildOpenGeniAgent(
                   "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
                 );
               }
-              if (!RequestHumanInputToolInput.safeParse(input).success) {
+              const parsed = RequestHumanInputToolInput.safeParse(input);
+              if (!parsed.success) {
                 return ToolGuardrailFunctionOutputFactory.rejectContent(
                   "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
                 );
+              }
+              const secretRejection = await secretQuestionRejection(parsed.data, {
+                enabled: toolFamilies.secrets,
+                hasActingHuman: options.secrets?.hasActingHuman ?? false,
+                ...(options.secrets?.validateQuestionVault
+                  ? { validateQuestionVault: options.secrets.validateQuestionVault }
+                  : {}),
+              });
+              if (secretRejection) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
               }
               return ToolGuardrailFunctionOutputFactory.allow();
             },
@@ -3181,6 +3309,7 @@ export function buildOpenGeniAgent(
       ...(options.onToolCancellationFence
         ? { onToolCancellationFence: options.onToolCancellationFence }
         : {}),
+      ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
@@ -3350,8 +3479,13 @@ function mcpToolRequiresApproval(
   return policy === true || (policy !== false && policy.has(unprefixedName));
 }
 
-/** Stable, secret-free execution identity for an MCP server without a connection row. */
-function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
+/**
+ * Stable, secret-free execution identity for an MCP server without a connection row.
+ * Tool permission rules are keyed by this value, so it depends on the exact URL string:
+ * changing a server's URL orphans the rules saved for the old one. Every caller that reads
+ * or writes those rules must derive the identity through this function.
+ */
+export function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
   const targetHash = createHash("sha256").update(url, "utf8").digest("hex");
   return `session-mcp:${serverId}:${targetHash}`;
 }
@@ -4119,6 +4253,7 @@ export function buildAgentCapabilities(
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
+    secretResolver?: SecretResolver | null;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
   return buildAgentCapabilitiesFromComposition(
@@ -4147,11 +4282,17 @@ function buildAgentCapabilitiesFromComposition(
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
+    secretResolver?: SecretResolver | null;
   },
 ): ReturnType<typeof Capabilities.default> {
+  // A secret resolver needs the controller's wrappers even without a turn
+  // signal: they are where references are resolved below every recorder.
   const toolCancellation =
-    options.turnCancellationSignal || options.onToolCancellationFence
-      ? createTurnToolCancellationController(options.turnCancellationSignal)
+    options.turnCancellationSignal || options.onToolCancellationFence || options.secretResolver
+      ? createTurnToolCancellationController(options.turnCancellationSignal, {
+          cutPolling: settings.experimentCutPolling,
+          ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+        })
       : null;
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
@@ -4189,6 +4330,9 @@ function buildAgentCapabilitiesFromComposition(
       // Preserve that behavior except for client-side, pre-dispatch Modal
       // readiness proof, which reaches bounded same-turn recovery.
       execCommandErrorFunction: (_context, error) => {
+        // A delivery-time refusal (unsupported shell, binary value) happened
+        // before dispatch: give the model the structured, value-free error.
+        if (isSecretReferenceError(error)) return error.toModelOutput();
         if (isProviderCommandObservationUnavailableError(error)) {
           return "Managed sandbox command observation unavailable. Outcome unknown. Do not replay the command or resend stdin; observe the existing invocation.";
         }
@@ -4262,6 +4406,29 @@ function buildAgentCapabilitiesFromComposition(
         };
       });
     };
+  }
+  // A proven pre-dispatch start failure is rethrown above for same-turn
+  // recovery. Bind that proof to its exact call so settlement can record the
+  // call as not started (replay safe) instead of outcome unknown.
+  for (const capability of caps) {
+    const target = capability as unknown as { tools(): Tool<unknown>[] };
+    const original = target.tools;
+    target.tools = function () {
+      return original.call(this).map((tool) => withCommandNotStartedCallProof(tool as never));
+    };
+  }
+  // Lean non-strict `exec_command` schema (settings.experimentOutputCost, on by
+  // default; OPENGENI_EXPERIMENT_OUTPUT_COST=false disables). Outermost, so every
+  // inner layer (SDK parser, turn cancellation, routing fence) sees canonical
+  // arguments.
+  if (settings.experimentOutputCost) {
+    for (const capability of caps) {
+      const target = capability as unknown as { tools(): Tool<unknown>[] };
+      const original = target.tools;
+      target.tools = function () {
+        return withLeanExecCommandArguments(original.call(this));
+      };
+    }
   }
   return caps;
 }
@@ -4342,6 +4509,12 @@ export type ToolPreparationPhaseMeasurement = {
 export type PrepareToolsOptions = {
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
+  /**
+   * Attempt-scoped secret resolver. When present and enabled, remote MCP and
+   * Codex-app tool arguments have their `{{secret:…}}` references resolved by
+   * the gateway after approval; otherwise references pass through literally.
+   */
+  secretResolver?: SecretResolver | null;
   /** Current-caller live selected-target fence, before every physical MCP request. */
   authorizeProviderRequest?: () => Promise<void>;
   /**
@@ -4449,6 +4622,8 @@ export type PrepareToolsOptions = {
       context: { transportMeta?: Record<string, unknown> | null },
     ) => boolean;
     filterDefinition?: (definition: ToolGatewayDefinition) => boolean;
+    /** Viewer-authority secret resolution for Site and workspace HTTP calls. */
+    resolveArguments?: ToolGatewayArgumentResolver;
   };
   /**
    * Persist an oversized *model-visible* tool result as a workspace File and
@@ -5539,6 +5714,7 @@ async function prepareAttemptToolEnvironment(
     ),
   );
   const subjectId = options.subjectId ?? "worker:mcp-model";
+  const secretArguments = createSecretArgumentResolver({ resolver: options.secretResolver });
   const guardedDefinitions = options.authorizeAttemptExecution
     ? definitions.map((definition) => ({
         ...definition,
@@ -5572,6 +5748,7 @@ async function prepareAttemptToolEnvironment(
       callerSubjectId === subjectId &&
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
+    ...(secretArguments ? { resolveArguments: secretArguments } : {}),
   });
   for (const { server } of prepared.servers) {
     server.bindAttemptToolEnvironment(environment, subjectId);
@@ -5858,6 +6035,9 @@ async function prepareWorkspaceToolGatewayEnvironment(
       : {}),
     ...(options.workspaceToolGateway.requireApproval
       ? { requireApproval: options.workspaceToolGateway.requireApproval }
+      : {}),
+    ...(options.workspaceToolGateway.resolveArguments
+      ? { resolveArguments: options.workspaceToolGateway.resolveArguments }
       : {}),
   });
 }
@@ -7501,7 +7681,7 @@ async function publishCodexAppsAuthNeeded(
 // The first-party MCP permission set signed into a worker's delegated token
 // when the session does not specify its own. POWERFUL BY DEFAULT: it carries
 // every permission that unlocks a first-party tool — session orchestration
-// (sessions:*), workspace variable sets (variable-sets:*), rigs:use
+// (sessions:*), vault secrets (secrets:list/use/write), rigs:use
 // (list/get/propose/verify only), and GitHub (github:use) — so agents are fully capable out of the box. A user DEMOTES a
 // specific session by setting a narrower session.firstPartyMcpPermissions (the
 // create-session permission picker), which the worker uses instead. Account-
@@ -9646,13 +9826,11 @@ export function withManifestRefreshOnResume(
 // OWNED-RESUME manifest refresh. This path runs ONLY for SDK-owned sessions
 // (withManifestRefreshOnResume wraps client.resume, which the SDK never calls
 // when handed a live provided session — the ownedSandbox branch bypasses this
-// entirely). Owned applyManifest MERGES env safely with no guard, and this
-// refresh is a FEATURE: it is how a workspace-env edit reaches a long-lived
-// owned local/docker box that rarely recycles. The provided-session env pin
-// (pinProvidedSessionManifestEnvironment below) — NOT this function — is the
-// fix for the SDK's validateNoEnvironmentDelta session-fatal guard. Drift is
-// additionally REPORTED here (key names only, never values) so any env
-// recompute change stays attributable from the DB alone.
+// entirely). Owned applyManifest MERGES env safely with no guard. Since W1
+// (secrets delivery) the manifest env is deployment constants only, so the
+// refresh only carries constant/pointer changes to a long-lived owned box (and
+// drops any legacy user keys from its state). There is no drift reporting:
+// user secrets are resolved per command and never ride the manifest.
 export async function applyMissingManifestEntries(
   session: SandboxSessionLike,
   targetManifest: Manifest,
@@ -9681,10 +9859,7 @@ export async function applyMissingManifestEntries(
       "Resumed sandbox session cannot apply new manifest entries because current manifest state is unavailable",
     );
   }
-  // Drift detection runs on EVERY resume (even no-op ones): the durable trace
-  // that makes an env-recompute regression attributable from the DB instead of
-  // from rotated worker logs.
-  await reportManifestEnvironmentDrift(currentManifest, target, context);
+  void context;
   if (!session.applyManifest && !session.materializeEntry) {
     if (Object.keys(target.entries).length === 0) {
       return;
@@ -9749,73 +9924,14 @@ export async function applyMissingManifestEntries(
 }
 
 /**
- * Key-level diff of the live box's baked manifest env vs the freshly recomputed
- * target env. Returns null when identical. Key NAMES only — values are secrets
- * and must never leave this function's comparison.
- */
-export function manifestEnvironmentDrift(
-  current: Manifest,
-  target: Manifest,
-): { added: string[]; removed: string[]; changed: string[] } | null {
-  const currentEnv = (current.environment ?? {}) as Record<string, unknown>;
-  const targetEnv = (target.environment ?? {}) as Record<string, unknown>;
-  const added: string[] = [];
-  const removed: string[] = [];
-  const changed: string[] = [];
-  for (const key of Object.keys(targetEnv)) {
-    if (!(key in currentEnv)) {
-      added.push(key);
-    } else if (stableJson(currentEnv[key]) !== stableJson(targetEnv[key])) {
-      changed.push(key);
-    }
-  }
-  for (const key of Object.keys(currentEnv)) {
-    if (!(key in targetEnv)) {
-      removed.push(key);
-    }
-  }
-  if (added.length === 0 && removed.length === 0 && changed.length === 0) {
-    return null;
-  }
-  return {
-    added: added.sort(),
-    removed: removed.sort(),
-    changed: changed.sort(),
-  };
-}
-
-async function reportManifestEnvironmentDrift(
-  current: Manifest,
-  target: Manifest,
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent">,
-): Promise<ReturnType<typeof manifestEnvironmentDrift>> {
-  const drift = manifestEnvironmentDrift(current, target);
-  if (!drift) {
-    return null;
-  }
-  // Reporting must never break a resume: the drift itself is benign under the
-  // env pin (the box keeps running on its baked env); only the SIGNAL matters.
-  try {
-    await context.onRuntimeEvent?.({
-      type: "sandbox.env.drift",
-      payload: drift,
-    });
-  } catch {
-    // Swallow: a failed emit must not fail the turn.
-  }
-  return drift;
-}
-
-/**
  * ENV PIN for provided sessions (the ownership-inversion turn path). The SDK
  * validates the FULL target manifest environment against a live provided
  * session's baked env BEFORE reducing to its entry-only delta
  * (validateNoEnvironmentDelta -> session-fatal UserError on ANY difference).
- * So a turn resuming an existing box must declare the box's OWN env,
- * byte-identical — never the fresh recompute. This replaces the agent's
- * defaultManifest environment with the baked one and reports the drift (key
- * names only) instead of letting it kill the session. Fresh env lands at the
- * next cold-create; rotating values ride OFF-manifest (TOKEN-BROKER B1/B2).
+ * Since W1 the manifest env is deployment constants only and nothing compares
+ * or reports it: a turn resuming an existing box always declares the box's OWN
+ * env, so per-deploy constant changes can never kill a warm box. Fresh
+ * constants land at the next cold-create; user secrets ride per command.
  */
 export async function pinProvidedSessionManifestEnvironment(
   agent: Agent<any, any>,
@@ -9839,10 +9955,10 @@ export async function pinProvidedSessionManifestEnvironment(
   if (!holder.defaultManifest || !currentManifestValue) {
     return;
   }
+  void context;
   const current = ensureManifest(currentManifestValue);
   const target = ensureManifest(holder.defaultManifest);
-  const drift = await reportManifestEnvironmentDrift(current, target, context);
-  if (!drift) {
+  if (stableJson(current.environment ?? {}) === stableJson(target.environment ?? {})) {
     return;
   }
   holder.defaultManifest = new Manifest({
@@ -9903,9 +10019,8 @@ export async function runOwnedSandboxSetup(
   const { settings, environment } = opts;
   // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
   // env against the live box's baked env before applying its entry-only delta
-  // (validateNoEnvironmentDelta — session-fatal on ANY drift; killed a 4-day
-  // prod manager session 2026-07-06). Align the turn's manifest to the box's
-  // own env and REPORT the drift instead of dying on it.
+  // (validateNoEnvironmentDelta — session-fatal on ANY difference). Adopt the
+  // box's own env; constants only since W1, so there is nothing to report.
   await pinProvidedSessionManifestEnvironment(agent, session, {
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
   });
@@ -10327,10 +10442,15 @@ export function buildManifest(
 
   // sandbox-safe in-memory or staged local-dir sources, so no host path grant
   // is required here.
+  // RM-3: the manifest env holds deployment constants only. Any other key is a
+  // regression (user secrets are delivered per command), so drop it here.
+  const keepEnvironmentName = sandboxManifestEnvironmentNamePredicate(settings);
   return new Manifest({
     root: options.root ?? "/workspace",
     entries,
-    environment,
+    environment: Object.fromEntries(
+      Object.entries(environment).filter(([name]) => keepEnvironmentName(name)),
+    ),
   });
 }
 
@@ -13080,4 +13200,8 @@ function sortJson(value: unknown): unknown {
 }
 
 export { createFirstPartyAttemptClient } from "./first-party-client";
-export { withClaudeUsageObserver } from "./claude-subscription-usage";
+export {
+  withClaudeUsageObserver,
+  type ClaudeRequestCustody,
+  type PreparedUsageRequest,
+} from "./claude-subscription-usage";

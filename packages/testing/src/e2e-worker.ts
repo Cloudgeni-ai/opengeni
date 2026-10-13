@@ -6,7 +6,7 @@ import { createProductionAgentRuntime } from "@opengeni/runtime";
 import {
   createOpenGeniWorker,
   createWorkerWorkflowSignaler,
-  registerSessionWorkflowWakeDispatcherSchedule,
+  startInternalMaintenanceCadences,
 } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import {
@@ -30,11 +30,16 @@ const observability = createObservability(settings, { component: `e2e-worker-${r
 const workflowSignaler = await createWorkerWorkflowSignaler(settings, dbClient.db);
 // The browser acceptance must include the same durable wake-repair owner as a
 // production control worker. Starting only the raw Temporal pollers makes a
-// committed Pause/Resume look successful while its outbox trigger targets a
-// schedule that does not exist, stranding the resumed queue forever.
+// committed Pause/Resume look successful while a lost immediate trigger is
+// never repaired, stranding the resumed queue forever.
 const wakeSchedule =
   role === "control"
-    ? await registerSessionWorkflowWakeDispatcherSchedule(settings, observability)
+    ? await startInternalMaintenanceCadences({
+        settings,
+        observability,
+        db: dbClient.db,
+        jobs: ["session-workflow-wake-dispatcher"],
+      })
     : null;
 const { worker, connection } = await createOpenGeniWorker({
   role,
@@ -78,6 +83,9 @@ function scriptedModelForScenario(scenario: string): Model {
   }
   if (scenario === "sandbox") {
     return new SandboxScriptedModel();
+  }
+  if (scenario === "directive") {
+    return new DirectiveScriptedModel();
   }
   if (scenario === "browser-command-control") {
     return new BrowserCommandControlModel();
@@ -481,4 +489,84 @@ class HeldWaitConsumedByPersonTurnModel implements Model {
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     yield* new ScriptedModel([await this.step(request)]).getStreamedResponse(request);
   }
+}
+
+/**
+ * Generic scripted driver for the secrets e2e harness (scripts/verify/secrets-e2e).
+ * The latest user message carries `E2E-DIRECTIVE {"steps":[{"tool":"exec_command",
+ * "args":{...}}]} E2E-END`. The model calls each tool in order and then answers
+ * `E2E-REPORT {"tools":[...],"outputs":[...]}` with the tool names it was offered
+ * and every step's output, so the harness can assert on both without a real model.
+ */
+class DirectiveScriptedModel implements Model {
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return await new ScriptedModel([directiveStepForRequest(request)]).getResponse(request);
+  }
+
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([directiveStepForRequest(request)]).getStreamedResponse(request);
+  }
+}
+
+type DirectiveStep = { tool: string; args: unknown };
+
+function directiveItemText(item: unknown): string {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  const content = (item as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        part && typeof part === "object" ? String((part as { text?: unknown }).text ?? "") : "",
+      )
+      .join("\n");
+  }
+  return "";
+}
+
+function directiveOutputText(output: unknown): string {
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) return output.map(directiveOutputText).join("\n");
+  if (output && typeof output === "object") {
+    const text = (output as { text?: unknown }).text;
+    if (typeof text === "string") return text;
+  }
+  return JSON.stringify(output ?? null);
+}
+
+function directiveStepForRequest(request: ModelRequest): ScriptedModelStep {
+  const items: unknown[] = Array.isArray(request.input) ? request.input : [request.input];
+  let start = -1;
+  let steps: DirectiveStep[] = [];
+  for (let index = items.length - 1; index >= 0 && start < 0; index -= 1) {
+    const item = items[index] as { role?: unknown };
+    if (item && typeof item === "object" && item.role !== "user") continue;
+    const match = /E2E-DIRECTIVE\s*([\s\S]*?)\s*E2E-END/u.exec(directiveItemText(item));
+    if (!match) continue;
+    start = index;
+    steps = (JSON.parse(match[1]!) as { steps: DirectiveStep[] }).steps;
+  }
+  if (start < 0)
+    return { outputText: 'E2E-REPORT {"error":"no E2E-DIRECTIVE in the latest user message"}' };
+  const after = items.slice(start + 1) as { type?: string; callId?: string; output?: unknown }[];
+  const issued = after.filter(
+    (item) => item.type === "function_call" && item.callId?.startsWith("e2e-step-"),
+  );
+  if (issued.length < steps.length) {
+    const step = steps[issued.length]!;
+    return {
+      output: [
+        functionCall(step.tool, step.args, `e2e-step-${issued.length}-${crypto.randomUUID()}`),
+      ],
+    };
+  }
+  const outputs = after
+    .filter((item) => item.type === "function_call_result" && item.callId?.startsWith("e2e-step-"))
+    .map((item) => directiveOutputText(item.output).slice(0, 8_000));
+  const tools = (request.tools ?? []).map(
+    (tool) => (tool as { name?: string; type?: string }).name ?? tool.type,
+  );
+  const report = `E2E-REPORT ${JSON.stringify({ tools, outputs })}`;
+  return { outputText: report };
 }

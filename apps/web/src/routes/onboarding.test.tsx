@@ -1512,8 +1512,12 @@ describe("organization onboarding UI", () => {
       token,
     }));
     const createWorkspace = mock(async (_request: unknown) => ({ id: "setup-workspace" }));
-    const createVariableSet = mock(async (_workspaceId: string, _request: unknown) => ({
-      id: "variable-set-1",
+    const createVault = mock(async (_request: unknown) => ({ id: "vault-private" }));
+    const createItem = mock(async (_vaultId: string, _request: unknown) => ({ id: "item-1" }));
+    const vaults = mock((_workspaceId: string) => ({
+      listVaults: async () => [],
+      createVault,
+      createItem,
     }));
     const saveNewSessionDraft = mock(
       async (_workspaceId: string, _request: Record<string, unknown>) => undefined,
@@ -1532,7 +1536,7 @@ describe("organization onboarding UI", () => {
                 ...setupClient,
                 createOrganizationApiKey,
                 createWorkspace,
-                createVariableSet,
+                vaults,
                 getNewSessionDraft: async () => emptyNewSessionDraft,
                 saveNewSessionDraft,
               } as never
@@ -1623,10 +1627,13 @@ describe("organization onboarding UI", () => {
       expect(createWorkspace.mock.calls).toEqual([
         [{ accountId: "preview-organization", name: "Opengeni setup" }],
       ]);
-      expect(createVariableSet.mock.calls[0]![0]).toBe("setup-workspace");
-      expect(createVariableSet.mock.calls[0]![1]).toMatchObject({
-        name: "Opengeni developer setup",
-        variables: [{ name: "DEVELOPER_SETUP_API_KEY", value: token }],
+      expect(vaults.mock.calls[0]![0]).toBe("setup-workspace");
+      expect(createVault.mock.calls).toEqual([[{ name: "Private", ownerKind: "user" }]]);
+      expect(createItem.mock.calls[0]![0]).toBe("vault-private");
+      expect(createItem.mock.calls[0]![1]).toEqual({
+        type: "api_key",
+        name: "Opengeni setup API key",
+        fields: [{ name: "value", value: token }],
       });
       // No chat starts yet: its new-chat page opens with the message ready to
       // send, so this works before any model or credits exist.
@@ -1636,20 +1643,19 @@ describe("organization onboarding UI", () => {
         {
           text: string;
           expectedRevision: number;
-          options: { variableSetIds?: string[]; agent?: { instructions?: string } };
+          options: { agent?: { instructions?: string } };
         },
       ];
       expect(draftWorkspaceId).toBe("setup-workspace");
       expect(draft.text).toBe("I want to add AI agents to my product. Help me set it up.");
       expect(draft.expectedRevision).toBe(emptyNewSessionDraft.revision);
-      expect(draft.options.variableSetIds).toEqual(["variable-set-1"]);
       const context = String(draft.options.agent?.instructions);
       expect(context).toContain("I chose to let Opengeni implement it.");
       expect(context).toContain("Organization: Northwind (ID preview-organization)");
       expect(context).toContain("builtin:opengeni-client");
-      expect(context).toContain("DEVELOPER_SETUP_API_KEY");
+      expect(context).toContain("{{secret:Opengeni setup API key}}");
       expect(context).toContain("GitHub");
-      // The key is in the sandbox variable set, never in model-visible history.
+      // The key is in the vault, never in model-visible history.
       expect(JSON.stringify(draft)).not.toContain(token);
       expect(onComplete.mock.calls).toEqual([[{ workspaceId: "setup-workspace" }]]);
     } finally {
@@ -1873,9 +1879,16 @@ describe("organization onboarding UI", () => {
       token: "ogk_retry123_secret",
     }));
     const createWorkspace = mock(async () => ({ id: "setup-workspace" }));
-    const createVariableSet = mock(async () => {
-      throw new Error("variable sets unavailable");
+    const createItem = mock(async () => {
+      throw new Error("vaults unavailable");
     });
+    const vaults = mock((_workspaceId: string) => ({
+      listVaults: async () => [
+        { id: "vault-private", ownerKind: "user", isDefault: true, canWrite: true },
+      ],
+      createVault: async () => ({ id: "unused" }),
+      createItem,
+    }));
     let draftAttempts = 0;
     const saveNewSessionDraft = mock(
       async (_workspaceId: string, _request: Record<string, unknown>) => {
@@ -1895,7 +1908,7 @@ describe("organization onboarding UI", () => {
                 ...setupClient,
                 createOrganizationApiKey,
                 createWorkspace,
-                createVariableSet,
+                vaults,
                 getNewSessionDraft: async () => emptyNewSessionDraft,
                 saveNewSessionDraft,
               } as never
@@ -1927,13 +1940,12 @@ describe("organization onboarding UI", () => {
       await flush();
       expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
       expect(createWorkspace).toHaveBeenCalledTimes(1);
-      expect(createVariableSet).toHaveBeenCalledTimes(1);
+      expect(createItem).toHaveBeenCalledTimes(1);
       expect(saveNewSessionDraft).toHaveBeenCalledTimes(2);
       const second = saveNewSessionDraft.mock.calls[1]![1] as {
-        options: { variableSetIds?: string[]; agent?: { instructions?: string } };
+        options: { agent?: { instructions?: string } };
       };
-      // Without the variable set the chat says so instead of claiming a key.
-      expect(second.options.variableSetIds).toBeUndefined();
+      // Without the saved key the chat says so instead of claiming one.
       expect(String(second.options.agent?.instructions)).toContain(
         "No API key is attached to this chat.",
       );

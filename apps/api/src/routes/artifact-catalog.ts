@@ -21,12 +21,14 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  siteViewerForGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   getFilesForSubject,
   getGeneratedImageArtifact,
   getSessionAuthorityProjection,
+  isWorkspaceArtifactVisible,
   listArtifactCatalogCandidates,
   nestedPostgresSqlState,
   updateArtifactPin,
@@ -114,6 +116,17 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
           throw editableArtifactHttpError(error);
         }
       }
+      // An Only me Site someone else owns answers exactly like a missing one.
+      if (
+        kind.data === "site" &&
+        !(await isWorkspaceArtifactVisible(
+          deps.db,
+          workspaceId,
+          await siteViewerForGrant(deps.db, grant),
+          artifactId,
+        ))
+      )
+        throw new HTTPException(404, { message: "Artifact not found" });
       if (fileKind) {
         const subjectId = await fileAuthoritySubjectIdForGrant(deps, grant);
         const [file] = await getFilesForSubject(deps.db, {
@@ -247,6 +260,9 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
       let lastReturned: ArtifactCatalogPosition | undefined;
       let nextCursor: string | null = null;
       const fileSubject = includesFiles ? await fileAuthoritySubjectIdForGrant(deps, grant) : null;
+      const siteViewer = kinds.includes("site")
+        ? await siteViewerForGrant(deps.db, grant)
+        : { subjectId: null };
       for (let batch = 0; batch < MAX_BATCHES; batch++) {
         const candidates = await listArtifactCatalogCandidates(
           deps.db,
@@ -254,6 +270,7 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
           {
             query,
             kinds,
+            siteViewer,
             snapshotAt,
             ...(after ? { after } : {}),
             limit: CANDIDATE_BATCH,
@@ -304,6 +321,8 @@ async function projectCandidate(
     ...(row.pinned !== undefined ? { pinned: row.pinned } : {}),
   };
   if (row.version_id) item.versionId = row.version_id;
+  if (row.kind === "site")
+    item.visibility = row.site_visibility === "user_private" ? "private" : "workspace";
   if (editableKinds.has(row.kind)) {
     const scope = editableArtifactScope({
       accountId: grant.accountId,

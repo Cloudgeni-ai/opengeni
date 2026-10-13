@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
   declaredCacheLifetimeMs,
+  subscriptionCoreModelPolicyProviderIds,
   type ModelDescriptor,
   type PlacementInput,
   type ReselectionPoint,
@@ -143,7 +144,8 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
     if (
       personalAuthority &&
       session.owner_subject_id &&
-      session.owner_membership_id === personalAuthority.ownerMembershipId &&
+      (session.owner_membership_id === personalAuthority.ownerMembershipId ||
+        personalAuthority.sharedSessionChoice?.sessionId === request.sessionId) &&
       request.initiatingHumanSubjectId
     ) {
       const [authorization] = await rawRows<{ authorized: boolean }>(
@@ -164,6 +166,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       readSubscriptionSessionBinding(tx, {
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
+        provider: providerId,
         forUpdate: request.lockBinding === true,
       }),
       {
@@ -202,24 +205,44 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       ];
     }
 
+    if (
+      personalAuthorityAuthorized &&
+      personalAuthority &&
+      personalAuthority.ownerMembershipId !== session.owner_membership_id
+    ) {
+      // The personal-access SQL gate proved this accepting human's live
+      // membership. Do not replace the independently verified chat owner.
+      people = [
+        ...people,
+        {
+          membershipId: personalAuthority.ownerMembershipId,
+          active: true,
+          personalFallbackOptIn: false,
+        },
+      ];
+    }
     const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
     const workspaceAllowedModelIds =
       workspacePolicy.allowedProviders === null && workspacePolicy.allowedModels === null
         ? null
         : request.models
-            .filter(
-              (model) =>
-                evaluateWorkspaceModelPolicy(workspacePolicy, {
-                  // Workspace model policy uses the resolved provider identity;
-                  // the subscription core's provider key is intentionally neutral.
-                  providerId:
-                    model.provider === providerId
-                      ? provider.adapter.modelPolicyProviderId
-                      : model.provider,
-                  modelId: model.id,
-                  // Subscription placement: these models never spend Opengeni credits.
-                  chargesCredits: false,
-                }).allowed,
+            .filter((model) =>
+              // Workspace model policy uses the resolved provider identity;
+              // the subscription core's provider key is intentionally
+              // neutral, and a provider may name a model under more than one
+              // identity, every one of which must be allowed.
+              (model.provider === providerId
+                ? subscriptionCoreModelPolicyProviderIds(provider.adapter, model.id)
+                : [model.provider]
+              ).every(
+                (policyProviderId) =>
+                  evaluateWorkspaceModelPolicy(workspacePolicy, {
+                    providerId: policyProviderId,
+                    modelId: model.id,
+                    // Subscription placement: these models never spend Opengeni credits.
+                    chargesCredits: false,
+                  }).allowed,
+              ),
             )
             .map((model) => model.id);
     const input: PlacementInput = {
@@ -254,6 +277,9 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
                 {
                   provider: personalAuthority.provider,
                   ownerMembershipId: personalAuthority.ownerMembershipId,
+                  ...(personalAuthority.sharedSessionChoice
+                    ? { sharedSessionChoice: personalAuthority.sharedSessionChoice }
+                    : {}),
                 },
               ]
             : [],

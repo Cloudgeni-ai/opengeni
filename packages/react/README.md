@@ -96,6 +96,17 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
+For an account-aware header, `useLastStartedTurnPolicy(sessionId, { events,
+includeServingModel: true })` overlays the latest lease-backed serving receipt
+only when it belongs to the last started turn. This requires the optional
+`getSessionModelAccount` client method. Without the option, the hook continues
+to return the accepted turn policy. Neither mode changes the composer's
+preferred model. `useSessionModelAccount` reads authorized accounts and choices;
+pass `provider` so Automatic resets only that provider's choice. Its optional
+`choice.serving` is the last committed placement, not a queued next-turn choice.
+The timeline renders neutral account-switch events without exposing account
+identity or duplicating provider compatibility events.
+
 `OpenGeniChat` and `SessionConversation` are the default product integration.
 Back them with `createSessionProxyHandler` from `@opengeni/sdk`, mounted on your
 server, and pass its mount as `baseUrl`. No provider, client, or workspace id
@@ -208,6 +219,28 @@ Without it, diffs and file views render as plain text.
 a new API contract revision. The stock Opengeni console opts into that
 stale-tab protection with `reloadOnApiContractChange`; embedded products
 should leave it off.
+
+Subscription account lists and their usage readings (`useCodexAccounts`,
+`useSuperGrokAccounts`) are shared per `client` object: readers mounted at the
+same time share one request and one result, and account changes made through
+these hooks re-read every mounted list (also when the component that made the
+change has already unmounted). By default nothing is kept after the last reader
+unmounts, so a host that reuses one `client` for different people never shows
+one person's accounts to the next, also when it re-keys its tree for the next
+person in a single render: the new reader and its children never render the
+previous rows, and a read still in flight for the previous person is
+discarded. (A reader joining one already on screen shows its rows before the
+browser paints, after one extra render.) Set `retainReadsAcrossMounts` on
+`OpenGeniProvider` to keep them across navigation instead: returning to a page
+renders the last accounts at once and re-reads them in the background once
+they are older than 10 seconds. Failed reads are never kept, and a
+401/403/404 drops what was kept. Retained reads are dropped when `client`
+changes or the provider unmounts.
+
+> **Host action item:** only set `retainReadsAcrossMounts` when every signed-in
+> person gets their own `client` object (create a new client on sign-in,
+> sign-out and account switch), as the stock Opengeni console does. With a
+> shared client, leave it off.
 
 ### Exact conversation search navigation
 
@@ -953,6 +986,11 @@ state remains application-owned; durable draft and session state remain in
   plus the `defaultModel` to preselect (from the client config) for a picker.
 - `useCodexAccounts()` — connected Codex (ChatGPT) accounts, the active/next-run
   pointer, and per-session account pinning for multi-account subscriptions.
+  `refreshUsage({ maxAgeMs })` reuses live usage readings only when every
+  listed account was read within `maxAgeMs`; concurrent refreshes share one
+  provider read. `liveUsageUpdatedAt` is the time of the oldest account
+  reading. See `retainReadsAcrossMounts` above for keeping the list and
+  readings across navigation.
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
@@ -960,10 +998,12 @@ state remains application-owned; durable draft and session state remain in
   "summary" })` returns compact list entries; omit the option for full sessions.
   Scripted clients can omit the summary method and the hook projects full pages
   locally while retaining cancellation and causal read revisions.
-- `useVariableSets()` — workspace variable sets with metadata-only generic
-  reads and create/update/remove/set/delete operations. Dedicated permissioned
-  exact-value reveal is part of the held React/UI train rather than an
-  implicit field on ordinary reads.
+- `useVaults()` / `useVault()` / `useVaultItems()` / `useVaultItem()` /
+  `useVaultFieldVersions()` / `useSessionSecrets()` — vaults, items, field
+  history and a session's vault policy, metadata only. `useVaultsApi()` returns
+  the SDK's `client.vaults(workspaceId)` routes for writes and the one audited
+  `revealField` call; keep revealed values in component state, never in a
+  cache. Variable Sets and `useVariableSets()` were removed in 2.0.0.
 - `useWorkspaces()` — the caller's workspaces with create/update (client-only;
   not bound to the provider's workspace).
 - `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent
@@ -1386,6 +1426,10 @@ nested page. Model changes preserve supported reasoning effort and latency;
 unsupported effort falls back to the new model's default, and unsupported speed
 returns to Standard. Thinking uses inline radio choices and is hidden when the
 model has no adjustable reasoning levels. Availability and Codex-only session restrictions still disable choices.
+
+Use `allowModelOptions={false}` for policies that save only a model identity,
+such as a fallback order. This hides effort and speed controls without changing
+the catalog, payment-source labels, or model eligibility.
 
 The trigger renders immediately; the searchable popover loads when opened. Hosts
 can translate its search, current-selection, empty-result, attachment-warning, and

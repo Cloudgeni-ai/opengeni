@@ -5,11 +5,19 @@
  * untouched. Workflow activity names, signal names and argument shapes stay
  * those of the legacy Codex wait: the activities look a waiter id up in the
  * core table first and fall back to the legacy table.
+ *
+ * The wait, wake and reconcile steps are provider-neutral (SuperGrok track
+ * X1b): a `CoreWaitBinding` supplies one provider's database entry points.
+ * The Codex-named functions are Codex's bindings and are unchanged.
  */
 import {
   abandonSubscriptionCapacityWakeDelivery,
+  armSubscriptionCoreCodexCapacityWait,
   claimSubscriptionCapacityWakeDeliveries,
   evaluateSubscriptionCoreCodexPlacement,
+  evaluateSubscriptionCorePlacementWithFailover,
+  getSession,
+  getSessionTurn,
   getSubscriptionCoreCodexCapacityWaitById,
   markSubscriptionCapacityWakeDelivered,
   readSubscriptionCoreCodexTurnModel,
@@ -18,14 +26,23 @@ import {
   recoverSubscriptionCoreCodexConnectionHealth,
   retrySubscriptionCapacityWakeDelivery,
   subscriptionCoreCodexCapacityWaitRef,
+  subscriptionCoreProvider,
   wakeSubscriptionCoreCodexCapacityWaiters,
   withSubscriptionCapacityWakeOutboxScope,
+  withSubscriptionCoreAcceptedTurn,
   type Database,
+  type SubscriptionCoreCodexCapacityWait,
   type SubscriptionCoreCodexWaitEvaluation,
   type SubscriptionCoreCodexWakeScope,
+  type SubscriptionCoreCodexPlacementEvaluation,
   type SubscriptionCoreTurnIdentity,
+  type SubscriptionCoreWaiterProvider,
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
+import type { Settings } from "@opengeni/config";
+import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { servingCatalogForBlockedTurn } from "./agent-turn/subscription-serving-catalog";
+import { subscriptionCoreWaitBindings } from "./subscription-core-wait-bindings";
 import type { CodexCapacityWaitRef, SignalCodexCapacityWorkflow } from "./types";
 import { workflowIdForSession } from "./common";
 
@@ -42,7 +59,57 @@ export function coreCodexWakeRetryDelayMs(attemptCount: number): number {
 
 export type CoreCodexWakeServices = {
   db: Database;
+  settings?: Settings;
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null | undefined;
+};
+
+/** One provider's database entry points for its core waiters. */
+export type CoreWaitBinding = {
+  provider: SubscriptionCoreWaiterProvider;
+  arm: typeof armSubscriptionCoreCodexCapacityWait;
+  getWaiterById: (
+    db: Database,
+    input: { workspaceId: string; sessionId: string; waiterId: string },
+  ) => Promise<SubscriptionCoreCodexCapacityWait | null>;
+  readTurnModel: typeof readSubscriptionCoreCodexTurnModel;
+  recoverHealth: (db: Database, identity: SubscriptionCoreTurnIdentity) => Promise<number>;
+  evaluatePlacement: (
+    db: Database,
+    request: {
+      identity: SubscriptionCoreTurnIdentity;
+      productModelId: string;
+      reasoningLevel: string;
+    },
+  ) => Promise<SubscriptionCoreCodexPlacementEvaluation>;
+  wakeWaiters: (
+    db: Database,
+    input: { accountId: string; reason: string; workspaceIds?: readonly string[] },
+  ) => Promise<SubscriptionCoreCodexWakeScope[]>;
+  reconcileWaiter: typeof reconcileSubscriptionCoreCodexCapacityWait;
+  /**
+   * Re-read the provider's usage before a timed or woken reconcile evaluates
+   * placement, for a provider whose usage read can end an exhaustion before
+   * its stored reset (its waiters then recheck on a bounded backoff), under
+   * the parked turn's exact accepted identity (the same read placement
+   * evaluation uses; never called without one). Best effort: a failure
+   * leaves the stored state, and placement decides.
+   */
+  refreshBeforeReconcile?: (
+    services: { db: Database; settings: Settings },
+    turn: SubscriptionCoreTurnIdentity,
+  ) => Promise<void>;
+};
+
+/** Codex's binding (each call resolves the Codex-named entry point at call time). */
+export const CODEX_CORE_WAIT_BINDING: CoreWaitBinding = {
+  provider: "codex",
+  arm: (db, input) => armSubscriptionCoreCodexCapacityWait(db, input),
+  getWaiterById: (db, input) => getSubscriptionCoreCodexCapacityWaitById(db, input),
+  readTurnModel: (db, input) => readSubscriptionCoreCodexTurnModel(db, input),
+  recoverHealth: (db, identity) => recoverSubscriptionCoreCodexConnectionHealth(db, identity),
+  evaluatePlacement: (db, request) => evaluateSubscriptionCoreCodexPlacement(db, request),
+  wakeWaiters: (db, input) => wakeSubscriptionCoreCodexCapacityWaiters(db, input),
+  reconcileWaiter: (db, input) => reconcileSubscriptionCoreCodexCapacityWait(db, input),
 };
 
 export type CoreCodexWakeDeliveryResult = {
@@ -128,9 +195,18 @@ export async function wakeSubscriptionCoreCodexWaitersAndDeliver(
   services: CoreCodexWakeServices,
   input: { accountId: string; reason: string; workspaceIds?: readonly string[] },
 ): Promise<SubscriptionCoreCodexWakeScope[]> {
+  return await wakeSubscriptionCoreWaitersAndDeliver(services, CODEX_CORE_WAIT_BINDING, input);
+}
+
+/** The same wake for any provider's core waiters. */
+export async function wakeSubscriptionCoreWaitersAndDeliver(
+  services: CoreCodexWakeServices,
+  binding: Pick<CoreWaitBinding, "wakeWaiters">,
+  input: { accountId: string; reason: string; workspaceIds?: readonly string[] },
+): Promise<SubscriptionCoreCodexWakeScope[]> {
   let scopes: SubscriptionCoreCodexWakeScope[] = [];
   try {
-    scopes = await wakeSubscriptionCoreCodexCapacityWaiters(services.db, input);
+    scopes = await binding.wakeWaiters(services.db, input);
   } catch {
     return [];
   }
@@ -151,12 +227,23 @@ export async function evaluateCoreCodexBlockedTurn(
   services: CoreCodexWakeServices,
   input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
 ): Promise<SubscriptionCoreCodexWaitEvaluation> {
+  return await evaluateCoreBlockedTurn(services, CODEX_CORE_WAIT_BINDING, input);
+}
+
+/** The same evaluation for any provider's blocked turn. */
+export async function evaluateCoreBlockedTurn(
+  services: CoreCodexWakeServices,
+  binding: CoreWaitBinding,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<SubscriptionCoreCodexWaitEvaluation> {
   const identity = await readSubscriptionCoreTurnIdentity(services.db, input);
   if (!identity) return { kind: "revoked" };
-  const model = await readSubscriptionCoreCodexTurnModel(services.db, input);
+  const model = await binding.readTurnModel(services.db, input);
   if (!model) return { kind: "revoked" };
-  await recoverCoreCodexHealthAndWake(services, identity);
-  const evaluation = await evaluateSubscriptionCoreCodexPlacement(services.db, {
+  await recoverCoreHealthAndWake(services, binding, identity);
+  const failover = await evaluateFailoverBlockedTurn(services, binding, identity, model);
+  if (failover) return failover;
+  const evaluation = await binding.evaluatePlacement(services.db, {
     identity,
     productModelId: model.productModelId,
     reasoningLevel: model.reasoningLevel,
@@ -178,16 +265,111 @@ export async function evaluateCoreCodexBlockedTurn(
   }
 }
 
+/** Fresh accepted policy + current readiness/settings decide the whole pool.
+ * Stored waiter candidates are deliberately not an input to this evaluator.
+ * A wake grants no credentials: the resumed attempt still claims and leases.
+ */
+async function evaluateFailoverBlockedTurn(
+  services: CoreCodexWakeServices,
+  home: CoreWaitBinding,
+  identity: SubscriptionCoreTurnIdentity,
+  model: { productModelId: string; reasoningLevel: string },
+): Promise<SubscriptionCoreCodexWaitEvaluation | null> {
+  const settings = services.settings;
+  if (!settings?.subscriptionCrossProviderFailoverEnabled) return null;
+  const context = await withSubscriptionCoreAcceptedTurn(services.db, identity, async (tx) => {
+    const session = await getSession(tx, identity.workspaceId, identity.sessionId);
+    const turn = await getSessionTurn(tx, identity.workspaceId, identity.turnId);
+    if (!session || !turn || turn.sessionId !== identity.sessionId) return null;
+    const accepted = readTurnExecutionPolicyV1(turn.metadata);
+    return (
+      session.codexCompactionMode === "portable" &&
+      turn.source !== "compaction" &&
+      accepted.kind === "valid" &&
+      accepted.policy.credentialRestriction === undefined &&
+      accepted.policy.productModelId === model.productModelId
+    );
+  });
+  if (context.status !== "completed" || context.value === null) return { kind: "revoked" };
+  if (!context.value) return null;
+  const bindings = subscriptionCoreWaitBindings();
+  const models = await servingCatalogForBlockedTurn(
+    services.db,
+    settings,
+    identity,
+    model.productModelId,
+    bindings.map((binding) => binding.provider),
+  );
+  if (
+    !models.some(
+      (candidate) => candidate.id === model.productModelId && candidate.provider === home.provider,
+    )
+  )
+    return null;
+  const request = { identity, ...model, models, crossProviderFailoverEnabled: true };
+  let evaluation = await evaluateSubscriptionCorePlacementWithFailover(
+    services.db,
+    subscriptionCoreProvider(home.provider),
+    request,
+  );
+  // Only candidates derived by the live authority/policy evaluator can have
+  // their health or usage refreshed. Personal billing keeps the same accepted
+  // identity, including shared-session and frozen-background restrictions.
+  const candidates = new Set(evaluation.candidateProviders ?? []);
+  for (const binding of bindings) {
+    if (binding.provider === home.provider || !candidates.has(binding.provider)) continue;
+    await recoverCoreHealthAndWake(services, binding, identity);
+    await binding
+      .refreshBeforeReconcile?.({ db: services.db, settings }, identity)
+      .catch(() => undefined);
+  }
+  if ([...candidates].some((provider) => provider !== home.provider)) {
+    evaluation = await evaluateSubscriptionCorePlacementWithFailover(
+      services.db,
+      subscriptionCoreProvider(home.provider),
+      request,
+    );
+  }
+  switch (evaluation.kind) {
+    case "not_visible":
+      return { kind: "revoked" };
+    case "cutover_not_enabled":
+      return { kind: "paused" };
+    case "run":
+      return { kind: "run", candidateProviders: evaluation.candidateProviders ?? [] };
+    case "wait":
+      // Leave the capacity wait once to surface the actionable configuration
+      // failure at claim. This is not a capacity/authority grant, and does not
+      // fabricate a provider or strand work behind an unrelated quota reset.
+      if (evaluation.reason === "failover_no_model_mapping")
+        return { kind: "run", candidateProviders: [] };
+      return {
+        kind: "wait",
+        waitReason: evaluation.reason,
+        earliestResetAt: evaluation.earliestResetAt,
+        healthRetryAt: evaluation.healthRetryAt,
+        candidateProviders: evaluation.candidateProviders ?? [],
+      };
+  }
+}
+
 /** Return due quarantines to service under this accepted turn; wake others if any recovered. */
 export async function recoverCoreCodexHealthAndWake(
   services: CoreCodexWakeServices,
   identity: SubscriptionCoreTurnIdentity,
 ): Promise<number> {
-  const recovered = await recoverSubscriptionCoreCodexConnectionHealth(services.db, identity).catch(
-    () => 0,
-  );
+  return await recoverCoreHealthAndWake(services, CODEX_CORE_WAIT_BINDING, identity);
+}
+
+/** The same recovery for any provider's connections. */
+export async function recoverCoreHealthAndWake(
+  services: CoreCodexWakeServices,
+  binding: Pick<CoreWaitBinding, "recoverHealth" | "wakeWaiters">,
+  identity: SubscriptionCoreTurnIdentity,
+): Promise<number> {
+  const recovered = await binding.recoverHealth(services.db, identity).catch(() => 0);
   if (recovered > 0) {
-    await wakeSubscriptionCoreCodexWaitersAndDeliver(services, {
+    await wakeSubscriptionCoreWaitersAndDeliver(services, binding, {
       accountId: identity.accountId,
       reason: "connection_health_recovered",
     });
@@ -214,7 +396,30 @@ export async function reconcileCoreCodexCapacityWait(
     generation: number;
   },
 ): Promise<CoreCodexReconcileResult | null> {
-  const waiter = await getSubscriptionCoreCodexCapacityWaitById(services.db, input);
+  return await reconcileCoreCapacityWait(services, CODEX_CORE_WAIT_BINDING, input);
+}
+
+/**
+ * The same reconcile for any provider: the waiter is looked up by the exact
+ * id and generation the workflow recorded. Null when the id names no core
+ * waiter of the binding's provider.
+ */
+export async function reconcileCoreCapacityWait(
+  services: CoreCodexWakeServices & {
+    bus: EventBus;
+    /** Present on the workflow's reconcile; the in-turn arm has just placed. */
+    settings?: Settings;
+  },
+  binding: CoreWaitBinding,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    waiterId: string;
+    generation: number;
+  },
+): Promise<CoreCodexReconcileResult | null> {
+  let waiter = await binding.getWaiterById(services.db, input);
   if (!waiter) return null;
   // Repair: drain this workspace's typed wakes that a crash left behind.
   await deliverSubscriptionCoreCodexWakes(services, {
@@ -224,18 +429,36 @@ export async function reconcileCoreCodexCapacityWait(
   if (waiter.accountId !== input.accountId || waiter.generation !== input.generation) {
     return { action: "stale" };
   }
+  if (binding.refreshBeforeReconcile && services.settings && waiter.blockedTurnLive !== false) {
+    const turn = await readSubscriptionCoreTurnIdentity(services.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: waiter.blockedTurnId,
+    });
+    // Without the exact accepted identity the evaluation below revokes.
+    if (turn) {
+      await binding
+        .refreshBeforeReconcile({ db: services.db, settings: services.settings }, turn)
+        .catch(() => undefined);
+    }
+    // A recovery the re-read found woke this waiter: evaluate at that revision.
+    waiter = await binding.getWaiterById(services.db, input);
+    if (!waiter || waiter.accountId !== input.accountId || waiter.generation !== input.generation)
+      return { action: "stale" };
+  }
   // A row left behind by a Steer, Cancel or other transition is superseded by
   // the reconcile without placing (a non-run evaluation never resumes).
   const evaluation: SubscriptionCoreCodexWaitEvaluation =
     waiter.blockedTurnLive === false
       ? { kind: "paused" }
-      : await evaluateCoreCodexBlockedTurn(services, {
+      : await evaluateCoreBlockedTurn(services, binding, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: waiter.blockedTurnId,
         });
-  const result = await reconcileSubscriptionCoreCodexCapacityWait(services.db, {
+  const result = await binding.reconcileWaiter(services.db, {
     ...input,
     evaluatedWakeRevision: waiter.wakeRevision,
     evaluation,

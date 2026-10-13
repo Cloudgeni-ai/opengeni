@@ -146,6 +146,7 @@ import {
   withSandboxFileDownloads,
   withSandboxSessionReady,
   withSandboxLifecycleHooks,
+  sessionMcpApprovalConnectionId,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
@@ -544,6 +545,35 @@ describe("structured human-input runtime boundary", () => {
   });
 
   test("serializes an ordinary question with an explicit null skill review", () => {
+    // A model filling the strict schema sends Other/options on a secret
+    // question; that must never fail the turn, and the stored card drops them.
+    const secret = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "secret-with-other",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [
+              {
+                id: "password",
+                kind: "secret",
+                prompt: "Password for the dashboard",
+                options: [],
+                allowOther: true,
+                secret: { item: "Dashboard", saveTo: "user" },
+              },
+            ],
+          }),
+        },
+      },
+    ]);
+    expect(secret[0]?.input.questions[0]).toMatchObject({
+      kind: "secret",
+      options: [],
+      allowOther: false,
+    });
+
     const serialized = serializeHumanInputRequests([
       {
         name: HUMAN_INPUT_TOOL_NAME,
@@ -3001,6 +3031,93 @@ describe("runtime event normalization", () => {
       } finally {
         await fixture.prepared.close();
         fixture.mcp.close();
+      }
+    });
+
+    test("host session MCP rules override requireApproval under the shared identity", async () => {
+      const mcp = startTestMcpServer();
+      const serverId = "cloudgeni";
+      // Host-saved rules: Allow a recommended-Ask tool, Ask a recommended-Allow tool.
+      const rules: Record<string, "allow" | "ask"> = {
+        search_documents: "allow",
+        fetch_document: "ask",
+      };
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: serverId,
+            name: "CloudGeni",
+            url: mcp.url,
+            cacheToolsList: false,
+            requireApproval: ["search_documents"],
+          },
+        ],
+      });
+      const seen: Array<{ toolName: string; connectionId?: string; defaultDecision?: string }> = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          seen.push({
+            toolName: call.toolName,
+            connectionId: call.connectionId ?? undefined,
+            defaultDecision: call.defaultDecision,
+          });
+          return { managed: true, decision: rules[call.toolName] ?? "allow" };
+        },
+        begin: async () => ({ allowed: true, managed: true, requestId: "session-mcp-request" }),
+        complete: async () => undefined,
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        connectorActionPolicy: hooks,
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const tools = await agent.getMcpTools(new RunContext());
+        const byName = (name: string) => {
+          const tool = tools.find(
+            (candidate) => candidate.type === "function" && candidate.name === name,
+          );
+          if (!tool || tool.type !== "function") throw new Error(`${name} missing`);
+          return tool;
+        };
+        const search = byName(`${serverId}__search_documents`);
+        const fetch = byName(`${serverId}__fetch_document`);
+
+        // Allow beats the Ask recommendation, and the tool executes.
+        expect(await search.needsApproval(new RunContext(), { query: "n" }, "call-search")).toBe(
+          false,
+        );
+        await search.invoke(new RunContext(), JSON.stringify({ query: "n" }), {
+          toolCall: { callId: "call-search" },
+        } as any);
+        expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "n" } }]);
+
+        // Ask on a tool the session recommended as Allow still pauses for approval.
+        expect(await fetch.needsApproval(new RunContext(), { id: "doc-1" }, "call-fetch")).toBe(
+          true,
+        );
+
+        const expectedId = sessionMcpApprovalConnectionId(serverId, mcp.url);
+        expect(seen.find((entry) => entry.toolName === "search_documents")).toMatchObject({
+          connectionId: expectedId,
+          defaultDecision: "ask",
+        });
+        expect(seen.find((entry) => entry.toolName === "fetch_document")).toMatchObject({
+          connectionId: expectedId,
+          defaultDecision: "allow",
+        });
+      } finally {
+        await prepared.close();
+        mcp.close();
       }
     });
 
@@ -6688,12 +6805,10 @@ describe("runtime event normalization", () => {
     expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
-  test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
-    // OWNED-resume refresh is a FEATURE (a workspace-env edit reaching a
-    // long-lived owned local/docker box) — owned applyManifest merges env with
-    // no guard. The drift EVENT is the durable trace; the provided-session
-    // guard fix lives in pinProvidedSessionManifestEnvironment (tested below),
-    // NOT here.
+  test("refreshes manifest environment on OWNED resumed sessions without drift reporting", async () => {
+    // OWNED-resume refresh carries constant/pointer changes to a long-lived
+    // owned box (owned applyManifest merges env with no guard). Since W1 there
+    // is no drift event: the manifest holds constants only.
     const current = new Manifest({
       root: "/workspace",
       entries: {
@@ -6739,14 +6854,7 @@ describe("runtime event normalization", () => {
     ).toMatchObject({
       GH_TOKEN: { value: "new-token" },
     });
-    // Drift rides a durable event as key names only — values are secrets.
-    expect(events).toEqual([
-      {
-        type: "sandbox.env.drift",
-        payload: { added: ["NEW_KEY"], removed: [], changed: ["GH_TOKEN"] },
-      },
-    ]);
-    expect(JSON.stringify(events)).not.toContain("token");
+    expect(events).toEqual([]);
   });
 
   test("pins provided-session agent manifests to the live box environment", async () => {
@@ -6788,12 +6896,23 @@ describe("runtime event normalization", () => {
       "NEW_KEY",
     );
     expect(Object.keys(agent.defaultManifest.entries)).toEqual(["repos/acme/one"]);
-    expect(events).toEqual([
-      {
-        type: "sandbox.env.drift",
-        payload: { added: ["NEW_KEY"], removed: [], changed: [] },
-      },
-    ]);
+    // W1/RM-3: no drift machinery, so no event.
+    expect(events).toEqual([]);
+  });
+
+  test("RM-3: buildManifest keeps deployment constants only", () => {
+    const settings = testSettings();
+    const manifest = buildManifest(settings, [], {
+      HOME: "/workspace",
+      PATH: "/usr/bin",
+      GIT_AUTHOR_NAME: "Bot",
+      OPENGENI_CODEMODE_URL: "http://example.invalid/codemode",
+      STRIPE_KEY: "sk_live_should_never_ride",
+      API_TOKEN: "user-secret",
+    });
+    const names = Object.keys(JSON.parse(JSON.stringify(manifest.environment)));
+    expect(names.sort()).toEqual(["GIT_AUTHOR_NAME", "HOME", "OPENGENI_CODEMODE_URL", "PATH"]);
+    expect(JSON.stringify(manifest)).not.toContain("user-secret");
   });
 
   test("provided-session env pin is a no-op without drift", async () => {

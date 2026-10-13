@@ -29,6 +29,9 @@ import { CopyButton } from "./copy-button";
 import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { remarkSoftLineBreaks } from "./remark-soft-line-breaks";
+import { rehypeSecretRefs } from "./rehype-secret-refs";
+import { mayContainSecretReference, SecretRefChip } from "./secret-ref-chip";
+import { useSecretsUi } from "../secrets-ui";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
@@ -248,8 +251,7 @@ const baseComponents: Components = {
   img: MarkdownImage,
 };
 
-const MARKDOWN_LINK_CLASS =
-  "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
+const MARKDOWN_LINK_CLASS = "break-words font-medium og-link";
 
 // Keep renderer component types stable: rebuilding them remounts paragraphs,
 // destroys native selections, and resets embedded media on host updates.
@@ -276,8 +278,27 @@ function linkActionTitle(target: OpenGeniLinkTarget): string {
       : "Open artifact";
 }
 
+/** A `rehypeSecretRefs` placeholder becomes a chip; every other span passes through. */
+function MarkdownSpan({
+  node: _node,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"span"> & ExtraProps) {
+  const raw = (props as Record<string, unknown>)["data-og-secret-ref"];
+  if (typeof raw === "string") return <MarkdownSecretRef raw={raw}>{children}</MarkdownSecretRef>;
+  return <span {...props}>{children}</span>;
+}
+
+function MarkdownSecretRef({ raw, children }: { raw: string; children?: ReactNode }) {
+  const ui = useSecretsUi();
+  const token = ui?.tokenize(raw).find((candidate) => candidate.type === "reference");
+  if (!token || token.type !== "reference") return <>{children}</>;
+  return <SecretRefChip reference={token.reference} />;
+}
+
 const markdownComponents: Components = {
   ...baseComponents,
+  span: MarkdownSpan,
   p: ({ children, node, ...props }) => {
     const containsArtifact = node?.children.some(
       (child) =>
@@ -696,11 +717,23 @@ function MarkdownImpl({
     hadRevealRef.current = true;
   }
   const revealActive = reveal !== null && (streaming || reveal.hasActive(now));
-  // The plugin walks the standard hast tree; a structural local type keeps the
-  // module dependency-free, at the cost of this narrowing cast at the seam.
+  const secretsUi = useSecretsUi();
+  // Secret references become chip placeholders before the ink split, so a
+  // reference is never cut into ink spans. Without a host tokenizer, or when
+  // the text names no reference, the pipeline is unchanged.
+  const secretRefs =
+    secretsUi && mayContainSecretReference(children)
+      ? [[rehypeSecretRefs, { tokenize: secretsUi.tokenize }]]
+      : [];
+  // The plugins walk the standard hast tree; structural local types keep the
+  // modules dependency-free, at the cost of this narrowing cast at the seam.
+  const rehypePluginList = [
+    ...secretRefs,
+    ...(revealActive && reveal !== null ? [[rehypeStreamReveal, { reveal, now }]] : []),
+  ];
   const rehypePlugins =
-    revealActive && reveal !== null
-      ? ([[rehypeStreamReveal, { reveal, now }]] as unknown as NonNullable<
+    rehypePluginList.length > 0
+      ? (rehypePluginList as unknown as NonNullable<
           Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
         >)
       : undefined;

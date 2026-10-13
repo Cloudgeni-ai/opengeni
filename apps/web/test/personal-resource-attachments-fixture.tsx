@@ -11,18 +11,9 @@ import type {
 } from "../src/lib/use-personal-resource-attachment";
 import "../src/styles.css";
 
-const variableSet = {
-  id: "11111111-1111-4111-8111-111111111111",
-  accountId: "22222222-2222-4222-8222-222222222222",
-  workspaceId: "33333333-3333-4333-8333-333333333333",
-  scope: "user" as const,
-  generation: 1,
-  status: "active" as const,
-  name: "Private deploy keys",
-  description: null,
-  variables: [],
-  createdAt: "2026-08-20T08:00:00.000Z",
-  updatedAt: "2026-08-20T08:00:00.000Z",
+const connectedMachine = {
+  enrollmentId: "11111111-1111-4111-8111-111111111111",
+  name: "Private build box",
 };
 
 function Fixture() {
@@ -55,9 +46,8 @@ function Fixture() {
       truncated: authorityUnavailable,
       catalog: null,
       selected: {
-        variableSets: resourceCount > 0 ? [variableSet] : [],
         rigs: [],
-        connectedMachines: [],
+        connectedMachines: resourceCount > 0 ? [connectedMachine] : [],
         resourceCount,
         personalResourceCount: resourceCount,
         closureUnverified: false,

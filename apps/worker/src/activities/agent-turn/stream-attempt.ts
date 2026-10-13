@@ -188,6 +188,7 @@ import type {
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
+import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
 
 export type TurnStreamAttemptDeps = {
@@ -421,7 +422,7 @@ export async function runTurnStreamAttempt(
       // A cancelled title may have received a complete provider response before
       // its result was discarded. Checkpoint only that positive observation;
       // pending or unknown requests keep their replay fence.
-      await providerTurn.codexSubscriptionCore?.titleRequests?.checkpoint();
+      await subscriptionCoreTurnOf(providerTurn)?.titleRequests?.checkpoint();
       return;
     }
 
@@ -512,6 +513,11 @@ export async function runTurnStreamAttempt(
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         providerApi,
+        ...(settings.subscriptionCrossProviderFailoverEnabled &&
+        compactionModeOptions.codexCompactionMode === "portable" &&
+        turnExecutionPolicy.credentialRestriction === undefined
+          ? { servingProviderId: turnExecutionPolicy.providerId }
+          : {}),
         projectCanonicalHistory: generatedImageHistoryProjector,
         materializeModelHistory: media.materializeScreenshotHistory,
         projectModelHistory: modelHistoryProjector,
@@ -1198,7 +1204,7 @@ export async function runTurnStreamAttempt(
           turnAttemptId: input.attemptId,
           provider: resolvedModel?.provider.id ?? settings.openaiProvider,
           providerApi: resolvedModel?.provider.api ?? "responses",
-          model: turn.model,
+          model: turnExecutionPolicy.productModelId,
           latencyMode: turnExecutionPolicy.latencyMode,
           metricProvider: streamProvider,
           externallyBilled: billingState.isExternallyBilledTurn,
@@ -1217,7 +1223,7 @@ export async function runTurnStreamAttempt(
         assertModelResponseLatencyMode({
           event: next.value,
           requested: turnExecutionPolicy.latencyMode,
-          model: turn.model,
+          model: turnExecutionPolicy.productModelId,
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
@@ -1245,6 +1251,12 @@ export async function runTurnStreamAttempt(
                     provider: streamProvider,
                     dispatchId,
                   }),
+                  // A core-placed turn reports real work for the shared
+                  // capacity breaker (providers with their own request events
+                  // set it there).
+                  ...(subscriptionCoreTurnOf(providerTurn)
+                    ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(next.value) }
+                    : {}),
                 },
               },
             ]);
@@ -1729,7 +1741,7 @@ export async function runTurnStreamAttempt(
               sessionId: input.sessionId,
               turnId: activeTurnId,
               turnAttemptId: input.attemptId,
-              model: turn.model,
+              model: turnExecutionPolicy.productModelId,
               externallyBilled: billingState.isExternallyBilledTurn,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               countsTowardTokenCap: billingState.countsTowardTokenCap,
@@ -1751,7 +1763,7 @@ export async function runTurnStreamAttempt(
               turnId: activeTurnId,
               provider: aggregateProvider,
               providerApi: aggregateProviderApi,
-              model: turn.model,
+              model: turnExecutionPolicy.productModelId,
               sourceKey: aggregateSourceKey,
               usage: { usage: aggregateUsage },
               normalizedUsage: normalizedAggregateUsage,
@@ -1773,7 +1785,7 @@ export async function runTurnStreamAttempt(
                 sourceKey: aggregateSourceKey,
                 provider: aggregateProvider,
                 providerApi: aggregateProviderApi,
-                model: turn.model,
+                model: turnExecutionPolicy.productModelId,
                 billing,
                 subscriptionConnectionId:
                   subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -1783,7 +1795,7 @@ export async function runTurnStreamAttempt(
                 observability,
                 settings,
                 provider: aggregateProvider,
-                model: turn.model,
+                model: turnExecutionPolicy.productModelId,
                 externallyBilled: billingState.isExternallyBilledTurn,
                 billing,
               });

@@ -6,7 +6,6 @@ import {
   type ResourceAuthorityScope,
   type Session,
   type UserResourceAuthoritySummary,
-  type VariableSet,
   type Workspace,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -25,25 +24,20 @@ export type PersonalResourceOwnerScope = Readonly<{
 }>;
 
 export type PersonalResourceCatalog = Readonly<{
-  personalVariableSets: VariableSet[];
   personalRigs: Rig[];
-  variableSets: VariableSet[];
   rigs: Rig[];
-  variableSetAuthorities: UserResourceAuthoritySummary[];
   rigAuthorities: UserResourceAuthoritySummary[];
   connectedMachineAuthorities: UserResourceAuthoritySummary[];
-  variableSetAuthoritiesTruncated: boolean;
   rigAuthoritiesTruncated: boolean;
   connectedMachineAuthoritiesTruncated: boolean;
   truncated: boolean;
 }>;
 
+/**
+ * Personal resources a session is bound to. Only-me vaults need no attachment:
+ * references resolve under the acting person's own authority at execution time.
+ */
 export type FixedPersonalResources = Readonly<{
-  variableSetIds?: readonly string[] | undefined;
-  variableSetScopes?: readonly (ResourceAuthorityScope | null)[] | undefined;
-  /** @deprecated compatibility alias for one selected set. */
-  variableSetId: string | null;
-  variableSetScope?: ResourceAuthorityScope | null | undefined;
   rigId: string | null;
   rigScope?: ResourceAuthorityScope | null | undefined;
   connectedMachine: Readonly<{ enrollmentId: string; name: string }> | null;
@@ -104,7 +98,7 @@ export function resolvePersonalResourceOwnerScope(input: {
 async function listAuthorityPages(
   client: OpenGeniBrowserClient,
   workspaceId: string,
-  resourceKind: "variable_set" | "rig" | "connected_machine",
+  resourceKind: "rig" | "connected_machine",
 ): Promise<{
   authorities: UserResourceAuthoritySummary[];
   truncated: boolean;
@@ -129,57 +123,40 @@ export async function loadPersonalResourceCatalog(
   client: OpenGeniBrowserClient,
   scope: PersonalResourceOwnerScope,
 ): Promise<PersonalResourceCatalog> {
-  const [variableSets, rigs, variableSetPage, rigPage, connectedMachinePage] = await Promise.all([
+  const [rigs, rigPage, connectedMachinePage] = await Promise.all([
     // User-scoped resources follow their owner into every workspace in the
     // organization. Resolve them through the session's current workspace so a
     // shared-workspace chat never depends on a second Personal-workspace route
     // remaining selectable in the browser.
-    client.listVariableSets(scope.targetWorkspaceId),
     client.listRigs(scope.targetWorkspaceId),
-    listAuthorityPages(client, scope.targetWorkspaceId, "variable_set"),
     listAuthorityPages(client, scope.targetWorkspaceId, "rig"),
     listAuthorityPages(client, scope.targetWorkspaceId, "connected_machine"),
   ]);
-  const personalVariableSets = variableSets.filter(
-    (resource) => resource.scope === "user" && resource.status === "active",
-  );
   const personalRigs = rigs.filter(
     (resource) => resource.scope === "user" && resource.status === "active",
   );
-  const matchesResource = (
-    authority: UserResourceAuthoritySummary,
-    kind: "variable_set" | "rig",
-    resource: { id: string; workspaceId: string },
-  ): boolean =>
-    authority.resourceKind === kind &&
-    authority.resourceId === resource.id &&
-    authority.status === "active" &&
-    authority.originWorkspaceId === resource.workspaceId;
-  const variableSetAuthorities = variableSetPage.authorities.filter((authority) =>
-    personalVariableSets.some((resource) => matchesResource(authority, "variable_set", resource)),
-  );
   const rigAuthorities = rigPage.authorities.filter((authority) =>
-    personalRigs.some((resource) => matchesResource(authority, "rig", resource)),
+    personalRigs.some(
+      (resource) =>
+        authority.resourceKind === "rig" &&
+        authority.resourceId === resource.id &&
+        authority.status === "active" &&
+        authority.originWorkspaceId === resource.workspaceId,
+    ),
   );
   return {
-    personalVariableSets,
     personalRigs,
-    variableSets: personalVariableSets.filter((resource) =>
-      variableSetAuthorities.some((authority) => authority.resourceId === resource.id),
-    ),
     rigs: personalRigs.filter((resource) =>
       rigAuthorities.some((authority) => authority.resourceId === resource.id),
     ),
-    variableSetAuthorities,
     rigAuthorities,
     connectedMachineAuthorities: connectedMachinePage.authorities.filter(
       (authority) =>
         authority.resourceKind === "connected_machine" && authority.status === "active",
     ),
-    variableSetAuthoritiesTruncated: variableSetPage.truncated,
     rigAuthoritiesTruncated: rigPage.truncated,
     connectedMachineAuthoritiesTruncated: connectedMachinePage.truncated,
-    truncated: variableSetPage.truncated || rigPage.truncated || connectedMachinePage.truncated,
+    truncated: rigPage.truncated || connectedMachinePage.truncated,
   };
 }
 
@@ -187,28 +164,15 @@ export function personalSelection(
   catalog: PersonalResourceCatalog | null,
   fixed: FixedPersonalResources,
 ): {
-  variableSets: VariableSet[];
   rigs: Rig[];
   connectedMachines: Array<Readonly<{ enrollmentId: string; name: string }>>;
   resourceCount: number;
   personalResourceCount: number;
   closureUnverified: boolean;
 } {
-  const variableSetIds =
-    fixed.variableSetIds ?? (fixed.variableSetId === null ? [] : [fixed.variableSetId]);
-  const selectedVariableSetIds = new Set(variableSetIds);
-  const expectedPersonalVariableSetIds = new Set(
-    variableSetIds.filter((_variableSetId, index) => fixed.variableSetScopes?.[index] === "user"),
-  );
-  const personalVariableSets =
-    catalog?.personalVariableSets.filter((resource) => selectedVariableSetIds.has(resource.id)) ??
-    [];
-  for (const resource of personalVariableSets) expectedPersonalVariableSetIds.add(resource.id);
   const personalRigs = fixed.rigId
     ? (catalog?.personalRigs.filter((resource) => resource.id === fixed.rigId) ?? [])
     : [];
-  const variableSets =
-    catalog?.variableSets.filter((resource) => selectedVariableSetIds.has(resource.id)) ?? [];
   const rigs = fixed.rigId
     ? (catalog?.rigs.filter((resource) => resource.id === fixed.rigId) ?? [])
     : [];
@@ -220,16 +184,8 @@ export function personalSelection(
       ? [fixed.connectedMachine]
       : []
     : [];
-  const personalResourceCount =
-    personalVariableSets.length + personalRigs.length + personalConnectedMachines.length;
+  const personalResourceCount = personalRigs.length + personalConnectedMachines.length;
   const closureUnverified = Boolean(
-    (expectedPersonalVariableSetIds.size > 0 &&
-      (catalog?.variableSetAuthoritiesTruncated ||
-        [...expectedPersonalVariableSetIds].some(
-          (variableSetId) =>
-            !personalVariableSets.some((resource) => resource.id === variableSetId) ||
-            !variableSets.some((resource) => resource.id === variableSetId),
-        ))) ||
     (personalRigs.length > 0 &&
       (catalog?.rigAuthoritiesTruncated || rigs.length !== personalRigs.length)) ||
     (personalConnectedMachines.length > 0 &&
@@ -237,10 +193,9 @@ export function personalSelection(
         connectedMachines.length !== personalConnectedMachines.length)),
   );
   return {
-    variableSets,
     rigs,
     connectedMachines,
-    resourceCount: variableSets.length + rigs.length + connectedMachines.length,
+    resourceCount: rigs.length + connectedMachines.length,
     personalResourceCount,
     closureUnverified,
   };
@@ -271,115 +226,47 @@ export function buildPersonalResourceAttachmentIntent(input: {
 }
 
 /**
- * The session composer must offer only resources the current workspace grant
- * can actually attach. The scoped Variable Set list already applies the
- * account/workspace/subject RLS boundary; these final capability and product
- * gates keep read-only and non-managed callers from seeing unusable choices.
- */
-export function selectableSessionVariableSets(
-  variableSets: readonly VariableSet[],
-  input: {
-    canAttach: boolean;
-    canUse: boolean;
-    personalResourcesAvailable: boolean;
-  },
-): VariableSet[] {
-  if (!input.canAttach || !input.canUse) return [];
-  return variableSets.filter(
-    (variableSet) =>
-      variableSet.status === "active" &&
-      (variableSet.scope !== "user" || input.personalResourcesAvailable),
-  );
-}
-
-export function newSessionVariableSetResolutionSource(input: {
-  canAttach: boolean;
-  canUse: boolean;
-  canListVariableSets: boolean;
-  canListSecrets: boolean;
-}): "catalog" | "attachment" | "denied" {
-  if (!input.canAttach || !input.canUse) return "denied";
-  return input.canListVariableSets && input.canListSecrets ? "catalog" : "attachment";
-}
-
-/**
- * Reconcile fixed resources restored from a durable new-session draft against
- * the scoped catalogs without discarding them while those catalogs are still
- * loading. A selected Rig also waits for the Variable Set catalog because its
- * active version can contribute default Variable Sets to the attachment; every
- * inherited default must resolve in the target workspace before the Rig is
- * considered attachable.
+ * Reconcile the Rig restored from a durable new-session draft against the
+ * scoped catalog without discarding it while that catalog is still loading.
  */
 export function reconcileNewSessionFixedResources(input: {
-  selectedVariableSetIds: readonly string[];
   selectedRigId: string;
-  selectedRigDefaultVariableSetIds: readonly string[];
-  selectableVariableSetIds: readonly string[];
   selectableRigIds: readonly string[];
-  variableSetsSettled: boolean;
   rigsSettled: boolean;
 }): {
-  variableSetIds: string[];
   rigId: string;
   selectionResolved: boolean;
 } {
-  const selectableVariableSetIds = new Set(input.selectableVariableSetIds);
-  const selectableRigIds = new Set(input.selectableRigIds);
-  const variableSetIds = input.variableSetsSettled
-    ? input.selectedVariableSetIds.filter((id) => selectableVariableSetIds.has(id))
-    : [...input.selectedVariableSetIds];
-  const selectedRigDefaultsResolved = input.selectedRigDefaultVariableSetIds.every((id) =>
-    selectableVariableSetIds.has(id),
-  );
+  const selectable = new Set(input.selectableRigIds);
   const rigId =
-    input.selectedRigId &&
-    input.rigsSettled &&
-    (!selectableRigIds.has(input.selectedRigId) ||
-      (input.variableSetsSettled && !selectedRigDefaultsResolved))
+    input.selectedRigId && input.rigsSettled && !selectable.has(input.selectedRigId)
       ? ""
       : input.selectedRigId;
-  const variableSetCatalogRequired =
-    input.selectedVariableSetIds.length > 0 || input.selectedRigId.length > 0;
-  const variableSetSelectionResolved =
-    !variableSetCatalogRequired ||
-    (input.variableSetsSettled &&
-      input.selectedVariableSetIds.every((id) => selectableVariableSetIds.has(id)) &&
-      selectedRigDefaultsResolved);
-  const rigSelectionResolved =
-    input.selectedRigId.length === 0 ||
-    (input.rigsSettled && selectableRigIds.has(input.selectedRigId));
   return {
-    variableSetIds,
     rigId,
-    selectionResolved: variableSetSelectionResolved && rigSelectionResolved,
+    selectionResolved:
+      input.selectedRigId.length === 0 ||
+      (input.rigsSettled && selectable.has(input.selectedRigId)),
   };
 }
 
-/** Show recovery only when a selected fixed resource is actually blocked by a failed catalog. */
+/** Show recovery only when the selected Rig is actually blocked by a failed catalog. */
 export function newSessionFixedResourceCatalogFailed(input: {
-  selectedVariableSetIds: readonly string[];
   selectedRigId: string;
   selectionResolved: boolean;
-  variableSetCatalogFailed: boolean;
   rigCatalogFailed: boolean;
 }): boolean {
   if (input.selectionResolved) return false;
-  return (
-    ((input.selectedVariableSetIds.length > 0 || input.selectedRigId.length > 0) &&
-      input.variableSetCatalogFailed) ||
-    (input.selectedRigId.length > 0 && input.rigCatalogFailed)
-  );
+  return input.selectedRigId.length > 0 && input.rigCatalogFailed;
 }
 
 /** Stable typed identity for resetting shared-output acknowledgement. */
 export function personalResourceSelectionIdentityKey(input: {
-  variableSetIds: readonly string[];
   rigId?: string | null | undefined;
   connectedMachineId?: string | null | undefined;
 }): string {
   return [
     ...new Set([
-      ...input.variableSetIds.map((id) => `variable_set:${id}`),
       ...(input.rigId ? [`rig:${input.rigId}`] : []),
       ...(input.connectedMachineId ? [`connected_machine:${input.connectedMachineId}`] : []),
     ]),

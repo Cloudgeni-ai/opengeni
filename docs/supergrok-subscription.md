@@ -8,13 +8,16 @@ Canonical implementation sources:
 
 - protocol/OAuth/transport: `packages/xai-subscription`;
 - public management API: `apps/api/src/routes/supergrok.ts`;
-- persistence and RLS: `packages/db/src/xai-subscription.ts` adapts the shared
-  `packages/db/src/subscription-account-repository.ts` lifecycle and
-  `packages/db/src/subscription-pool-schema.ts` table definitions;
-  `packages/db/src/index.ts`, `packages/db/src/schema.ts`, and migration
-  `0234_xai_subscription_authority.sql`;
-- runtime: `apps/worker/src/activities/xai-auth.ts` and
-  `apps/worker/src/activities/agent-turn/xai-capacity.ts`;
+- persistence and RLS: the shared subscription core through the SuperGrok
+  adapter (`packages/db/src/subscription-core-xai.ts`,
+  `packages/db/src/subscription-core-xai-adapter.ts`,
+  `packages/db/src/subscription-core-xai-compat.ts`) since the drained 0721
+  cutover; the legacy SuperGrok tables are read-only history and the legacy
+  repository was deleted in M4 X4;
+- runtime: `apps/worker/src/activities/agent-turn/xai-core.ts`,
+  `apps/worker/src/activities/xai-auth.ts` and
+  `apps/api/src/xai-subscription-core.ts`; a SuperGrok route other than the
+  core fails closed;
 - workflow capacity orchestration: `apps/worker/src/activities/codex-capacity.ts`
   and `apps/worker/src/workflows/session.ts`;
 - clients: the SuperGrok methods/types in `@opengeni/sdk`,
@@ -92,6 +95,15 @@ updates without causal authority) resolves the organization or workspace pool
 and never a personal pool. Already accepted work keeps its frozen
 snapshot. Private work additionally requires the exact initiating human.
 
+> Retired runtime: the next paragraph describes the legacy pool. SuperGrok
+> runs on the shared subscription core since 0719. The drained retirement
+> migration 0751 drops the legacy pool's routines, triggers and row
+> policies, and the runtime role reads no row of the legacy pool tables. The
+> synthetic pool-worker subjects and `withSubscriptionPoolSessionAccess`
+> remain only in legacy callers that the SuperGrok and Claude deletion
+> steps remove. See
+> [subscription core, R](design/subscription-core-2026-10-07.md#r-retirement-of-the-legacy-pool-routines-and-the-codex-twins).
+
 Pool authority is additive to session access, never a replacement for it.
 Shared (organization or workspace) pools are read and written under the
 synthetic pool-worker database subject (`worker:xai-workspace`, or
@@ -126,33 +138,18 @@ log, never in the user-visible message.
 
 ## Allocation, pins, and leases
 
-Disconnecting a workspace or personal credential clears its session pin and pin
-source atomically before deletion. Pin versions advance to reject stale edits;
-unrelated account pins remain unchanged.
+SuperGrok runs only on the shared subscription core, the runtime Codex uses
+(see [subscription accounts](subscription-accounts.md)). Accounts are core
+connections; eligibility, selection, session bindings (the former pins),
+turn and operation leases, refusal health and durable waits follow that
+contract, with SuperGrok's adapter supplying sign-in, refresh, usage reading,
+error classification and its model catalog. Disconnecting a connection
+clears the bindings that pointed at it in the same transaction.
 
-One rotation row serializes each organization, workspace, or exact-user pool. Credentials have
-separate health and allocator state: `status=active` is credential health, while
-`allocator_enabled` controls only new selection. Reconnect and refresh restore
-credential health but do not silently change allocator eligibility.
-
-Selection is deterministic and transaction-scoped:
-
-1. revalidate the accepted turn's authority snapshot under exact-subject FORCE
-   RLS;
-2. lock the pool rotation row, reap expired leases, and reuse an exact live
-   same-turn lease when present;
-3. filter to active, allocator-enabled, non-exhausted accounts; an expired
-   access token remains eligible because the request transport can refresh it;
-4. honor a session pin when present; otherwise balance concurrent live-turn
-   leases, then use fair least-selected, least-recent ordering when rotation is
-   enabled, or the explicit active credential when rotation is disabled;
-5. write the unique `(workspace_id, turn_id)` lease, fairness metadata, and
-   active cursor in one transaction.
-
-The five-minute lease is renewed every minute and at runtime/model-usage
-ownership checkpoints. A replacement holder advances generation. Leases fence
-exact turn ownership; they do not serialize an account or limit its concurrent
-sessions. Every release is idempotent.
+The legacy rotation rows, `allocator_enabled`, session pins and five-minute
+leases described by earlier releases were moved onto the core by the drained
+SuperGrok cutover. Their tables remain only as read-only forensic records; no
+runtime reads or writes them.
 
 ## Provider requests and media
 

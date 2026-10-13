@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import type {
+  ConnectionAccountIntent,
   McpConnectionAccountBinding,
   McpPersonalConnectionDelegation,
   SessionEventType,
@@ -9,7 +10,10 @@ import type {
   SessionRealtimeModel,
 } from "@opengeni/contracts";
 import { McpPersonalConnectionDelegations } from "@opengeni/contracts";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -74,6 +78,8 @@ export type BeginSessionRealtimeInput = {
   model: SessionRealtimeModel;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+  /** The voice owner's account intent, carried by the turns this lease admits. */
+  connectionAccountIntent?: ConnectionAccountIntent | null;
   now?: Date;
   leaseMs?: number;
 };
@@ -445,6 +451,7 @@ export async function beginSessionRealtimeInTransaction(
         input.personalConnectionDelegations ?? [],
       ),
       mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+      connectionAccountIntent: parseConnectionAccountIntent(input.connectionAccountIntent),
       model: input.model,
       state: "active",
       version: 1,

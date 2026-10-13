@@ -13,7 +13,6 @@ import {
   type SessionTurn,
   type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
-  type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { startOfUtcMonth } from "./model-usage";
@@ -38,22 +37,6 @@ export function credentialSubjectIdForTurnInitiator(
   turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
 ): string | undefined {
   return directPersonalConnectionSubjectId(turn);
-}
-
-export function xaiCatalogReadinessAuthority(
-  turn: {
-    initiatingHumanSubjectId: string | null;
-    xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-  },
-  directCredentialSubjectId: string | undefined,
-): {
-  subjectId: string;
-  authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-} | null {
-  const subjectId = turn.initiatingHumanSubjectId ?? directCredentialSubjectId;
-  return subjectId
-    ? { subjectId, authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot }
-    : null;
 }
 
 /**

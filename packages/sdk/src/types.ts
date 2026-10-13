@@ -46,7 +46,8 @@ export type BundledSkillId =
   | "builtin:opengeni-spreadsheets"
   | "builtin:opengeni-presentations"
   | "builtin:opengeni-sites"
-  | "builtin:opengeni-video-generation";
+  | "builtin:opengeni-video-generation"
+  | "builtin:opengeni-secrets";
 
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
@@ -1513,7 +1514,6 @@ export type ForkSessionRequest = {
   visibility: SessionVisibility;
   workspaceSharedAcknowledged: boolean;
   rigId?: string | null | undefined;
-  variableSetIds?: string[] | undefined;
 };
 
 export type ForkSessionResponse = {
@@ -1643,10 +1643,11 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** Ordered low-to-high precedence; the final entry is the legacy singular alias. */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
   variableSetIds?: string[] | undefined;
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   variableSetId: string | null;
-  /** @deprecated use variableSetId */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
@@ -2134,7 +2135,57 @@ export type SessionTurn = {
   updatedAt: string;
 };
 
-export type HumanInputQuestionKind = "text" | "single_select" | "multi_select";
+export type HumanInputQuestionKind = "text" | "single_select" | "multi_select" | "secret";
+
+/** Options for a generated password (see `@opengeni/contracts` GeneratePasswordSpec). */
+export type GeneratePasswordSpec = {
+  length?: number | undefined;
+  lowercase?: boolean | undefined;
+  uppercase?: boolean | undefined;
+  digits?: boolean | undefined;
+  symbols?: boolean | undefined;
+  symbolSet?: string | undefined;
+  excludeAmbiguous?: boolean | undefined;
+  requireEachClass?: boolean | undefined;
+};
+
+export type HumanInputSecretSaveTo = "user" | "task" | "workspace";
+
+/** A secret question's spec; the value is saved to a vault, never to the response. */
+export type HumanInputSecretSpec = {
+  item: string;
+  field?: string | undefined;
+  fieldKind?: "concealed" | "totp" | "text" | undefined;
+  itemType?: "login" | "api_key" | "note" | undefined;
+  username?: { prompt: string; value?: string | null | undefined } | null | undefined;
+  website?: string | null | undefined;
+  looksLike?: string | null | undefined;
+  pattern?: string | null | undefined;
+  saveTo?: HumanInputSecretSaveTo | undefined;
+  vault?: string | null | undefined;
+  allowGenerate?: boolean | undefined;
+  generate?: GeneratePasswordSpec | null | undefined;
+  autocomplete?: "current-password" | "new-password" | "one-time-code" | "off" | undefined;
+};
+
+/** Write-only secret value for one secret question: exactly one of `value` or `generate`. */
+export type HumanInputSecretAnswer = {
+  questionId: string;
+  value?: string | undefined;
+  generate?: GeneratePasswordSpec | undefined;
+  username?: string | undefined;
+  saveTo: HumanInputSecretSaveTo;
+  vaultId?: string | undefined;
+};
+
+/** What the agent and timeline see for an answered secret question. */
+export type HumanInputSecretAnswerResult = {
+  reference: string;
+  username: string | null;
+  vaultName: string;
+  itemName: string;
+  saveTo: HumanInputSecretSaveTo;
+};
 
 export type HumanInputOption = {
   id: string;
@@ -2159,6 +2210,8 @@ export type HumanInputQuestion = {
   label?: string | null | undefined;
   helpText?: string | null | undefined;
   options: HumanInputOption[];
+  /** Required exactly when `kind` is "secret"; null otherwise. */
+  secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
   allowOther: boolean;
   validation?:
@@ -2174,6 +2227,8 @@ export type HumanInputAnswer = {
   questionId: string;
   values: string[];
   other?: string | null | undefined;
+  /** Secret questions: the saved reference, never the value. */
+  secret?: HumanInputSecretAnswerResult | undefined;
 };
 
 export type HumanInputResponse =
@@ -2181,7 +2236,12 @@ export type HumanInputResponse =
   | { outcome: "skipped" | "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
-  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | {
+      outcome: "answered";
+      answers: HumanInputAnswer[];
+      /** Write-only secret values; never echoed in events or responses. */
+      secretAnswers?: HumanInputSecretAnswer[] | undefined;
+    }
   | { outcome: "skipped" };
 
 export type SessionHumanInputRequest = {
@@ -2321,6 +2381,8 @@ export const SESSION_EVENT_TYPES = [
   "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  "subscription.account.selected",
+  "subscription.account.switched",
   "codex.account.selection.changed",
   // A person chose the session's account (any provider) or returned it to
   // automatic placement.
@@ -3203,14 +3265,24 @@ export type IncidentTelemetryPreflightInput = Omit<
 export type ScheduledTaskAgentConfig = {
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  /** Read-only: the complete accepted account set, including an empty set. */
-  connectionAccountsFrozen?: true | undefined;
+  /**
+   * Connector accounts a person pinned for a schedule that starts its own
+   * session. Each pinned pair narrows its connector; every other connector
+   * uses the owner's current accounts at each run.
+   */
+  pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Skip an occurrence instead of running without an unusable pinned account. */
+  pinnedAccountsRequired?: true | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /**
+   * Present when runs follow the workspace's default connectors (minus the
+   * excluded ones) plus `tools`; absent when runs get exactly `tools`.
+   */
+  toolPolicy?: ScheduledTaskToolPolicy | undefined;
   metadata: Record<string, unknown>;
   slackBotConnectionId?: string | undefined;
   /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
@@ -3290,16 +3362,21 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
   variableSetId: string | null;
-  /** @deprecated use variableSetId */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
+  /** Vaults every run may resolve secret references from (the task vault is always included). */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
   /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
   policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
+  /** Read-only: which accounts a run would use if it started now, for a viewer who can act on it. */
+  accountPlan?: ScheduledTaskAccountPlan | undefined;
 };
 
 /**
@@ -3327,8 +3404,18 @@ export type ScheduledTaskAccessConnector = {
 };
 
 /**
- * What a scheduled task's frozen connectors, connector accounts and Opengeni
- * tools lack compared with what its owner would get by saving it again now.
+ * A schedule that follows the workspace's default connectors at each run,
+ * the way a new chat does. Connectors a person turned off stay off.
+ */
+export type ScheduledTaskToolPolicy = {
+  mode: "workspace_default";
+  excludedMcpServerIds: string[];
+};
+
+/**
+ * What a scheduled task's saved connectors and Opengeni tools lack compared
+ * with what its owner would get by saving it again now, plus pinned accounts
+ * that can no longer be used.
  */
 export type ScheduledTaskPolicyDrift = {
   /** Workspace default connectors that new schedules get and this one lacks. */
@@ -3337,12 +3424,38 @@ export type ScheduledTaskPolicyDrift = {
   unavailableConnectors: ScheduledTaskAccessConnector[];
   /** Default Opengeni tools missing from an agent-created task's frozen tools. */
   missingOpenGeniTools: FirstPartyMcpToolName[];
-  /** Connectors whose chosen account can no longer be used by this schedule. */
+  /** Connectors whose pinned account can no longer be used; runs continue without them. */
   unavailableAccounts: ScheduledTaskAccessConnector[];
-  /** Connectors this schedule has no account for, although one is now available. */
-  attachableAccounts: ScheduledTaskAccessConnector[];
   /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
   canRefresh: boolean;
+};
+
+/** One connector account a scheduled run would act as. */
+export type ScheduledTaskAccountPlanAccount = {
+  connectionId: string;
+  label: string;
+  /** `personal`: the schedule owner's own account. `shared`: a workspace account. */
+  scope: "personal" | "shared";
+};
+
+export type ScheduledTaskAccountPlanConnector = {
+  id: string;
+  name: string;
+  /** `default`: the owner's current accounts at each run. `pinned`: only the accounts a person chose. */
+  mode: "default" | "pinned";
+  /** Accounts a run would use if it started now; empty when none can be used. */
+  accounts: ScheduledTaskAccountPlanAccount[];
+  /** Pinned accounts that can no longer be used; always empty in `default` mode. */
+  unavailablePins: Array<{ connectionId: string }>;
+};
+
+/**
+ * Which connector accounts a run of this schedule would use if it started
+ * now, resolved at read time from the owner's live connections. Nothing here
+ * is stored.
+ */
+export type ScheduledTaskAccountPlan = {
+  connectors: ScheduledTaskAccountPlanConnector[];
 };
 
 /** Re-freeze with the caller's current authority; `executionDigest` is the reviewed head. */
@@ -3403,11 +3516,6 @@ export type CreateSessionRequest = {
   // Host working directory for a connected-machine target (the agent runs here;
   // default = the machine's launch dir). Ignored for managed sandboxes.
   workingDir?: string | undefined;
-  /** Ordered low-to-high precedence; later sets win name collisions. */
-  variableSetIds?: string[] | undefined;
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
   // The rig to bind this session to (M3). Its active version is frozen onto the
   // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
   rigId?: string | undefined;
@@ -3505,6 +3613,7 @@ export const KNOWN_PERMISSIONS = [
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "codemode:call",
   "goals:manage",
@@ -3630,6 +3739,11 @@ export type FirstPartyMcpToolName =
   | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
+  | "secret_search"
+  | "secret_save"
+  | "secret_get"
+  | "secret_move"
+  | "secret_delete"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -4109,7 +4223,7 @@ export type ModelAccountSettingValues = {
   /** Ordered fallback models for a preferred model. */
   fallbackOrder: Record<string, string[]>;
   personalConnectionsAllowed: boolean;
-  /** Use the person's own account when shared accounts are exhausted (never in background work). */
+  /** Permit a person's opt-in fallback; accepted background work retains its captured authority. */
   personalFallbackAllowed: boolean;
 };
 
@@ -4194,9 +4308,25 @@ export type ModelAccountChoiceRefusal =
   | "session_has_no_owner";
 
 /**
- * One account the model picker may list for a session: a shared account of
- * the workspace's pool or the caller's own personal account.
+ * Cached usage, not a live check or a promise of available capacity. Source/time
+ * describe the snapshot, not each retained window. A past reset does not prove replenishment.
  */
+export type ModelAccountUsageSnapshot = {
+  /** Snapshot-level time, not the observation time of every retained window. */
+  observedAt: string | null;
+  source: "usage_endpoint" | "response_headers" | "refusal" | null;
+  windows: Array<{
+    id: string;
+    /** Null means unknown; values over 100 can represent overage. */
+    usedPercent: number | null;
+    resetsAt: string | null;
+    status: "ok" | "warning" | "exhausted" | "unknown";
+  }>;
+  exhaustedUntil: string | null;
+  exhaustedKind: "quota" | "rate_limit" | null;
+};
+
+/** An already-visible account, with optional cached usage (never an eligibility decision). */
 export type ModelAccountChoiceOption = {
   provider: string;
   connectionId: string;
@@ -4209,15 +4339,37 @@ export type ModelAccountChoiceOption = {
   allowedModelIds: string[] | null;
   choosable: boolean;
   refusal: ModelAccountChoiceRefusal | null;
+  /** Omitted on older servers; null means no decodable stored snapshot. Readings may be partial or stale. */
+  usage?: ModelAccountUsageSnapshot | null | undefined;
 };
 
 /** A session's current account, what it may switch to, and the effective personal settings. */
 export type SessionModelAccountChoiceResponse = {
+  /** Last committed placement; neither queued account choices nor unplaced proposals are serving truth. */
+  serving?:
+    | {
+        turnId: string;
+        provider: string;
+        connectionId: string | null;
+        modelId: string;
+        preferredModelId: string;
+        reasoningEffort: ReasoningEffort;
+        latencyMode: LatencyMode;
+      }
+    | null
+    | undefined;
+  /** The session's account when it has bindings for one provider only; else null (see `bindings`). */
   binding: {
     provider: string;
     connectionId: string | null;
     choice: "explicit" | "automatic";
   } | null;
+  /** One binding per provider. */
+  bindings: {
+    provider: string;
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+  }[];
   accounts: ModelAccountChoiceOption[];
   personal: {
     connectionsAllowed: boolean;
@@ -4226,8 +4378,15 @@ export type SessionModelAccountChoiceResponse = {
   };
 };
 
-/** `connectionId: null` returns the session to automatic account selection. */
-export type SetSessionModelAccountChoiceRequest = { connectionId: string | null };
+/**
+ * A connection becomes the choice for its provider; other providers' choices
+ * stay. `connectionId: null` returns `provider`'s choice to automatic, or
+ * every provider's when `provider` is omitted.
+ */
+export type SetSessionModelAccountChoiceRequest = {
+  connectionId: string | null;
+  provider?: string;
+};
 
 export type SetSessionModelAccountChoiceResponse = {
   changed: boolean;
@@ -4367,6 +4526,13 @@ export type WorkspaceCodexSubscriptionSource = {
   effectiveSource: "workspace" | "organization" | "disabled";
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
+  /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
+  workspaceSetAside?: boolean;
+  /**
+   * How many organization accounts other than the workspace's own reach this
+   * workspace (accounts limited to chosen people aside). Absent from older servers.
+   */
+  organizationCount?: number;
 };
 
 /**
@@ -4428,6 +4594,11 @@ export type CodexPlanExcludedModel = {
 export type CodexAccount = {
   id: string;
   source?: "workspace" | "organization";
+  /**
+   * Organization list only: shared workspaces that list the account among
+   * their own (it was connected there).
+   */
+  ownInWorkspaceIds?: string[];
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -6333,11 +6504,6 @@ export type UpdateSessionRequest = {
   title: string;
 };
 
-/** Replace the complete ordered low-to-high precedence Variable Set selection. */
-export type UpdateSessionVariableSetsRequest = {
-  variableSetIds: string[];
-};
-
 // --- Operator context controls (/clear, /compact) ----------------------------
 
 /** Outcome of a manual /compact trigger. */
@@ -6424,8 +6590,6 @@ export type NewSessionDraftOptions = {
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
   workingDir?: string | undefined;
-  variableSetIds?: string[] | undefined;
-  variableSetId?: string | undefined;
   rigId?: string | undefined;
   goal?: GoalSpec | undefined;
   firstPartyMcpPermissions?: Permission[] | undefined;
@@ -6749,7 +6913,14 @@ export type ScheduledTaskAgentConfigInput = {
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
+  /**
+   * Connectors added on top of the workspace defaults when `toolPolicy` is
+   * set; otherwise the exact list. Omit both on a schedule that starts its
+   * own session to follow the workspace defaults at each run.
+   */
   tools?: ToolRef[] | undefined;
+  /** Follow the workspace's default connectors at each run, except the excluded ones. */
+  toolPolicy?: ScheduledTaskToolPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
   slackBotConnectionId?: string | undefined;
   /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
@@ -6782,13 +6953,16 @@ export type CreateAgentScheduledTaskRequest = {
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  /**
+   * Connector accounts a person pins for a schedule that starts its own
+   * session (never an existing-chat schedule, never an agent).
+   */
+  pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Skip an occurrence instead of running without an unusable pinned account. */
+  pinnedAccountsRequired?: boolean | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
-  variableSetId?: string | null | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | null | undefined;
   /**
    * Sandbox Environment each run binds to; its active version is resolved per
    * fire. Omit to resolve it once at create: the workspace default (none for a
@@ -6796,6 +6970,8 @@ export type CreateAgentScheduledTaskRequest = {
    * existing-session task. `null` means none.
    */
   rigId?: string | null | undefined;
+  /** Vault narrowing for every run; omission adds none. */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -6817,7 +6993,6 @@ export type CreateSessionScheduledTaskRequest = {
   /** A schedule posting into an Only me chat is always Only me. */
   visibility?: SessionVisibility | undefined;
   runMode?: "existing_session" | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   status?: ScheduledTaskStatus | undefined;
   metadata?: Record<string, unknown> | undefined;
@@ -6839,7 +7014,10 @@ export type UpdateScheduledTaskRequest = {
   targetSessionId?: string | null | undefined;
   /** Change who can see it. Only the owner can; a schedule posting into an Only me chat stays Only me. */
   visibility?: SessionVisibility | undefined;
-  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Replace the person-pinned accounts; `[]` unpins every connector. Omitted keeps the pins. */
+  pinnedAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Skip occurrences instead of running without an unusable pinned account. */
+  pinnedAccountsRequired?: boolean | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -6853,11 +7031,10 @@ export type UpdateScheduledTaskRequest = {
       }
     | undefined;
   status?: ScheduledTaskStatus | undefined;
-  variableSetId?: string | null | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | null | undefined;
   // The rig each run binds to (M3); active version resolved per fire.
   rigId?: string | null | undefined;
+  /** Vault narrowing for every run. */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -6947,6 +7124,23 @@ export type ScheduledTaskRun = {
     | null
     | undefined;
   /**
+   * Pinned connector accounts this run could not use. The run went ahead
+   * without those connectors; no other account was used in their place.
+   */
+  degradedAccounts?:
+    | Array<{
+        serverId: string;
+        connectionId: string | null;
+        reason:
+          | "connector_unavailable"
+          | "account_not_visible"
+          | "account_inactive"
+          | "account_mismatch"
+          | "selection_unavailable"
+          | "owner_access_unavailable";
+      }>
+    | undefined;
+  /**
    * Why the scheduler refused this occurrence before running it; `error`
    * equals `reason`. `retryable: true` (status `skipped`): a later occurrence
    * runs once the condition clears. `retryable: false` (status `failed`):
@@ -7008,9 +7202,10 @@ export type ScheduledTaskRunAccessFailure = {
 
 /**
  * A schedule that needs its owner's attention: its latest run failed closed on
- * connector access (`runId`, `failures`), and/or a chosen connector account can
- * no longer be used so new runs cannot start (`unavailableAccounts`; `runId`
- * and `firedAt` are null when only this applies).
+ * connector access (`runId`, `failures`), and/or a pinned connector account can
+ * no longer be used (`unavailableAccounts`; runs continue without that
+ * connector unless the schedule requires its pins; `runId` and `firedAt` are
+ * null when only this applies).
  */
 export type ScheduledTaskAccessAttention = {
   taskId: string;
@@ -7028,85 +7223,6 @@ export type ScheduledTaskAccessAttention = {
 export type ListScheduledTaskAccessAttentionResponse = {
   tasks: ScheduledTaskAccessAttention[];
 };
-
-// --- VariableSets -------------------------------------------------------------
-
-/** Generic variable-set reads expose name + version metadata only. */
-export type VariableSetVariableMetadata = {
-  name: string;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
-/** Dedicated permissioned plaintext response; never embedded in metadata reads. */
-export type VariableSetSecret = {
-  variableSetId: string;
-  name: string;
-  version: number;
-  value: string;
-};
-
-export type VariableSet = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  scope: "organization" | "workspace" | "user";
-  generation: number;
-  status: "active" | "revoked";
-  name: string;
-  description: string | null;
-  variables: VariableSetVariableMetadata[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-/** Exact-ID attachment metadata; intentionally excludes catalog and secret metadata. */
-export type VariableSetAttachmentMetadata = {
-  id: string;
-  scope: "organization" | "workspace" | "user";
-};
-
-export type ResolveVariableSetAttachmentsRequest = {
-  variableSetIds: string[];
-};
-
-export type ResolveVariableSetAttachmentsResponse = {
-  variableSets: VariableSetAttachmentMetadata[];
-};
-
-/** @deprecated use VariableSetVariableMetadata */
-export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
-
-/** @deprecated use VariableSet */
-export type WorkspaceEnvironment = VariableSet;
-
-export type CreateVariableSetRequest = {
-  /** Omitted remains the legacy workspace-owned path. */
-  scope?: "organization" | "workspace" | "user" | undefined;
-  name: string;
-  description?: string | undefined;
-  /** Initial variables. Values are write-only: they never come back on reads. */
-  variables?: { name: string; value: string }[] | undefined;
-};
-
-/** @deprecated use CreateVariableSetRequest */
-export type CreateWorkspaceEnvironmentRequest = CreateVariableSetRequest;
-
-export type UpdateVariableSetRequest = {
-  name?: string | undefined;
-  description?: string | null | undefined;
-};
-
-/** @deprecated use UpdateVariableSetRequest */
-export type UpdateWorkspaceEnvironmentRequest = UpdateVariableSetRequest;
-
-export type SetVariableSetVariableRequest = {
-  value: string;
-};
-
-/** @deprecated use SetVariableSetVariableRequest */
-export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
 
 // --- Rigs ---------------------------------------------------------------------
 // Workspace-scoped, versioned sandbox machine definitions. Versions are
@@ -7159,6 +7275,7 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
   defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
@@ -7269,7 +7386,6 @@ export type CreateRigRequest = {
   setupScript?: string | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
-  defaultVariableSetIds?: string[] | undefined;
 };
 
 export type UpdateRigRequest = {
@@ -7287,7 +7403,6 @@ export type RigDefinitionEditPayload = {
   setupScript?: string | null | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
-  defaultVariableSetIds?: string[] | undefined;
   changelog?: string | null | undefined;
 };
 
@@ -9747,13 +9862,29 @@ export type DeviceEnrollmentDenyResponse = {
 /** POST /v1/workspaces/:ws/enrollments/token body. */
 export type MintEnrollTokenRequest = {
   allowScreenControl?: boolean;
+  /**
+   * Who can use the machine. `user` makes it the signed-in caller's own
+   * machine (requires a verified person: someone signed in, or a credential
+   * acting as them, such as a personal API key or an organization key acting
+   * `asUser`; a key, service or agent acting as itself gets 422); `workspace`
+   * shares it with this workspace's members. Omitted mints the original
+   * workspace-shared token.
+   */
+  scope?: EnrollTokenScope;
 };
+
+/** Who can use a machine connected with an enroll token. */
+export type EnrollTokenScope = "user" | "workspace";
 
 /** POST /v1/workspaces/:ws/enrollments/token response. The `token` is SECRET. */
 export type MintEnrollTokenResponse = {
   token: string;
   expiresAt: string;
   expiresInSeconds: number;
+  /** What the token grants. Absent from servers that predate scoped tokens,
+   *  which always mint workspace-shared tokens. */
+  scope?: EnrollTokenScope;
+  allowScreenControl?: boolean;
 };
 
 /** The credential payload the headless exchange returns (a subset of the agent's
@@ -9800,6 +9931,8 @@ export type ModelConnectionAccessPolicy = {
    * `allowPersonalWorkspaces: false`.
    */
   allowedPeople?: string[] | null;
+  /** Explicit owner consent to share a personal subscription with the organization. */
+  sharePersonal?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {
@@ -9815,6 +9948,7 @@ export type ModelConnectionAccessResponse = {
   localWorkspaceIds?: string[];
   /** The workspace whose administrators also manage the account, if any. */
   managedByWorkspaceId?: string | null;
+  personalSharingSupported?: boolean;
 };
 
 export type ConnectorToolPermission = "allow" | "ask" | "block";
@@ -9859,6 +9993,26 @@ export type UpdateConnectorToolPermissionsRequest = {
   | { target: "action"; toolName: string; actionName: string }
 );
 
+/** Saved Allow/Ask/Block rules for a session MCP server the host attaches.
+ * Tools without a rule follow `defaultPermission`, then the attaching session's
+ * `requireApproval` recommendation (Ask), then Allow. */
+export type SessionMcpToolPermissionsResponse = {
+  connectionId: string;
+  serverId: string;
+  defaultPermission: ConnectorToolPermission | null;
+  tools: Array<{ toolName: string; permission: ConnectorToolPermission }>;
+  revision: string;
+  canManage: boolean;
+  appliesTo: "next_attempt";
+};
+/** `url` is the exact URL attached to sessions; `permission: null` resets. */
+export type UpdateSessionMcpToolPermissionsRequest = {
+  serverId: string;
+  url: string;
+  permission: ConnectorToolPermission | null;
+  expectedRevision?: string;
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });
+
 /** Agent capability ids (see `@opengeni/contracts` agent-config). */
 export type AgentCapabilityId =
   | "webSearch"
@@ -9870,6 +10024,7 @@ export type AgentCapabilityId =
   | "schedules"
   | "artifacts"
   | "browser"
+  | "secrets"
   | "media"
   | "workspaceFiles"
   | "workspaceConnectors"
@@ -9888,6 +10043,7 @@ export type AgentCapabilityToggles = {
   schedules?: boolean | undefined;
   artifacts?: boolean | undefined;
   browser?: boolean | undefined;
+  secrets?: boolean | undefined;
   media?: boolean | undefined;
   workspaceFiles?: boolean | undefined;
   workspaceConnectors?: boolean | undefined;
@@ -9912,7 +10068,12 @@ export type AgentConfigRequest = {
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;
   renderer?: AgentRenderer | undefined;
+  /** Vaults this session may use (input only); intersected with the parent's policy. */
+  vaultPolicy?: VaultPolicy | undefined;
 };
+
+/** Which vaults a session or schedule may use (see `@opengeni/contracts` VaultPolicy). */
+export type VaultPolicy = { mode: "all" } | { mode: "selected"; vaultIds: string[] };
 
 export type WorkspaceAgentDefaults = {
   capabilities?: AgentCapabilities | undefined;
@@ -9930,6 +10091,7 @@ export type ResolvedAgentCapabilities = {
   schedules: boolean;
   artifacts: boolean;
   browser: boolean;
+  secrets: boolean;
   media: boolean;
   workspaceFiles: boolean;
   workspaceConnectors: boolean;
@@ -9942,6 +10104,8 @@ export type ResolvedAgentConfig = {
   capabilities: ResolvedAgentCapabilities;
   /** Capabilities wanted on but not offered by this deployment. */
   unavailable: AgentCapabilityId[];
+  /** Why each unavailable capability is off; present whenever `unavailable` is non-empty. */
+  unavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
   identity: string | null;
   renderer: AgentRenderer;
   source:

@@ -15,8 +15,10 @@
  * (`claude_setup_token_v1`), which never renews: once Claude refuses it the
  * shared refresh marks the connection needs-relogin. The format is derived
  * from the decoded secret (`credential.format`) whenever the core decides
- * renewal; the stored `credential_format` column holds the encryption
- * envelope version the shared writers record. `provider_account_id` is
+ * renewal; the stored `credential_format` column is informational only
+ * (the cutover records `claude_oauth_v1` / `claude_setup_token_v1`, the
+ * shared connect and reconnect writers record the envelope version `v1`)
+ * and is never passed to `capabilitiesFor`. `provider_account_id` is
  * the Claude account UUID, else the `oauth:`/`setup:` HMAC id the writers
  * already derive; setup tokens report no email or plan.
  *
@@ -32,9 +34,13 @@ import {
   claudeRefreshedCredential,
   ClaudeSubscriptionReconnectRequired,
   requestClaudeTokenRefresh,
-} from "./claude-subscription-tokens";
+} from "./subscription-core-claude-oauth";
 import { subscriptionCoreDefaultErrors } from "./subscription-core/errors";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
+import {
+  decodeSubscriptionCoreClaudeUsage,
+  fetchSubscriptionCoreClaudeUsage,
+} from "./subscription-core-claude-usage";
 
 /** Claude's provider id on the shared core and in the legacy tables. */
 export const SUBSCRIPTION_CORE_CLAUDE_PROVIDER = "claude";
@@ -138,7 +144,11 @@ export function subscriptionCoreClaudeAdapter(
       format === SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT ? capabilities : setupTokenCapabilities,
     credentialKind: "oauth",
     quotaKind: "usage_windows",
+    // Workspace model policy names Claude models by their scope-specific
+    // provider id; on the core a workspace-scoped model runs on organization
+    // connections, so it must be allowed under both identities.
     modelPolicyProviderId: SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0],
+    modelPolicyProviderIdsFor: subscriptionCoreClaudeModelPolicyProviderIds,
     cacheFacts: { kind: "exact_ttl", ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS },
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_CLAUDE_FORBIDDEN_QUARANTINE_MS,
@@ -174,12 +184,32 @@ export function subscriptionCoreClaudeAdapter(
       },
     },
     reloginText: (message) => (message.trim().length > 0 ? message : RELOGIN_TEXT),
+    // Usage reads and their decoding live in `subscription-core-claude-usage.ts` (C2a).
+    fetchUsage: (read) => fetchSubscriptionCoreClaudeUsage(read),
+    decodeQuota: (input) => decodeSubscriptionCoreClaudeUsage(input),
+    // A usage reading may omit a window that still runs: keep it (design 5.3).
+    usageReadingsComplete: false,
   };
 }
 
 /** The product model ids a Claude upstream model id is served as. */
 export function subscriptionCoreClaudeProductModelIds(upstreamModelId: string): string[] {
   return SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES.map((prefix) => `${prefix}/${upstreamModelId}`);
+}
+
+/**
+ * The workspace-policy provider ids a Claude product model must all be
+ * allowed under: its own prefix plus the organization id its connections
+ * carry (`workspace-claude-subscription` models need both), the
+ * organization id alone otherwise.
+ */
+export function subscriptionCoreClaudeModelPolicyProviderIds(modelId: string): readonly string[] {
+  const prefix = modelId.slice(0, Math.max(0, modelId.indexOf("/")));
+  const organization = SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0];
+  return prefix !== organization &&
+    (SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES as readonly string[]).includes(prefix)
+    ? [prefix, organization]
+    : [organization];
 }
 
 const ACCOUNT_WINDOWS = new Set(["five_hour", "seven_day"]);

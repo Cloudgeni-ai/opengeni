@@ -1,27 +1,20 @@
 import { blocks, sentences, toolAvailable, type AgentPromptModule } from "../types";
 
 /**
- * Integration setup and Variable Set discovery (workspace admin tools). A
+ * Integration setup (workspace admin tools). A
  * sentence naming a setup tool renders unless the attempt proved it absent.
  */
 export const adminModule: AgentPromptModule = {
   id: "admin",
   applies: (context) => context.capabilities.workspaceAdmin,
   render: (context) => {
-    const variableSets = toolAvailable(context, "variable_set_list");
     const catalog = toolAvailable(context, "capability_catalog_search");
     const authorization = toolAvailable(context, "capability_authorization_request");
     const customMcp = toolAvailable(context, "custom_mcp_setup_request");
     const setupCards = authorization || customMcp;
-    const seeSessions = context.capabilities.subagents ? " (see Session coordination)" : "";
-    const discovery =
-      variableSets && catalog
-        ? `If access is missing, check \`variable_set_list\`${seeSessions}, then search \`capability_catalog_search\`.`
-        : variableSets
-          ? `If access is missing, check \`variable_set_list\`${seeSessions}.`
-          : catalog
-            ? "If access is missing, search `capability_catalog_search`."
-            : undefined;
+    const discovery = catalog
+      ? "If access is missing, search `capability_catalog_search`."
+      : undefined;
     return blocks(
       "# Integration setup",
       sentences(
@@ -32,6 +25,9 @@ export const adminModule: AgentPromptModule = {
         customMcp &&
           "If no match exists and the task needs a remote MCP whose exact HTTPS URL the user supplied or reliable documentation establishes, call `custom_mcp_setup_request` with its name, URL, and rationale.",
         "Never invent URLs or request credentials in chat.",
+        context.capabilities.secrets &&
+          context.capabilities.humanInput &&
+          'For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.',
         setupCards &&
           "Showing either card does not need integration-management permission and grants no access; the authenticated human must authorize setup.",
         setupCards &&

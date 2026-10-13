@@ -53,6 +53,19 @@ const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.
 const COMPAT = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.
 const FENCES = "0717_subscription_authority_fences.sql";
+// The personal version reader is built from the owner reader withheld 0715
+// rewrites: held back with 0715 and replayed after it.
+const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
+// Readiness compiles against the kind-aware registry introduced by withheld 0715.
+const FAILOVER_READINESS = "0746_subscription_failover_readiness_and_request_fence.sql";
+// Shared-personal acceptance is a later cutover, outside this historical seam.
+const SHARED_PERSONAL_CHOICE = "0749_subscription_shared_personal_choice.sql";
+// Install after the older neutral-routine rewrite and its historical assertions.
+const PERSONAL_SHARING = "0752_subscription_personal_sharing.sql";
+const XAI_CUTOVER = "0747_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0748_subscription_core_claude_cutover.sql";
+// The drained retirement requires every receipt; recorded and never applied.
+const RETIREMENT = "0751_subscription_core_legacy_retirement.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -93,9 +106,9 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${FAILOVER_READINESS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SHARED_PERSONAL_CHOICE}), (${RETIREMENT}), (${PERSONAL_SHARING})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES})`;
+        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS}, ${FAILOVER_READINESS}, ${PERSONAL_SHARING})`;
       } finally {
         await owner.end();
       }

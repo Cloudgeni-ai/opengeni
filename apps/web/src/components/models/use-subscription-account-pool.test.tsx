@@ -7,10 +7,13 @@ import type {
   SubscriptionAccountPoolOperations,
   SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
+import { peekSharedQuery, retainSharedQueries } from "@/lib/shared-query";
+
 let createRoot: typeof import("react-dom/client").createRoot;
 let usePool: typeof import("./use-subscription-account-pool").useSubscriptionAccountPool;
 let root: Root, container: HTMLElement, result: ReturnType<typeof usePool>;
-const client = {};
+// Account lists are retained per client between mounts; every test gets its own.
+let client: object = {};
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -91,6 +94,7 @@ beforeAll(async () => {
   ({ useSubscriptionAccountPool: usePool } = await import("./use-subscription-account-pool"));
 });
 beforeEach(() => {
+  client = {};
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -138,7 +142,7 @@ test("a late failed read cannot clear the next scope's account list", async () =
   expect(result.loadError).toBeNull();
 });
 
-test("an old mutation cannot refresh or mark the next scope as busy", async () => {
+test("an old mutation cannot mark the next scope as busy or show the old scope's rows", async () => {
   const rename = deferred<void>();
   let oldReads = 0,
     newReads = 0;
@@ -168,8 +172,13 @@ test("an old mutation cannot refresh or mark the next scope as busy", async () =
     await mutation;
   });
   expect(result.accounts.map((account) => account.id)).toEqual(["account-b"]);
+  expect(result.busy).toBe(false);
+  // The old scope's loader never runs again for the new scope ...
   expect(oldReads).toBe(1);
-  expect(newReads).toBe(1);
+  // ... but the completed change still invalidates this provider's lists (an
+  // organization change can change what a workspace inherits), so the mounted
+  // list re-reads once in the background with its own loader.
+  expect(newReads).toBe(2);
 });
 
 test("inherited accounts cannot be mutated through the workspace pool", async () => {
@@ -186,4 +195,88 @@ test("inherited accounts cannot be mutated through the workspace pool", async ()
     await expect(result.rename(result.accounts[0]!, "Name")).rejects.toThrow("owning scope");
   });
   expect(mutations).toBe(0);
+});
+
+test("a revisit renders retained accounts at once and an account change evicts other scopes", async () => {
+  // The console keeps reads across navigation for its live client.
+  const retained = retainSharedQueries(client);
+  let reads = 0;
+  let label = "Before";
+  const ops = operations(async () => {
+    reads++;
+    return { ...data("account-a"), accounts: [{ ...poolAccount("account-a"), label }] };
+  });
+  await render("scope-a", ops);
+  expect(result.accounts[0]?.label).toBe("Before");
+  // Navigate to another scope's page and back.
+  await render(
+    "scope-b",
+    operations(async () => data("account-b")),
+  );
+  const rendered: { loading: boolean; ids: string[] }[] = [];
+  await render("scope-a", ops);
+  rendered.push({ loading: result.loading, ids: result.accounts.map((account) => account.id) });
+  expect(rendered[0]).toEqual({ loading: false, ids: ["account-a"] });
+  expect(reads).toBe(1);
+
+  // Renaming from scope A's page evicts scope B's retained list too: an
+  // organization change can change what a workspace inherits.
+  label = "After";
+  await act(async () => {
+    await result.rename(result.accounts[0]!, "After");
+  });
+  expect(result.accounts[0]?.label).toBe("After");
+  expect(reads).toBe(2);
+  expect(
+    peekSharedQuery(client, ["subscription-pool", "Subscription", "workspace", "scope-b"]),
+  ).toBeNull();
+  retained();
+});
+
+test("an account change that settles after the page is left still invalidates retained lists", async () => {
+  const retained = retainSharedQueries(client);
+  let reads = 0;
+  let label = "Before";
+  const renamed = deferred<void>();
+  const ops = operations(
+    async () => {
+      reads++;
+      return { ...data("account-a"), accounts: [{ ...poolAccount("account-a"), label }] };
+    },
+    () => renamed.promise,
+  );
+  await render("scope-a", ops);
+  let pending!: Promise<void>;
+  await act(async () => {
+    pending = result.rename(result.accounts[0]!, "After").catch(() => undefined);
+  });
+  // Leave Settings while the rename is still being saved.
+  await act(async () => root.render(createElement("div")));
+  label = "After";
+  await act(async () => {
+    renamed.resolve();
+    await pending;
+  });
+  expect(
+    peekSharedQuery(client, ["subscription-pool", "Subscription", "workspace", "scope-a"]),
+  ).toBeNull();
+  // Coming back never shows the pre-rename row, even for one frame.
+  const labels: (string | null | undefined)[] = [];
+  function Probe() {
+    const pool = usePool({
+      client,
+      identity: "scope-a",
+      operations: ops,
+      providerName: "Subscription",
+      workspaceId: "scope-a",
+      canManage: true,
+    });
+    labels.push(pool.accounts[0]?.label);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  expect(labels).not.toContain("Before");
+  expect(labels.at(-1)).toBe("After");
+  expect(reads).toBe(2);
+  retained();
 });

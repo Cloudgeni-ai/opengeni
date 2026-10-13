@@ -30,7 +30,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { modelDisplayName, useVariableSets } from "@opengeni/react";
+import { modelDisplayName } from "@opengeni/react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -63,7 +63,6 @@ import { Switch } from "@/components/ui/switch";
 import { modelPayerHint } from "@/lib/model-payer";
 import { useAppContext } from "@/context";
 import { formatElapsedSeconds } from "@/lib/format";
-import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   markScheduledTaskAttentionSeen,
   notifyScheduledTaskAttentionUpdated,
@@ -118,6 +117,7 @@ import {
 } from "./schedule-parts";
 import { scheduledRunErrorText } from "@/lib/scheduled-run-error";
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
+import { ScheduleAccounts, scheduleAccountsDescription } from "./schedule-accounts";
 import { useScheduleActions } from "./use-schedule-actions";
 import { MoreMenu } from "@/components/ui/page-actions";
 
@@ -354,6 +354,7 @@ export function ScheduleDetailPage({
         task.executionDigest,
       )}
       attention={attention?.taskId === task.id ? attention : null}
+      pinnedAccountsRequired={task.agentConfig.pinnedAccountsRequired === true}
       ownsTask={perms.own}
       busy={busy}
       onRefreshAccess={() => void refreshAccess()}
@@ -362,6 +363,44 @@ export function ScheduleDetailPage({
   );
   const runCount = runs.status === "ready" ? runs.runs.length : undefined;
   const latest = runs.status === "ready" ? runs.runs[0] : undefined;
+
+  // Unpinning sends the remaining pins only; the server refuses a schedule
+  // that changed since this page read it.
+  const unpinConnector = async (connectorId: string) => {
+    setRefreshingAccess(true);
+    try {
+      await client.updateScheduledTask(workspaceId, task.id, {
+        pinnedAccounts: (task.agentConfig.pinnedAccounts ?? []).filter(
+          (pin) => pin.serverId !== connectorId,
+        ),
+        expectedExecutionDigest: task.executionDigest,
+      });
+      toast.success("Uses your current accounts", {
+        description: "The next run uses the accounts you have connected then.",
+      });
+      await refresh(true);
+      notifyScheduledTaskAttentionUpdated();
+    } catch (error) {
+      toast.error("Couldn't change this schedule's accounts", {
+        description: scheduleErrorText(error),
+      });
+    } finally {
+      setRefreshingAccess(false);
+    }
+  };
+  const accountPlan = task.accountPlan;
+  const accounts =
+    accountPlan && accountPlan.connectors.length > 0 ? (
+      <DetailSection title="Accounts" description={scheduleAccountsDescription(task, accountPlan)}>
+        <ScheduleAccounts
+          plan={accountPlan}
+          skipsRuns={task.agentConfig.pinnedAccountsRequired === true}
+          canEdit={perms.canEdit}
+          busy={busy}
+          onUseCurrentAccounts={(connectorId) => void unpinConnector(connectorId)}
+        />
+      </DetailSection>
+    ) : null;
 
   const copyLink = () => {
     const url = new URL(schedulePath(workspaceId, task.id), window.location.origin).toString();
@@ -491,6 +530,7 @@ export function ScheduleDetailPage({
               now={clock}
               workspaceId={workspaceId}
               accessNotices={accessNotices}
+              accounts={accounts}
               onActiveChange={(active) =>
                 void (active ? actions.resume(task) : actions.pause(task))
               }
@@ -557,6 +597,7 @@ function Overview({
   now,
   workspaceId,
   accessNotices,
+  accounts,
   onActiveChange,
   onOpenSession,
 }: {
@@ -568,6 +609,8 @@ function Overview({
   workspaceId: string;
   /** Frozen-access drift and connector failures, for the owner to act on. */
   accessNotices: ReactNode;
+  /** Which account each connector would use now; only the owner receives it. */
+  accounts: ReactNode;
   onActiveChange: (active: boolean) => void;
   onOpenSession: (sessionId: string) => void;
 }) {
@@ -668,6 +711,7 @@ function Overview({
           />
         </DetailSection>
       )}
+      {knowledge ? null : accounts}
     </>
   );
 }
@@ -706,7 +750,7 @@ function Instructions({ text }: { text: string }) {
           aria-expanded={expanded}
           aria-controls={id}
           onClick={() => setExpanded((value) => !value)}
-          className="mt-1.5 inline-flex rounded-[6px] text-xs leading-4.5 font-medium text-brand underline-offset-4 hover:underline pointer-coarse:min-h-11 pointer-coarse:items-center"
+          className="mt-1.5 inline-flex rounded-[6px] text-xs leading-4.5 font-medium og-link pointer-coarse:min-h-11 pointer-coarse:items-center"
         >
           {expanded ? "Show less" : "Show more"}
         </button>
@@ -746,11 +790,7 @@ function Setup({
   description: string;
   onOpenSession: (sessionId: string) => void;
 }) {
-  const { accessContext, client, toolMcpServers } = useAppContext();
-  const canListSets =
-    hasWorkspacePermission(accessContext, workspaceId, "variable-sets:list") &&
-    Boolean(task.variableSetId);
-  const variableSets = useVariableSets({ enabled: canListSets });
+  const { client, toolMcpServers } = useAppContext();
   const rigs = useWorkspaceRigs({ enabled: Boolean(task.rigId) });
   const [chat, setChat] = useState<Session | null>(null);
   const inheritsChatSettings = scheduleInheritsChatSettings(task);
@@ -775,9 +815,6 @@ function Setup({
     };
   }, [access.canTargetSessions, client, targetId, workspaceId]);
 
-  const setName = task.variableSetId
-    ? variableSets.variableSets.find((set) => set.id === task.variableSetId)?.name
-    : undefined;
   const rigName = task.rigId ? rigs.rigs.find((rig) => rig.id === task.rigId)?.name : undefined;
   const repositories = task.agentConfig.resources.filter(
     (resource): resource is Extract<typeof resource, { kind: "repository" }> =>
@@ -799,7 +836,7 @@ function Setup({
             <button
               type="button"
               onClick={() => onOpenSession(targetId)}
-              className="rounded-[6px] text-left font-medium text-brand underline-offset-4 hover:underline"
+              className="rounded-[6px] text-left font-medium og-link"
             >
               {chat ? sessionDisplayTitle(chat) : "Open the chat"}
             </button>
@@ -810,17 +847,6 @@ function Setup({
       ) : null}
       {task.runMode !== "new_session_per_run" ? (
         <DetailFact label="If still running">{IF_STILL_RUNNING[task.overlapPolicy]}</DetailFact>
-      ) : null}
-      {!inheritsChatSettings && task.variableSetId ? (
-        <DetailFact label="Variable set">
-          <Link
-            to="/workspaces/$workspaceId/variable-sets/$variableSetId"
-            params={{ workspaceId, variableSetId: task.variableSetId }}
-            className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
-          >
-            {setName ?? (variableSets.loading ? "Loading…" : "Attached variable set")}
-          </Link>
-        </DetailFact>
       ) : null}
       {repositories.length > 0 ? (
         <DetailFact label={repositories.length === 1 ? "Repository" : "Repositories"}>
@@ -839,7 +865,7 @@ function Setup({
           <Link
             to="/workspaces/$workspaceId/rigs/$rigId"
             params={{ workspaceId, rigId: task.rigId }}
-            className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
+            className="rounded-[6px] font-medium og-link"
           >
             {rigName ?? (rigs.loading ? "Loading…" : "Attached sandbox environment")}
           </Link>

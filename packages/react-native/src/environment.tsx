@@ -7,7 +7,7 @@ import {
   useMemo,
   useState,
 } from "react";
-import type { OpenGeniReactNativeAdapters } from "./adapters";
+import type { NativeLinkAdapter, OpenGeniReactNativeAdapters } from "./adapters";
 import { sha256HexToArrayBuffer } from "./adapters";
 
 interface EventTargetLike {
@@ -211,4 +211,13 @@ export function useOpenGeniReactNativeEnvironment(): NativeEnvironmentContextVal
     throw new Error("Opengeni native hooks require OpenGeniReactNativeProvider");
   }
   return value;
+}
+
+/**
+ * The host's link adapter, if any. Works outside the provider, where it is
+ * undefined. Opening links lives in `./links` so this module stays free of
+ * runtime `react-native` imports.
+ */
+export function useNativeLinkAdapter(): NativeLinkAdapter | undefined {
+  return useContext(NativeEnvironmentContext)?.adapters.links;
 }

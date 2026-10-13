@@ -109,6 +109,10 @@ describe("site auth maintenance", () => {
       surface: "system",
     });
     expect(String(createInput?.["initialMessage"])).toContain("Purpose: repair");
+    // Only provider-managed connections remain; the agent signs in through them.
+    expect(String(createInput?.["initialMessage"])).toContain(
+      "external_provider) authority with browser_auth advance_external",
+    );
     expect(String(createInput?.["initialMessage"])).toContain(claim.preferredNetworkRouteId!);
     expect(recordUsage).toHaveBeenCalledTimes(1);
   });

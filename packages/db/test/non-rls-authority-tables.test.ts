@@ -109,6 +109,10 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       { table: "workspace_memberships", policy: "personal_document_authority_capability_read" },
       { table: "workspace_memberships", policy: "scoped_compute_capability_read" },
       { table: "workspace_memberships", policy: "variable_set_authority_capability_read" },
+      // Vault routines (0739) read memberships and workspaces for reach. Same
+      // shape as the lanes above (owner-only, capability-gated), and also
+      // scoped TO the routine owner, so it is inert for every other role.
+      { table: "workspace_memberships", policy: "vault_authority_capability_read" },
       // The Default-collection backfill needs to enumerate every workspace in an
       // account from inside its SECURITY DEFINER lifecycle, so it opens a
       // marker-gated window on `workspaces`. Recorded here because it is broader
@@ -118,6 +122,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       // Confined to that definer today, but it is the one entry on this list
       // that would need narrowing before `workspaces` could adopt RLS.
       { table: "workspaces", policy: "document_default_backfill_lifecycle" },
+      { table: "workspaces", policy: "vault_authority_capability_read" },
     ]);
   }, 180_000);
 

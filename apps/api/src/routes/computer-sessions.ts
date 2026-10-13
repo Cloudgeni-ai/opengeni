@@ -11,6 +11,7 @@ import {
   ComputerNativeCommand,
   ComputerNativeCallRequest,
   ComputerActionCommand,
+  computerActionSecretTexts,
   ComputerActionRequest,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
@@ -121,6 +122,11 @@ import {
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import {
+  collectStringsDeep,
+  resolveInteractionSecretValues,
+  type InteractionSecretsPort,
+} from "../interaction-secrets";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -204,7 +210,12 @@ export function computerScreenshotResponse(
 /** Public ComputerSession resource surface. Physical app/window authority stays
  * in the same placement controller used by BrowserSession; this route owns only
  * durable authorization, placement fencing, lifecycle receipts, and routing. */
-export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
+export function registerComputerSessionRoutes(
+  app: Hono,
+  deps: ApiRouteDeps,
+  options: { interactionSecrets?: InteractionSecretsPort | null } = {},
+): void {
+  const interactionSecrets = options.interactionSecrets ?? null;
   const channelServices = {
     db: deps.db,
     settings: deps.settings,
@@ -604,14 +615,25 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grant.principalKind !== "agent_attempt"
           )
             throw new HTTPException(403, { message: "Human desktop input is disabled" });
+          const commandFields = {
+            ...request,
+            protocolVersion: INTERACTION_PROTOCOL_VERSION,
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId: null,
+            actor: interactionActorForGrant(grant),
+          };
+          ComputerNativeCommand.parse(commandFields);
+          const secretValues = await resolveInteractionSecretValues({
+            port: interactionSecrets,
+            grant,
+            texts: collectStringsDeep(request.arguments),
+            use: { surface: "desktop", toolName: request.tool, operationId: request.operationId },
+          });
           return await sessionClient.nativeCall(
             ComputerNativeCommand.parse({
-              ...request,
-              protocolVersion: INTERACTION_PROTOCOL_VERSION,
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId: null,
-              actor: interactionActorForGrant(grant),
+              ...commandFields,
+              ...(secretValues === undefined ? {} : { secretValues }),
             }),
           );
         },
@@ -644,18 +666,29 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           ) {
             throw new HTTPException(403, { message: "Human desktop input is disabled" });
           }
+          const commandFields = {
+            protocolVersion: INTERACTION_PROTOCOL_VERSION,
+            operationId: request.operationId,
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId: request.targetId,
+            expectedTargetGeneration: request.expectedTargetGeneration,
+            expectedObservationId: request.expectedObservationId,
+            expectedFrameId: request.expectedFrameId,
+            actor: interactionActorForGrant(grant),
+            action: request.action,
+          };
+          ComputerActionCommand.parse(commandFields);
+          const secretValues = await resolveInteractionSecretValues({
+            port: interactionSecrets,
+            grant,
+            texts: computerActionSecretTexts(request.action),
+            use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
+          });
           return await sessionClient.action(
             ComputerActionCommand.parse({
-              protocolVersion: INTERACTION_PROTOCOL_VERSION,
-              operationId: request.operationId,
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId: request.targetId,
-              expectedTargetGeneration: request.expectedTargetGeneration,
-              expectedObservationId: request.expectedObservationId,
-              expectedFrameId: request.expectedFrameId,
-              actor: interactionActorForGrant(grant),
-              action: request.action,
+              ...commandFields,
+              ...(secretValues === undefined ? {} : { secretValues }),
             }),
           );
         },

@@ -14,7 +14,6 @@ import {
   Alert,
   Animated,
   AppState,
-  Linking,
   PanResponder,
   Platform,
   Pressable,
@@ -23,6 +22,7 @@ import {
   type LayoutChangeEvent,
 } from "react-native";
 
+import { useOpenNativeLink } from "../links";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
@@ -128,6 +128,7 @@ const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
 
 function Spans({ spans }: { spans: NotificationSpan[] }) {
   const theme = useNativeTimelineTheme();
+  const openLink = useOpenNativeLink();
   const c = theme.colors;
   // Spans are the positional pieces of one parsed message and never reorder,
   // so their index is their identity.
@@ -147,7 +148,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
         // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
         key={index}
         accessibilityRole="link"
-        onPress={() => void Linking.openURL(span.href)}
+        onPress={() => openLink(span.href)}
         style={{ color: c.fg, textDecorationLine: "underline" }}
       >
         {span.text}
@@ -484,6 +485,7 @@ export function NativeInboxList({
 }: NativeInboxListProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const openLink = useOpenNativeLink();
   const [busy, setBusy] = useState<Record<string, string>>({});
   const now = Date.now();
   const items = useMemo(() => inbox.data?.items ?? [], [inbox.data]);
@@ -703,13 +705,7 @@ export function NativeInboxList({
     }
     if (item.kind === "notification" && item.link) {
       const url = item.link.url;
-      return (
-        <Button
-          label={item.link.label}
-          icon="arrow-up-right"
-          onPress={() => void Linking.openURL(url)}
-        />
-      );
+      return <Button label={item.link.label} icon="arrow-up-right" onPress={() => openLink(url)} />;
     }
     return null;
   };

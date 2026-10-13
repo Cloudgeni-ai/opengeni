@@ -16,6 +16,7 @@ import {
   stableJson,
   type RepositoryResourceRef,
   type ResourceRef,
+  type ScheduledTaskToolPolicy,
   type ToolRef,
   type WorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
@@ -119,6 +120,32 @@ export function withWorkspaceDefaultMcpTools(
       runtimeSettings,
     ),
   );
+}
+
+/**
+ * The tools a run of a schedule that starts its own session gets now. A
+ * schedule that follows the workspace defaults gets the defaults as they are
+ * at this moment (never a copy saved earlier), minus the connectors a person
+ * turned off, plus its own tools. Without a policy it gets exactly its tools.
+ * The Opengeni carrier is never excluded.
+ */
+export function scheduledTaskRunTools(input: {
+  agentConfig: { tools: ToolRef[]; toolPolicy?: ScheduledTaskToolPolicy | undefined };
+  settings: McpSettings;
+  runtimeSettings: McpSettings;
+  workspaceDefaults: WorkspaceSessionToolDefaults | null;
+}): ToolRef[] {
+  const policy = input.agentConfig.toolPolicy;
+  if (!policy) return [...input.agentConfig.tools];
+  const excluded = new Set(policy.excludedMcpServerIds);
+  const kept = (tool: ToolRef) =>
+    tool.kind !== "mcp" || tool.id === "opengeni" || !excluded.has(tool.id);
+  return withWorkspaceDefaultMcpTools(
+    input.agentConfig.tools.filter(kept),
+    input.settings,
+    input.runtimeSettings,
+    input.workspaceDefaults,
+  ).filter(kept);
 }
 
 /** Drop stored refs that are no longer present in the current runtime registry. */

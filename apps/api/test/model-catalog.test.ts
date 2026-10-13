@@ -1001,7 +1001,9 @@ describe("workspace model catalog route discipline", () => {
     expect(handler.indexOf("getWorkspaceModelPolicy")).toBeGreaterThan(grant);
     // Codex readiness follows the organization's Codex cutover row.
     expect(handler.indexOf("loadWorkspaceCodexCatalogReadiness")).toBeGreaterThan(grant);
-    expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
+    // SuperGrok readiness is the shared core's projection only.
+    expect(handler.indexOf("loadCoreRoutedXaiCatalogReadiness")).toBeGreaterThan(grant);
+    expect(handler).not.toContain("workspaceXaiSubscriptionActive");
     expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');
     // The published default uses the same selection and the caller's own

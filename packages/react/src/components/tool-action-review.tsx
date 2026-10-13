@@ -10,6 +10,7 @@ import {
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
 import type { ToolActionReview, ToolReviewDetailsPage, ToolReviewStatus } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
+import { SecretRefText } from "./secret-ref-chip";
 
 export type ToolReviewDetailsLoader = (
   review: ToolActionReview,
@@ -316,12 +317,12 @@ function ReviewFacts({
                     className={cn(linkButton, "max-w-full")}
                   >
                     <span className="line-clamp-4 min-w-0 break-words [overflow-wrap:anywhere]">
-                      {field.preview}
+                      <SecretRefText text={field.preview} linkable={false} />
                     </span>
                     <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
                   </button>
                 ) : (
-                  field.preview
+                  <SecretRefText text={field.preview} />
                 )}
               </dd>
             </div>
@@ -603,12 +604,12 @@ export function ToolActionReviewDetails({
                       onClick={() => open(item.path!, item.label)}
                     >
                       <span className="min-w-0 break-words focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40">
-                        {item.value}
+                        <SecretRefText text={item.value} linkable={false} />
                       </span>
                       <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
                     </button>
                   ) : (
-                    item.value
+                    <SecretRefText text={item.value} />
                   )}
                 </dd>
               </div>

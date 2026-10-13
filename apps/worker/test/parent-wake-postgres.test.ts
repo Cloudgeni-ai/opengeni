@@ -6,20 +6,14 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   createDb,
   createSession,
-  createXaiSubscriptionCredential,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   markSessionWorkflowWakeDelivered,
-  setInitialActiveClaudeCredential,
-  setInitialActiveXaiCredential,
   settleConnectedMachineSessionBackgroundCommand,
   settleSessionInputWait,
   settleSessionIdleWithParentOutbox,
-  upsertOrganizationClaudeSubscription,
-  upsertOrganizationXaiSubscription,
   waitForSessionInputWithEvent,
   type SessionWorkflowWakeDeliveryResult,
 } from "@opengeni/db";
@@ -56,7 +50,7 @@ afterAll(async () => {
 }, 60_000);
 
 test.each(["organization", "personal"] as const)(
-  "SUB-ACCESS-01: real child, background-command, and wait-timeout producers coalesce with accepted %s Claude and SuperGrok snapshots",
+  "SUB-ACCESS-01: real child, background-command, and wait-timeout producers coalesce with accepted %s Claude snapshots and copy SuperGrok's verbatim",
   async (scope) => {
     if (!shared || !client) return;
     const admin = shared.admin;
@@ -69,7 +63,6 @@ test.each(["organization", "personal"] as const)(
     const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name) values (${accountId}, 'Shared test workspace') returning id`;
     const workspaceId = workspace!.id;
-    const encryptionKey = new Uint8Array(32).fill(23);
     const [personalWorkspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name) values (${accountId}, 'Personal test fixture') returning id`;
     await admin`insert into workspace_inference_controls (account_id, workspace_id) values (${accountId}, ${workspaceId})`;
@@ -86,75 +79,12 @@ test.each(["organization", "personal"] as const)(
         ${accountId}, ${workspaceId}, ${subjectId}, 'owner', '[]'::jsonb
       )`;
 
-    if (scope === "personal") {
-      const claudeIdentity = crypto.randomUUID();
-      const claude = await createClaudeSubscriptionAccount(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        scope: "user",
-        encryptionKey,
-        secret: {
-          version: 1,
-          token: "sk-ant-oat01-parent-wake-personal",
-          identity: { accountUuid: claudeIdentity, deviceId: "d".repeat(64) },
-        },
-        providerAccountId: claudeIdentity,
-        label: null,
-        accountEmail: null,
-        planType: "claude_max",
-        expiresAt: null,
-      });
-      await setInitialActiveClaudeCredential(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        authoritySnapshot: claude.authoritySnapshot,
-        credentialId: claude.account.id,
-      });
-      const xai = await createXaiSubscriptionCredential(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        scope: "user",
-        encryptionKey,
-        secret: { version: 1, accessToken: "parent-wake-personal" },
-        providerAccountId: `parent-wake-personal-${crypto.randomUUID()}`,
-      });
-      await setInitialActiveXaiCredential(db, {
-        accountId,
-        workspaceId,
-        subjectId,
-        authoritySnapshot: xai.authoritySnapshot,
-        credentialId: xai.account.id,
-      });
-    } else {
-      const claudeIdentity = crypto.randomUUID();
-      await upsertOrganizationClaudeSubscription(db, {
-        organizationId: accountId,
-        actorSubjectId: subjectId,
-        encryptionKey,
-        secret: {
-          version: 1,
-          token: "sk-ant-oat01-parent-wake-org",
-          identity: { accountUuid: claudeIdentity, deviceId: "e".repeat(64) },
-        },
-        providerAccountId: claudeIdentity,
-        label: null,
-        accountEmail: null,
-        expiresAt: null,
-      });
-      await upsertOrganizationXaiSubscription(db, {
-        organizationId: accountId,
-        actorSubjectId: subjectId,
-        providerAccountId: `parent-wake-org-${crypto.randomUUID()}`,
-        encryptionKey,
-        secret: { version: 1, accessToken: "parent-wake-org" },
-        label: null,
-        accountEmail: null,
-        expiresAt: new Date(Date.now() + 3_600_000),
-      });
-    }
+    // Already-accepted pre-cutover authority is copied, not recomputed from
+    // today's live pool. No retired credential repository participates.
+    const acceptedClaude: PoolSnapshot =
+      scope === "personal"
+        ? { version: 1, scope: "user", authorityGeneration: 1 }
+        : { version: 1, scope: "organization" };
 
     async function start(
       message: string,
@@ -187,7 +117,7 @@ test.each(["organization", "personal"] as const)(
                 executionGeneration: parent.turn.executionGeneration,
               },
             }
-          : {}),
+          : { initialClaudeProviderAccountAuthoritySnapshot: acceptedClaude }),
         initialMessage: message,
         resources: [],
         tools: [],
@@ -248,7 +178,9 @@ test.each(["organization", "personal"] as const)(
         xai_provider_account_authority_snapshot as xai
       from session_turns where id = ${parent.turn.id}`;
     expect(accepted?.claude.scope).toBe(scope === "personal" ? "user" : "organization");
-    expect(accepted?.xai).toEqual(accepted?.claude);
+    // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
+    // workspace default, never computed from live pools, and copied verbatim.
+    expect(accepted?.xai).toEqual({ version: 1, scope: "workspace" });
 
     const child = await start("complete delegated work", parent);
     const [childAuthority] = await admin<{ claude: PoolSnapshot; xai: PoolSnapshot }[]>`

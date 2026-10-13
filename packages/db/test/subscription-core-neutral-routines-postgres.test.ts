@@ -17,6 +17,9 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
   SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
   withSubscriptionCoreAcceptedTurn,
@@ -32,6 +35,16 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appConnectionUrl = "";
+/**
+ * This binary requires the SuperGrok and Claude receipts, which the rolling
+ * state lacks, and the absence of everything the drained retirement drops
+ * (held back with the cutovers, whose receipts it requires).
+ */
+const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+  "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+];
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
 // A deployment's own application role (not named opengeni_app), configured
@@ -69,11 +82,31 @@ beforeAll(async () => {
     "0726_subscription_personal_acceptance_reads.sql",
     // 0728 adds a format-aware overload next to 0707's personal connect writer.
     "0728_subscription_core_personal_connect_format.sql",
+    // 0730 derives the personal version reader from 0707's owner reader.
+    "0730_subscription_core_personal_connection_versions.sql",
+    // 0735's owner-only usage routines run on 0707's owner internals.
+    "0735_subscription_core_owned_connection_usage.sql",
+    // Reads the registry/receipt and rewrites the admission guard withheld above.
+    "0746_subscription_failover_readiness_and_request_fence.sql",
+    "0752_subscription_personal_sharing.sql",
   ];
+  // The drained SuperGrok and Claude cutovers and the retirement after them
+  // are maintenance-only: a rolling deployment of 0707 never applies them, so
+  // they stay recorded and unapplied here.
+  const xaiCutover = "0747_subscription_core_xai_cutover.sql";
+  const claudeCutover = "0748_subscription_core_claude_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    for (const name of withheld) await owner`insert into schema_migrations(name) values (${name})`;
+    for (const name of [
+      ...withheld,
+      xaiCutover,
+      claudeCutover,
+      "0749_subscription_shared_personal_choice.sql",
+      "0750_subscription_waiter_candidates.sql",
+      SUBSCRIPTION_RETIREMENT_MIGRATION,
+    ])
+      await owner`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     await owner`delete from schema_migrations where name in ${owner(withheld)}`;
@@ -391,7 +424,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         targetSchema: "public",
       };
       const posture = await inspectRuntimeDatabasePosture(client!.db, options);
-      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(BEFORE_XAI_CUTOVER);
       for (const name of SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES) {
         const found = posture.privateRoutines.filter((entry) => entry.name === name);
         expect(found).toHaveLength(1);
@@ -425,10 +458,11 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
       expect(rows.length).toBe(
         SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES.length +
           SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length +
-          // 0715: the registered connection-kind lookup the routines call.
-          1,
+          // Registered kind lookup and B1's narrow kind/receipt reader.
+          2,
       );
       expect(rows.some((row) => row.name === "subscription_core_connection_kind")).toBe(true);
+      expect(rows.some((row) => row.name === "subscription_core_failover_readiness")).toBe(true);
       for (const row of rows) {
         expect({
           name: row.name,
@@ -518,6 +552,54 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         expected = expected.replace(from, () => to);
       }
       expect(row!.formatted).toBe(expected);
+    },
+    180_000,
+  );
+
+  test.skipIf(!realDb)(
+    "the personal version reader is the live owner reader plus exactly 0730's changes",
+    async () => {
+      // 0730 builds its reader from the live owner reader (0707, as 0715
+      // rewrote it). A later fix to the owner reader's membership, writer
+      // context or kind rule must reach the version reader too: this compares
+      // the two live bodies after 0730's three substitutions.
+      const [row] = await database!.admin<{ base: string; versions: string }[]>`
+        select
+          pg_get_functiondef('opengeni_private.subscription_core_personal_connections(text,uuid,uuid,text)'::regprocedure) as base,
+          pg_get_functiondef('opengeni_private.subscription_core_personal_connection_versions(text,uuid,uuid,text)'::regprocedure) as versions`;
+      const substitutions: Array<[string, string]> = [
+        [
+          "FUNCTION opengeni_private.subscription_core_personal_connections(",
+          "FUNCTION opengeni_private.subscription_core_personal_connection_versions(",
+        ],
+        [
+          "RETURNS TABLE(id uuid, label text, account_email text, plan_type text, provider_account_id text, status text, last_error text, allocator_enabled boolean, allocator_version integer, allowed_model_ids text[], connected_by_subject_id text, expires_at timestamp with time zone, last_refresh_at timestamp with time zone, provider_state jsonb, updated_at timestamp with time zone, quota jsonb, quota_revision bigint, quota_observed_refresh_generation bigint, quota_updated_at timestamp with time zone, extra_credits_enabled boolean, extra_credits_version integer, extra_credits_updated_at timestamp with time zone)",
+          "RETURNS TABLE(id uuid, version integer)",
+        ],
+        [
+          [
+            "SELECT connection.id, connection.label, connection.account_email, connection.plan_type,",
+            "          connection.provider_account_id, connection.status, connection.last_error,",
+            "          connection.allocator_enabled, connection.allocator_version,",
+            "          connection.allowed_model_ids, connection.connected_by_subject_id,",
+            "          connection.expires_at, connection.last_refresh_at, connection.provider_state,",
+            "          connection.updated_at, quota.quota, quota.revision::bigint,",
+            "          quota.observed_refresh_generation, quota.updated_at,",
+            "          connection.extra_credits_enabled, connection.extra_credits_version,",
+            "          connection.extra_credits_updated_at\n",
+          ].join("\n"),
+          "SELECT connection.id, connection.version\n",
+        ],
+      ];
+      let expected = row!.base;
+      for (const [from, to] of substitutions) {
+        expect({ from, occurrences: expected.split(from).length - 1 }).toEqual({
+          from,
+          occurrences: 1,
+        });
+        expected = expected.replace(from, () => to);
+      }
+      expect(row!.versions).toBe(expected);
     },
     180_000,
   );
@@ -970,7 +1052,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
   test.skipIf(!realDb)(
     "applied to a provisioned database, 0707 keeps the runtime posture clean before provisioning again",
     () => {
-      expect(unprovisionedPostureViolations).toEqual([]);
+      expect(unprovisionedPostureViolations).toEqual(BEFORE_XAI_CUTOVER);
       // 0715 grants its two routines to every configured application role,
       // not only the default name, before provision-roles.
       expect(customRoleKindRoutinesBeforeProvision).toEqual({

@@ -1,3 +1,4 @@
+import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
@@ -228,7 +229,9 @@ export function projectHistoryForProvider(
   providerApi: HistoryProviderApi,
 ): Array<Record<string, unknown>> {
   const nativeClaude = providerApi === "anthropic-messages";
-  const projected = items.map((item) => {
+  // Each distinct session goal context reaches the model once per request.
+  const goalOnce = collapseRepeatedSessionGoalContexts(items);
+  const projected = goalOnce.map((item) => {
     const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
     return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
   });

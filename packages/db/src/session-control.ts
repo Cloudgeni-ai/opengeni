@@ -26,7 +26,7 @@ import {
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import { copySubscriptionAuthorityCompatInTransaction } from "./subscription-core-acceptance-authority";
-import { deleteSubscriptionCoreCodexWaitersForTurns } from "./subscription-core-codex-waiter-cleanup";
+import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputResponseContext,
@@ -1126,9 +1126,123 @@ function targetValues(sessionIds: string[]) {
   );
 }
 
-const TARGET_PATH_PROJECTION_LIMIT = 128;
+// Who can read a session and who it controls are separate. A paused Only-me
+// ancestor still pauses a workspace-visible descendant. The control walk reads
+// under the caller's visibility first; only when that chain stops short of a
+// root is it re-read in full and the part the caller could not see redacted:
+// a hidden ancestor contributes its pause state, never its title, actor or
+// reason. The ordinary path costs no extra statement.
+// Same label the related-access projection uses for an ancestor the caller cannot read.
+const HIDDEN_ANCESTOR_DISPLAY_NAME = "An ancestor session";
+
+/**
+ * Re-run a read outside the active viewer's session visibility, then restore
+ * it. Null when no viewer is set: a gap is then a genuine invariant failure.
+ */
+async function readOutsideViewerVisibility<T>(
+  db: Database,
+  read: () => Promise<T>,
+): Promise<T | null> {
+  const [row] = await db.execute<{ subjectId: string | null }>(
+    sql`select nullif(current_setting('opengeni.subject_id', true), '') as "subjectId"`,
+  );
+  const viewer = row?.subjectId ?? null;
+  if (!viewer) return null;
+  const restore = () => db.execute(sql`select set_config('opengeni.subject_id', ${viewer}, true)`);
+  await db.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+  let value: T;
+  try {
+    value = await read();
+  } catch (error) {
+    await restore().catch(() => undefined);
+    throw error;
+  }
+  await restore();
+  return value;
+}
+
+async function sessionsHiddenFromViewer(
+  db: Database,
+  workspaceId: string,
+  sessionIds: Iterable<string>,
+): Promise<Set<string>> {
+  const ids = [...new Set(sessionIds)];
+  if (ids.length === 0) return new Set();
+  const visible = await db.execute<{ id: string }>(sql`
+    select session.id
+    from ${schema.sessions} session
+    where session.workspace_id = ${workspaceId}
+      and session.id in (${sql.join(
+        ids.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )})
+  `);
+  const visibleIds = new Set(visible.map((row: { id: string }) => row.id));
+  return new Set(ids.filter((id) => !visibleIds.has(id)));
+}
+
+function redactHiddenAncestor<T extends AncestryNode>(row: T): T {
+  return {
+    ...row,
+    title: HIDDEN_ANCESTOR_DISPLAY_NAME,
+    directControlChangedBy: null,
+    directControlReason: null,
+  };
+}
+
+/** True when some target's visible chain ends below its root. */
+function ancestryStopsShort(rows: AncestryRow[]): boolean {
+  const deepest = new Map<string, AncestryRow>();
+  for (const row of rows) {
+    const current = deepest.get(row.targetId);
+    if (!current || Number(row.depth) > Number(current.depth)) deepest.set(row.targetId, row);
+  }
+  for (const row of deepest.values()) {
+    if (row.parentSessionId !== null && !row.cycle && Number(row.depth) < SESSION_ANCESTRY_LIMIT) {
+      return true;
+    }
+  }
+  return false;
+}
 
 async function loadTargetAncestryRows(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<AncestryRow[]> {
+  const visible = await queryTargetAncestryRows(db, workspaceId, sessionIds);
+  if (!ancestryStopsShort(visible)) return visible;
+  const complete = await readOutsideViewerVisibility(db, () =>
+    queryTargetAncestryRows(db, workspaceId, sessionIds),
+  );
+  if (!complete) return visible;
+  const visibleIds = new Set(visible.map((row) => row.sessionId));
+  return complete.map((row) => (visibleIds.has(row.sessionId) ? row : redactHiddenAncestor(row)));
+}
+
+async function loadAncestryNodes(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Map<string, AncestryNode>> {
+  const visible = await queryAncestryNodes(db, workspaceId, sessionIds);
+  const stopsShort = [...visible.values()].some(
+    (node) => node.parentSessionId !== null && !visible.has(node.parentSessionId),
+  );
+  if (!stopsShort) return visible;
+  const complete = await readOutsideViewerVisibility(db, () =>
+    queryAncestryNodes(db, workspaceId, sessionIds),
+  );
+  if (!complete) return visible;
+  for (const [sessionId, node] of complete) {
+    if (!visible.has(sessionId)) complete.set(sessionId, redactHiddenAncestor(node));
+  }
+  return complete;
+}
+
+const TARGET_PATH_PROJECTION_LIMIT = 128;
+
+async function queryTargetAncestryRows(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
@@ -1196,7 +1310,7 @@ async function loadTargetAncestryRows(
   `);
 }
 
-async function loadAncestryNodes(
+async function queryAncestryNodes(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
@@ -1822,7 +1936,8 @@ export async function evaluateSessionDiscoveryControls(
     throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
   }
 
-  const rows = await db.execute<SessionDiscoveryControlRow>(sql`
+  const readRows = async () => [
+    ...(await db.execute<SessionDiscoveryControlRow>(sql`
     with recursive targets(id) as (values ${targetValues(uniqueIds)}),
     ancestry as (
       select
@@ -1943,7 +2058,34 @@ export async function evaluateSessionDiscoveryControls(
     left join blocker_counts counts on counts.target_id = target.id
     left join primary_blockers primary_blocker on primary_blocker.target_id = target.id
     order by target.id
-  `);
+  `)),
+  ];
+  let rows = await readRows();
+  const stopsShort = rows.some(
+    (row) =>
+      !row.reachedRoot &&
+      Number(row.ancestryCount) > 0 &&
+      (row.maxDepth === null || Number(row.maxDepth) < SESSION_ANCESTRY_LIMIT),
+  );
+  const complete = stopsShort ? await readOutsideViewerVisibility(db, readRows) : null;
+  if (complete) {
+    const hiddenBlockers = await sessionsHiddenFromViewer(
+      db,
+      workspaceId,
+      complete.flatMap((row) =>
+        row.primarySessionId && row.primarySessionId !== row.targetId ? [row.primarySessionId] : [],
+      ),
+    );
+    rows = complete.map((row) =>
+      row.primarySessionId && hiddenBlockers.has(row.primarySessionId)
+        ? {
+            ...row,
+            primaryDisplayName: HIDDEN_ANCESTOR_DISPLAY_NAME,
+            primaryDisplayNameOriginalChars: HIDDEN_ANCESTOR_DISPLAY_NAME.length,
+          }
+        : row,
+    );
+  }
 
   const result = new Map<string, SessionDiscoveryControl>();
   for (const row of rows) {
@@ -3263,9 +3405,10 @@ async function cancelSessionSubtreeInTransaction(
         turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
         questions: schema.sessionHumanInputRequests.questions,
       });
-    // A core Codex waiter exists only while its turn waits; cancelling the
-    // turn removes it (and its pending wake deliveries) in the same commit.
-    await deleteSubscriptionCoreCodexWaitersForTurns(db, {
+    // A core waiter (of whichever provider) exists only while its turn
+    // waits; cancelling the turn removes it (and its pending wake
+    // deliveries) in the same commit.
+    await deleteSubscriptionCoreWaitersForTurns(db, null, {
       workspaceId: input.workspaceId,
       turnIds: immediatelyCancelledTurnIds,
     });

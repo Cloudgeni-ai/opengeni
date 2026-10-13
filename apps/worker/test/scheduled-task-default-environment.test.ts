@@ -1,17 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  CreateScheduledTaskRequest,
-  UpdateScheduledTaskRequest,
-  type AccessGrant,
-  type Permission,
-} from "@opengeni/contracts";
-import { createValidatedScheduledTask, validatedScheduledTaskUpdate } from "@opengeni/core";
+import { CreateScheduledTaskRequest, type AccessGrant, type Permission } from "@opengeni/contracts";
+import { createValidatedScheduledTask } from "@opengeni/core";
 import {
   createDb,
   createRig,
-  createScheduledTask,
   createSession,
-  createVariableSet,
   getScheduledTask,
   getScheduledTaskRunAcceptedExecution,
   getPersonalGitHubRepositorySelectionState,
@@ -20,8 +13,6 @@ import {
   replacePersonalGitHubRepositorySelections,
   requireSession,
   setWorkspaceDefaultRig,
-  updateScheduledTask,
-  updateSessionVariableSets,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -102,13 +93,13 @@ function grantFor(
   return { ...workspace, principalKind: "human_session", permissions } as AccessGrant;
 }
 
-async function seedRig(workspace: Workspace, name: string, defaultVariableSetIds: string[] = []) {
+async function seedRig(workspace: Workspace, name: string) {
   return await createRig(client.db, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     name,
     createdBy: "user:test",
-    initialVersion: { changelog: "v1", defaultVariableSetIds },
+    initialVersion: { changelog: "v1" },
   });
 }
 
@@ -148,79 +139,6 @@ function activities(overrides: Partial<import("@opengeni/config").Settings> = {}
 }
 
 describe("scheduled task default Sandbox Environment", () => {
-  test("a materialized reusable task inherits changed chat Variable Sets on dispatch and recovery", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    const credentials = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "Updated reusable chat credentials",
-    });
-    const session = await createSession(client.db, {
-      ...workspace,
-      initialMessage: "Reusable chat",
-      resources: [],
-      tools: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    });
-    const task = await createScheduledTask(client.db, {
-      ...workspace,
-      name: "Reusable message",
-      status: "paused",
-      schedule: { type: "manual" },
-      temporalScheduleId: crypto.randomUUID(),
-      runMode: "reusable_session",
-      targetSessionId: session.id,
-      overlapPolicy: "buffer_one",
-      agentConfig: {
-        prompt: "Read the current chat's environment",
-        tools: [],
-        resources: [],
-        metadata: {},
-        connectionAccounts: [],
-        connectionAccountsFrozen: true,
-      },
-      createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      metadata: {},
-    });
-    expect(
-      await updateSessionVariableSets(client.db, {
-        ...workspace,
-        sessionId: session.id,
-        variableSets: [credentials],
-      }),
-    ).toMatchObject({ status: "updated" });
-    await updateScheduledTask(client.db, workspace.workspaceId, task.id, { status: "active" });
-    const input = {
-      workspaceId: workspace.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled" as const,
-      producerKey: `reusable-message-${crypto.randomUUID()}`,
-    };
-    const dispatched = await activities().dispatchScheduledTaskRun(input);
-    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
-    expect(dispatched, run?.error ?? undefined).toMatchObject({ action: "signal" });
-    if (dispatched.action !== "signal") throw new Error("Reusable-chat dispatch refused");
-    expect(dispatched.sessionId).toBe(session.id);
-    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
-      workspaceId: workspace.workspaceId,
-      runId: run!.id,
-    });
-    expect(accepted?.targetSessionExecution?.variableSets.map((set) => set.id)).toEqual([
-      credentials.id,
-    ]);
-    expect(accepted?.task.variableSetId).toBeNull();
-    const recovered = await activities().dispatchScheduledTaskRun(input);
-    expect(["signal", "already_dispatched"]).toContain(recovered.action);
-    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      1,
-    );
-  }, 60_000);
-
   test("target chat and occurrence repositories both enter frozen account authority at admission", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -362,12 +280,7 @@ describe("scheduled task default Sandbox Environment", () => {
   test("an omitted environment freezes the workspace default at creation and every run rides it", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const credentials = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "shared credentials",
-    });
-    const workspaceDefault = await seedRig(workspace, "analytics", [credentials.id]);
+    const workspaceDefault = await seedRig(workspace, "analytics");
     await setWorkspaceDefaultRig(client.db, workspace.workspaceId, workspaceDefault.id);
 
     const task = await createTask(workspace);
@@ -389,8 +302,7 @@ describe("scheduled task default Sandbox Environment", () => {
     expect(dispatched.action).toBe("start");
     if (dispatched.action !== "start") return;
     const session = await requireSession(client.db, workspace.workspaceId, dispatched.sessionId);
-    // The generated session carries the environment, so its default
-    // Variable Sets are layered into every turn of the run.
+    // The generated session carries the environment frozen on the task.
     expect(session.rigId).toBe(workspaceDefault.id);
     expect(session.rigVersionId).toBe(workspaceDefault.activeVersion!.id);
   }, 60_000);
@@ -411,104 +323,15 @@ describe("scheduled task default Sandbox Environment", () => {
     expect((await createTask(workspace)).rigId).toBeNull();
   }, 60_000);
 
-  test("a default never gives a task Variable Sets its creator could not attach", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    const credentials = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "restricted credentials",
-    });
-    const workspaceDefault = await seedRig(workspace, "with secrets", [credentials.id]);
-    await setWorkspaceDefaultRig(client.db, workspace.workspaceId, workspaceDefault.id);
-
-    const manageOnly = grantFor(workspace, ["scheduled_tasks:manage"]);
-    await expect(createTask(workspace, {}, manageOnly)).rejects.toMatchObject({ status: 403 });
-    // The same creator may still opt out explicitly.
-    expect((await createTask(workspace, { rigId: null }, manageOnly)).rigId).toBeNull();
-  }, 60_000);
-
-  test("an explicit environment needs the same Variable Set authority as the default", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    const credentials = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "restricted credentials",
-    });
-    const withSecrets = await seedRig(workspace, "with secrets", [credentials.id]);
-    const manageOnly = grantFor(workspace, ["scheduled_tasks:manage"]);
-    const update = (
-      existing: Awaited<ReturnType<typeof createTask>>,
-      payload: Record<string, unknown>,
-      grant: AccessGrant,
-    ) =>
-      validatedScheduledTaskUpdate({
-        settings,
-        db: client.db,
-        objectStorage: null,
-        grant,
-        existing,
-        payload: UpdateScheduledTaskRequest.parse(payload),
-      });
-
-    // Naming the environment on create or edit binds its Variable Sets to
-    // every generated session, so it is refused like the omitted default.
-    await expect(
-      createTask(workspace, { rigId: withSecrets.id }, manageOnly),
-    ).rejects.toMatchObject({ status: 403 });
-    const plain = await createTask(workspace, { rigId: null }, manageOnly);
-    await expect(update(plain, { rigId: withSecrets.id }, manageOnly)).rejects.toMatchObject({
-      status: 403,
-    });
-    expect((await update(plain, { rigId: withSecrets.id }, grantFor(workspace))).rigId).toBe(
-      withSecrets.id,
-    );
-
-    // An existing-session task adopts its target's environment without a
-    // new binding. Turning it into a generated-session task binds that
-    // environment to fresh sessions, so the same check applies.
-    const target = await createSession(client.db, {
-      ...workspace,
-      initialMessage: "target with secrets",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      rigId: withSecrets.id,
-      rigVersionId: withSecrets.activeVersion!.id,
-    });
-    const adopted = await createTask(workspace, {
-      runMode: "existing_session",
-      targetSessionId: target.id,
-    });
-    expect(adopted.rigId).toBeNull();
-    await expect(
-      update(
-        adopted,
-        { runMode: "new_session_per_run", targetSessionId: null, rigId: withSecrets.id },
-        manageOnly,
-      ),
-    ).rejects.toMatchObject({ status: 403 });
-  }, 60_000);
-
   test("an existing-session task inherits its target environment without duplicating its binding", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const workspaceDefault = await seedRig(workspace, "default");
     const targetEnvironment = await seedRig(workspace, "target");
-    const credentials = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "target credentials",
-    });
     await setWorkspaceDefaultRig(client.db, workspace.workspaceId, workspaceDefault.id);
     const target = await createSession(client.db, {
       ...workspace,
       initialMessage: "long-running target",
-      variableSetId: credentials.id,
       resources: [],
       metadata: {},
       model: "scripted-model",
@@ -542,9 +365,6 @@ describe("scheduled task default Sandbox Environment", () => {
       runId: run!.id,
     });
     expect(accepted?.targetSessionExecution?.model).toBe(target.model);
-    expect(accepted?.targetSessionExecution?.variableSets.map((set) => set.id)).toContain(
-      credentials.id,
-    );
     expect((await requireSession(client.db, workspace.workspaceId, target.id)).rigId).toBe(
       targetEnvironment.id,
     );

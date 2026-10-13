@@ -312,6 +312,9 @@ export {
 } from "./message-links";
 export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
+export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults-api";
+export type { VaultClientLike, VaultsApi } from "./vaults-api";
+export type * from "./vault-types";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
@@ -424,6 +427,9 @@ export type {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  UpdateWorkspaceArtifactVisibilityRequest,
+  UpdateWorkspaceArtifactVisibilityResponse,
+  WorkspaceArtifactVisibility,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -811,6 +817,7 @@ export type {
   UpdateWorkspaceModelAccountSettingsRequest,
   ModelAccountChoiceRefusal,
   ModelAccountChoiceOption,
+  ModelAccountUsageSnapshot,
   SessionModelAccountChoiceResponse,
   SetSessionModelAccountChoiceRequest,
   SetSessionModelAccountChoiceResponse,
@@ -961,8 +968,6 @@ export type {
   CreateScheduledTaskRequest,
   CreateSessionScheduledTaskRequest,
   CreateSessionRequest,
-  CreateVariableSetRequest,
-  CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
   EnsureWorkspaceResponse,
@@ -996,6 +1001,12 @@ export type {
   HumanInputQuestion,
   HumanInputQuestionKind,
   HumanInputResponse,
+  HumanInputSecretAnswer,
+  HumanInputSecretAnswerResult,
+  HumanInputSecretSaveTo,
+  HumanInputSecretSpec,
+  GeneratePasswordSpec,
+  VaultPolicy,
   FileDownloadUrlResponse,
   FileResourceRef,
   FileStatus,
@@ -1136,6 +1147,10 @@ export type {
   PrivateScheduledTaskSummary,
   ScheduledTaskAccessConnector,
   ScheduledTaskAccessFailureReason,
+  ScheduledTaskAccountPlan,
+  ScheduledTaskAccountPlanAccount,
+  ScheduledTaskAccountPlanConnector,
+  ScheduledTaskToolPolicy,
   ScheduledTaskAgentConfig,
   ScheduledTaskAgentConfigInput,
   ScheduledTaskDayOfWeek,
@@ -1324,7 +1339,6 @@ export type {
   GitLogResponse,
   GitShowRequest,
   GitShowResponse,
-  SetWorkspaceEnvironmentVariableRequest,
   WorkspaceCaptureFile,
   WorkspaceCaptureRepo,
   WorkspaceCaptureDegradedReason,
@@ -1357,7 +1371,6 @@ export type {
   SessionRetention,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
-  UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
   AgentCapabilityId,
@@ -1372,8 +1385,6 @@ export type {
   AgentEffectiveTools,
   ClientAgentConfig,
   AgentConfigErrorCode,
-  UpdateVariableSetRequest,
-  UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
@@ -1395,12 +1406,6 @@ export type {
   ListUserResourceAuthoritiesResponse,
   Workspace,
   WorkspaceControlEvent,
-  VariableSet,
-  VariableSetAttachmentMetadata,
-  ResolveVariableSetAttachmentsRequest,
-  ResolveVariableSetAttachmentsResponse,
-  VariableSetSecret,
-  VariableSetVariableMetadata,
   Channel,
   CreateChannelRequest,
   ReorderChannelsRequest,
@@ -1419,8 +1424,6 @@ export type {
   RigSetupAppendPayload,
   RigDefinitionEditPayload,
   ProposeRigChangeRequest,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
   WorkspaceMemberCandidate,
   PreviewSkillImportRequest,
@@ -1512,6 +1515,7 @@ export type {
   DeviceEnrollmentApproveResponse,
   DeviceEnrollmentDenyRequest,
   DeviceEnrollmentDenyResponse,
+  EnrollTokenScope,
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
   EnrollmentCredentials,
@@ -1531,6 +1535,8 @@ export type {
   ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
 } from "./types";
 
 export { sessionListEntry } from "./session-list-entries";

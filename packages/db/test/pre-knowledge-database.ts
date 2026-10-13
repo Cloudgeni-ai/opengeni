@@ -33,11 +33,19 @@ export async function acquirePreKnowledgeTestDatabase(
       ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
     for (const name of allowanceMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+    // Resolves knowledge_index_claim from the withheld 0461 migration.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+    // Rewrites the visibility transition installed by the withheld 0501 migration.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
     // The import migration extends the withheld 0499 attachment helper.
     await admin`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
     // The session storage lifecycle extends the withheld import guards.
     for (const name of sessionStorageMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+    // The drained SuperGrok cutover reads the withheld 0560 import column; this
+    // fixture never runs that maintenance step or the ones after it (the
+    // Claude cutover and the retirement), so they stay recorded.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql')`;
     await migrate(blank.databaseUrl);
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.
@@ -57,6 +65,8 @@ export async function acquirePreKnowledgeTestDatabase(
       ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0640_knowledge_entry_created_since.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql','0515_autonomous_learning_defaults.sql','0561_scheduled_session_agent_identity.sql')`;
     for (const name of allowanceMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
+    await admin`DELETE FROM schema_migrations WHERE name='0730_maintenance_work_probes.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name='0738_private_sessions_share_sandboxes.sql'`;
     await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
     for (const name of sessionStorageMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;

@@ -1,5 +1,19 @@
 # Run lifecycle: turns, goals, and memory
 
+Subscription failover keeps the accepted turn model and authority immutable.
+For portable sessions, the enabled serving path records a per-generation
+serving policy, then obtains a lease before recording
+`subscription.account.selected` or `subscription.account.switched`. A pending
+recovery target is not a completed switch. Recovery checks unresolved model
+requests and preserves canonical history; only the outbound request projection
+removes another provider's opaque artifacts. The control worker resolves the
+current metadata-only catalog and re-evaluates the full eligible pool for a
+parked turn. Stored candidate-provider hints accelerate wakes but grant no
+authority. Missing model mappings leave the capacity wait for an actionable
+claim-time failure rather than waiting indefinitely for unrelated quota.
+See [the subscription contract](subscription-accounts.md) and
+`apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts`.
+
 This is the orientation for how an Opengeni agent run actually executes over
 time. It ties together three subsystems a contributor touching the session
 workflow, the worker activity, or the runtime must keep straight. Code wins
@@ -2169,7 +2183,25 @@ between slices. A short command therefore returns its terminal result from the
 original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
-workspace mutation admission.
+workspace mutation admission. The requested window is honored up to 4 minutes
+(10 seconds when omitted; settings.experimentCutPolling, on by default)
+so a build or test run the model asked to wait for returns its terminal result
+in one tool call instead of repeated empty `write_stdin` polls. The ceiling stays
+under the 5-minute Claude prompt-cache TTL. So a dev server, watcher, tail or
+REPL does not hold the turn for minutes, the call still returns once output it
+produced has been quiet for 5 seconds after the ordinary 30-second window, or
+after 2 seconds when that output ends in an input prompt
+(`looksLikeInputPrompt`). A call that produced no output waits for exit or its
+requested window. `OPENGENI_EXPERIMENT_CUT_POLLING=false` restores the
+30-second cap. Connected Machine (op-stream) commands keep their own 30-second
+background yield and are unaffected. Live output still streams to the command card while the call
+waits, and Pause/Steer cancellation is still checked between slices. The
+model-facing `exec_command` schema is non-strict and requires only `cmd` and
+`max_output_tokens` (settings.experimentOutputCost, on by default;
+`OPENGENI_EXPERIMENT_OUTPUT_COST=false` restores the strict SDK schema). An
+omitted `login`, `tty` or `yield_time_ms` is filled with `false`, `false` and
+`10000` before every inner layer, so execution matches the values models chose
+under the strict schema; `shell` and `workdir` keep their absent meaning.
 
 Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
 to collect complete output from the same invocation until provider terminal/EOF

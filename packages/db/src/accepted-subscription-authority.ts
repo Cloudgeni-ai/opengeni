@@ -1,9 +1,9 @@
 import {
   SubscriptionPersonalAuthorityV2,
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
-import { resolveClaudeSharedPoolAuthoritySnapshotInTransaction } from "./claude-subscription-accounts";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 import {
@@ -11,7 +11,6 @@ import {
   coreSubscriptionAuthorityV2OrEmptyInTransaction,
   EMPTY_SUBSCRIPTION_AUTHORITY_V2,
 } from "./subscription-core-acceptance-authority";
-import { resolveXaiSharedPoolAuthoritySnapshotInTransaction } from "./xai-subscription";
 
 type SubscriptionProvider = "xai" | "claude";
 export type FrozenSubscriptionExecutionAuthority = {
@@ -53,17 +52,21 @@ export function subscriptionExecutionAuthorityFromTurn(
  * non-subject creators, and internal producers without causal authority).
  * The result is never user-scoped, so this cannot widen access to a personal
  * pool. The transaction must already carry the account/workspace RLS context.
+ * Claude is on the shared core (its C3 receipt exists): its v1 value is the
+ * column default, never computed from live state and never read (design 5.3,
+ * "v1 columns after a provider's cutover").
  */
 export async function sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
-  db: Database,
-  workspaceId: string,
+  _db: Database,
+  _workspaceId: string,
 ): Promise<{
   xai: XaiProviderAccountAuthoritySnapshotV1;
   claude: XaiProviderAccountAuthoritySnapshotV1;
 }> {
   return {
-    xai: await resolveXaiSharedPoolAuthoritySnapshotInTransaction(db, { workspaceId }),
-    claude: await resolveClaudeSharedPoolAuthoritySnapshotInTransaction(db, { workspaceId }),
+    // Historical v1 carriers stay default-valued for new work.
+    xai: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+    claude: workspaceAuthority,
   };
 }
 

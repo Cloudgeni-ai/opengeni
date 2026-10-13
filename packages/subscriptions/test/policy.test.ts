@@ -34,6 +34,85 @@ import {
 
 const NOW = 10_000_000;
 
+describe("exact personal authority in shared chats", () => {
+  function sharedChoice(): PlacementInput {
+    const state = input({
+      connections: [personal("own", "codex"), personal("other", "codex")],
+      personalFallbackOptIn: true,
+      session: {
+        ownerMembershipId: "chat-owner",
+        personalAuthority: [
+          {
+            provider: "codex",
+            ownerMembershipId: "member-a",
+            sharedSessionChoice: { sessionId: "session-1", connectionId: "own" },
+          },
+        ],
+        binding: {
+          provider: "codex",
+          connectionId: "own",
+          modelId: "codex/a",
+          choice: "explicit",
+          lastModelCallAt: NOW,
+        },
+      },
+    });
+    state.people = [
+      ...state.people,
+      { membershipId: "chat-owner", active: true, personalFallbackOptIn: true },
+    ];
+    return state;
+  }
+
+  test("a participating noncreator's explicit account is eligible, not their other account", () => {
+    const state = sharedChoice();
+    const result = decidePlacement(state);
+    expect(result).toMatchObject({ kind: "run", connectionId: "own" });
+    expect(authorizationIneligibility(state, state.connections[1]!)).toContain(
+      "personal_not_owners_work",
+    );
+    expect(checkPlacementDecision(state, result)).toEqual([]);
+  });
+
+  test("automatic selection, foreign sessions, absent authority, policy off and inactive owners refuse", () => {
+    for (const mutate of [
+      (state: PlacementInput) => {
+        state.session.binding = null;
+      },
+      (state: PlacementInput) => {
+        state.session.id = "other-session";
+      },
+      (state: PlacementInput) => {
+        state.session.personalAuthority = [];
+      },
+      (state: PlacementInput) => {
+        state.settings.personalConnectionsAllowed = false;
+      },
+      (state: PlacementInput) => {
+        state.people = state.people.map((person) => ({ ...person, active: false }));
+      },
+      (state: PlacementInput) => {
+        state.session.ownerMembershipId = null;
+      },
+    ]) {
+      const state = sharedChoice();
+      mutate(state);
+      const result = decidePlacement(state);
+      expect(result.kind).toBe("wait");
+      expect(checkPlacementDecision(state, result)).toEqual([]);
+    }
+  });
+
+  test("legacy private-work authority never becomes shared-chat consent", () => {
+    const state = sharedChoice();
+    state.session.ownerMembershipId = "member-a";
+    state.session.personalAuthority = [{ provider: "codex", ownerMembershipId: "member-a" }];
+    expect(decidePlacement(state).kind).toBe("wait");
+    state.session.visibility = "private";
+    expect(decidePlacement(state)).toMatchObject({ kind: "run", connectionId: "own" });
+  });
+});
+
 function quota(patch: Partial<SubscriptionQuota> = {}): SubscriptionQuota {
   return {
     windows: [{ id: "primary", usedPercent: 20, resetsAt: NOW + 3_600_000, status: "ok" }],
@@ -1370,7 +1449,7 @@ describe("quota freshness and observations", () => {
     expect(quotaCapacity(later, NOW)).toEqual({ kind: "unknown" });
   });
 
-  test("SUB-ELIG-06: a header reading or refusal that omits a running exhausted window keeps it until its reset; a usage reading or one that reports it again replaces it", () => {
+  test("SUB-ELIG-06: a header reading, refusal or partial usage reading that omits a running exhausted window keeps it until its reset; a complete usage reading or one that reports it again replaces it", () => {
     const weekly = { id: "weekly", usedPercent: 100, resetsAt: NOW + 86_400_000 };
     // Omitted windows that are not carried: one that is not exhausted, and
     // an exhausted one that resets exactly when the new reading is made.
@@ -1410,11 +1489,62 @@ describe("quota freshness and observations", () => {
       kind: "exhausted",
       resetsAt: NOW + 86_400_000,
     });
-    // A usage-endpoint reading is complete: omitting the window ends it.
+    // A usage-endpoint reading of an adapter that declares its readings
+    // complete: omitting the window ends it.
     const usage = { ...partial, source: "usage_endpoint" as const };
-    expect(applyQuotaObservation({ refreshGeneration: 1, quota: current }, usage)!.windows).toEqual(
-      usage.windows,
-    );
+    expect(
+      applyQuotaObservation({ refreshGeneration: 1, quota: current }, usage, {
+        usageReadingsComplete: true,
+      })!.windows,
+    ).toEqual(usage.windows);
+    // Without that declaration (absent or false) a usage reading is partial
+    // and keeps the omitted block until its reset (fail closed).
+    for (const options of [undefined, { usageReadingsComplete: false }]) {
+      const partialUsage = applyQuotaObservation(
+        { refreshGeneration: 1, quota: current },
+        usage,
+        options,
+      )!;
+      expect(partialUsage.windows).toEqual([...usage.windows, { ...weekly, status: "exhausted" }]);
+      expect(quotaCapacity(partialUsage, NOW + 1_000)).toEqual({
+        kind: "exhausted",
+        resetsAt: NOW + 86_400_000,
+      });
+    }
+    // The declaration never changes a header reading: it stays partial.
+    expect(
+      applyQuotaObservation({ refreshGeneration: 1, quota: current }, partial, {
+        usageReadingsComplete: true,
+      })!.windows,
+    ).toEqual([...partial.windows, { ...weekly, status: "exhausted" }]);
+    // A refusal's fallback window (core-synthesized, no known provider reset)
+    // is replaced only by a complete usage reading.
+    const fallback = quota({
+      observedAt: NOW - 1_000,
+      source: "refusal",
+      windows: [
+        {
+          id: "exhausted_without_reset",
+          usedPercent: 100,
+          resetsAt: NOW + 60_000,
+          status: "exhausted",
+        },
+      ],
+    });
+    expect(
+      quotaCapacity(
+        applyQuotaObservation({ refreshGeneration: 1, quota: fallback }, usage, {
+          usageReadingsComplete: true,
+        })!,
+        NOW + 1_000,
+      ),
+    ).toEqual({ kind: "available" });
+    expect(
+      quotaCapacity(
+        applyQuotaObservation({ refreshGeneration: 1, quota: fallback }, usage)!,
+        NOW + 1_000,
+      ),
+    ).toEqual({ kind: "exhausted", resetsAt: NOW + 60_000 });
     // A reading that reports the window again shows an early reset.
     const reset = quota({
       observedAt: NOW + 2_000,

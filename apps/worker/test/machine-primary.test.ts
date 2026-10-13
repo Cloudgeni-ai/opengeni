@@ -54,7 +54,6 @@ describe("change B — sandboxEnvironmentForRun transient delivery for a machine
     const { environment: env, gitToken } = await sandboxEnvironmentForRun(
       settings,
       [repoResource()],
-      {},
       { skipGitHubToken: true, codemodeDelivery: "transient_exec" },
     );
     expect(gitToken).toBeUndefined();
@@ -78,18 +77,13 @@ describe("change B — sandboxEnvironmentForRun transient delivery for a machine
     // configuration error. That throw IS the proof the cloud path still mints (vs the
     // clean return above). Failure-sensitive: were the skip applied unconditionally,
     // this would resolve instead of throwing.
-    await expect(sandboxEnvironmentForRun(settings, [repoResource()], {})).rejects.toThrow();
+    await expect(sandboxEnvironmentForRun(settings, [repoResource()])).rejects.toThrow();
   });
 
   test("no repo attached: skip flag is a no-op (the base env either way)", async () => {
     const settings = cloudSettings();
-    const withSkip = await sandboxEnvironmentForRun(settings, [], {}, { skipGitHubToken: true });
-    const withoutSkip = await sandboxEnvironmentForRun(
-      settings,
-      [],
-      {},
-      { skipGitHubToken: false },
-    );
+    const withSkip = await sandboxEnvironmentForRun(settings, [], { skipGitHubToken: true });
+    const withoutSkip = await sandboxEnvironmentForRun(settings, [], { skipGitHubToken: false });
     expect(withSkip).toEqual(withoutSkip);
     expect(withSkip.environment.GH_TOKEN).toBeUndefined();
     expect(withSkip.gitToken).toBeUndefined();

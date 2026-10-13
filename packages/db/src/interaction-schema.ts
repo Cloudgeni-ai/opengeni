@@ -2,7 +2,6 @@ import type {
   AttachedBrowserDeviceCapabilities,
   AuthRunChoice,
   AuthRunExternalAction,
-  AuthRunPendingField,
   BrowserRevisionMaterialization,
   BrowserSessionCapabilities,
   ComputerSessionCapabilities,
@@ -1226,7 +1225,6 @@ export const authRuns = pgTable(
       enum: [
         "discovering",
         "awaiting_choice",
-        "awaiting_secret",
         "awaiting_external_action",
         "working",
         "verified",
@@ -1237,7 +1235,6 @@ export const authRuns = pgTable(
       .notNull()
       .default("discovering"),
     choices: jsonb("choices").$type<AuthRunChoice[]>().notNull().default([]),
-    pendingFields: jsonb("pending_fields").$type<AuthRunPendingField[]>().notNull().default([]),
     externalAction: jsonb("external_action").$type<AuthRunExternalAction>(),
     interventionId: uuid("intervention_id"),
     verifiedUrl: text("verified_url"),
@@ -1281,8 +1278,6 @@ export const authRuns = pgTable(
         and (${table.authorityId} is null or octet_length(${table.authorityId}) between 1 and 512)
         and jsonb_typeof(${table.choices}) = 'array'
         and octet_length(${table.choices}::text) between 2 and 65536
-        and jsonb_typeof(${table.pendingFields}) = 'array'
-        and octet_length(${table.pendingFields}::text) between 2 and 65536
         and (${table.externalAction} is null or (
           jsonb_typeof(${table.externalAction}) = 'object'
           and octet_length(${table.externalAction}::text) between 2 and 65536
@@ -1328,7 +1323,6 @@ export const authRuns = pgTable(
     projectionValid: check(
       "auth_runs_projection_check",
       sql`(${table.state} = 'awaiting_choice') = (jsonb_array_length(${table.choices}) > 0)
-        and (${table.state} = 'awaiting_secret') = (jsonb_array_length(${table.pendingFields}) > 0)
         and (${table.state} = 'awaiting_external_action') = (${table.externalAction} is not null)
         and (${table.state} = 'failed') = (${table.failureCode} is not null)`,
     ),
@@ -1451,17 +1445,7 @@ export const interactionResourceOperations = pgTable(
     }).notNull(),
     resourceId: uuid("resource_id").notNull(),
     kind: text("kind", {
-      enum: [
-        "create",
-        "update",
-        "start",
-        "report",
-        "protected_fill",
-        "external_auth",
-        "verify",
-        "resolve",
-        "save",
-      ],
+      enum: ["create", "update", "start", "report", "external_auth", "verify", "resolve", "save"],
     }).notNull(),
     requestDigest: text("request_digest").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

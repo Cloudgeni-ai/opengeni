@@ -118,7 +118,9 @@ describe("compact session view on the live local workspace route (API fixture)",
     );
     browser = await chromium.launch();
     page = await browser.newPage({
-      viewport: { width: 1280, height: 900 },
+      // These proofs count the rail's four-row Show more windows. A short rail
+      // has no spare height, so it adds no automatic fill rows.
+      viewport: { width: 1280, height: 400 },
       reducedMotion: "reduce",
     });
     page.on("pageerror", (error) => console.error("Browser page error:", error.message));

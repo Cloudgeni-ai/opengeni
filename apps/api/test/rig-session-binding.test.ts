@@ -11,13 +11,13 @@ import {
   createRig,
   createRigVersion,
   createSession,
-  createVariableSet,
   getSession,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
 import { createSessionForRequest, createValidatedScheduledTask } from "@opengeni/core";
+import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // M3 rig session binding, driven through the REAL createSessionForRequest
@@ -138,39 +138,25 @@ afterAll(async () => {
 }, 180_000);
 
 describe("M3 rig binding: freeze at create", () => {
-  test("rig defaults require independent Variable Set attach and use permissions", async () => {
+  test("a legacy rig version that still lists default Variable Sets creates sessions without them", async () => {
     if (!available) return;
     const bus = new MemoryEventBus();
     const { accountId, workspaceId } = await freshWorkspace();
-    const variableSet = await createVariableSet(db, {
+    const variableSet = await createLegacyVariableSet(db, {
       accountId,
       workspaceId,
       name: "rig-default-secret",
     });
     const { rigId } = await seedRig(accountId, workspaceId, "secret-rig", [variableSet.id]);
 
-    await expect(
-      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-        initialMessage: "missing attach",
-        rigId,
-      }),
-    ).rejects.toThrow(/variable-sets:attach/);
-    await expect(
-      createSessionForRequest(
-        deps(bus),
-        grant(accountId, workspaceId, undefined, ["variable-sets:attach"]),
-        workspaceId,
-        { initialMessage: "missing use", rigId },
-      ),
-    ).rejects.toThrow(/variable-sets:use/);
-
-    const authorized = await createSessionForRequest(
+    const created = await createSessionForRequest(
       deps(bus),
-      grant(accountId, workspaceId, undefined, ["variable-sets:attach", "variable-sets:use"]),
+      grant(accountId, workspaceId),
       workspaceId,
-      { initialMessage: "authorized", rigId },
+      { initialMessage: "legacy rig defaults", rigId },
     );
-    expect(authorized.rigId).toBe(rigId);
+    expect(created.rigId).toBe(rigId);
+    expect(created.variableSetIds).toEqual([]);
   }, 60_000);
 
   test("binds the rig's active version and freezes it — a later promote never moves an existing session", async () => {
@@ -484,60 +470,42 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
   }, 60_000);
 });
 
-describe("child sessions and the parent's Sandbox Environment and Variable Sets", () => {
+describe("child sessions and the parent's Sandbox Environment", () => {
   // A child is created like any other session: nothing about the parent's
-  // environment or Variable Sets is copied. An omitted rigId resolves to the
-  // workspace default and omitted variableSetIds attach none, so the child
-  // lands on its own box. Naming the parent's environment and sets explicitly
-  // reaches them and keeps the shared box.
-  test("omission resolves like a top-level create; explicit ids reach the parent's", async () => {
+  // environment is copied. An omitted rigId resolves to the workspace default,
+  // so the child lands on its own box. Naming the parent's environment
+  // explicitly reaches it and keeps the shared box.
+  test("omission resolves like a top-level create; an explicit id reaches the parent's", async () => {
     if (!available) return;
     const bus = new MemoryEventBus();
     const { accountId, workspaceId } = await freshWorkspace();
-    const credentials = await createVariableSet(db, {
-      accountId,
-      workspaceId,
-      name: "parent-credentials",
-    });
     const workspaceDefault = await seedRig(accountId, workspaceId, "child-default");
     const parentRig = await seedRig(accountId, workspaceId, "child-parent-rig");
     await admin`update workspaces set default_rig_id = ${workspaceDefault.rigId} where id = ${workspaceId}`;
-    const attach: Permission[] = ["variable-sets:attach", "variable-sets:use"];
     const parent = await createSessionForRequest(
       deps(bus),
-      grant(accountId, workspaceId, undefined, attach),
+      grant(accountId, workspaceId),
       workspaceId,
-      {
-        initialMessage: "parent",
-        rigId: parentRig.rigId,
-        variableSetIds: [credentials.id],
-        sandboxBackend: "modal",
-      },
+      { initialMessage: "parent", rigId: parentRig.rigId, sandboxBackend: "modal" },
     );
 
     const omitted = await createSessionForRequest(
       deps(bus),
-      grant(accountId, workspaceId, parent.id, attach),
+      grant(accountId, workspaceId, parent.id),
       workspaceId,
       { initialMessage: "child with omitted environment" },
     );
     expect(omitted.parentSessionId).toBe(parent.id);
     expect(omitted.rigId).toBe(workspaceDefault.rigId);
-    expect(omitted.variableSetIds).toEqual([]);
     expect(omitted.sandboxGroupId).not.toBe(parent.sandboxGroupId);
 
     const explicit = await createSessionForRequest(
       deps(bus),
-      grant(accountId, workspaceId, parent.id, attach),
+      grant(accountId, workspaceId, parent.id),
       workspaceId,
-      {
-        initialMessage: "child naming the parent's environment",
-        rigId: parentRig.rigId,
-        variableSetIds: [credentials.id],
-      },
+      { initialMessage: "child naming the parent's environment", rigId: parentRig.rigId },
     );
     expect(explicit.rigId).toBe(parentRig.rigId);
-    expect(explicit.variableSetIds).toEqual([credentials.id]);
     expect(explicit.sandboxGroupId).toBe(parent.sandboxGroupId);
   }, 60_000);
 });

@@ -19,6 +19,7 @@ import {
   requireOrganizationCodexHuman,
   requireSameOriginBrowserMutation,
 } from "./codex";
+import { claudeCoreRoute, requireClaudeCorePersonalWorkspace } from "../claude-subscription-core";
 
 export function registerClaudeSubscriptionOAuthRoutes(
   app: Hono,
@@ -91,6 +92,13 @@ export function registerClaudeSubscriptionOAuthRoutes(
       message: "Sign in to Opengeni to connect Claude.",
     });
   }
+  /**
+   * Require the Claude cutover receipt at start and completion alike.
+   */
+  async function oauthCore(c: Context, inputScope: ClaudeOAuthScope) {
+    await claudeCoreRoute(deps, async () => inputScope.accountId);
+    return { connectedBySubjectId: (await managedCookieHuman(c, deps))?.subjectId ?? null };
+  }
   for (const organization of [false, true]) {
     const path = organization
       ? "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth"
@@ -102,6 +110,16 @@ export function registerClaudeSubscriptionOAuthRoutes(
       );
       if (!payload.success || (organization && payload.data.scope !== "workspace"))
         throw new HTTPException(422, { message: "Choose where to connect this Claude account." });
+      // The runtime first: on the core a private account is authorized in
+      // the owner's Personal workspace and refused (403) anywhere else,
+      // before any Claude sign-in.
+      const core = await oauthCore(c, inputScope);
+      if (payload.data.scope === "user")
+        await requireClaudeCorePersonalWorkspace(deps, {
+          accountId: inputScope.accountId,
+          workspaceId: inputScope.workspaceId,
+          subjectId: inputScope.actorSubjectId,
+        });
       if (!organization)
         await requireSubscriptionScopeMutation(
           c,
@@ -109,8 +127,9 @@ export function registerClaudeSubscriptionOAuthRoutes(
           inputScope.workspaceId!,
           payload.data.scope,
           "Claude",
+          "personal_workspace",
         );
-      return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data));
+      return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data, core));
     });
     app.post(`${path}/complete`, async (c) => {
       const inputScope = await scope(c, organization);
@@ -121,6 +140,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
         throw new HTTPException(422, {
           message: "Enter the authorization code from Claude.",
         });
+      const core = await oauthCore(c, inputScope);
       return c.json(
         await completeClaudeSubscriptionOAuth(
           deps,
@@ -134,6 +154,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
                 inputScope.workspaceId!,
                 poolScope ?? "workspace",
                 "Claude",
+                "personal_workspace",
               );
             const fresh = await scope(c, organization, true);
             if (
@@ -146,6 +167,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
               });
           },
           fetchImpl,
+          core,
         ),
       );
     });

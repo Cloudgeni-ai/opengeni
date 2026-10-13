@@ -56,11 +56,13 @@ import {
   createDeviceEnrollmentRequest,
   denyDeviceEnrollmentRequest,
   EnrollTokenAlreadyRedeemedError,
+  EnrollTokenOwnerUnavailableError,
   finalizeEnrollmentByToken,
   getDeviceEnrollmentRequestByDeviceCode,
   getEnrollment,
   getPendingDeviceEnrollmentRequestByUserCode,
   getPendingDeviceEnrollmentRequestByUserCodeGlobal,
+  PersonalMachineConnectedElsewhereError,
   type Database,
   type DeviceEnrollmentRequestRecord,
   type EnrollmentOs,
@@ -358,15 +360,19 @@ export async function denyDeviceEnrollment(
 }
 
 /** MINT a headless enroll token (design 11 §A2.2). Signs an `oget_` token bound to
- *  the workspace + account + the screen-control consent, with a 1h TTL. Returns
- *  null when the credential plane is disabled (no signing secret) so the route can
- *  mirror poll's "disabled" handling. The token value is NEVER logged. */
+ *  the workspace + account + the screen-control consent, with a 1h TTL. With an
+ *  `ownerSubjectId` the token is personal (`enroll_user`): the machine it connects
+ *  belongs to that person. Callers must pass only an authenticated human's own
+ *  subject. Returns null when the credential plane is disabled (no signing secret)
+ *  so the route can mirror poll's "disabled" handling. The token value is NEVER
+ *  logged. */
 export async function mintEnrollToken(
   services: EnrollmentServices,
   input: {
     accountId: string;
     workspaceId: string;
     allowScreenControl: boolean;
+    ownerSubjectId?: string | null;
   },
 ): Promise<MintEnrollTokenResponse | null> {
   const { settings } = services;
@@ -376,8 +382,7 @@ export async function mintEnrollToken(
   }
   const nowSeconds = Math.floor(Date.now() / 1000);
   const exp = nowSeconds + ENROLL_TOKEN_TTL_SECONDS;
-  const token = await signEnrollToken(secret, {
-    typ: "enroll",
+  const claims = {
     workspaceId: input.workspaceId,
     accountId: input.accountId,
     allowScreenControl: input.allowScreenControl,
@@ -385,11 +390,20 @@ export async function mintEnrollToken(
     exp,
     // Single-use: the exchange records this id, so the token connects one machine.
     jti: randomBytes(18).toString("base64url"),
-  });
+  };
+  const ownerSubjectId = input.ownerSubjectId ?? null;
+  const token = await signEnrollToken(
+    secret,
+    ownerSubjectId !== null
+      ? { typ: "enroll_user", ownerSubjectId, ...claims }
+      : { typ: "enroll", ...claims },
+  );
   return {
     token,
     expiresAt: new Date(exp * 1000).toISOString(),
     expiresInSeconds: ENROLL_TOKEN_TTL_SECONDS,
+    scope: ownerSubjectId !== null ? "user" : "workspace",
+    allowScreenControl: input.allowScreenControl,
   };
 }
 
@@ -398,7 +412,10 @@ export type ExchangeEnrollTokenResult =
   | { ok: true; credentials: EnrollTokenExchangeResponse["credentials"] }
   | { ok: false; reason: "disabled" }
   | { ok: false; reason: "invalid" }
-  | { ok: false; reason: "used" };
+  | { ok: false; reason: "used" }
+  | { ok: false; reason: "owner_unavailable" }
+  | { ok: false; reason: "connected_elsewhere" }
+  | { ok: false; reason: "busy" };
 
 /** EXCHANGE a headless enroll token (design 11 §A2.3) — the UNAUTHENTICATED path
  *  where the token IS the auth. Verifies the `oget_` token, then performs the SAME
@@ -438,6 +455,9 @@ export async function exchangeEnrollToken(
     ({ enrollment } = await finalizeEnrollmentByToken(db, {
       accountId: claims.accountId,
       workspaceId: claims.workspaceId,
+      // A personal token connects the signed owner's own machine; the finalizer
+      // rechecks that person's live membership and workspace access.
+      ...(claims.typ === "enroll_user" ? { ownerSubjectId: claims.ownerSubjectId } : {}),
       pubkey: input.publicKey,
       hasDisplay: input.canOfferDisplay,
       // The token's allowScreenControl is the AUTHORITATIVE consent (NOT the agent's
@@ -452,6 +472,18 @@ export async function exchangeEnrollToken(
   } catch (error) {
     if (error instanceof EnrollTokenAlreadyRedeemedError) {
       return { ok: false, reason: "used" };
+    }
+    if (error instanceof EnrollTokenOwnerUnavailableError) {
+      return { ok: false, reason: "owner_unavailable" };
+    }
+    if (error instanceof PersonalMachineConnectedElsewhereError) {
+      // The owner's personal enrollment for this machine lives in another
+      // workspace; nothing was written and the token was not claimed.
+      return { ok: false, reason: "connected_elsewhere" };
+    }
+    if ((error as { code?: unknown } | null)?.code === "55P03") {
+      // The owner's organization membership is changing right now.
+      return { ok: false, reason: "busy" };
     }
     throw error;
   }

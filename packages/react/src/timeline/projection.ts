@@ -7,6 +7,8 @@ import {
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
+  type HumanInputSecretAnswerResult,
+  type HumanInputSecretSpec,
   type SessionEvent,
   type SessionStatus,
   type TimelineAnnotation,
@@ -23,6 +25,7 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
+import { presentTurnFailureText } from "./compaction-copy";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -1128,6 +1131,25 @@ export function buildTimeline(
         break;
       }
 
+      case "subscription.account.switched": {
+        // One neutral receipt, not its provider-specific compatibility alias.
+        // Never expose connection ids, personal labels, or provider error text.
+        const text =
+          payload.reason === "return_to_preferred"
+            ? "Returned to your preferred model."
+            : payload.reason === "failover_cross_provider"
+              ? "Switched to a fallback model."
+              : "Switched to another subscription account.";
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "input",
+          text,
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "codex.capacity.waiting":
       case "turn.capacity_waiting": {
         const capacityWait = capacityWaitPresentation(event.type, payload, turnId);
@@ -1473,14 +1495,43 @@ export function buildTimeline(
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
+        // A compaction failure names its outcome and keeps the recorded
+        // provider text behind Details. The turn's own failed compaction
+        // landmark is the one place that shows it: it receives the recorded
+        // text, and no separate notice repeats it.
+        // Retry reopens the same logical turn, so only a landmark from this
+        // attempt (after the turn's previous settlement) can own this failure.
+        const failure = allowance ? null : presentTurnFailureText(failureText);
+        let landmarkIndex = -1;
+        if (failure?.detail !== undefined && turnId !== null) {
+          // Skip the turn-end just pushed for this failure.
+          for (let index = items.length - 2; index >= 0; index -= 1) {
+            const item = items[index];
+            if (item?.kind === "turn-end" && item.turnId === turnId) break;
+            if (
+              item?.kind === "context-compaction" &&
+              item.turnId === turnId &&
+              item.phase === "skipped" &&
+              item.skipReason === "summarization_failed"
+            ) {
+              landmarkIndex = index;
+              break;
+            }
+          }
+        }
+        const landmark = landmarkIndex >= 0 ? items[landmarkIndex] : undefined;
+        if (landmark?.kind === "context-compaction" && failure?.detail !== undefined) {
+          items[landmarkIndex] = { ...landmark, failureDetail: failure.detail };
+        }
         if (allowance) {
           allowanceNotice(event, turnId);
-        } else if (!hadActivity) {
+        } else if (!hadActivity && !landmark) {
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: failureText ?? "The turn failed.",
+            text: failure?.summary ?? "The turn failed.",
+            ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
             occurredAt: event.occurredAt,
           });
         }
@@ -1719,10 +1770,13 @@ function humanInputQuestions(value: unknown): HumanInputQuestion[] {
     if (
       !id ||
       !prompt ||
-      (kind !== "text" && kind !== "single_select" && kind !== "multi_select")
+      (kind !== "text" && kind !== "single_select" && kind !== "multi_select" && kind !== "secret")
     ) {
       return [];
     }
+    // Secret questions keep their spec (names and hints only; never a value).
+    const secret = kind === "secret" ? humanInputSecretSpec(question.secret) : null;
+    if (kind === "secret" && !secret) return [];
     const options = Array.isArray(question.options)
       ? question.options.map(asRecord).flatMap((option) => {
           const optionId = stringValue(option.id);
@@ -1742,20 +1796,54 @@ function humanInputQuestions(value: unknown): HumanInputQuestion[] {
         options,
         required: question.required === true,
         allowOther: question.allowOther === true,
+        ...(secret ? { secret } : {}),
       },
     ];
   });
 }
 
+function humanInputSecretSpec(value: unknown): HumanInputSecretSpec | null {
+  const spec = asRecord(value);
+  const item = stringValue(spec.item);
+  if (!item) return null;
+  return spec as unknown as HumanInputSecretSpec;
+}
+
+function humanInputSecretResult(value: unknown): HumanInputSecretAnswerResult | null {
+  if (value === undefined || value === null) return null;
+  const result = asRecord(value);
+  const reference = stringValue(result.reference);
+  const vaultName = stringValue(result.vaultName);
+  const itemName = stringValue(result.itemName);
+  const saveTo = result.saveTo;
+  if (
+    !reference ||
+    !vaultName ||
+    !itemName ||
+    (saveTo !== "user" && saveTo !== "task" && saveTo !== "workspace")
+  ) {
+    return null;
+  }
+  return {
+    reference,
+    username: stringValue(result.username) || null,
+    vaultName,
+    itemName,
+    saveTo,
+  };
+}
+
 function humanInputAnswer(value: Record<string, unknown>): HumanInputAnswer | null {
   const questionId = stringValue(value.questionId);
   if (!questionId) return null;
+  const secret = humanInputSecretResult(value.secret);
   return {
     questionId,
     values: Array.isArray(value.values)
       ? value.values.filter((answer): answer is string => typeof answer === "string")
       : [],
     ...(typeof value.other === "string" && value.other ? { other: value.other } : {}),
+    ...(secret ? { secret } : {}),
   };
 }
 
@@ -1774,6 +1862,7 @@ function humanInputAnswerSummary(
     label: question?.label || question?.prompt || fallbackLabel,
     prompt: question?.prompt || fallbackLabel,
     values,
+    ...(answer.secret ? { secret: answer.secret } : {}),
   };
 }
 
@@ -2232,6 +2321,8 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         label: live.capacityWait.label,
         since: live.occurredAt,
         detail: live.capacityWait.detail,
+        // Its span is not work and may last until a quota resets: no clock.
+        untimed: true,
       };
     }
     const pausedMs = (capacityPauses.get(key) ?? []).reduce((total, pause) => {
@@ -2809,7 +2900,12 @@ function pushInsertion(
 }
 
 function isAgentActivityEvent(type: string): boolean {
-  return type.startsWith("agent.") || type.startsWith("sandbox.");
+  return (
+    type.startsWith("agent.") ||
+    type.startsWith("sandbox.") ||
+    type === "subscription.account.selected" ||
+    type === "subscription.account.switched"
+  );
 }
 
 /**
@@ -3559,8 +3655,11 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
 const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
 
 /**
- * A capacity wait reads as "Limit reached" with one plain secondary line. Only
- * a wait that time alone will not end keeps its recorded, actionable reason.
+ * A quota or capacity wait reads as "Usage limit reached" with one plain line
+ * of guidance. It never promises that the work continues by itself: the
+ * reader decides whether to wait for the quota to reset or to switch. Only a
+ * wait that a person must resolve (reconnect, re-enable, choose another
+ * account) keeps its recorded, actionable reason and is not labelled a limit.
  */
 function capacityWaitPresentation(
   type: string,
@@ -3580,12 +3679,17 @@ function capacityWaitPresentation(
     const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
     return { turnId, label: "Waiting", detail, text: detail };
   }
-  const detail =
-    payload.waitReason === "pinned_account_unavailable"
-      ? "Continues automatically when the chosen account is available."
-      : "Continues automatically when capacity is available.";
-  return { turnId, label: "Limit reached", detail, text: `Limit reached. ${detail}` };
+  return {
+    turnId,
+    label: CAPACITY_LIMIT_LABEL,
+    detail: CAPACITY_LIMIT_DETAIL,
+    text: `${CAPACITY_LIMIT_LABEL}. ${CAPACITY_LIMIT_DETAIL}`,
+  };
 }
+
+const CAPACITY_LIMIT_LABEL = "Usage limit reached";
+const CAPACITY_LIMIT_DETAIL =
+  "Try again after your quota resets, or switch to another model or provider.";
 
 /** Lifecycle evidence that a capacity wait is over. */
 function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {

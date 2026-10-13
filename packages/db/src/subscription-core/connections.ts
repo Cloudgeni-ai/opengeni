@@ -37,6 +37,7 @@ import { resolveSubscriptionConnectionId } from "../subscription-core-repository
 import {
   isSubscriptionCoreRlsRefusal,
   listSubscriptionCorePersonalConnectionRowsInTransaction,
+  readSubscriptionCorePersonalConnectionVersionsInTransaction,
   readSubscriptionCoreWorkspacePool,
   subscriptionCoreWakeReason,
   type SubscriptionCoreWake,
@@ -84,7 +85,9 @@ export type SubscriptionCoreConnectRefusal =
   /** Personal connections are turned off for this person here. */
   | "personal_connections_disabled"
   /** The provider's cutover is not enabled (or the caller is not exact). */
-  | "unavailable";
+  | "unavailable"
+  /** A fenced reconnect's connection is gone, changed, or not the one this sign-in reaches. */
+  | "changed";
 
 export type SubscriptionCoreConnectResult =
   | {
@@ -93,8 +96,25 @@ export type SubscriptionCoreConnectResult =
       isNew: boolean;
       ownership: "shared" | "personal";
       wake: SubscriptionCoreWake;
+      /**
+       * The connection's row version after the write: always for a shared
+       * connection; for a personal one only when asked (`returnVersion` or
+       * `reconnect`), which costs one owner read.
+       */
+      version?: number;
     }
   | { kind: "refused"; reason: SubscriptionCoreConnectRefusal };
+
+/**
+ * A reconnect of one exact connection (a route that names the account it
+ * replaces): the sign-in must land on that connection at that version, or
+ * nothing is written (`changed`). Never creates a connection.
+ */
+export type SubscriptionCoreReconnectTarget = {
+  connectionId: string;
+  /** The connection's row version the caller read (`SubscriptionCoreConnectionRow.version`). */
+  expectedVersion: number;
+};
 
 export type SubscriptionCoreConnectScope = {
   accountId: string;
@@ -107,7 +127,19 @@ export type SubscriptionCoreConnectScope = {
    * refused (`forbidden`), never a shared one.
    */
   personal?: boolean;
+  /** Replace exactly this connection at this version (see the type). */
+  reconnect?: SubscriptionCoreReconnectTarget;
+  /** Report a personal connection's row version too (one owner read). */
+  returnVersion?: boolean;
 };
+
+/** Rolls back a fenced reconnect that reached another (or a new) connection. */
+class SubscriptionCoreReconnectChanged extends Error {
+  constructor() {
+    super("subscription core reconnect target changed");
+    this.name = "SubscriptionCoreReconnectChanged";
+  }
+}
 
 function iso(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
@@ -154,23 +186,30 @@ export async function connectSubscriptionCoreConnection(
   ) {
     throw new Error("subscription core credential format is malformed");
   }
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
-      if (
-        input.workspaceId !== null &&
-        (input.personal === true ||
-          (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal")
-      ) {
-        // The personal writer refuses a workspace that is not the person's own.
-        return await connectPersonal(tx, provider, { ...input, workspaceId: input.workspaceId });
-      }
-      if (input.personal === true) return { kind: "refused", reason: "forbidden" };
-      return await connectShared(tx, provider, input);
-    },
-  );
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        await setSubjectRlsContext(tx, input.subjectId);
+        if (
+          input.workspaceId !== null &&
+          (input.personal === true ||
+            (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal")
+        ) {
+          // The personal writer refuses a workspace that is not the person's own.
+          return await connectPersonal(tx, provider, { ...input, workspaceId: input.workspaceId });
+        }
+        if (input.personal === true) return { kind: "refused", reason: "forbidden" };
+        return await connectShared(tx, provider, input);
+      },
+    );
+  } catch (error) {
+    if (error instanceof SubscriptionCoreReconnectChanged) {
+      return { kind: "refused", reason: "changed" };
+    }
+    throw error;
+  }
 }
 
 async function connectPersonal(
@@ -202,6 +241,23 @@ async function connectPersonal(
       )`,
   );
   if (row?.outcome === "connected" && row.connection_id) {
+    let version: number | undefined;
+    if (input.reconnect || input.returnVersion) {
+      version = (
+        await readSubscriptionCorePersonalConnectionVersionsInTransaction(tx, provider, input)
+      ).get(row.connection_id);
+    }
+    // The writer holds the row lock until commit and moves the version by
+    // exactly one, so this compares the version the caller read. Anything
+    // else rolls the whole write back (the caller sees `changed`).
+    if (
+      input.reconnect &&
+      (row.is_new ||
+        row.connection_id !== input.reconnect.connectionId ||
+        version !== input.reconnect.expectedVersion + 1)
+    ) {
+      throw new SubscriptionCoreReconnectChanged();
+    }
     return {
       kind: "connected",
       id: row.connection_id,
@@ -212,6 +268,7 @@ async function connectPersonal(
         reason: subscriptionCoreWakeReason(provider, "connected"),
         workspaceIds: [input.workspaceId],
       },
+      ...(version === undefined ? {} : { version }),
     };
   }
   if (row?.outcome === "personal_connections_disabled") {
@@ -264,9 +321,10 @@ async function connectShared(
   let [existing] =
     input.providerAccountId === null
       ? []
-      : await rawRows<{ id: string; managed_by_workspace_id: string | null }>(
+      : await rawRows<{ id: string; managed_by_workspace_id: string | null; version: number }>(
           tx,
-          sql`select id::text as id, managed_by_workspace_id::text as managed_by_workspace_id
+          sql`select id::text as id, managed_by_workspace_id::text as managed_by_workspace_id,
+              version
             from subscription_connections
             where account_id = ${input.accountId}::uuid and provider = ${providerId}
               and kind = ${connectionKind} and ownership = 'shared'
@@ -285,15 +343,29 @@ async function connectShared(
     // Disconnect may have scrubbed the identity while this caller waited.
     // The connect key still serializes replacement creation; never reactivate
     // the old tombstone or reuse its assignment/management authority.
-    [existing] = await rawRows<{ id: string; managed_by_workspace_id: string | null }>(
+    [existing] = await rawRows<{
+      id: string;
+      managed_by_workspace_id: string | null;
+      version: number;
+    }>(
       tx,
-      sql`select id::text as id, managed_by_workspace_id::text as managed_by_workspace_id
+      sql`select id::text as id, managed_by_workspace_id::text as managed_by_workspace_id,
+          version
         from subscription_connections where account_id = ${input.accountId}::uuid
           and id = ${existing.id}::uuid and disconnected_at is null
           and provider_account_id = ${input.providerAccountId}
           and provider_subject_id is not distinct from ${input.providerSubjectId}
         for update`,
     );
+  }
+  // A fenced reconnect writes only the connection it names, at the version
+  // the caller read (the row is locked above), and never creates one.
+  if (
+    input.reconnect &&
+    (existing?.id !== input.reconnect.connectionId ||
+      Number(existing.version) !== input.reconnect.expectedVersion)
+  ) {
+    return { kind: "refused", reason: "changed" };
   }
   // Only a managed human is recorded as the connecting person (legacy
   // parity): local administration and service principals own no reset credit.
@@ -320,7 +392,7 @@ async function connectShared(
     if (!admin && existing.managed_by_workspace_id !== input.workspaceId) {
       return { kind: "refused", reason: "managed_elsewhere" };
     }
-    let replaced: { id: string }[];
+    let replaced: { id: string; version: number }[];
     try {
       replaced = await tx.transaction(async (savepoint) => {
         await rawRows(
@@ -329,7 +401,7 @@ async function connectShared(
             where account_id = ${input.accountId}::uuid and id = ${existing.id}::uuid
             for update`,
         );
-        return await rawRows<{ id: string }>(
+        return await rawRows<{ id: string; version: number }>(
           savepoint as unknown as Database,
           sql`update subscription_connections set
               credential_encrypted = ${input.credentialEncrypted}, credential_format = ${credentialFormat},
@@ -342,7 +414,7 @@ async function connectShared(
               label = coalesce(label, ${input.label}),
               connected_by_subject_id = ${connectedBySubjectId}, updated_at = clock_timestamp()
             where account_id = ${input.accountId}::uuid and id = ${existing.id}::uuid
-            returning id::text as id`,
+            returning id::text as id, version`,
         );
       });
     } catch (error) {
@@ -351,12 +423,19 @@ async function connectShared(
     }
     // The update policy hides a connection this subject may not manage.
     if (!replaced[0]) return { kind: "refused", reason: "forbidden" };
-    return { kind: "connected", id: replaced[0].id, isNew: false, ownership: "shared", wake };
+    return {
+      kind: "connected",
+      id: replaced[0].id,
+      isNew: false,
+      ownership: "shared",
+      wake,
+      version: Number(replaced[0].version),
+    };
   }
   // A new shared connection is an organization decision (SUB-OWN-01/04).
   if (!admin) return { kind: "refused", reason: "forbidden" };
   const workspaceScoped = input.workspaceId !== null;
-  const [created] = await rawRows<{ id: string }>(
+  const [created] = await rawRows<{ id: string; version: number }>(
     tx,
     sql`insert into subscription_connections (
         account_id, provider, kind, provider_account_id, account_email, label, plan_type,
@@ -370,7 +449,7 @@ async function connectShared(
         ${workspaceScoped ? "workspaces" : "organization"}, ${!workspaceScoped},
         ${input.workspaceId}::uuid, ${providerState}::jsonb,
         ${input.providerSubjectId}
-      ) returning id::text as id`,
+      ) returning id::text as id, version`,
   );
   if (!created) {
     throw new Error(`${provider.adapter.displayName} connection insert returned no row`);
@@ -387,7 +466,14 @@ async function connectShared(
         true, null, '{}'::text[], ${input.workspaceId}::uuid
       )`);
   }
-  return { kind: "connected", id: created.id, isNew: true, ownership: "shared", wake };
+  return {
+    kind: "connected",
+    id: created.id,
+    isNew: true,
+    ownership: "shared",
+    wake,
+    version: Number(created.version),
+  };
 }
 
 export type SubscriptionCoreDisconnectOutcome =

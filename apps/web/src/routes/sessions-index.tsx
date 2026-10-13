@@ -13,7 +13,7 @@ import {
 } from "@/lib/composer-connectors";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
-// THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
+// THIS RUN? (when machines exist) → (C) rig or machine fields.
 // Goals are set by the agent (or later surfaces), not at create.
 //
 // "Where should this run?" is a first-class segmented control with two kinds:
@@ -31,7 +31,6 @@ import {
   LightboxProvider,
   ModelMark,
   useChannels,
-  useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
@@ -43,18 +42,9 @@ import {
   type NewSessionSelectionHistory,
   type Rig,
   type SessionRealtimeModel,
-  type VariableSet,
-  type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import {
-  ChevronDownIcon,
-  CreditCardIcon,
-  FolderIcon,
-  LockIcon,
-  PlusIcon,
-  ServerCogIcon,
-} from "lucide-react";
+import { ChevronDownIcon, CreditCardIcon, FolderIcon, LockIcon, PlusIcon } from "lucide-react";
 import {
   createElement,
   lazy,
@@ -90,7 +80,6 @@ import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
 } from "@/components/repository-picker";
-import { NewSessionVariableSetPicker } from "@/components/session/new-session-variable-set-picker";
 import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
@@ -101,10 +90,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "@/lib/transient-retry";
-import { Select } from "@/components/ui/select";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { StatusDot } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
@@ -121,6 +108,7 @@ import {
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { composerFallbackModel } from "@/lib/model-access-onboarding";
+import { useForgetLastSession } from "@/lib/last-session-memory";
 import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
@@ -143,7 +131,6 @@ import {
   reconcileNewSessionFixedResources,
   recoverNewSessionPersonalResourceAttachment,
   resolvePersonalResourceOwnerScope,
-  selectableSessionVariableSets,
 } from "@/lib/personal-resource-attachments";
 import {
   recentSessionModelPresentation,
@@ -159,8 +146,15 @@ import {
 } from "@/lib/use-workspace-model-catalog";
 import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
 import { ComposerCapabilitiesChip } from "@/components/composer-capabilities-chip";
+import { useVaults } from "@opengeni/react";
+import {
+  SessionSecretsMenuBody,
+  draftSecretsRows,
+  sessionSecretsSummary,
+} from "@/components/secrets/session-secrets-panel";
 import {
   capabilityAvailability,
+  capabilityOn,
   capabilitySummary,
   draftFromRequest,
   requestFromDraft,
@@ -176,7 +170,6 @@ import {
   rememberedMachineFolder,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
-  workspaceDefaultRigOptionLabel,
   type SessionDraft,
 } from "@/lib/session-create";
 import {
@@ -190,7 +183,6 @@ import {
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
 import { userErrorText } from "@/lib/api-error";
-import { cn } from "@/lib/utils";
 import {
   newSessionCreateSnapshot,
   runNewSessionRouteSubmission,
@@ -227,7 +219,8 @@ export function SessionsIndexRoute({
   workspaceId: string;
   launch?: ComposerLaunchSearch;
 }) {
-  const { accessKeyVersion } = useAppContext();
+  const { accessKeyVersion, accessContext } = useAppContext();
+  useForgetLastSession(accessContext.subjectId, workspaceId);
   return (
     <SessionsIndexRouteContent
       key={`${workspaceId}:${accessKeyVersion}`}
@@ -353,38 +346,28 @@ function SessionsIndexRouteContent({
         agentCapabilities: requestFromDraft(next, agentAvailability),
       })),
   };
+  // "+" > Secrets: which vaults this chat may use. Shown only while its agent
+  // can use secrets (the workspace default or this chat's own capabilities).
+  const draftSecretsOn =
+    agentAvailability.isAvailable("secrets") &&
+    capabilityOn(composerAgentCapabilities.draft.values, "secrets");
+  const canListSecrets =
+    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
+    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const draftVaults = useVaults({
+    client: context.client,
+    workspaceId,
+    enabled: canListSecrets && draftSecretsOn,
+  });
+  const draftVaultPolicy = draft.vaultPolicy ?? { mode: "all" as const };
+  const draftVaultRows = draftVaults.vaults
+    ? draftSecretsRows(draftVaults.vaults, draftVaultPolicy)
+    : null;
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
   );
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
-  const canAttachVariableSets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "variable-sets:attach",
-  );
-  const canUseVariableSets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "variable-sets:use",
-  );
-  const canListVariableSets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "variable-sets:list",
-  );
-  const canListVariableSetSecrets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "secrets:list",
-  );
-  const canLoadVariableSetCatalog =
-    canAttachVariableSets && canUseVariableSets && canListVariableSets && canListVariableSetSecrets;
-  const canResolveVariableSetAttachments =
-    canAttachVariableSets && canUseVariableSets && !canLoadVariableSetCatalog;
-  const variableSets = useVariableSets({
-    enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
-  });
   const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
   const rigs = useWorkspaceRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
@@ -442,13 +425,6 @@ function SessionsIndexRouteContent({
   });
   const personalResourcesAvailable =
     personalOwnerScope !== null && (personalWorkspace || tenancyCapabilities?.activated === true);
-  const selectableVariableSets = canLoadVariableSetCatalog
-    ? selectableSessionVariableSets(variableSets.variableSets, {
-        canAttach: canAttachVariableSets,
-        canUse: canUseVariableSets,
-        personalResourcesAvailable,
-      })
-    : [];
   const personalResourceEligibilitySettled =
     personalWorkspace || personalOwnerScope === null || tenancyCapabilities !== null;
   // Sandbox Environments configure the managed sandbox; a deployment without
@@ -458,101 +434,14 @@ function SessionsIndexRouteContent({
     ? []
     : rigs.rigs.filter((rig) => rig.scope !== "user" || personalResourcesAvailable);
   const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
-  const selectedRigDefaultVariableSetIds = selectedRig?.activeVersion?.defaultVariableSetIds ?? [];
-  const selectedRigDefaultVariableSetIdsKey = selectedRigDefaultVariableSetIds.join("\u0000");
-  const variableSetAttachmentIds = [
-    ...new Set([...draft.variableSetIds, ...selectedRigDefaultVariableSetIds]),
-  ];
-  const variableSetAttachmentIdsKey = variableSetAttachmentIds.join("\u0000");
-  const variableSetAttachmentResolutionGeneration = useRef(0);
-  const [variableSetAttachmentResolution, setVariableSetAttachmentResolution] = useState<{
-    key: string;
-    variableSets: VariableSetAttachmentMetadata[];
-    error: Error | null;
-  }>({ key: "", variableSets: [], error: null });
-  const resolveVariableSetAttachments = useLatestCallback(async (): Promise<void> => {
-    const generation = ++variableSetAttachmentResolutionGeneration.current;
-    if (
-      !fixedResourceCatalogEnabled ||
-      !canResolveVariableSetAttachments ||
-      variableSetAttachmentIds.length === 0
-    ) {
-      setVariableSetAttachmentResolution({
-        key: variableSetAttachmentIdsKey,
-        variableSets: [],
-        error: null,
-      });
-      return;
-    }
-    setVariableSetAttachmentResolution({ key: "", variableSets: [], error: null });
-    try {
-      const result = await context.client.resolveVariableSetAttachments(workspaceId, {
-        variableSetIds: variableSetAttachmentIds,
-      });
-      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
-      setVariableSetAttachmentResolution({
-        key: variableSetAttachmentIdsKey,
-        variableSets: result.variableSets,
-        error: null,
-      });
-    } catch (cause) {
-      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
-      setVariableSetAttachmentResolution({
-        key: variableSetAttachmentIdsKey,
-        variableSets: [],
-        error: cause instanceof Error ? cause : new Error(String(cause)),
-      });
-    }
-  });
-  useEffect(() => {
-    void resolveVariableSetAttachments();
-  }, [
-    resolveVariableSetAttachments,
-    variableSetAttachmentIdsKey,
-    canResolveVariableSetAttachments,
-    fixedResourceCatalogEnabled,
-  ]);
-  const variableSetAttachmentResolutionCurrent =
-    variableSetAttachmentResolution.key === variableSetAttachmentIdsKey;
-  const resolvedVariableSetAttachments = variableSetAttachmentResolutionCurrent
-    ? variableSetAttachmentResolution.variableSets
-    : [];
-  const resolvedVariableSetIds = canLoadVariableSetCatalog
-    ? selectableVariableSets.map((variableSet) => variableSet.id)
-    : canResolveVariableSetAttachments
-      ? resolvedVariableSetAttachments.map((variableSet) => variableSet.id)
-      : [];
-  const resolvedVariableSetIdsKey = resolvedVariableSetIds.join("\u0000");
-  const variableSetResolutionLoading = canLoadVariableSetCatalog
-    ? variableSets.loading
-    : canResolveVariableSetAttachments
-      ? !variableSetAttachmentResolutionCurrent
-      : false;
-  const variableSetResolutionError = canLoadVariableSetCatalog
-    ? variableSets.error
-    : canResolveVariableSetAttachments && variableSetAttachmentResolutionCurrent
-      ? variableSetAttachmentResolution.error
-      : null;
-  const variableSetsSettled =
-    (canLoadVariableSetCatalog || canResolveVariableSetAttachments) &&
-    personalResourceEligibilitySettled &&
-    !variableSetResolutionLoading &&
-    variableSetResolutionError === null;
   const selectableRigIdsKey = selectableRigs.map((rig) => rig.id).join("\u0000");
-  const selectedFixedResourceKey = [...draft.variableSetIds, `rig:${draft.rigId}`].join("\u0000");
   const fixedResourceSelection = reconcileNewSessionFixedResources({
-    selectedVariableSetIds: draft.variableSetIds,
     selectedRigId: draft.rigId,
-    selectedRigDefaultVariableSetIds,
-    selectableVariableSetIds: fixedResourceCatalogEnabled
-      ? resolvedVariableSetIds
-      : draft.variableSetIds,
     selectableRigIds: fixedResourceCatalogEnabled
       ? selectableRigs.map((rig) => rig.id)
       : draft.rigId
         ? [draft.rigId]
         : [],
-    variableSetsSettled: !fixedResourceCatalogEnabled || variableSetsSettled,
     rigsSettled:
       !fixedResourceCatalogEnabled ||
       (personalResourceEligibilitySettled && !rigs.loading && rigs.error === null),
@@ -560,67 +449,27 @@ function SessionsIndexRouteContent({
   const fixedResourceCatalogError =
     draft.compute.kind === "sandbox" &&
     newSessionFixedResourceCatalogFailed({
-      selectedVariableSetIds: draft.variableSetIds,
       selectedRigId: draft.rigId,
       selectionResolved: fixedResourceSelection.selectionResolved,
-      variableSetCatalogFailed: variableSetResolutionError !== null,
       rigCatalogFailed: rigs.error !== null,
     });
   useEffect(() => {
     setDraft((current) => {
       if (current.compute.kind !== "sandbox") return current;
       const reconciled = reconcileNewSessionFixedResources({
-        selectedVariableSetIds: current.variableSetIds,
         selectedRigId: current.rigId,
-        selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey
-          ? selectedRigDefaultVariableSetIdsKey.split("\u0000")
-          : [],
-        selectableVariableSetIds: resolvedVariableSetIdsKey
-          ? resolvedVariableSetIdsKey.split("\u0000")
-          : [],
         selectableRigIds: selectableRigIdsKey ? selectableRigIdsKey.split("\u0000") : [],
-        variableSetsSettled,
         rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
       });
-      if (
-        reconciled.variableSetIds.length === current.variableSetIds.length &&
-        reconciled.variableSetIds.every((id, index) => id === current.variableSetIds[index]) &&
-        reconciled.rigId === current.rigId
-      ) {
-        return current;
-      }
-      return {
-        ...current,
-        variableSetIds: reconciled.variableSetIds,
-        variableSetId: reconciled.variableSetIds.at(-1) ?? "",
-        rigId: reconciled.rigId,
-      };
+      return reconciled.rigId === current.rigId ? current : { ...current, rigId: reconciled.rigId };
     });
   }, [
+    draft.rigId,
     personalResourceEligibilitySettled,
     rigs.error,
     rigs.loading,
-    selectedFixedResourceKey,
-    selectedRigDefaultVariableSetIdsKey,
     selectableRigIdsKey,
-    resolvedVariableSetIdsKey,
-    variableSetsSettled,
   ]);
-  const personalAttachmentVariableSetIds = [
-    ...new Set([
-      ...(selectedRig?.activeVersion?.defaultVariableSetIds ?? []),
-      ...draft.variableSetIds,
-    ]),
-  ];
-  const selectedPersonalVariableSets = personalAttachmentVariableSetIds.flatMap((variableSetId) => {
-    const variableSet = selectableVariableSets.find((candidate) => candidate.id === variableSetId);
-    if (variableSet?.scope === "user") return [{ id: variableSet.id, name: variableSet.name }];
-    return resolvedVariableSetAttachments.some(
-      (candidate) => candidate.id === variableSetId && candidate.scope === "user",
-    )
-      ? [{ id: variableSetId, name: "Personal Variable Set" }]
-      : [];
-  });
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
@@ -654,15 +503,13 @@ function SessionsIndexRouteContent({
   const personalMachineSelected = selectedMachine?.scope === "user";
   const selectedPersonalResourceNames =
     draft.compute.kind === "sandbox"
-      ? [
-          ...selectedPersonalVariableSets.map((variableSet) => variableSet.name),
-          ...(selectedRig?.scope === "user" ? [selectedRig.name] : []),
-        ]
+      ? selectedRig?.scope === "user"
+        ? [selectedRig.name]
+        : []
       : personalMachineSelected && selectedMachine
         ? [selectedMachine.name]
         : [];
   const personalResourceSelectionKey = personalResourceSelectionIdentityKey({
-    variableSetIds: selectedPersonalVariableSets.map((variableSet) => variableSet.id),
     rigId: selectedRig?.scope === "user" ? selectedRig.id : null,
     connectedMachineId:
       personalMachineSelected && selectedMachine ? selectedMachine.enrollmentId : null,
@@ -681,14 +528,7 @@ function SessionsIndexRouteContent({
     const generation = ++personalResourceCatalogRefreshGeneration.current;
     setPersonalResourceCatalogRefreshPending(true);
     try {
-      await Promise.all([
-        canLoadVariableSetCatalog
-          ? variableSets.refresh()
-          : canResolveVariableSetAttachments
-            ? resolveVariableSetAttachments()
-            : Promise.resolve(),
-        canUseRigs ? rigs.refresh() : Promise.resolve(),
-      ]);
+      if (canUseRigs) await rigs.refresh();
     } finally {
       if (personalResourceCatalogRefreshGeneration.current === generation) {
         setPersonalResourceCatalogRefreshPending(false);
@@ -1807,30 +1647,35 @@ function SessionsIndexRouteContent({
                         },
                       }
                     : {})}
-                  {...(draft.compute.kind === "sandbox"
+                  {...(draftSecretsOn && canListSecrets
                     ? {
-                        variableSets: {
-                          selectedCount: draft.variableSetIds.length,
+                        secrets: {
+                          summary: sessionSecretsSummary(draftVaultPolicy, draftVaultRows),
+                          disabled: busy || newSessionDraft.loading,
                           panel: (
-                            <ManagedSandboxFields
-                              variableSetsOnly
-                              variableSetWorkspaceId={workspaceId}
-                              canAttachVariableSets={canAttachVariableSets}
-                              canUseVariableSets={canUseVariableSets}
-                              draft={draft}
-                              onChange={setDraft}
+                            <SessionSecretsMenuBody
+                              vaults={draftVaultRows}
+                              policy={draftVaultPolicy}
+                              narrowedByParent={false}
+                              canEdit
                               disabled={busy || newSessionDraft.loading}
-                              variableSets={selectableVariableSets}
-                              rigs={selectableRigs}
-                              personalResourceAccess={{
-                                names: selectedPersonalResourceNames,
-                                visibility: createVisibility,
-                              }}
-                              catalogRecovery={{
-                                error: fixedResourceCatalogError,
-                                refreshing: personalResourceCatalogRefreshPending,
-                                onRetry: () => void refreshPersonalResourceCatalogs(),
-                              }}
+                              loading={draftVaults.loading}
+                              error={draftVaults.error}
+                              onRetry={() => void draftVaults.refresh()}
+                              onPolicyChange={(policy) =>
+                                setDraft((current) => {
+                                  const { vaultPolicy: _previous, ...rest } = current;
+                                  return policy.mode === "all"
+                                    ? rest
+                                    : { ...rest, vaultPolicy: policy };
+                                })
+                              }
+                              onManage={() =>
+                                void navigate({
+                                  to: "/workspaces/$workspaceId/secrets",
+                                  params: { workspaceId },
+                                })
+                              }
                             />
                           ),
                         },
@@ -1968,7 +1813,6 @@ function SessionsIndexRouteContent({
             }}
             fleet={fleet}
             machines={machines}
-            variableSets={selectableVariableSets}
             rigs={selectableRigs}
             workspaceDefaultRigId={workspace?.defaultRigId ?? null}
             catalogRecovery={{
@@ -2122,7 +1966,7 @@ function RecentSessionRow({
 
 // Setup selections sit above the prompt so the footer remains an action row.
 // Repo stays out of the compute band so that band only shows when rigs /
-// variable sets exist. Tools and repos live under “+” at every width.
+// machines exist. Tools and repos live under “+” at every width.
 function SessionSetupStrip({
   disabled,
   channels,
@@ -2488,7 +2332,6 @@ function ComputeTargetControl(props: {
   personalResourceAccess: NewSessionPersonalResourceAccess;
   fleet: ReturnType<typeof useWorkspaceMachines>;
   machines: MachineView[];
-  variableSets: VariableSet[];
   rigs: Rig[];
   workspaceDefaultRigId: string | null;
   catalogRecovery: FixedResourceCatalogRecovery;
@@ -2650,7 +2493,7 @@ function ComputeTargetControl(props: {
         <div role="alert" className="mt-3">
           <Notice
             tone="failed"
-            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
+            title="Couldn’t verify the selected Sandbox Environment"
             action={
               <Button
                 type="button"
@@ -2671,141 +2514,6 @@ function ComputeTargetControl(props: {
         <PersonalResourceAccessInline access={props.personalResourceAccess} />
       </div>
     </>
-  );
-}
-
-// ── Managed Sandbox extras: rig + variable set only (repos live in the composer pills) ─
-
-function ManagedSandboxFields(props: {
-  variableSetsOnly?: boolean;
-  variableSetWorkspaceId?: string;
-  canAttachVariableSets?: boolean;
-  canUseVariableSets?: boolean;
-  onClose?: () => void;
-  leading?: ReactNode;
-  draft: SessionDraft;
-  onChange: (draft: SessionDraft) => void;
-  disabled: boolean;
-  personalResourceAccess: NewSessionPersonalResourceAccess;
-  variableSets: VariableSet[];
-  rigs: Rig[];
-  workspaceDefaultRigId?: string | null;
-  catalogRecovery: FixedResourceCatalogRecovery;
-}) {
-  const { draft, onChange } = props;
-  const personalRigs = props.rigs.filter((resource) => resource.scope === "user");
-  const workspaceRigs = props.rigs.filter((resource) => resource.scope !== "user");
-  const showRigs = !props.variableSetsOnly && (workspaceRigs.length > 0 || personalRigs.length > 0);
-  const showVariableSets = props.variableSetsOnly === true;
-  if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
-    return null;
-  }
-
-  return (
-    // One flat card: hairline-separated rows, controls right-aligned, no
-    // nested boxes and no restating helper text — the controls speak.
-    <div
-      className={
-        props.variableSetsOnly
-          ? "min-h-0 overflow-y-auto"
-          : "mt-5 overflow-hidden rounded-lg border border-border bg-surface/40"
-      }
-    >
-      {props.leading && !showVariableSets ? (
-        <div className="flex items-center gap-2 px-1 pb-2">
-          {props.leading}
-          <span className="text-sm font-medium">Variable sets</span>
-        </div>
-      ) : null}
-      {props.catalogRecovery.error ? (
-        <div
-          role="alert"
-          className={cn((showRigs || showVariableSets) && "border-b border-border/70", "p-2.5")}
-        >
-          <Notice
-            tone="failed"
-            className="p-2.5 text-xs"
-            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
-            action={
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={props.disabled || props.catalogRecovery.refreshing}
-                onClick={props.catalogRecovery.onRetry}
-              >
-                Retry
-              </Button>
-            }
-          >
-            Retry to reload your available resources before starting this session.
-          </Notice>
-        </div>
-      ) : null}
-      {/* Rig picker — offered only when the workspace has at least one rig.
-          Picking a rig preselects its default variable sets in the control
-          below (still user-overridable). Empty ⇒ the workspace default rig,
-          resolved server-side; its option names that default. */}
-      {showRigs ? (
-        <div className="flex items-center justify-between gap-3 px-3 py-2">
-          <Label className="flex shrink-0 items-center gap-1.5 text-xs">
-            <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
-            Sandbox Environment
-          </Label>
-          <Select
-            value={draft.rigId}
-            disabled={props.disabled}
-            onChange={(event) => {
-              const rigId = event.target.value;
-              onChange({
-                ...draft,
-                rigId,
-              });
-            }}
-            className="h-8 w-auto max-w-56 text-xs"
-          >
-            <option value="">
-              {workspaceDefaultRigOptionLabel(props.workspaceDefaultRigId, props.rigs)}
-            </option>
-            {workspaceRigs.map((rig) => (
-              <option key={rig.id} value={rig.id}>
-                {rig.name}
-                {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
-              </option>
-            ))}
-            {personalRigs.length > 0 ? (
-              <optgroup label="Only me">
-                {personalRigs.map((rig) => (
-                  <option key={rig.id} value={rig.id}>
-                    {rig.name}
-                    {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null}
-          </Select>
-        </div>
-      ) : null}
-
-      {/* Keep restored selections visible even when the caller may attach/use
-          exact IDs but cannot enumerate the Variable Set catalog. */}
-      {showVariableSets && props.variableSetWorkspaceId ? (
-        <NewSessionVariableSetPicker
-          workspaceId={props.variableSetWorkspaceId}
-          canAttach={props.canAttachVariableSets === true}
-          canUse={props.canUseVariableSets === true}
-          runtimeIds={draft.variableSetIds}
-          variableSets={props.variableSets}
-          disabled={props.disabled}
-          leading={props.leading}
-          onClose={props.onClose}
-          onChange={(variableSetIds) =>
-            onChange({ ...draft, variableSetIds, variableSetId: variableSetIds.at(-1) ?? "" })
-          }
-        />
-      ) : null}
-      <PersonalResourceAccessInline access={props.personalResourceAccess} embedded />
-    </div>
   );
 }
 

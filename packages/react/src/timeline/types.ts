@@ -2,6 +2,7 @@ import type {
   AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
+  HumanInputSecretAnswerResult,
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
@@ -81,6 +82,8 @@ export type HumanInputAnswerSummary = {
   label: string;
   prompt: string;
   values: string[];
+  /** A secret question's saved reference (never a value). */
+  secret?: HumanInputSecretAnswerResult | undefined;
 };
 
 /**
@@ -459,6 +462,11 @@ export type ContextCompactionItem = {
    * definitively rejected the compaction request. Content-free identifiers.
    */
   providerRejection: ContextCompactionProviderRejection | null;
+  /**
+   * The same turn's recorded failure text, when that turn failed because this
+   * compaction did. Diagnostics shown behind Details only.
+   */
+  failureDetail?: string;
   /** Provider implementation id for debug disclosure only. */
   implementation: string | null;
   occurredAt: string;
@@ -619,7 +627,12 @@ export type TimelineGroup =
         startedAt: string;
         endedAt?: string;
         responseStartedAt?: string;
-        waiting?: { label: string; since: string; detail?: string };
+        /**
+         * A live wait. `untimed` marks a capacity wait, whose row shows no
+         * running clock: that span is not work and ends on a quota reset or
+         * a person's choice, not after a predictable time.
+         */
+        waiting?: { label: string; since: string; detail?: string; untimed?: true };
         /**
          * Settled capacity-wait time inside this work span. It is not work:
          * the worked duration and the live working clock exclude it.

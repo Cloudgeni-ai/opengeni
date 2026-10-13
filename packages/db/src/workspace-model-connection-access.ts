@@ -1,28 +1,26 @@
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
-import {
-  listClaudeSubscriptionAccountsMetadataForAuthority,
-  getClaudeRotationSettings,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
-  ClaudeAuthorityPoolInactiveError,
-} from "./claude-subscription-accounts";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
 } from "@opengeni/config";
-import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { connections } from "./schema";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
-import {
-  listXaiSubscriptionAccountsMetadata,
-  getXaiRotationSettings,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-} from "./xai-subscription";
 import { connectionModelAllowed } from "./model-connection-access";
 
 export type ConnectionModelRestrictions = Record<string, string[] | null>;
+
+/** Claude's two model restrictions, as its core route projects them. */
+export type ClaudeCoreModelRestrictions = {
+  readonly "organization-claude-subscription/": readonly string[] | null;
+  readonly "workspace-claude-subscription/": readonly string[] | null;
+};
+
+/** A mutable copy of one core restriction (the core's answers may be frozen). */
+const copied = (restriction: readonly string[] | null) =>
+  restriction === null ? null : [...restriction];
 
 /** Metadata-only read under the caller's workspace and subject RLS scope. */
 async function listDirectModelConnections(db: Database, workspaceId: string, subjectId: string) {
@@ -50,7 +48,11 @@ async function listDirectModelConnections(db: Database, workspaceId: string, sub
   );
 }
 
-/** Public model-id restrictions only. Never returns connection or private owner identifiers. */
+/**
+ * Public model-id restrictions only. Never returns connection or private owner
+ * identifiers. `supergrok/` is closed here: SuperGrok runs only on the shared
+ * core, whose readiness projection replaces it (`withCoreRoutedXaiRestriction`).
+ */
 export async function getWorkspaceConnectionModelRestrictions(
   db: Database,
   workspaceId: string,
@@ -60,78 +62,34 @@ export async function getWorkspaceConnectionModelRestrictions(
     allocatorEnabled: boolean;
     allowedModelIds?: string[] | null;
   }>,
-  authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
+  /**
+   * Claude's restrictions on its core route (design 5.3, C2a): when given,
+   * no legacy Claude pool or v1 snapshot is read and these are used.
+   */
+  claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
 ): Promise<ConnectionModelRestrictions> {
-  const [xai, xaiAuthority] = await Promise.all([
-    listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
-    authoritySnapshot ??
-      resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
-        workspaceId,
-        subjectId,
-      }),
-  ]);
-  const xaiRotation = await getXaiRotationSettings(db, {
-    workspaceId,
-    subjectId,
-    authoritySnapshot: xaiAuthority,
-  });
   const union = (rows: Array<{ allowedModelIds?: string[] | null }>) =>
     rows.some((row) => row.allowedModelIds == null)
       ? null
       : [...new Set(rows.flatMap((row) => row.allowedModelIds ?? []))];
-  const claudeAuthority =
-    claudeAuthoritySnapshot ??
-    (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, {
-      workspaceId,
-      subjectId,
-    }));
-  let claudeModels: string[] | null = [];
-  try {
-    const [claude, claudeRotation] = await Promise.all([
-      listClaudeSubscriptionAccountsMetadataForAuthority(db, {
-        workspaceId,
-        subjectId,
-        authoritySnapshot: claudeAuthority,
-      }),
-      getClaudeRotationSettings(db, { workspaceId, subjectId, authoritySnapshot: claudeAuthority }),
-    ]);
-    claudeModels = union(
-      claude.filter(
-        (row) =>
-          row.status === "active" &&
-          row.allocatorEnabled &&
-          (claudeRotation?.rotationEnabled || row.id === claudeRotation?.activeCredentialId),
-      ),
-    );
-  } catch (error) {
-    // An accepted private pool cannot be replaced by the caller's current pool.
-    // Catalog readiness closes this rail; execution still rejects stale authority.
-    if (!claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
-      throw error;
-  }
   const restrictions: ConnectionModelRestrictions = {
     "codex/": union(codex.filter((row) => row.status === "active" && row.allocatorEnabled)),
-    "supergrok/": union(
-      xai.filter(
-        (row) =>
-          row.scope === xaiAuthority.scope &&
-          row.status === "active" &&
-          row.allocatorEnabled &&
-          (xaiRotation?.rotationEnabled || row.id === xaiRotation?.activeCredentialId),
-      ),
-    ),
+    "supergrok/": [],
     "workspace-gateway/": [],
     "workspace-openrouter/": [],
     "workspace-opper/": [],
     "workspace-anthropic/": [],
-    "workspace-claude-subscription/": claudeAuthority.scope === "organization" ? [] : claudeModels,
+    "workspace-claude-subscription/": claudeCoreRestrictions
+      ? copied(claudeCoreRestrictions["workspace-claude-subscription/"])
+      : [],
     "organization-gateway/": [],
     "organization-openrouter/": [],
     "organization-opper/": [],
     "organization-anthropic/": [],
-    "organization-claude-subscription/":
-      claudeAuthority.scope === "organization" ? claudeModels : [],
+    "organization-claude-subscription/": claudeCoreRestrictions
+      ? copied(claudeCoreRestrictions["organization-claude-subscription/"])
+      : [],
   };
   await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) => {
     const rows = await rawRows<{
@@ -179,9 +137,6 @@ export async function assertModelConnectionAllowsTurn(
     subjectId: string;
     modelId: string;
     codexCredentialId?: string | null;
-    xaiCredentialId?: string | null;
-    claudeCredentialId?: string | null;
-    claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
     workspaceProviderConnectionId?: string;
   },
 ): Promise<void> {
@@ -204,27 +159,13 @@ export async function assertModelConnectionAllowsTurn(
   }
   if (
     model.startsWith("workspace-claude-subscription/") ||
-    model.startsWith("organization-claude-subscription/")
+    model.startsWith("organization-claude-subscription/") ||
+    model.startsWith("codex/") ||
+    model.startsWith("supergrok/")
   ) {
-    const snapshot = input.claudeAuthoritySnapshot;
-    if (!input.claudeCredentialId || !snapshot)
-      throw new Error("No subscription is available for this model");
-    if (
-      model.startsWith("organization-claude-subscription/") !==
-      (snapshot.scope === "organization")
-    )
-      throw new Error("This model does not belong to the accepted subscription pool");
-    query = sql`SELECT c.allowed_model_ids AS models FROM claude_subscription_credentials c
-      JOIN revalidate_claude_subscription_authority(${input.workspaceId}::uuid, ${input.subjectId}, ${input.claudeCredentialId}::uuid, ${JSON.stringify(snapshot)}::jsonb) a ON a.id = c.id
-      WHERE c.id = ${input.claudeCredentialId}::uuid AND c.status = 'active'`;
-  } else if (model.startsWith("codex/")) {
-    // Codex must already have passed the exact core placement/lease boundary.
-    // Reaching this legacy-provider helper is not authority to dispatch it.
-    throw new Error("Codex model access requires shared-core placement");
-  } else if (model.startsWith("supergrok/")) {
-    const id = input.xaiCredentialId;
-    if (!id) throw new Error("No subscription is available for this model");
-    query = sql`SELECT allowed_model_ids AS models FROM xai_subscription_credentials WHERE id = ${id}::uuid`;
+    // Subscription requests require the exact core placement and lease;
+    // this API-key helper cannot authorize a subscription dispatch.
+    throw new Error("Subscription model access requires shared-core placement");
   } else if (
     model.startsWith("organization-gateway/") ||
     model.startsWith("organization-openrouter/") ||

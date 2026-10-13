@@ -121,6 +121,27 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test("model-identity policies omit unsaved effort and latency controls", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="medium"
+        latencyMode="fast"
+        allowModelOptions={false}
+        triggerStyle="field"
+        onModelChange={() => {}}
+        onEffortChange={() => {
+          throw new Error("effort is not saved here");
+        }}
+        onLatencyModeChange={() => {
+          throw new Error("latency is not saved here");
+        }}
+      />,
+    );
+    expect(container.querySelectorAll('[data-testid^="model-picker-choice-"]')).toHaveLength(2);
+    expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeNull();
+  });
   test.each([true, false])(
     "catalog logo respects model versus billing presentation (collapseScopes=%s)",
     async (collapseScopes) => {
