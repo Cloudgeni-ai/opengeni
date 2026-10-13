@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readlink, rm, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -32,8 +33,24 @@ const recoveryE2e =
 // "graceful": the controller shuts down as for an upgrade or service restart.
 // "killed": the controller, its launcher daemon and Chrome's stderr drain are
 // killed outright, as a service stop does to everything left in its cgroup.
+// "stopped": the controller runs as a systemd user service with the native
+// agent's KillMode and that service is stopped; the browser it launched lives
+// in its own scope and keeps every process. Needs a user service manager.
 // Headed modes run when a display is available (for example, under Xvfb).
-const recoveryCases = (["graceful", "killed"] as const).flatMap((ending) =>
+const userServiceManager =
+  process.platform === "linux" &&
+  spawnSync("busctl", [
+    "--user",
+    "call",
+    "org.freedesktop.systemd1",
+    "/org/freedesktop/systemd1",
+    "org.freedesktop.DBus.Peer",
+    "Ping",
+  ]).status === 0;
+const recoveryEndings = userServiceManager
+  ? (["graceful", "killed", "stopped"] as const)
+  : (["graceful", "killed"] as const);
+const recoveryCases = recoveryEndings.flatMap((ending) =>
   (process.env.DISPLAY ? [false, true] : [false]).map((headed) => ({ ending, headed })),
 );
 recoveryE2e.each(recoveryCases)(
@@ -82,6 +99,7 @@ recoveryE2e.each(recoveryCases)(
     let first: BrowserSupervisor | undefined;
     let second: BrowserSupervisor | undefined;
     let controller: ReturnType<typeof Bun.spawn> | undefined;
+    let controllerUnit: string | undefined;
     let browserPid: number | undefined;
     const failures: unknown[] = [];
     try {
@@ -93,7 +111,7 @@ recoveryE2e.each(recoveryCases)(
         expect(semanticNames(clicked.observation!)).toContain("Unsaved 1");
         browserPid = await chromiumProfilePid(profile);
         await first.close();
-      } else {
+      } else if (ending === "killed") {
         controller = Bun.spawn(
           [
             process.execPath,
@@ -112,6 +130,43 @@ recoveryE2e.each(recoveryCases)(
         for (const pid of [controller.pid, launcher, ...drains]) process.kill(pid, "SIGKILL");
         await controller.exited;
         for (const pid of [launcher, ...drains]) await waitForProcessDeath(pid);
+      } else {
+        controllerUnit = `ogb-controller-${randomUUID()}.service`;
+        controller = Bun.spawn(
+          [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--collect",
+            "--pipe",
+            "--same-dir",
+            `--unit=${controllerUnit}`,
+            "--property=KillMode=mixed",
+            ...Object.keys(process.env)
+              .filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key))
+              .map((key) => `--setenv=${key}`),
+            "--",
+            process.execPath,
+            join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
+            JSON.stringify({ rootDirectory, socketRootDirectory, options }),
+          ],
+          { stdin: "ignore", stdout: "pipe", stderr: "inherit" },
+        );
+        const line = await firstLine(controller.stdout as ReadableStream<Uint8Array>, 30_000);
+        const clicked = JSON.parse(line) as { state: string; names: string[] };
+        expect(clicked.state).toBe("completed");
+        expect(clicked.names).toContain("Unsaved 1");
+        browserPid = await chromiumProfilePid(profile);
+        const browserTree = [browserPid, ...(await descendantPids(browserPid))];
+        expect(browserTree.length).toBeGreaterThan(2);
+        // The whole browser tree, including the process Chromium itself moves
+        // into an app scope at startup, is in the browser's own scope.
+        const scope = await processUnit(browserPid);
+        expect(scope).toMatch(/\/opengeni-browsers\.slice\/opengeni-browser-[^/]+\.scope$/u);
+        for (const pid of browserTree) expect(await processUnit(pid)).toBe(scope);
+        expect(spawnSync("systemctl", ["--user", "stop", controllerUnit]).status).toBe(0);
+        await controller.exited;
+        for (const pid of browserTree) expect(() => process.kill(pid, 0)).not.toThrow();
       }
       // The controller is gone; the browser it launched is not.
       const inode = (await stat(profile)).ino;
@@ -148,6 +203,7 @@ recoveryE2e.each(recoveryCases)(
       }
     } finally {
       if (controller?.exitCode === null) controller.kill("SIGKILL");
+      if (controllerUnit) spawnSync("systemctl", ["--user", "stop", controllerUnit]);
       const cleanup = await Promise.allSettled([first?.close(), second?.close()]);
       server.stop(true);
       const cleanupFailures = cleanup.flatMap((result) =>
@@ -389,6 +445,25 @@ async function waitForProcessDeath(pid: number): Promise<void> {
 async function parentPid(pid: number): Promise<number> {
   const procStat = await readFile(`/proc/${pid}/stat`, "utf8");
   return Number(procStat.slice(procStat.lastIndexOf(")") + 2).split(" ")[1]);
+}
+
+async function descendantPids(pid: number): Promise<number[]> {
+  const children = (await readFile(`/proc/${pid}/task/${pid}/children`, "utf8").catch(() => ""))
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean)
+    .map(Number);
+  const nested = await Promise.all(children.map((child) => descendantPids(child)));
+  return [...children, ...nested.flat()];
+}
+
+/** The unified-hierarchy cgroup path of a process. */
+async function processUnit(pid: number): Promise<string> {
+  const line = (await readFile(`/proc/${pid}/cgroup`, "utf8"))
+    .split("\n")
+    .find((entry) => entry.startsWith("0::"));
+  if (!line) throw new Error("process has no unified cgroup");
+  return line.slice(3);
 }
 
 async function childPids(pid: number, command: string): Promise<number[]> {
