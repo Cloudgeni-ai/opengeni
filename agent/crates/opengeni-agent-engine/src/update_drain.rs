@@ -30,6 +30,9 @@ pub struct UploadIdentity {
 #[derive(Default)]
 struct State {
     operation: Option<String>,
+    /// Accepted update still waiting for the host to become idle. It does not
+    /// fence admission; each idle attempt fences through `reserve_update`.
+    waiting: Option<String>,
     sealed: bool,
     unsettled: bool,
     routed: usize,
@@ -72,7 +75,73 @@ impl UpdateDrain {
             state.unsettled = true;
         }
     }
-    /// Claim the updater and fence new work before any asynchronous proof.
+    /// Accept the sole host update without fencing work. The update waits for
+    /// idle through repeated `reserve_update` attempts until `finish_update`.
+    pub fn accept_update(&self, operation: &str) -> UpdateReservation {
+        let Ok(mut state) = self.state.lock() else {
+            return UpdateReservation::Unavailable;
+        };
+        if state.waiting.as_deref() == Some(operation)
+            || state.operation.as_deref() == Some(operation)
+        {
+            return UpdateReservation::AlreadyAccepted;
+        }
+        if state.waiting.is_some() || state.operation.is_some() {
+            return UpdateReservation::Busy;
+        }
+        if state.unsettled {
+            return UpdateReservation::Unavailable;
+        }
+        state.waiting = Some(operation.to_owned());
+        UpdateReservation::Started
+    }
+
+    /// End an accepted update: release its fence and stop it waiting.
+    pub fn finish_update(&self, operation: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.waiting.as_deref() == Some(operation) {
+                state.waiting = None;
+            }
+            if state.operation.as_deref() == Some(operation) {
+                state.operation = None;
+                state.sealed = false;
+            }
+        }
+    }
+
+    /// Whether this update is still accepted. A waiting updater whose
+    /// acceptance was finished elsewhere stops at its next attempt.
+    pub fn is_accepted(&self, operation: &str) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.waiting.as_deref() == Some(operation)
+                || state.operation.as_deref() == Some(operation)
+        })
+    }
+
+    /// Fence admission for one idle attempt of the accepted waiting update.
+    /// Never fences for an operation that is no longer accepted.
+    pub fn fence_update(&self, operation: &str) -> UpdateReservation {
+        let Ok(mut state) = self.state.lock() else {
+            return UpdateReservation::Unavailable;
+        };
+        if state.unsettled {
+            return UpdateReservation::Unavailable;
+        }
+        if state.waiting.as_deref() != Some(operation) {
+            return UpdateReservation::Busy;
+        }
+        match state.operation.as_deref() {
+            Some(current) if current == operation => UpdateReservation::AlreadyAccepted,
+            Some(_) => UpdateReservation::Busy,
+            None => {
+                state.operation = Some(operation.to_owned());
+                UpdateReservation::Started
+            }
+        }
+    }
+
+    /// Claim the updater and fence new work before any asynchronous proof. An
+    /// accepted waiting update can only be fenced by its own operation.
     pub fn reserve_update(&self, operation: &str) -> UpdateReservation {
         let Ok(mut state) = self.state.lock() else {
             return UpdateReservation::Unavailable;
@@ -84,6 +153,13 @@ impl UpdateDrain {
                 if state.unsettled {
                     return UpdateReservation::Unavailable;
                 }
+                if state
+                    .waiting
+                    .as_deref()
+                    .is_some_and(|waiting| waiting != operation)
+                {
+                    return UpdateReservation::Busy;
+                }
                 state.operation = Some(operation.to_owned());
                 UpdateReservation::Started
             }
@@ -91,6 +167,7 @@ impl UpdateDrain {
     }
 
     /// Release only this updater's fence; never clear unsettled physical work.
+    /// An accepted waiting update stays accepted.
     pub fn release_update(&self, operation: &str) {
         if let Ok(mut state) = self.state.lock() {
             if state.operation.as_deref() == Some(operation) {
@@ -268,6 +345,44 @@ mod tests {
         assert!(drain.reserve_work(None).is_none());
         drain.release_update("one");
         assert!(drain.reserve_work(None).is_some());
+    }
+
+    #[test]
+    fn accepted_update_waits_without_fencing_until_finished() {
+        let drain = Arc::new(UpdateDrain::default());
+        assert_eq!(drain.accept_update("one"), UpdateReservation::Started);
+        assert_eq!(
+            drain.accept_update("one"),
+            UpdateReservation::AlreadyAccepted
+        );
+        assert_eq!(drain.accept_update("two"), UpdateReservation::Busy);
+        // Waiting admits ordinary work and does not report a draining updater.
+        assert!(!drain.is_draining());
+        let work = drain.reserve_work(None).unwrap();
+        // Only the accepted operation may fence; a busy attempt releases.
+        assert_eq!(drain.fence_update("two"), UpdateReservation::Busy);
+        assert_eq!(drain.reserve_update("two"), UpdateReservation::Busy);
+        assert_eq!(drain.fence_update("one"), UpdateReservation::Started);
+        assert!(drain.reserve_work(None).is_none());
+        assert!(!drain.seal_update("one"));
+        drain.release_update("one");
+        assert!(drain.is_accepted("one"));
+        assert!(drain.reserve_work(None).is_some());
+        assert_eq!(drain.accept_update("two"), UpdateReservation::Busy);
+        drop(work);
+        // The next attempt fences and seals once work settled.
+        assert_eq!(drain.fence_update("one"), UpdateReservation::Started);
+        assert!(drain.seal_update("one"));
+        assert!(drain.reserve_control().is_none());
+        drain.finish_update("one");
+        assert!(!drain.is_accepted("one"));
+        // A finished update can never fence again.
+        assert_eq!(drain.fence_update("one"), UpdateReservation::Busy);
+        assert!(drain.reserve_control().is_some());
+        assert_eq!(drain.accept_update("two"), UpdateReservation::Started);
+        drain.finish_update("two");
+        drain.mark_unsettled();
+        assert_eq!(drain.accept_update("three"), UpdateReservation::Unavailable);
     }
 
     #[test]

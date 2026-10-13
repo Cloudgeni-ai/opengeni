@@ -148,7 +148,8 @@ describe("ComputerSupervisor", () => {
         expect(supervisor.isIdle()).toBe(false);
         startGate.resolve();
         await creating;
-        expect(supervisor.isIdle()).toBe(false);
+        // An open, quiescent session on the physical seat survives a restart.
+        expect(supervisor.isIdle()).toBe(true);
         const closing = supervisor.endSession(options());
         await ending.promise;
         expect(supervisor.listSessions()).toEqual([]);
@@ -164,6 +165,60 @@ describe("ComputerSupervisor", () => {
       }
     },
   );
+
+  test("an admitted command or an isolated virtual seat blocks the update idle proof", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-update-busy-");
+    const dispatched = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let virtualSeat = false;
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      environmentAllocator: {
+        async allocate() {
+          return {
+            seatId: "seat-1",
+            displayId: ":101",
+            rfbPort: virtualSeat ? 5901 : null,
+            environment: { PATH: process.env.PATH ?? "/usr/bin" },
+            async close() {},
+          };
+        },
+      },
+      createDriver: async (context) => {
+        const driver = new FixtureComputerDriver(
+          context.computerSessionId,
+          context.controllerGeneration,
+        );
+        const dispatch = driver.dispatch.bind(driver);
+        driver.dispatch = async () => {
+          dispatched.resolve();
+          await release.promise;
+          return await dispatch();
+        };
+        return driver;
+      },
+    });
+    try {
+      await supervisor.createSession(options());
+      expect(supervisor.isIdle()).toBe(true);
+      const running = supervisor.action(command());
+      await dispatched.promise;
+      expect(supervisor.isIdle()).toBe(false);
+      release.resolve();
+      expect(await running).toMatchObject({ state: "completed" });
+      // The target queue releases its tail just after the receipt settles.
+      await Bun.sleep(1);
+      expect(supervisor.isIdle()).toBe(true);
+      await supervisor.endSession(options());
+      virtualSeat = true;
+      await supervisor.createSession(options());
+      expect(supervisor.isIdle()).toBe(false);
+    } finally {
+      release.resolve();
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
 
   test("hosts workspace sessions and replays durable terminal receipts without redispatch", async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-supervisor-");

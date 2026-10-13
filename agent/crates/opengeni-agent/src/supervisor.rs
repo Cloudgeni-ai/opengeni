@@ -66,6 +66,13 @@ const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(5);
 const HOUSEKEEPING_TICK: Duration = Duration::from_secs(30);
 /// Host-capacity resample cadence (budgets track the host over time) — pacing.
 const CAPACITY_RESAMPLE: Duration = Duration::from_secs(60);
+/// How often an accepted update re-attempts its idle proof while the host is
+/// busy. Each attempt is a few local checks and, when otherwise idle, one
+/// short controller fence — pacing.
+#[cfg(not(test))]
+const UPDATE_IDLE_RECHECK: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const UPDATE_IDLE_RECHECK: Duration = Duration::from_millis(20);
 /// Op frames queued toward the bulk publisher. A pipe diameter for the
 /// fire-and-forget lane: a full channel DROPS the frame (allowed — op frames
 /// are healed by gap-detection + OpAttach replay), it never blocks a pump.
@@ -1367,28 +1374,49 @@ impl<P: Platform + 'static> Supervisor<P> {
             .await;
 
             // Commands may intentionally live forever (development servers, PTYs).
-            // Never fence the whole host waiting for their lifetime to end. The
-            // fence already excludes new routed work; defer this update if any
-            // accepted work remains, preserving its independent lifetime.
-            let mut busy_code = update_busy_code(&update_drain, &engine);
-            if busy_code.is_none() {
-                if let Some(backend) = browser_control.as_ref() {
-                    busy_code = match backend.begin_update(&update.operation_id).await {
-                        Ok(true) => None,
-                        Ok(false) => Some("update_busy_work"),
-                        Err(_) => Some("update_state_unavailable"),
-                    };
+            // Never fence the whole host waiting for their lifetime to end, and
+            // never give up on a busy host: the accepted update waits without
+            // fencing, and each attempt fences only for its own short idle proof.
+            // A busy attempt reopens admission and tries again later.
+            let mut reported_busy: Option<&'static str> = None;
+            loop {
+                if shutdown.is_requested() {
+                    // The successor's Hello settles this update as replaced.
+                    update_drain.finish_update(&update.operation_id);
+                    return;
                 }
-            }
-            // Controller fencing awaits external IO. Recheck the shared fence:
-            // an admitted control on any link may have arrived during that proof.
-            if busy_code.is_none() {
-                busy_code = update_busy_code(&update_drain, &engine);
-                if busy_code.is_none() && !update_drain.seal_update(&update.operation_id) {
-                    busy_code = Some("update_busy_work");
+                if !update_drain.is_accepted(&update.operation_id) {
+                    return;
                 }
-            }
-            if let Some(code) = busy_code {
+                let mut busy_code = match update_drain.fence_update(&update.operation_id) {
+                    UpdateReservation::Started | UpdateReservation::AlreadyAccepted => {
+                        update_busy_code(&update_drain, &engine)
+                    }
+                    // Acceptance was finished while this attempt was pending.
+                    UpdateReservation::Busy if !update_drain.is_accepted(&update.operation_id) => {
+                        return;
+                    }
+                    UpdateReservation::Busy => Some("update_busy_work"),
+                    UpdateReservation::Unavailable => Some("update_state_unavailable"),
+                };
+                if busy_code.is_none() {
+                    if let Some(backend) = browser_control.as_ref() {
+                        busy_code = match backend.begin_update(&update.operation_id).await {
+                            Ok(true) => None,
+                            Ok(false) => Some("update_busy_work"),
+                            Err(_) => Some("update_state_unavailable"),
+                        };
+                    }
+                }
+                // Controller fencing awaits external IO. Recheck the shared fence:
+                // an admitted control on any link may have arrived during that proof.
+                if busy_code.is_none() {
+                    busy_code = update_busy_code(&update_drain, &engine);
+                    if busy_code.is_none() && !update_drain.seal_update(&update.operation_id) {
+                        busy_code = Some("update_busy_work");
+                    }
+                }
+                let Some(code) = busy_code else { break };
                 if let Some(backend) = browser_control.as_ref() {
                     if backend.release_update(&update.operation_id).await.is_err() {
                         warn!("browser controller update fence could not be released");
@@ -1397,19 +1425,44 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // Reopen host admission. Any lost controller-release receipt
                 // retains its exact owner for ordinary scoped recovery.
                 update_drain.release_update(&update.operation_id);
-                publish_agent_update_progress(
-                    &client,
-                    &events_subject,
-                    &agent_id,
-                    &update,
-                    v1::AgentUpdateStage::Failed,
-                    "",
-                    code,
-                    true,
-                    false,
-                )
-                .await;
-                return;
+                if update_drain.snapshot().is_none() {
+                    // Lost physical settlement never becomes provable again in
+                    // this process; waiting would only hide the failure.
+                    update_drain.finish_update(&update.operation_id);
+                    publish_agent_update_progress(
+                        &client,
+                        &events_subject,
+                        &agent_id,
+                        &update,
+                        v1::AgentUpdateStage::Failed,
+                        "",
+                        "update_state_unavailable",
+                        true,
+                        false,
+                    )
+                    .await;
+                    return;
+                }
+                if reported_busy != Some(code) {
+                    // Say what the update is waiting for, once per reason.
+                    publish_agent_update_progress(
+                        &client,
+                        &events_subject,
+                        &agent_id,
+                        &update,
+                        v1::AgentUpdateStage::WaitingForIdle,
+                        "",
+                        code,
+                        true,
+                        false,
+                    )
+                    .await;
+                    reported_busy = Some(code);
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(UPDATE_IDLE_RECHECK) => {}
+                    () = shutdown.notified() => {}
+                }
             }
 
             let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1481,7 +1534,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         rolled_back,
                     )
                     .await;
-                    update_drain.release_update(&update.operation_id);
+                    update_drain.finish_update(&update.operation_id);
                 }
                 Err(error) => {
                     if let Some(backend) = browser_control.as_ref() {
@@ -1502,17 +1555,18 @@ impl<P: Platform + 'static> Supervisor<P> {
                         false,
                     )
                     .await;
-                    update_drain.release_update(&update.operation_id);
+                    update_drain.finish_update(&update.operation_id);
                 }
             }
         });
     }
 
-    /// Claims the process-global updater without retaining a synchronous mutex
-    /// guard across an async reply. The same operation id is response-idempotent;
-    /// a different operation is rejected until the owner finishes or restarts.
+    /// Accepts the process-global updater without retaining a synchronous mutex
+    /// guard across an async reply, and without fencing work: the update waits
+    /// for idle. The same operation id is response-idempotent; a different
+    /// operation is rejected until the owner finishes or restarts.
     fn reserve_update_operation(&self, operation_id: &str) -> UpdateReservation {
-        self.update_drain.reserve_update(operation_id)
+        self.update_drain.accept_update(operation_id)
     }
 
     /// Spawns a request/reply Git op as an engine job on its own task. The
@@ -2952,7 +3006,7 @@ mod tests {
                 it::wait_for_event(&mut events, Duration::from_secs(5), |event| {
                     matches!(&event.event, Some(Event::AgentUpdateProgress(progress))
                     if progress.operation_id == operation_id
-                        && progress.stage == v1::AgentUpdateStage::Failed as i32
+                        && progress.stage == v1::AgentUpdateStage::WaitingForIdle as i32
                         && progress.error_code == code && progress.retryable)
                 })
                 .await
@@ -2964,6 +3018,13 @@ mod tests {
                 .reserve_work(None)
                 .expect("deferred update reopens admission");
             drop(continuation);
+            // The update stays accepted and keeps waiting; a different one is refused.
+            assert!(supervisor.update_drain.is_accepted(&operation_id));
+            assert_eq!(
+                supervisor.reserve_update_operation("another"),
+                UpdateReservation::Busy
+            );
+            supervisor.update_drain.finish_update(&operation_id);
         }
     }
 
@@ -3138,7 +3199,8 @@ mod tests {
                     &mut events,
                     Duration::from_secs(5),
                     |event| matches!(&event.event, Some(Event::AgentUpdateProgress(p))
-                    if p.operation_id == operation && p.stage == v1::AgentUpdateStage::Failed as i32
+                    if p.operation_id == operation
+                        && p.stage == v1::AgentUpdateStage::WaitingForIdle as i32
                         && p.error_code == "update_busy_work" && p.retryable)
                 )
                 .await
@@ -3152,8 +3214,19 @@ mod tests {
             let next = supervisor
                 .update_drain
                 .reserve_work(None)
-                .expect("failed update releases host");
+                .expect("waiting update leaves the host admitting work");
             drop(next);
+            // Repeated idle attempts neither fail the update nor fence the host.
+            tokio::time::sleep(UPDATE_IDLE_RECHECK * 5).await;
+            assert!(supervisor.update_drain.is_accepted(&operation));
+            assert!(supervisor.update_drain.reserve_work(None).is_some());
+            assert_eq!(
+                supervisor.engine.admission_snapshot(),
+                before,
+                "accepted work must survive"
+            );
+            // Cancel before the work settles: tests must never reach a real apply.
+            supervisor.update_drain.finish_update(&operation);
             drop(ticket);
             drop(routed);
             // A later explicitly requested update can reserve the host again.
@@ -3161,7 +3234,7 @@ mod tests {
                 supervisor.reserve_update_operation("next"),
                 UpdateReservation::Started
             );
-            supervisor.update_drain.release_update("next");
+            supervisor.update_drain.finish_update("next");
         }
     }
 
@@ -3285,7 +3358,7 @@ mod tests {
             .unwrap()
             .error
             .is_none());
-        assert!(it::wait_for_event(&mut events,Duration::from_secs(5),|event| matches!(&event.event,Some(Event::AgentUpdateProgress(progress)) if progress.stage == v1::AgentUpdateStage::Failed as i32 && progress.error_code == "update_busy_uploads" && progress.retryable)).await);
+        assert!(it::wait_for_event(&mut events,Duration::from_secs(5),|event| matches!(&event.event,Some(Event::AgentUpdateProgress(progress)) if progress.stage == v1::AgentUpdateStage::WaitingForIdle as i32 && progress.error_code == "update_busy_uploads" && progress.retryable)).await);
         assert_eq!(supervisor.update_drain.snapshot().unwrap().uploads, 1);
         // A deferred update releases exclusive admission, without ending the upload.
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -3295,8 +3368,13 @@ mod tests {
         })
         .await
         .expect("deferred update must release admission");
+        // Cancel the waiting update before the upload settles: tests must
+        // never reach a real apply. Then fence directly for the continuation.
+        supervisor
+            .update_drain
+            .finish_update("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
         assert_eq!(
-            supervisor.reserve_update_operation("continuation-audit"),
+            supervisor.update_drain.reserve_update("continuation-audit"),
             UpdateReservation::Started
         );
         let chunk = ControlRequest {

@@ -590,15 +590,21 @@ export class BrowserSupervisor {
     }
   }
 
-  /** Update safety includes work hidden from the public active-session list. */
+  /** Update safety includes work hidden from the public active-session list.
+   * An open session does not by itself make a restart unsafe: a quiescent
+   * managed session with a completed working-runtime launch is preserved by
+   * graceful shutdown and reattached on its next causal request, and a session
+   * whose driver already ended has nothing left to lose. Any other session
+   * (attached Chrome, external providers, launches without a durable working
+   * runtime) or any admitted command still blocks. */
   isIdle(): boolean {
     return (
       !this.cleanupUncertain &&
       this.creationRequests.size === 0 &&
-      this.sessions.size === 0 &&
       this.creating.size === 0 &&
       this.ending.size === 0 &&
-      this.stateTransferTails.size === 0
+      this.stateTransferTails.size === 0 &&
+      [...this.sessions.values()].every((runtime) => restartPreservesRuntime(runtime))
     );
   }
 
@@ -946,15 +952,7 @@ export class BrowserSupervisor {
       return;
     }
     const driverAlreadyClosed = runtime.lifecycle === "captured";
-    const preserveWorkingRuntime =
-      suspendForShutdown &&
-      runtime.lifecycle === "active" &&
-      !runtime.driver.isTerminal?.() &&
-      runtime.workingJournal !== null &&
-      runtime.workingReceipt?.intent === "launch" &&
-      runtime.workingReceipt.state === "completed" &&
-      runtime.workingReceipt.process !== null &&
-      runtime.workingReceipt.directoryLaunchAllowed;
+    const preserveWorkingRuntime = suspendForShutdown && hasPreservableWorkingRuntime(runtime);
     runtime.lifecycle = "ending";
     const ending = (async () => {
       if (runtime.driver.isTerminal?.() || preserveWorkingRuntime) {
@@ -2246,6 +2244,29 @@ async function createBrowserDriver(
         }
       : {}),
   });
+}
+
+/** Graceful shutdown keeps this owned browser running and its next causal
+ * request reattaches it from the completed working-runtime launch receipt. */
+function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
+  return (
+    runtime.lifecycle === "active" &&
+    !runtime.driver.isTerminal?.() &&
+    runtime.workingJournal !== null &&
+    runtime.workingReceipt?.intent === "launch" &&
+    runtime.workingReceipt.state === "completed" &&
+    runtime.workingReceipt.process !== null &&
+    runtime.workingReceipt.directoryLaunchAllowed
+  );
+}
+
+/** A restart now loses neither admitted work nor unrecoverable session state. */
+function restartPreservesRuntime(runtime: Runtime): boolean {
+  if (runtime.recovery !== null || runtime.externalAuthTail !== null) return false;
+  if (!runtime.controller.isIdle()) return false;
+  // A session whose driver already ended has no live state left to lose.
+  if (runtime.driver.isTerminal?.()) return true;
+  return hasPreservableWorkingRuntime(runtime);
 }
 
 function binding(runtime: Runtime): BrowserSessionReference {
