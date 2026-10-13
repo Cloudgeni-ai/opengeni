@@ -2243,6 +2243,7 @@ export const InteractionError = z
       "outcome_unknown",
       "invalid_action",
       "timeout",
+      "tab_not_responding",
       "controller_lost",
       "driver_failed",
     ]),
