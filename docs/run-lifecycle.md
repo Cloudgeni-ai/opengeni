@@ -1226,6 +1226,87 @@ the session locks and registers one ordinary queue wake. It writes no receipt:
 the woken workflow still proves through Temporal that the exact activity is
 gone and rechecks both writer gates before `reconcileSessionAttemptQuiescence`
 commits. A paused session then parks idle for Resume as usual.
+Migration 0764 extends that same inventory to quiesced recovering logical turns,
+regardless of a stale idle/queued session projection. Its scoped repair uses
+`peekSessionWork` before waking a quiesced turn, preserving Pause, admission,
+capacity and sandbox setup/lifecycle blockers. Current runnable recovery wakes
+cannot be acknowledged merely because Temporal accepted a signal; claim of that
+same turn consumes the obligation.
+
+Historical retirement is an explicit operator operation, never a reaper age
+heuristic. Supply `MigrationRuntimeOptions.interruptedTurnRetirement` or a private
+JSON file via `OPENGENI_MIGRATION_INTERRUPTED_TURN_RETIREMENT_MANIFEST` when
+running migrations. Explicit retirement also works after 0764 was recorded
+without a manifest; it is never silently ignored. The manifest has one operation UUID and at most 1,000 unique
+session targets: account/workspace/session/turn UUIDs, workflow ID, exact turn
+version and session event sequence. The migration aborts atomically if any
+target changed, has another executable turn (withdrawn drafts are preserved), or lacks a closed, physically
+quiesced recoverable attempt with no live writers. Canonical failure settlement
+closes its interactions, fails pending inputs/runs, suppresses unchanged goal
+continuation and enqueues the existing failed-child result. It creates no attempt
+or prompt, preserves history and Pause, and changes the turn/session to failed.
+Replaying the same manifest matches the exact audit receipt, not a newer epoch.
+Without a manifest an ordinary upgrade changes only recovery discovery.
+
+Build the private manifest with a read-only query (psql variables
+`workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its
+count and scope before supplying it to the migration runner. Selection is not
+proof: the repair repeats all admission-independent safety checks under locks.
+The cursor, not a potentially stale wide-row projection, supplies the sequence
+fence. Do not commit the resulting identifiers to a public repository.
+
+```sql
+SELECT jsonb_build_object('operationId', :'operation_id'::uuid,
+  'targets', jsonb_agg(jsonb_build_object(
+    'accountId', s.account_id, 'workspaceId', s.workspace_id,
+    'sessionId', s.id, 'turnId', t.id,
+    'workflowId', coalesce(s.temporal_workflow_id, t.temporal_workflow_id),
+    'expectedVersion', t.version,
+    'expectedLastSequence', coalesce(c.last_sequence, s.last_sequence)
+  ) ORDER BY s.id))
+FROM sessions s
+JOIN session_turns t ON t.workspace_id = s.workspace_id
+  AND t.session_id = s.id AND t.id = s.active_turn_id
+LEFT JOIN session_event_cursors c ON c.workspace_id = s.workspace_id
+  AND c.session_id = s.id AND c.account_id = s.account_id
+JOIN LATERAL (
+  SELECT state, outcome, quiesced_at, closed_at FROM session_turn_attempts a
+  WHERE a.workspace_id = t.workspace_id AND a.session_id = t.session_id
+    AND a.turn_id = t.id
+  ORDER BY execution_generation DESC, updated_at DESC, id DESC LIMIT 1
+) a ON true
+WHERE s.workspace_id = :'workspace_id'::uuid
+  AND s.status IN ('idle', 'queued', 'recovering')
+  AND t.status = 'recovering' AND t.active_attempt_id IS NULL
+  AND t.updated_at < :'interrupted_before'::timestamptz
+  AND a.closed_at < :'interrupted_before'::timestamptz
+  AND a.state = 'closed' AND a.outcome = 'interrupted_recoverable'
+  AND a.quiesced_at IS NOT NULL;
+```
+
+Verify that the exact operation settled its selected turns, emitted no new
+attempt, and left no active pointer to them. Compare `retired` to the reviewed
+manifest count; the other three counts must be zero. Parent results remain in
+the ordinary durable child outbox, including after normal delivery.
+
+```sql
+WITH retired AS (
+  SELECT session_id, turn_id, occurred_at FROM session_events
+  WHERE workspace_id = :'workspace_id'::uuid AND type = 'turn.failed'
+    AND payload->>'code' = 'interrupted_turn_retired'
+    AND payload->>'retirementOperationId' = :'operation_id'
+)
+SELECT count(*) AS retired,
+  count(*) FILTER (WHERE t.status <> 'failed') AS not_failed,
+  count(*) FILTER (WHERE s.active_turn_id = t.id) AS active_pointers,
+  count(*) FILTER (WHERE EXISTS (
+    SELECT 1 FROM session_turn_attempts a WHERE a.workspace_id = t.workspace_id
+      AND a.session_id = t.session_id AND a.turn_id = t.id
+      AND a.created_at >= r.occurred_at)) AS replayed_turns
+FROM retired r JOIN session_turns t ON t.id = r.turn_id
+JOIN sessions s ON s.id = r.session_id;
+```
+
 The initial session status and replay cursor come from one SQL statement
 snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless

@@ -16,12 +16,14 @@ type Candidate = QuiescenceReceiptWakeRepairCursor & { accountId: string };
  * normally commits that receipt and wake atomically; if it died first, or the
  * workflow observed a still-leased activity and closed, nothing else wakes the
  * session and it strands in `recovering` forever.
+ * A received physical receipt can strand too: accepting its transport signal
+ * does not prove the workflow reclaimed the logical turn.
  *
  * This repair only registers an ordinary queue wake. It writes no receipt, no
  * turn, and no control state: the woken workflow routes the exact attempt
- * through `reconcileSessionAttemptQuiescence`, which proves through Temporal
- * that the activity is gone and rechecks both writer gates before the receipt
- * transaction. Discovery is not admission; every predicate is rechecked here
+ * through `reconcileSessionAttemptQuiescence` when its receipt is missing,
+ * proving through Temporal that the activity is gone and rechecking both writer
+ * gates. Quiesced turns must pass ordinary peek admission. Discovery is not admission; every predicate is rechecked here
  * under the canonical session locks.
  */
 async function repairCandidate(db: Database, candidate: Candidate): Promise<boolean> {
@@ -36,11 +38,7 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
         sessionIds: [candidate.sessionId],
       });
       const session = locks.sessions[0];
-      if (
-        !session ||
-        session.accountId !== candidate.accountId ||
-        session.activeTurnId === null
-      )
+      if (!session || session.accountId !== candidate.accountId || session.activeTurnId === null)
         return false;
       // Serialize with wake producers and the dispatcher before deciding.
       await tx
@@ -114,8 +112,16 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
       // Missing receipts must still be reconciled under Pause. A durable
       // receipt, however, permits execution only through ordinary admission;
       // do not wake intentionally paused or independently blocked work.
-      if (!eligible.receipt_missing &&
-        (await peekSessionWork(tx as unknown as Database, candidate.workspaceId, candidate.sessionId)).kind !== "runnable")
+      if (
+        !eligible.receipt_missing &&
+        (
+          await peekSessionWork(
+            tx as unknown as Database,
+            candidate.workspaceId,
+            candidate.sessionId,
+          )
+        ).kind !== "runnable"
+      )
         return false;
       await registerSessionWorkflowWakeInTransaction(tx as unknown as Database, {
         accountId: candidate.accountId,

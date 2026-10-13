@@ -2,6 +2,9 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { sql as drizzleSql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import * as databaseSchema from "./schema";
 import { KNOWLEDGE_MIGRATION_MARKER, migrateRetainedKnowledge } from "./knowledge-migration";
 import { migrateLegacySkillConfigurations } from "./skill-config-migration";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
@@ -33,8 +36,10 @@ import {
   stageSkillMetadataMigration,
 } from "./skill-metadata-migration";
 import {
-  INTERRUPTED_TURN_RETIREMENT_MARKER, INTERRUPTED_TURN_RETIREMENT_MIGRATION,
-  migrateInterruptedTurnRetirement, parseInterruptedTurnRetirementManifest,
+  INTERRUPTED_TURN_RETIREMENT_MARKER,
+  INTERRUPTED_TURN_RETIREMENT_MIGRATION,
+  migrateInterruptedTurnRetirement,
+  parseInterruptedTurnRetirementManifest,
   type InterruptedTurnRetirementManifest,
 } from "./interrupted-turn-retirement-migration";
 
@@ -248,21 +253,27 @@ export async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
-  options?: Pick<MigrationRuntimeOptions, "preinstalledVector" | "environmentsEncryptionKey" | "interruptedTurnRetirement">,
+  options?: Pick<
+    MigrationRuntimeOptions,
+    "preinstalledVector" | "environmentsEncryptionKey" | "interruptedTurnRetirement"
+  >,
 ): Promise<void> {
   if (sqlText.includes(INTERRUPTED_TURN_RETIREMENT_MARKER)) {
     if (file !== INTERRUPTED_TURN_RETIREMENT_MIGRATION)
       throw new Error("Interrupted-turn retirement is restricted to migration 0764");
     const parts = sqlText.split(INTERRUPTED_TURN_RETIREMENT_MARKER);
-    if (parts.length !== 2) throw new Error("0764 requires exactly one interrupted-turn retirement stage");
-    await sql.begin(async transaction => {
-      await transaction`select set_config('lock_timeout', '5s', true),
+    if (parts.length !== 2)
+      throw new Error("0764 requires exactly one interrupted-turn retirement stage");
+    await drizzle(sql, { schema: databaseSchema }).transaction(async (transaction) => {
+      await transaction.execute(drizzleSql`select set_config('lock_timeout', '5s', true),
         set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
-        set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
-      await transaction.unsafe(parts[0]!);
+        set_config('opengeni.session_variable_set_attachments_v1', '1', true)`);
+      await transaction.execute(drizzleSql.raw(parts[0]!));
       await migrateInterruptedTurnRetirement(transaction, options?.interruptedTurnRetirement);
-      await transaction.unsafe(parts[1]!);
-      await transaction`insert into schema_migrations(name) values (${file}) on conflict do nothing`;
+      if (parts[1]!.trim()) await transaction.execute(drizzleSql.raw(parts[1]!));
+      await transaction.execute(
+        drizzleSql`insert into schema_migrations(name) values (${file}) on conflict do nothing`,
+      );
     });
     return;
   }
@@ -643,9 +654,11 @@ export async function migrate(
   const depthPolicy = deploymentDepthPolicy(runtimeOptions);
   const preinstalledVector = preinstalledVectorPolicy(runtimeOptions);
   const retirementPath = process.env.OPENGENI_MIGRATION_INTERRUPTED_TURN_RETIREMENT_MANIFEST;
-  const retirement = runtimeOptions?.interruptedTurnRetirement ?? (retirementPath
-    ? parseInterruptedTurnRetirementManifest(JSON.parse(await readFile(retirementPath, "utf8")))
-    : undefined);
+  const retirement =
+    runtimeOptions?.interruptedTurnRetirement ??
+    (retirementPath
+      ? parseInterruptedTurnRetirementManifest(JSON.parse(await readFile(retirementPath, "utf8")))
+      : undefined);
   const sql = postgres(databaseUrl, { max: 1 });
   try {
     // Serialize concurrent migrate() runs; the session-level lock is released
@@ -667,6 +680,16 @@ export async function migrate(
     );
     const appliedRows = await sql`SELECT "name" FROM "schema_migrations"`;
     const applied = new Set(appliedRows.map((row) => row.name as string));
+    // Explicit operator retirement remains usable after an ordinary upgrade
+    // recorded 0764 without a manifest. Do not silently ignore supplied intent.
+    // Replay proves the same terminal audit receipt; another epoch fails closed.
+    if (retirement && applied.has(INTERRUPTED_TURN_RETIREMENT_MIGRATION)) {
+      await drizzle(sql, { schema: databaseSchema }).transaction(async (transaction) => {
+        await transaction.execute(drizzleSql`select set_config('lock_timeout', '5s', true),
+          set_config('statement_timeout', '10min', true)`);
+        await migrateInterruptedTurnRetirement(transaction, retirement);
+      });
+    }
     const pendingMigrationSources = new Map<string, string>();
     for (const file of files) {
       if (!applied.has(file)) {

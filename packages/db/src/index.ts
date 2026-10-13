@@ -74565,6 +74565,39 @@ export async function failSessionWorkBeforeAttemptClaim(
   db: Database,
   workspaceId: string,
   input: FailSessionWorkBeforeAttemptClaimInput,
+): Promise<FailSessionWorkBeforeAttemptClaimResult> {
+  return await settleSessionWorkBeforeAttemptClaim(db, workspaceId, input);
+}
+
+/** Explicit operator maintenance, not normal admission and never a reaper
+ * age heuristic. Exact manifest fences and physical quiescence are mandatory. */
+export async function retireInterruptedSessionTurn(
+  db: Database,
+  workspaceId: string,
+  input: {
+    accountId: string;
+    sessionId: string;
+    workflowId: string;
+  } & InterruptedTurnRetirementProof,
+): Promise<FailSessionWorkBeforeAttemptClaimResult> {
+  return await settleSessionWorkBeforeAttemptClaim(
+    db,
+    workspaceId,
+    {
+      accountId: input.accountId,
+      sessionId: input.sessionId,
+      workflowId: input.workflowId,
+      trigger: { kind: "next" },
+      error: "Interrupted work was terminally retired by the operator without replay.",
+    },
+    input,
+  );
+}
+
+async function settleSessionWorkBeforeAttemptClaim(
+  db: Database,
+  workspaceId: string,
+  input: FailSessionWorkBeforeAttemptClaimInput,
   retirement?: InterruptedTurnRetirementProof,
 ): Promise<FailSessionWorkBeforeAttemptClaimResult> {
   return await retrySessionActivityRls(
@@ -74595,14 +74628,23 @@ export async function failSessionWorkBeforeAttemptClaim(
         }
         if (session.status === "failed" || session.status === "cancelled") {
           if (retirement && session.status === "failed") {
-            const [prior] = await tx.select({id: schema.sessionEvents.id}).from(schema.sessionEvents)
-              .where(and(eq(schema.sessionEvents.workspaceId, workspaceId), eq(schema.sessionEvents.sessionId, session.id),
-                eq(schema.sessionEvents.turnId, retirement.turnId), eq(schema.sessionEvents.type, "turn.failed"),
-                sql`${schema.sessionEvents.payload}->>'code' = 'interrupted_turn_retired'`,
-                sql`${schema.sessionEvents.payload}->>'retirementOperationId' = ${retirement.operationId}`,
-                sql`${schema.sessionEvents.payload}->>'retiredVersion' = ${String(retirement.expectedVersion)}`,
-                sql`${schema.sessionEvents.payload}->>'retiredLastSequence' = ${String(retirement.expectedLastSequence)}`)).limit(1);
-            if (prior) return {action: "failed", turnId: retirement.turnId, events: []} as const;
+            const [prior] = await tx
+              .select({ id: schema.sessionEvents.id })
+              .from(schema.sessionEvents)
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, workspaceId),
+                  eq(schema.sessionEvents.sessionId, session.id),
+                  eq(schema.sessionEvents.turnId, retirement.turnId),
+                  eq(schema.sessionEvents.type, "turn.failed"),
+                  sql`${schema.sessionEvents.payload}->>'code' = 'interrupted_turn_retired'`,
+                  sql`${schema.sessionEvents.payload}->>'retirementOperationId' = ${retirement.operationId}`,
+                  sql`${schema.sessionEvents.payload}->>'retiredVersion' = ${String(retirement.expectedVersion)}`,
+                  sql`${schema.sessionEvents.payload}->>'retiredLastSequence' = ${String(retirement.expectedLastSequence)}`,
+                ),
+              )
+              .limit(1);
+            if (prior) return { action: "failed", turnId: retirement.turnId, events: [] } as const;
           }
           return { action: "terminal", turnId: null, events: [] } as const;
         }
@@ -74621,8 +74663,11 @@ export async function failSessionWorkBeforeAttemptClaim(
         if (!baseLocks.workspace || (!retirement && effectiveControl.state !== "active")) {
           return { action: "stale", turnId: null, events: [] } as const;
         }
-        if (retirement && (session.activeTurnId !== retirement.turnId ||
-          session.lastSequence !== retirement.expectedLastSequence)) {
+        if (
+          retirement &&
+          (session.activeTurnId !== retirement.turnId ||
+            session.lastSequence !== retirement.expectedLastSequence)
+        ) {
           return { action: "stale", turnId: null, events: [] } as const;
         }
 
@@ -74782,10 +74827,17 @@ export async function failSessionWorkBeforeAttemptClaim(
         }
 
         if (retirement) {
-          if (!turn || turn.id !== retirement.turnId || turn.status !== "recovering" ||
-            turn.activeAttemptId !== null || turn.version !== retirement.expectedVersion)
+          if (
+            !turn ||
+            turn.id !== retirement.turnId ||
+            turn.status !== "recovering" ||
+            turn.activeAttemptId !== null ||
+            turn.version !== retirement.expectedVersion
+          )
             return { action: "stale", turnId: null, events: [] } as const;
-          const [proof] = await rawRows<{ safe: boolean }>(tx as unknown as Database, sql`
+          const [proof] = await rawRows<{ safe: boolean }>(
+            tx as unknown as Database,
+            sql`
             select exists (
               select 1 from session_turn_attempts attempt
               where attempt.workspace_id = ${workspaceId}
@@ -74805,8 +74857,9 @@ export async function failSessionWorkBeforeAttemptClaim(
               select 1 from session_turns sibling
               where sibling.workspace_id = ${workspaceId} and sibling.session_id = ${session.id}
                 and sibling.id <> ${turn.id}
-                and sibling.status not in ('completed', 'failed', 'cancelled', 'superseded')
-            ) as safe`);
+                and sibling.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+            ) as safe`,
+          );
           if (!proof?.safe) return { action: "stale", turnId: null, events: [] } as const;
         }
         const now = new Date();
@@ -74886,31 +74939,52 @@ export async function failSessionWorkBeforeAttemptClaim(
           sessionId: input.sessionId,
         });
         if (!turn || retirement) {
-          failedSystemUpdateIds = (
-            await tx
-              .update(schema.sessionSystemUpdates)
-              .set({ state: "failed" })
-              .where(
-                and(
-                  eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-                  eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-                  eq(schema.sessionSystemUpdates.state, "pending"),
-                ),
-              )
-              .returning({ id: schema.sessionSystemUpdates.id })
-          )
-            .map((update) => update.id)
-            .sort();
+          const failedUpdates = await tx
+            .update(schema.sessionSystemUpdates)
+            .set({ state: "failed" })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.state, "pending"),
+              ),
+            )
+            .returning({
+              id: schema.sessionSystemUpdates.id,
+              scheduledTaskRunId: schema.sessionSystemUpdates.scheduledTaskRunId,
+            });
+          failedSystemUpdateIds = failedUpdates.map((update) => update.id).sort();
+          if (retirement) {
+            // Settle only the exact occurrences whose pending inputs were
+            // retired. Dispatched is accepted source truth, not a running
+            // agent status; use its canonical lifecycle capability, never a
+            // broad session-wide update of dispatch history.
+            const runIds = [
+              ...new Set(failedUpdates.flatMap((update) => update.scheduledTaskRunId ?? [])),
+            ].sort();
+            for (const runId of runIds)
+              await markScheduledTaskRunAuthorityRejectedInTransaction(tx as unknown as Database, {
+                workspaceId,
+                sessionId: session.id,
+                runId,
+                error: input.error,
+              });
+          }
         }
         if (retirement && turn) {
-          await tx.update(schema.sessionGoals).set({
-            continuationSuppressedTurnId: turn.id,
-            continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
-            updatedAt: now,
-          }).where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, session.id)));
-          await tx.update(schema.scheduledTaskRuns).set({status: "failed", error: input.error, completedAt: now, updatedAt: now})
-            .where(and(eq(schema.scheduledTaskRuns.workspaceId, workspaceId), eq(schema.scheduledTaskRuns.sessionId, session.id),
-              inArray(schema.scheduledTaskRuns.status, ["queued", "running"])));
+          await tx
+            .update(schema.sessionGoals)
+            .set({
+              continuationSuppressedTurnId: turn.id,
+              continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, workspaceId),
+                eq(schema.sessionGoals.sessionId, session.id),
+              ),
+            );
         }
         const values = [
           ...(turn
@@ -74943,9 +75017,14 @@ export async function failSessionWorkBeforeAttemptClaim(
                     triggerEventId: turn.triggerEventId,
                     code: retirement ? "interrupted_turn_retired" : "pre_claim_failure",
                     error: input.error,
-                    ...(retirement ? { retirementOperationId: retirement.operationId,
-                      retiredVersion: retirement.expectedVersion, retiredLastSequence: retirement.expectedLastSequence,
-                      failedSystemUpdateIds } : {}),
+                    ...(retirement
+                      ? {
+                          retirementOperationId: retirement.operationId,
+                          retiredVersion: retirement.expectedVersion,
+                          retiredLastSequence: retirement.expectedLastSequence,
+                          failedSystemUpdateIds,
+                        }
+                      : {}),
                   },
                   turnId: turn.id,
                   turnGeneration: turn.executionGeneration,
@@ -74965,9 +75044,14 @@ export async function failSessionWorkBeforeAttemptClaim(
               status: "failed",
               code: retirement ? "interrupted_turn_retired" : "pre_claim_failure",
               error: input.error,
-              ...(retirement ? { retirementOperationId: retirement.operationId,
-                retiredVersion: retirement.expectedVersion, retiredLastSequence: retirement.expectedLastSequence,
-                failedSystemUpdateIds } : {}),
+              ...(retirement
+                ? {
+                    retirementOperationId: retirement.operationId,
+                    retiredVersion: retirement.expectedVersion,
+                    retiredLastSequence: retirement.expectedLastSequence,
+                    failedSystemUpdateIds,
+                  }
+                : {}),
               ...(input.admissionFailure ? { admissionFailure: input.admissionFailure } : {}),
               ...(!turn ? { failedSystemUpdateIds } : {}),
             },
@@ -75077,7 +75161,14 @@ export async function failSessionWorkBeforeAttemptClaim(
             status: "failed",
             activeTurnId: null,
             compactRequested: false,
-            ...(retirement ? { inputWaitTurnId: null, inputWaitUntil: null, inputWaitReason: null, inputWaitSetAt: null } : {}),
+            ...(retirement
+              ? {
+                  inputWaitTurnId: null,
+                  inputWaitUntil: null,
+                  inputWaitReason: null,
+                  inputWaitSetAt: null,
+                }
+              : {}),
             lastSequence: sequence,
             queueVersion: session.queueVersion + 1,
             updatedAt: now,
@@ -80590,21 +80681,30 @@ export async function markSessionWorkflowWakeDelivered(
               const [recovering] = await tx
                 .select({ id: schema.sessionTurns.id })
                 .from(schema.sessionTurns)
-                .where(and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.id, session.activeTurnId),
-                  eq(schema.sessionTurns.status, "recovering"),
-                  isNull(schema.sessionTurns.activeAttemptId),
-                ))
+                .where(
+                  and(
+                    eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                    eq(schema.sessionTurns.sessionId, input.sessionId),
+                    eq(schema.sessionTurns.id, session.activeTurnId),
+                    eq(schema.sessionTurns.status, "recovering"),
+                    isNull(schema.sessionTurns.activeAttemptId),
+                  ),
+                )
                 .limit(1);
               // The receipt proves the previous writer is gone, not that a
               // closing workflow consumed the recovery. Keep transport debt
               // until the exact logical turn is reclaimed. Use the ordinary
               // peek so setup/capacity/lifecycle blockers remain authoritative.
-              if (recovering && (await peekSessionWork(
-                tx as unknown as Database, input.workspaceId, input.sessionId,
-              )).kind === "runnable") {
+              if (
+                recovering &&
+                (
+                  await peekSessionWork(
+                    tx as unknown as Database,
+                    input.workspaceId,
+                    input.sessionId,
+                  )
+                ).kind === "runnable"
+              ) {
                 return { action: "pending_admission", blocker: "pending_prompt_turn" } as const;
               }
             }
@@ -81212,7 +81312,8 @@ export async function addSessionSystemUpdateWithSourceMutation<
         if (
           options.requireIdleSession &&
           ((session.status !== "idle" && session.status !== "failed") ||
-            session.activeTurnId !== null || effectiveControl.state !== "active")
+            session.activeTurnId !== null ||
+            effectiveControl.state !== "active")
         ) {
           const replayed = await replayExistingUpdate([]);
           if (replayed) {
