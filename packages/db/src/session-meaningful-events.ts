@@ -37,17 +37,17 @@ export const MEANINGFUL_SESSION_EVENT_TYPES = [
  * `0503` is that migration's index predicate. `0527` adds two changes: completed
  * commentary is activity, and a `turn.completed` recording the `reply` a human
  * or API message received before its turn waited for input is an answer even
- * though its `output` is empty. `0771` adds one more: a turn stopped because
+ * though its `output` is empty. `0772` adds one more: a turn stopped because
  * its task reached its usage limit (`segmentLimit: "session_usage_limit"`) is
  * an actionable boundary — only a person can raise or clear the limit — so it
  * needs attention exactly like a failure, without any explanatory model call.
  * Other segment limits (`max_turns`, `budget_exhausted`) keep their meaning.
  */
-function attentionSessionEventSql(alias: string, revision: "0503" | "0527" | "0771"): SQL {
+function attentionSessionEventSql(alias: string, revision: "0503" | "0527" | "0772"): SQL {
   const e = sql.identifier(alias);
   const turnResult = sql`coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result')`;
   const usageLimitStop =
-    revision === "0771"
+    revision === "0772"
       ? sql`(${e}.payload ->> 'segmentLimit') = 'session_usage_limit' or `
       : sql``;
   // These are code-owned literals, not request values. Literal predicates let
@@ -83,15 +83,15 @@ function attentionSessionEventSql(alias: string, revision: "0503" | "0527" | "07
  * never creates attention on its own; the answer or turn outcome that follows
  * does. A turn that ends waiting for input has no output, but when a human or
  * API message started it, the `reply` it records is that answer. Exactly the
- * migration 0771 partial-index predicate, which also counts a task usage limit
+ * migration 0772 partial-index predicate, which also counts a task usage limit
  * stop as an actionable boundary.
  */
 export function meaningfulSessionEventSql(alias: string): SQL {
-  return attentionSessionEventSql(alias, "0771");
+  return attentionSessionEventSql(alias, "0772");
 }
 
 /**
- * The migration 0527 index predicate (no usage-limit stops). Pre-0771 API
+ * The migration 0527 index predicate (no usage-limit stops). Pre-0772 API
  * processes still probe with it during a rolling deploy; nothing current
  * queries it.
  */

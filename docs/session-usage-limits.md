@@ -14,7 +14,7 @@ fixed bound on that overshoot.
 
 Canonical sources: contracts in `packages/contracts/src/session-usage-limits.ts`
 and the zod-free refusal leaf `packages/contracts/src/session-usage-limit-refusal.ts`;
-storage, settlement and import in `packages/db/drizzle/0770_session_usage_limits.sql`
+storage, settlement and import in `packages/db/drizzle/0771_session_usage_limits.sql`
 and `packages/db/src/session-usage-limits.ts`; authority, edge admission and
 write rules in `packages/core/src/session-usage-limits.ts`; worker admission in
 `apps/worker/src/activities/agent-turn/admission.ts`; HTTP routes in
@@ -272,13 +272,13 @@ API and both workers when set. It gates producers only:
 - persisted limits are still read and enforced, and an authorized clear
   (`limitMicros: null`) is still allowed for recovery.
 
-1. Apply migrations 0770–0772 and provision the matching database roles. The
+1. Apply migrations 0771–0773 and provision the matching database roles. The
    tables live in `opengeni_private` with FORCE RLS and execute-only entry
-   points; the runtime posture and schema-contract checks include them. 0771
+   points; the runtime posture and schema-contract checks include them. 0772
    builds a partial attention index on `session_events` concurrently (rolling;
-   its build time scales with the meaningful-event history), and 0772 replaces
+   its build time scales with the meaningful-event history), and 0773 replaces
    the cursor trigger routine so the attention frontier counts usage-limit
-   stops. The pre-0771 `session_events_meaningful_attention_v2_idx` stays for
+   stops. The pre-0772 `session_events_meaningful_attention_v2_idx` stays for
    older API processes during the rollout; drop it in a later rolling migration.
 2. Upgrade **every consumer** first: API, control worker, turn worker, web,
    SDK/React, Slack and embedded hosts. A worker that predates this release
