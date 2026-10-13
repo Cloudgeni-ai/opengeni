@@ -4486,6 +4486,11 @@ latency remain explicit limits; this does not enable ordinary stdout retention.
 Missing traces may reflect sampling or retention; the durable session timeline
 remains authoritative. This linkage does not retroactively identify old traces.
 
+Codex joins request custody settlement before exposing a parsed provider failure
+to the worker's recovery classifier, including a final buffered event without a
+trailing blank separator. A pending or failed custody write never becomes replay
+permission; audit failure on these paths preserves the original provider diagnostic.
+
 Codex EOF classification waits for the SSE parser's final buffered block, including
 a valid terminal without a trailing blank separator. Raw transport EOF is not
 itself a failed response. Missing or failed semantic terminals remain failures;

@@ -409,6 +409,9 @@ async function emitRequestEvent(
   const terminalOutcome = terminalOutcomeForPhase(event.phase);
   if (terminalOutcome !== null) {
     if (audit.terminalOutcome !== null) {
+      // Another terminal path may own a still-pending custody write. Its
+      // audit is deduplicated, but every consumer must join that same write.
+      await audit.settlement;
       return false;
     }
     // Fence before invoking either observer. The durable observer may reject,
@@ -1573,9 +1576,19 @@ function validateCodexStream(
     }
   };
   const transform = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      emitCompleteBlocks(controller, false);
+    async transform(chunk, controller) {
+      try {
+        buffer += decoder.decode(chunk, { stream: true });
+        emitCompleteBlocks(controller, false);
+      } catch (error) {
+        // Parsing a provider failure throws before pipeThrough cancels its
+        // source. Join request custody here: the worker must not classify
+        // recovery while the refusal/unknown receipt is still being written.
+        // Audit or settlement failure must preserve the provider diagnostic;
+        // an unsuccessful custody write keeps the request's replay fence.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
+      }
     },
     async flush(controller) {
       try {
@@ -1600,12 +1613,17 @@ function validateCodexStream(
             "The Codex response stream ended without a terminal response",
           );
         }
-      } finally {
-        // Raw transport EOF can precede parsing a final block without a blank
-        // separator. Settle only after that parse; the audit fence deduplicates
-        // an earlier terminal already observed from a complete block.
-        await onParsedEof?.();
+      } catch (error) {
+        // A final buffered failure has the same diagnostic and custody rules
+        // as a failure parsed from a complete chunk. Finalization must not
+        // replace that failure with an audit or settlement rejection.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
       }
+      // Raw transport EOF can precede parsing a final block without a blank
+      // separator. Settle only after that parse; successful parsing still
+      // propagates a failed custody/audit write to the caller.
+      await onParsedEof?.();
     },
   });
   const headers = new Headers(res.headers);
