@@ -618,22 +618,28 @@ async function chooseOnce(
             break;
           }
         }
-        if (!target && receipt && input.provider != null) {
-          // The legacy provider-qualified endpoint keeps its contract: a
-          // connection the choice listing does not offer (a shared account
-          // scoped to chosen people, whose designations this caller cannot
-          // read) goes to the binding guard, which alone judges whether this
-          // session may use it and refuses with 42501 otherwise.
-          target = {
-            provider: input.provider,
-            connectionId:
-              (await resolveSubscriptionConnectionId(tx, {
-                accountId: input.accountId,
-                provider: input.provider,
-                connectionId: input.connectionId,
-              })) ?? input.connectionId,
-            personal: false,
-          };
+        if (!target && receipt && input.provider != null && UUID_PATTERN.test(input.connectionId)) {
+          // The legacy provider-qualified endpoint keeps its contract for a
+          // shared account scoped to chosen people, which the choice listing
+          // does not offer (its designations are not readable here): the
+          // binding guard alone judges whether this session may use it and
+          // refuses with 42501 otherwise. Nothing else is named this way; a
+          // personal connection stays decided by the listing above.
+          const canonical =
+            (await resolveSubscriptionConnectionId(tx, {
+              accountId: input.accountId,
+              provider: input.provider,
+              connectionId: input.connectionId,
+            })) ?? input.connectionId;
+          const [peopleScoped] = await rawRows<{ id: string }>(
+            tx,
+            sql`select id::text as id from subscription_connections
+              where account_id = ${input.accountId}::uuid and id = ${canonical}::uuid
+                and provider = ${input.provider} and ownership = 'shared'
+                and scope_kind = 'people' and disconnected_at is null`,
+          );
+          if (peopleScoped)
+            target = { provider: input.provider, connectionId: peopleScoped.id, personal: false };
         }
         if (!target) return none("not_found");
         if (input.provider != null && input.provider !== target.provider) return none("not_found");

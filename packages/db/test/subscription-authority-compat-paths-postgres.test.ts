@@ -648,13 +648,13 @@ beforeAll(async () => {
     authorityGeneration: 7,
     connectionIds: [crypto.randomUUID()],
   };
-  // Claude's drained cutover committed now: every carrier below is accepted
-  // after it, so a carrier whose source holds no record carries none.
-  await database.admin`
-    insert into opengeni_private.subscription_provider_cutover_receipts (
-      provider, migration, committed_at, seed_rotation
-    ) values ('claude', '0799_subscription_core_claude_cutover.sql', clock_timestamp(),
-      '{"mode":"spread"}')`;
+  // Claude's drained cutover (0748) committed during migration: every carrier
+  // below is accepted after it, so a carrier whose source holds no record
+  // carries none.
+  const [receipt] = await database.admin<{ count: number }[]>`
+    select count(*)::int as count from opengeni_private.subscription_provider_cutover_receipts
+    where provider = 'claude'`;
+  if (receipt?.count !== 1) throw new Error("Claude's cutover receipt is missing");
 }, 180_000);
 
 afterAll(async () => {
