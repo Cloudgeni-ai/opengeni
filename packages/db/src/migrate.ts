@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { databaseBootConnectOptions } from "./boot-connect";
 import { sql as drizzleSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as databaseSchema from "./schema";
@@ -659,7 +660,7 @@ export async function migrate(
     (retirementPath
       ? parseInterruptedTurnRetirementManifest(JSON.parse(await readFile(retirementPath, "utf8")))
       : undefined);
-  const sql = postgres(databaseUrl, { max: 1 });
+  const sql = postgres(databaseUrl, { max: 1, ...databaseBootConnectOptions(databaseUrl) });
   try {
     // Serialize concurrent migrate() runs; the session-level lock is released
     // when the connection closes.
@@ -797,7 +798,7 @@ export async function planMigrations(
 ): Promise<MigrationPlan> {
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-  const sql = postgres(databaseUrl, { max: 1 });
+  const sql = postgres(databaseUrl, { max: 1, ...databaseBootConnectOptions(databaseUrl) });
   let applied: Set<string>;
   try {
     if (schema) assertIdentifier("OPENGENI_DB_SCHEMA", schema);

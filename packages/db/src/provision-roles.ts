@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { databaseBootConnectOptions } from "./boot-connect";
 import type { RlsStrategy } from "./database";
 import {
   RUNTIME_FULL_DML_TABLES,
@@ -135,7 +136,7 @@ export async function provisionRoles(
     commaSeparated(process.env.OPENGENI_TEMPORAL_DATABASES ?? "temporal,temporal_visibility")
   ).map((name) => validateIdentifier("temporalDatabases", name));
 
-  const sql = postgres(adminConnection, { max: 1 });
+  const sql = postgres(adminConnection, { max: 1, ...databaseBootConnectOptions(adminConnection) });
   try {
     // FORCE strategy provisions the non-owner app role Opengeni connects as.
     // SCOPED strategy: the host owns the connection role; Opengeni provisions no
@@ -509,7 +510,7 @@ async function grantTemporalRoleInDatabase(
   role: string,
 ): Promise<void> {
   const databaseUrl = databaseUrlFor(adminConnection, database);
-  const databaseSql = postgres(databaseUrl, { max: 1 });
+  const databaseSql = postgres(databaseUrl, { max: 1, ...databaseBootConnectOptions(databaseUrl) });
   try {
     await databaseSql.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${identifier(role)}`);
   } finally {
