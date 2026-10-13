@@ -146,6 +146,8 @@ describe("Site Data client", () => {
       expect(h.seen[0]!.path).toBe(`/v1/workspaces/ws-1/published-artifacts/${SITE_ID}/data/query`);
       expect(h.seen[0]!.headers["x-opengeni-site-id"]).toBe(SITE_ID);
       expect(h.seen[0]!.headers["x-opengeni-site-version"]).toBe(VERSION_ID);
+      // The host marks every bridged request as coming from a Site frame.
+      expect(h.seen[0]!.headers["x-opengeni-site-frame"]).toBe("1");
       expect(JSON.parse(String(h.seen[0]!.body))).toMatchObject({
         collection: "companies",
         count: true,
@@ -221,7 +223,18 @@ describe("Site Data client", () => {
         "ws",
         "POST",
       ),
-    ).toThrow();
+    ).toThrow(expect.objectContaining({ code: "site_data_unsupported" }));
+    // No host forwards a Site's request for another Site's data or management routes.
+    for (const pinned of [SITE_ID, undefined])
+      for (const route of ["/data", "/data/query", "/data/collections/x/import", "/files"])
+        expect(() =>
+          siteSessionPath(
+            `/v1/workspaces/site-host/published-artifacts/${SITE_ID}${route}`,
+            "ws",
+            "POST",
+            pinned,
+          ),
+        ).toThrow(expect.objectContaining({ code: "site_session_path_unsupported" }));
     // Inside the Site the alias stays unresolved.
     expect(
       siteSessionPath(

@@ -1,4 +1,4 @@
-import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
+import { SITE_FRAME_HEADER, siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
@@ -172,6 +172,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
               input.artifactId,
             );
             const headers = siteRequestHeaders(message.headers);
+            // Host-set marker: the API treats every bridged request as a Site frame.
+            headers.set(SITE_FRAME_HEADER, "1");
             if (input.artifactId) {
               headers.set("x-opengeni-site-id", input.artifactId);
               headers.set("x-opengeni-site-version", input.siteVersionId);

@@ -1,6 +1,10 @@
 const SITE_WORKSPACE_PREFIX = "/v1/workspaces/site-host";
-/** Site Data routes name the host's pinned Site as `current`, never an id. */
-const SITE_DATA_CURRENT_PREFIX = `${SITE_WORKSPACE_PREFIX}/published-artifacts/current/`;
+/** Site Data routes under any published Site: `<prefix>/published-artifacts/<id>/data|files`. */
+const SITE_DATA_PATH =
+  /^\/v1\/workspaces\/site-host\/published-artifacts\/([^/]+)\/(?:data|files)(?:\/|$)/u;
+
+/** The header a host sets on every request it forwards from a Site frame. */
+export const SITE_FRAME_HEADER = "x-opengeni-site-frame";
 
 /** A Site/Codemode SDK request named a route outside the proxied surface. */
 export class SiteSessionPathError extends Error {
@@ -9,6 +13,16 @@ export class SiteSessionPathError extends Error {
   constructor() {
     super("Unsupported Site session API path");
     this.name = "SiteSessionPathError";
+  }
+}
+
+/** The host serves no Site Data: it is not bound to a published Site (inline HTML, previews). */
+export class SiteDataUnsupportedError extends Error {
+  readonly code = "site_data_unsupported";
+
+  constructor() {
+    super("This Site host does not provide Site Data");
+    this.name = "SiteDataUnsupportedError";
   }
 }
 
@@ -36,9 +50,14 @@ export function siteSessionPath(
     "/workspaces/site-host",
     `/workspaces/${encodeURIComponent(workspaceId)}`,
   );
-  if (pathname.startsWith(SITE_DATA_CURRENT_PREFIX) && workspaceId !== "site-host") {
+  const data = SITE_DATA_PATH.exec(pathname);
+  if (data) {
+    // A Site reaches only its own data, as `current`; naming any Site id is refused for every host.
+    if (data[1] !== "current") throw new SiteSessionPathError();
+    // Inside the Site the alias stays unresolved; the host resolves it.
+    if (workspaceId === "site-host") return path;
     // Only a host bound to a published Site serves its data.
-    if (!siteId) throw new SiteSessionPathError();
+    if (!siteId) throw new SiteDataUnsupportedError();
     return rewritten.replace(
       "/published-artifacts/current/",
       `/published-artifacts/${encodeURIComponent(siteId)}/`,

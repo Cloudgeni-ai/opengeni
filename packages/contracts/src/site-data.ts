@@ -27,7 +27,7 @@ const FieldPath = z
     "A data field as a dotted path (up to 4 levels), or a system field: $id, $key, $owner, $createdAt, $updatedAt, $version.",
   );
 const RecordKey = z.string().min(1).max(256).describe("Your own stable record key.");
-const Scalar = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const Scalar = z.union([z.string().max(1024), z.number(), z.boolean(), z.null()]);
 const RecordData = z
   .record(z.string(), z.unknown())
   .describe("The record's JSON object (at most 256 KB by default).");
