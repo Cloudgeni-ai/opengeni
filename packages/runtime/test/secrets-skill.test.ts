@@ -147,6 +147,7 @@ describe("opengeni-secrets bundled Skill (AG-3)", () => {
       "binary_value",
       "unsupported_shell",
       "secretfile_not_allowed",
+      "secret_search_cursor_invalid",
     ])
       expect(troubleshooting).toContain(`| \`${code}\` |`);
     const codemode = file("references/codemode-and-scripts.md");

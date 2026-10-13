@@ -31,6 +31,7 @@ and a `hint`. Fix the reference and retry the same action.
 | `vault_permission_denied`, `secret_save_forbidden` | This session cannot write there. Pick another `saveTo` or vault. |
 | `vault_limit_reached`, `secret_value_too_large` | Archive unused items with `secret_delete`, or store large files as `file` items. |
 | `provider_conflict` | The item changed in the password manager meanwhile. Search again and retry the save. |
+| `secret_search_cursor_invalid` | The `cursor` came from a search with other filters, or its vault is gone. Search again without `cursor` and page from the start. |
 
 ## Other symptoms
 

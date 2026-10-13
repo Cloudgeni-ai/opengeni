@@ -177,7 +177,7 @@ With the `secrets` capability on, agents get:
 
 | Tool | Purpose | Needs |
 |---|---|---|
-| `secret_search` | Find items by name, website or type, with ready references. | `secrets:list` |
+| `secret_search` | Find or list items by name, website, type or vault, with ready references. The first page lists every reachable vault and its item count; `nextCursor` pages through the rest (up to 1,000 items examined per call). | `secrets:list` |
 | `secret_save` | Create or update an item; fields take a value, a generated password, another reference or a version to restore. | `secrets:write` |
 | `secret_get` | Reveal a value to the model. Agents do not hold `secrets:read` by default. | `secrets:read` |
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |

@@ -108,7 +108,7 @@ export function registerSecretTools(
     "secret_search",
     {
       description:
-        "Find saved logins, API keys and other secrets you can use. Returns items with their vault, website, username, field names and ready references such as {{secret:Vault/Item/password}} and {{secret:Vault/Item/otp}}; never values. Search by name, website (for example the login page's domain) or type before signing in or asking anyone for a secret.",
+        "Find saved logins, API keys and other secrets you can use. Returns items with their vault, website, username, field names and ready references such as {{secret:Vault/Item/password}} and {{secret:Vault/Item/otp}}; never values. Search by name, website (for example the login page's domain) or type before signing in or asking anyone for a secret. With no filters it lists everything you can use. The first page also lists every vault you can reach with its item count; when `nextCursor` is set, call again with the same filters and that `cursor` for the next page.",
       inputSchema: SecretSearchInput.shape,
     },
     (input) =>

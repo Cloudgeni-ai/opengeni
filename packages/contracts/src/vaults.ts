@@ -42,6 +42,9 @@ export const VAULT_LIMITS = {
   execValueMaxBytes: 102_400,
   policyVaultIdsMax: 200,
   searchResultsMax: 50,
+  /** Items one agent search call examines before it returns a cursor. */
+  searchScanMax: 1_000,
+  searchCursorMaxChars: 1_024,
   providerReadsPerAttempt: 50,
   providerValueCacheMs: 60_000,
 } as const;
@@ -521,6 +524,7 @@ export const VaultErrorCode = z.enum([
   "invalid_secret_name",
   "secret_value_too_large",
   "human_auth_required",
+  "secret_search_cursor_invalid",
 ]);
 export type VaultErrorCode = z.infer<typeof VaultErrorCode>;
 
@@ -544,6 +548,7 @@ export const VAULT_ERROR_HTTP_STATUS: Readonly<Record<VaultErrorCode, number>> =
   invalid_secret_name: 422,
   secret_value_too_large: 422,
   secret_save_forbidden: 422,
+  secret_search_cursor_invalid: 422,
   vault_policy_outside_parent: 422,
   vault_read_only: 403,
   vault_permission_denied: 403,
@@ -581,6 +586,8 @@ export const SecretSearchInput = z
     /** Vault name or ID. */
     vault: z.string().max(200).optional(),
     limit: z.number().int().min(1).max(VAULT_LIMITS.searchResultsMax).default(20),
+    /** `nextCursor` from the previous call with the same filters. */
+    cursor: z.string().max(VAULT_LIMITS.searchCursorMaxChars).optional(),
   })
   .strict();
 export type SecretSearchInput = z.infer<typeof SecretSearchInput>;
@@ -607,9 +614,22 @@ export const SecretSearchResult = z.object({
   references: VaultItemReferences,
 });
 export type SecretSearchResult = z.infer<typeof SecretSearchResult>;
+export const SecretSearchVault = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  ownerKind: VaultOwnerKind,
+  source: VaultSource,
+  mode: VaultMode,
+  itemCount: z.number().int().nonnegative(),
+});
+export type SecretSearchVault = z.infer<typeof SecretSearchVault>;
 export const SecretSearchOutput = z.object({
   items: z.array(SecretSearchResult),
+  /** True when more matches remain; pass `nextCursor` to continue. */
   truncated: z.boolean(),
+  nextCursor: z.string().nullable(),
+  /** Every vault the caller can reach, on the first page only. */
+  vaults: z.array(SecretSearchVault).optional(),
 });
 export type SecretSearchOutput = z.infer<typeof SecretSearchOutput>;
 
