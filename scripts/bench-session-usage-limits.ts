@@ -205,10 +205,10 @@ async function main(): Promise<void> {
     const unrelatedRoot = separateRoots[0]!;
     await settle(unrelatedRoot, "unrelated:init");
     const unrelatedIdle = await timeAdmission(unrelatedRoot);
-    let storming = true;
+    const storming = { active: true };
     const storm = (async () => {
       let round = 0;
-      while (storming) {
+      while (storming.active) {
         round += 1;
         await Promise.all(
           children.map((sessionId, index) => settle(sessionId, `storm:${round}:${index}`)),
@@ -217,7 +217,7 @@ async function main(): Promise<void> {
       return round;
     })();
     const unrelatedDuringStorm = await timeAdmission(unrelatedRoot);
-    storming = false;
+    storming.active = false;
     const stormRounds = await storm;
     const sameRoot = await contention(children, "same-root");
     const separate = await contention(separateRoots, "separate-roots");
