@@ -1623,6 +1623,11 @@ const SettingsSchema = z.object({
   // confirmation keeps query transport fail closed until that separate sink is
   // proven sanitized.
   organizationUserSetupQueryEdgeSanitizationConfirmed: EnvBoolean.default(false),
+  // Managed mode sends sign-up verification, organization user setup and sign-in
+  // method notices by email. "disabled" is an explicit operator choice for
+  // deployments that provision accounts another way: nothing is ever sent, and
+  // those deliveries settle as failed with errorClass "delivery_disabled".
+  managedEmailDelivery: z.enum(["resend", "disabled"]).default("resend"),
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("Opengeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
@@ -4927,6 +4932,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     organizationUserSetupQueryEdgeSanitizationConfirmed: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED",
     ),
+    managedEmailDelivery: optional("OPENGENI_MANAGED_EMAIL_DELIVERY"),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
@@ -9753,8 +9759,17 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
         "OPENGENI_PUBLIC_BASE_URL must use https when browser session sets are enabled outside local/test",
       );
     }
-    if (!["local", "test"].includes(settings.environment) && !settings.resendApiKey) {
+    if (
+      settings.managedEmailDelivery === "resend" &&
+      !["local", "test"].includes(settings.environment) &&
+      !settings.resendApiKey
+    ) {
       throw new Error("OPENGENI_RESEND_API_KEY is required for managed mode outside local/test");
+    }
+    if (settings.managedEmailDelivery === "disabled" && settings.resendApiKey) {
+      throw new Error(
+        "OPENGENI_RESEND_API_KEY must be unset when OPENGENI_MANAGED_EMAIL_DELIVERY=disabled",
+      );
     }
     if (!["local", "test"].includes(settings.environment) && !settings.environmentsEncryptionKey) {
       throw new Error(

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { InMemoryManagedEmailTransport } from "../src/auth/managed-email";
+import {
+  createManagedEmailTransport,
+  InMemoryManagedEmailTransport,
+} from "../src/auth/managed-email";
 import {
   assertManagedEmailTransportMetadata,
   organizationUserSetupPayloadDigest,
@@ -20,6 +23,19 @@ const message = {
 };
 
 describe("managed email transport", () => {
+  test("disabled delivery never sends, even where a provider would be selected", async () => {
+    const transport = createManagedEmailTransport({
+      ...testSettings(),
+      environment: "production",
+      managedEmailDelivery: "disabled",
+    });
+    expect(await transport.send(message)).toEqual({
+      status: "failed",
+      errorClass: "delivery_disabled",
+    });
+    expect(() => assertManagedEmailTransportMetadata(transport)).not.toThrow();
+  });
+
   test("rejects malformed embedded-provider metadata before durable delivery", () => {
     expect(() =>
       assertManagedEmailTransportMetadata({

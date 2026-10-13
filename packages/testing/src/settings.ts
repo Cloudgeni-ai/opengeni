@@ -130,6 +130,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     betterAuthAllowedHosts: "",
     betterAuthCookieDomain: undefined,
     betterAuthTrustedOrigins: "",
+    managedEmailDelivery: "resend",
     resendApiKey: undefined,
     emailFrom: "Opengeni <auth@mail.opengeni.ai>",
     stripeSecretKey: undefined,
