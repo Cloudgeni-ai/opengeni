@@ -5,6 +5,7 @@ import { projectPickerRows, sortPickerRows } from "@opengeni/react";
 import {
   scheduledRunErrorText,
   SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE,
+  SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE,
 } from "./scheduled-run-error";
 import {
   sessionModelMissingFromCatalog,
@@ -231,5 +232,12 @@ describe("scheduledRunErrorText", () => {
     expect(scheduledRunErrorText("  Sandbox capacity is unavailable.  ")).toBe(
       "Sandbox capacity is unavailable.",
     );
+  });
+
+  test("a run skipped at the task's usage limit says how it resumes, without credits", () => {
+    expect(scheduledRunErrorText("session_usage_limit")).toBe(
+      SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE,
+    );
+    expect(SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE).not.toMatch(/credit|budget|month/i);
   });
 });
