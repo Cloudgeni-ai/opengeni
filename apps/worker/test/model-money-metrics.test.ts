@@ -15,6 +15,9 @@ import {
   recordModelCreditsCharged,
   recordModelResponseUsage,
 } from "../src/observability-metrics";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state (OPE-798).
+useNoSessionUsageLimitForFakeDatabases();
 
 // Per-model usage and money metrics: pin the series names, the bounded label
 // set, and that no account/workspace/session identifier ever becomes a label.

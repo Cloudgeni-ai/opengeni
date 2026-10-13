@@ -14,7 +14,11 @@ import {
   type Session,
 } from "@opengeni/contracts";
 import { isCodexBilledModel } from "@opengeni/codex";
-import { getWorkspaceModelPolicy, type Database } from "@opengeni/db";
+import {
+  checkSessionUsageLimitAdmission,
+  getWorkspaceModelPolicy,
+  type Database,
+} from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "./model-catalog";
 import { agentRunAdmissionDenial } from "./billing/agent-run-admission";
 
@@ -153,6 +157,20 @@ export async function goalRunBudgetBlocked(
   return blocks[denial];
 }
 
+/**
+ * Per-task usage limit gate for goal continuation and resume (OPE-798). A
+ * reached root limit blocks with its own reason; raising or clearing the limit
+ * never resumes a goal by itself. A read failure throws (never unlimited).
+ */
+export async function goalSessionUsageLimitBlocked(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<GoalAdmissionBlock | null> {
+  const admission = await checkSessionUsageLimitAdmission(db, input);
+  if (admission.allowed) return null;
+  return { pausedReason: "session_usage_limit", message: admission.refusal.message };
+}
+
 export class GoalResumeBlockedError extends Error {
   constructor(
     readonly pausedReason: GoalAdmissionPausedReason,
@@ -167,9 +185,17 @@ export class GoalResumeBlockedError extends Error {
 export async function assertGoalResumeAllowed(
   services: Parameters<typeof agentRunAdmissionDenial>[0] & { catalogSourceSettings?: Settings },
   session: Pick<Session, "accountId" | "workspaceId" | "model" | "codexCompactionMode"> &
-    Partial<Pick<Session, "latencyMode">>,
+    Partial<Pick<Session, "latencyMode" | "id">>,
   causalTurn: { initiatingHumanSubjectId: string | null } | null,
 ): Promise<void> {
+  if (session.id) {
+    const limit = await goalSessionUsageLimitBlocked(services.db, {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+    });
+    if (limit) throw new GoalResumeBlockedError(limit.pausedReason, limit.message);
+  }
   const decision = await resolveGoalModelAdmission(
     services.db,
     services.catalogSourceSettings ?? services.settings,

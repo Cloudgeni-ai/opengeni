@@ -9,7 +9,8 @@
     ".": "./src/index.ts",
     "./subscription-reference-model": "./src/subscription-reference-model.ts",
     "./subscription-reference-worlds": "./src/subscription-reference-worlds.ts",
-    "./fake-login": "./src/fake-login/index.ts"
+    "./fake-login": "./src/fake-login/index.ts",
+    "./session-usage-limits": "./src/session-usage-limits.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

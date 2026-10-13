@@ -679,6 +679,7 @@ export async function runTurnStreamAttempt(
       chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
       countsTowardTokenCap: billingState.countsTowardTokenCap,
       initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+      sessionId: input.sessionId,
     });
   };
   const runStreamAttempt = async (options: {

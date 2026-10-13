@@ -16,7 +16,12 @@ import {
 } from "@opengeni/config";
 import type { LatencyMode } from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
-import { applyCreditDebitUpToBalance, recordUsageEvent, type Database } from "@opengeni/db";
+import {
+  applyCreditDebitUpToBalance,
+  recordUsageEvent,
+  settleSessionUsageReceipt,
+  type Database,
+} from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
 
@@ -186,6 +191,23 @@ export async function settleModelUsage(
     : estimatedProviderCostMicros !== null
       ? ("configured_list_price" as const)
       : null;
+  // Per-task usage limit meter (OPE-798). Synchronous and awaited before any
+  // credit/usage write: the canonical pre-margin estimate is recorded once
+  // per source identity against the session's task root, for every funding
+  // path. A failure throws so no further model request is dispatched until
+  // the database recovers; the provider call is never replayed.
+  if (input.sessionId) {
+    await settleSessionUsageReceipt(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceId: input.sourceId,
+      turnId: input.turnId ?? null,
+      amountMicros: estimatedProviderCostMicros,
+      pricingSource,
+      model: input.model,
+    });
+  }
   // Provider settlement and workspace-facing cost are separate. Externally
   // metered subscription/workspace turns remain exempt from the Opengeni token
   // cap, while a deployment-funded free model still records model.tokens. Every

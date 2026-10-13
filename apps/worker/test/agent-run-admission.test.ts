@@ -9,6 +9,9 @@ import { createGoalActivities, goalRunBudgetBlocked } from "../src/activities/go
 import type { ControlActivityServices } from "../src/activities/types";
 import { checkLimit } from "@opengeni/core";
 import { ensureRunAllowedBetweenModelCalls } from "../src/activities/agent-turn/admission";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state (OPE-798).
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";

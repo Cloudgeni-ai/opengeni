@@ -53,7 +53,7 @@ import { recordCoreCodexRefusal } from "./codex-core-settlement";
 import { failOverCoreCodexTurn } from "./codex-core-failover";
 import { createTurnHistorySink } from "./history-sink";
 
-import { BudgetExhaustedError } from "./admission";
+import { BudgetExhaustedError, sessionUsageLimitStopEvents } from "./admission";
 import {
   automaticRecoveryUnavailableFailure,
   providerRecoveryExhaustedFailure,
@@ -1025,27 +1025,44 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
     if (
-      !(await eventing.settle!({
-        events: [
-          ...(error.allowance
-            ? [{ type: "usage.exhausted" as const, payload: error.allowance }]
-            : []),
-          {
-            type: "turn.completed",
-            payload: {
-              output: "",
-              segmentLimit: "budget_exhausted",
-              detail: error.message,
-              ...(error.allowance ?? {}),
+      !(await eventing.settle!(
+        error.sessionUsageLimit
+          ? {
+              // OPE-798: the task's usage limit was reached between model
+              // calls. Already admitted usage is recorded; history is kept.
+              events: sessionUsageLimitStopEvents(error.sessionUsageLimit),
+              turnStatus: "completed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              allowanceGoalPause: {
+                rationale: error.sessionUsageLimit.message,
+                reason: "session_usage_limit",
+              },
+            }
+          : {
+              events: [
+                ...(error.allowance
+                  ? [{ type: "usage.exhausted" as const, payload: error.allowance }]
+                  : []),
+                {
+                  type: "turn.completed",
+                  payload: {
+                    output: "",
+                    segmentLimit: "budget_exhausted",
+                    detail: error.message,
+                    ...(error.allowance ?? {}),
+                  },
+                },
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "completed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              ...(error.allowance
+                ? { allowanceGoalPause: { rationale: error.allowance.message } }
+                : {}),
             },
-          },
-          { type: "session.status.changed", payload: { status: "idle" } },
-        ],
-        turnStatus: "completed",
-        sessionStatus: "idle",
-        activeTurnId: null,
-        ...(error.allowance ? { allowanceGoalPause: { rationale: error.allowance.message } } : {}),
-      }))
+      ))
     ) {
       return claimedResult({ status: "cancelled" });
     }

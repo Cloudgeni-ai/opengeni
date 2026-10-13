@@ -324,6 +324,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         entitlements: deps.entitlements,
+        sessionId: input.sessionId,
       });
       return await summarizeModel(s, m);
     };

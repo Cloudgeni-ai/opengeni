@@ -306,6 +306,12 @@ export async function setSessionUsageLimitInTransaction(
     actor: SessionUsageLimitWriteActor;
     /** Producer flag; when false only clearing (null) is accepted. */
     producerEnabled: boolean;
+    /**
+     * False only inside the session-creating transaction, which already owns
+     * the new row and whose create response carries the state; later changes
+     * always append `session.usage_limit.updated`.
+     */
+    appendEvent?: boolean;
   },
 ): Promise<SessionUsageLimitSetResult> {
   if (currentCreditDebitAttribution().kind === "turn") {
@@ -320,13 +326,17 @@ export async function setSessionUsageLimitInTransaction(
   ) {
     throw new RangeError("Session usage limit must be null or 0..$10,000,000 in micros");
   }
-  const locks = await lockSessionEventWriteRows(db, {
-    workspaceId: input.workspaceId,
-    controlLock: "share",
-    sessionIds: [input.sessionId],
-  });
-  const session = locks.sessions.find((row) => row.id === input.sessionId);
-  if (!session || session.accountId !== input.accountId) {
+  const appendEvent = input.appendEvent !== false;
+  const session = appendEvent
+    ? (
+        await lockSessionEventWriteRows(db, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        })
+      ).sessions.find((row) => row.id === input.sessionId)
+    : null;
+  if (appendEvent && (!session || session.accountId !== input.accountId)) {
     return { outcome: "not_found", state: null, rootSessionId: null };
   }
   const result = await runCommand(db, {
@@ -344,7 +354,9 @@ export async function setSessionUsageLimitInTransaction(
   const outcome = result.outcome as SessionUsageLimitSetOutcome;
   const state = result.state ? projectSessionUsageLimitState(result.state) : null;
   const rootSessionId = typeof result.rootSessionId === "string" ? result.rootSessionId : null;
-  if (outcome !== "ok" || !state) return { outcome, state, rootSessionId };
+  if (outcome !== "ok" || !state || !appendEvent || !session) {
+    return { outcome, state, rootSessionId };
+  }
   const sequence = session.lastSequence + 1;
   const now = new Date();
   await db

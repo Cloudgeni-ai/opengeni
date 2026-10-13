@@ -65551,7 +65551,7 @@ export type SessionGoalResumeValidation = (
   tx: Database,
   session: Pick<
     Session,
-    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+    "id" | "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
   >,
   causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
 ) => Promise<void>;
@@ -65662,6 +65662,7 @@ export async function setSessionGoalStatus(
       await input.beforeResume(
         scopedDb,
         {
+          id: sessionId,
           accountId: session.accountId,
           workspaceId,
           model: effectiveSession!.model,
@@ -76552,8 +76553,12 @@ export type ApplySessionTurnSettlementInput = {
    * input after a bounded terminal condition.
    */
   suppressGoalContinuation?: boolean;
-  /** Pause an active goal atomically with a recoverable allowance stop. */
-  allowanceGoalPause?: { rationale: string };
+  /**
+   * Pause an active goal atomically with a recoverable non-failure stop: an
+   * allowance stop (default reason `allowance`) or a reached per-task usage
+   * limit (`session_usage_limit`).
+   */
+  allowanceGoalPause?: { rationale: string; reason?: "allowance" | "session_usage_limit" };
   events: AppendEventInput[];
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
@@ -77539,7 +77544,7 @@ export async function applySessionTurnSettlement(
           .update(schema.sessionGoals)
           .set({
             status: "paused",
-            pausedReason: "allowance",
+            pausedReason: input.allowanceGoalPause.reason ?? "allowance",
             rationale: input.allowanceGoalPause.rationale,
             continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
             version: sql`${schema.sessionGoals.version} + 1`,
@@ -77563,7 +77568,7 @@ export async function applySessionTurnSettlement(
             payload: {
               goalId: pausedGoal.id,
               actor: "system",
-              reason: "allowance",
+              reason: input.allowanceGoalPause.reason ?? "allowance",
               rationale: input.allowanceGoalPause.rationale,
               autoContinuations: pausedGoal.autoContinuations,
               noProgressStreak: pausedGoal.noProgressStreak,

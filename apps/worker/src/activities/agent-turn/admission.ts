@@ -1,4 +1,10 @@
-import { checkWorkspaceAllowance, getSpendableCreditBalance, sumUsageQuantity } from "@opengeni/db";
+import {
+  checkSessionUsageLimitAdmission,
+  checkWorkspaceAllowance,
+  getSpendableCreditBalance,
+  SessionUsageLimitUnavailableError,
+  sumUsageQuantity,
+} from "@opengeni/db";
 import {
   configuredStaticUsageLimits,
   resolveTurnExecutionPolicyV1,
@@ -10,10 +16,12 @@ import type { TurnActivityServices as ActivityServices } from "../types";
 import {
   type AllowanceExhaustedRefusal,
   type SessionEvent,
+  type SessionUsageLimitReachedRefusal,
   type SessionTurn,
   type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
+import { SESSION_USAGE_LIMIT_SEGMENT } from "@opengeni/contracts/session-usage-limit-refusal";
 import { createHash } from "node:crypto";
 import { startOfUtcMonth } from "./model-usage";
 
@@ -228,10 +236,59 @@ export class BudgetExhaustedError extends Error {
     message: string,
     readonly serializedRunState: string | null,
     readonly allowance: AllowanceRefusal | null = null,
+    /** A reached per-task usage limit (OPE-798): its own stop marker, never credits. */
+    readonly sessionUsageLimit: SessionUsageLimitReachedRefusal | null = null,
   ) {
     super(message);
     this.name = "BudgetExhaustedError";
   }
+}
+
+/** The task's root usage limit is reached: a recoverable non-failure stop. */
+export class SessionUsageLimitReachedError extends Error {
+  readonly code = "session_usage_limit_reached";
+
+  constructor(readonly refusal: SessionUsageLimitReachedRefusal) {
+    super(refusal.message);
+    this.name = "SessionUsageLimitReachedError";
+  }
+}
+
+/**
+ * The terminal events of a usage-limit stop: a completed (non-failed) turn
+ * with its own `segmentLimit` and the typed refusal, then an idle session.
+ * Deliberately no `usage.exhausted` (an allowance/webhook contract) and no
+ * `budget_exhausted` marker, so no client offers "Add credits".
+ */
+export function sessionUsageLimitStopEvents(
+  refusal: SessionUsageLimitReachedRefusal,
+  extra: { detail?: string } = {},
+) {
+  return [
+    {
+      type: "turn.completed" as const,
+      payload: {
+        output: "",
+        segmentLimit: SESSION_USAGE_LIMIT_SEGMENT,
+        ...(extra.detail ? { detail: extra.detail } : {}),
+        sessionUsageLimit: refusal,
+      },
+    },
+    { type: "session.status.changed" as const, payload: { status: "idle" } },
+  ];
+}
+
+/**
+ * Refuse a new model request once the task's root usage limit is reached.
+ * Reads the latest durable counter; a read failure throws
+ * `SessionUsageLimitUnavailableError` (never treated as unlimited).
+ */
+export async function ensureSessionUsageLimitAllows(
+  db: ActivityServices["db"],
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<void> {
+  const admission = await checkSessionUsageLimitAdmission(db, input);
+  if (!admission.allowed) throw new SessionUsageLimitReachedError(admission.refusal);
 }
 
 export type AllowanceRefusal = AllowanceExhaustedRefusal;
@@ -258,6 +315,8 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   countsTowardTokenCap: boolean;
   initiatingHumanSubjectId: string | null;
   modelId?: string;
+  /** The session whose task root usage limit gates this request (OPE-798). */
+  sessionId?: string;
   serializedRunState?: () => string | null;
 }): Promise<number | undefined> {
   try {
@@ -272,8 +331,12 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
       input.countsTowardTokenCap,
       input.initiatingHumanSubjectId,
       input.modelId,
+      input.sessionId,
     );
   } catch (limitError) {
+    // An unreadable usage state blocks the request as an infrastructure
+    // failure; it is never presented as a credit or usage-limit stop.
+    if (limitError instanceof SessionUsageLimitUnavailableError) throw limitError;
     let serializedRunState: string | null = null;
     try {
       serializedRunState = input.serializedRunState?.() ?? null;
@@ -284,6 +347,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
       limitError instanceof Error ? limitError.message : String(limitError),
       serializedRunState,
       limitError instanceof AllowanceExhaustedError ? limitError.refusal : null,
+      limitError instanceof SessionUsageLimitReachedError ? limitError.refusal : null,
     );
   }
 }
@@ -303,8 +367,12 @@ export async function ensureRunAllowed(
   countsTowardTokenCap = !isExternallyBilledTurn,
   initiatingHumanSubjectId: string | null = null,
   modelId?: string,
+  sessionId?: string,
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
+  // Per-task usage limit (OPE-798): independent of funding, so it applies to
+  // credit, subscription, workspace-key and free paths alike.
+  if (sessionId) await ensureSessionUsageLimitAllows(db, { accountId, workspaceId, sessionId });
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
   // Opengeni credit gate. The agent-run COUNT cap below is a volume/fairness

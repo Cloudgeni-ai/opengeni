@@ -590,6 +590,15 @@ const SettingsSchema = z.object({
   // into @opengeni/db once at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
   childLifecycleNoticesEnabled: EnvBoolean.default(false),
+  // Per-task (root session) API-equivalent usage limits (OPE-798): producer
+  // flag only. Off (default) rejects NEW non-null limits on create and on the
+  // usage-limit route and hides the editor; limits already persisted are still
+  // metered and enforced, and clearing stays allowed. Metering and enforcement
+  // never depend on this flag. Enable only after every API, worker, web, SDK
+  // and embedded host consumer runs an image that understands the
+  // `session_usage_limit` stop and goal reason.
+  // Env: OPENGENI_SESSION_USAGE_LIMITS_ENABLED.
+  sessionUsageLimitsEnabled: EnvBoolean.default(false),
   // Per-channel and per-DM Slack workspace routing. Default ON. A channel does
   // not count a personal workspace as a candidate, so an organization with one
   // shared workspace resolves it as the sole candidate and never asks; the
@@ -4545,6 +4554,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
     goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
     childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
+    sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),

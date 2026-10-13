@@ -25,6 +25,7 @@ import type {
 import {
   modelFundingForAdmission,
   goalRunBudgetBlocked,
+  goalSessionUsageLimitBlocked,
   resolveGoalModelAdmission,
 } from "@opengeni/core";
 export { goalContinuationModelDecision, goalRunBudgetBlocked } from "@opengeni/core";
@@ -139,9 +140,19 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
             ? { ...turnExecutionPolicy, credentialRestriction }
             : turnExecutionPolicy;
         }
+        // OPE-798: a reached task usage limit pauses the goal with its own
+        // reason before any funding gate; a read failure aborts materialization.
+        const usageLimitBlocked = modelPolicyBlocked
+          ? null
+          : await goalSessionUsageLimitBlocked(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            });
         const budgetBlocked = modelPolicyBlocked
           ? null
-          : await goalRunBudgetBlocked(
+          : (usageLimitBlocked ??
+            (await goalRunBudgetBlocked(
               { ...service, settings, db: tx },
               {
                 accountId: input.accountId,
@@ -149,7 +160,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
                 model: continuationModel,
                 initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
               },
-            );
+            )));
         const pausedReason = modelPolicyBlocked
           ? modelDecision.pausedReason
           : budgetBlocked?.pausedReason;

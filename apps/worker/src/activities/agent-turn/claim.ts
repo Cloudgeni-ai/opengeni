@@ -80,11 +80,13 @@ import {
   legacyTurnExecutionPolicyInput,
   ensureRunAllowed,
   AllowanceExhaustedError,
+  SessionUsageLimitReachedError,
+  sessionUsageLimitStopEvents,
   type AllowanceRefusal,
 } from "./admission";
 import { providerRecoveryCountFromMetadata, isWorkerShutdownCancellation } from "./errors";
 import { throwIfTurnOperationCancelled, waitForTurnOperation } from "./sandbox-provision";
-import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import type { SessionUsageLimitReachedRefusal, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type {
   AttemptIdentityState,
   BillingState,
@@ -549,6 +551,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // AND the optional host `entitlements` port (when bound, its admitRun replaces
   // the local credit read). Unset port → today's local-ledger path.
   let allowanceRefusal: AllowanceRefusal | null = null;
+  let sessionUsageLimitRefusal: SessionUsageLimitReachedRefusal | null = null;
   try {
     await waitForTurnOperation(
       ensureRunAllowed(
@@ -562,13 +565,19 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         billingState.countsTowardTokenCap,
         turn.initiatingHumanSubjectId,
         turnExecutionPolicy.productModelId,
+        input.sessionId,
       ),
       cancellationSignal,
       undefined,
     );
   } catch (error) {
-    if (!(error instanceof AllowanceExhaustedError)) throw error;
-    allowanceRefusal = error.refusal;
+    if (error instanceof SessionUsageLimitReachedError) {
+      sessionUsageLimitRefusal = error.refusal;
+    } else if (error instanceof AllowanceExhaustedError) {
+      allowanceRefusal = error.refusal;
+    } else {
+      throw error;
+    }
   }
   // Setup (variableSet load, MCP connects, sandbox restore) does not
   // stream and so never observes cancellation on its own; these explicit
@@ -769,6 +778,28 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     durationSeconds: (performance.now() - activityStarted) / 1_000,
   });
   const turnStartSettlementStartedAt = performance.now();
+  if (sessionUsageLimitRefusal) {
+    // The task's usage limit is reached before any provider or sandbox work:
+    // a typed non-failure stop that leaves the session usable and pauses an
+    // active goal with its own reason (never credits or a monthly budget).
+    if (
+      !(await eventing.settle({
+        events: sessionUsageLimitStopEvents(sessionUsageLimitRefusal),
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        allowanceGoalPause: {
+          rationale: sessionUsageLimitRefusal.message,
+          reason: "session_usage_limit",
+        },
+      }))
+    ) {
+      return { exit: claimedResult({ status: "cancelled" }) };
+    }
+    control.turnMetricOutcome = "completed";
+    control.activityStatus = "idle";
+    return { exit: claimedResult({ status: "idle" }) };
+  }
   if (allowanceRefusal) {
     // Claim has frozen the exact human, but no provider or sandbox has started.
     // Use the same terminal valve as a post-response stop, retaining a usable
