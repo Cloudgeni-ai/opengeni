@@ -114,6 +114,26 @@ export type ExtensionCommandResult = {
   };
 };
 
+const DEBUGGER_DOMAINS = new Set([
+  "Accessibility",
+  "DOM",
+  "Input",
+  "Log",
+  "Network",
+  "Page",
+  "Runtime",
+]);
+
+// Single methods admitted outside the driver's domains. Focus emulation keeps
+// a background tab rendering and acknowledging input without activating it or
+// raising Chrome; without it Chrome holds every mouse event sent to a hidden
+// tab for about five seconds. Chrome clears it when the debugger detaches.
+const DEBUGGER_METHODS = new Set(["Emulation.setFocusEmulationEnabled"]);
+
+export function isAllowedDebuggerMethod(method: string): boolean {
+  return DEBUGGER_METHODS.has(method) || DEBUGGER_DOMAINS.has(method.slice(0, method.indexOf(".")));
+}
+
 export function parseExtensionCommand(value: unknown): ExtensionCommandEnvelope {
   const envelope = requireRecord(value, "bridge command envelope");
   exactKeys(envelope, [
