@@ -58,9 +58,9 @@ Each organization subscription account has its own page.
 - Which accounts: a workspace uses either its own Codex accounts or the
   organization's, never both for new work. Codex can also be turned off for the
   workspace; accounts stay connected.
-- Sharing work between this workspace's accounts: Spread work sends each new
-  chat to the account with the most usage left. Primary only uses the primary
-  account and waits when it runs out.
+- Sharing work between this workspace's accounts: Spread work shares new chats
+  evenly across accounts that can serve them. Primary first starts new chats on
+  the primary account and uses another account when it can't serve them.
 - Keep Codex chats portable: summarizes long chats in a form another provider's
   model can continue. Off keeps new chats on Codex, with better memory of long
   conversations.

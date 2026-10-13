@@ -45,7 +45,7 @@ const RULES: Rule[] = [
     method: "POST",
     pattern: /\/(codex|claude|supergrok)\/accounts\/:accountId\/activate$/,
     text: ({ provider }) =>
-      `Make this the primary ${provider} account: the one new work uses when account picking is set to Primary only.`,
+      `Make this the primary ${provider} account: when account picking is set to Primary first, new work starts on it and moves to another account only when it can't serve the work.`,
   },
   {
     method: "PATCH",
@@ -74,7 +74,7 @@ const RULES: Rule[] = [
     method: "PATCH",
     pattern: /\/(codex|claude|supergrok)\/settings$/,
     text: ({ provider, scope }) =>
-      `Choose how ${provider} accounts are picked ${scope} when several are connected: Primary only, or Spread (each new chat goes to the account with the most usage left).`,
+      `Choose how ${provider} accounts are picked ${scope} when several are connected: Primary first (new chats start on the primary account and use another account when it can't serve them), or Spread (new chats are shared evenly across accounts that can serve them).`,
   },
   {
     method: "POST",
