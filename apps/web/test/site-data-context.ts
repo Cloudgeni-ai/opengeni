@@ -124,14 +124,21 @@ export const client = {
         title: "Team CRM",
         description: null,
         status: "active",
-        visibility: "workspace_shared",
+        visibility: "workspace",
         ownerSubjectId: me,
         currentVersion: version,
         createdAt: minutesAgo(60 * 24 * 9),
         updatedAt: minutesAgo(45),
       },
       versions: [{ ...version, createdAt: minutesAgo(45), sizeBytes: 48_210 }],
+      events: [],
     };
+  },
+  async getSessionTenancyCreateCapabilities() {
+    return { canCreatePrivate: true };
+  },
+  async listSessionPage() {
+    return { pinned: [], sessions: [], nextCursor: null, filtersApplied: true };
   },
   async getWorkspaceArtifactHtml() {
     return `<!doctype html><html><body style="font:15px system-ui;margin:32px;color:#1f2328"><h1>Team CRM</h1><p>Contacts are loaded from Site Data.</p></body></html>`;
