@@ -404,6 +404,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
     let browser_bridge = start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await;
+    if let (Some(sidecars), Some(bridge)) = (&browser_sidecars, &browser_bridge) {
+        sidecars.observe_attached_inventory(bridge.inventory());
+    }
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).

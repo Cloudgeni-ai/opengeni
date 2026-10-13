@@ -255,6 +255,22 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+The extension's hello carries two generations. `connectionGeneration` is new
+for every native port and fences that transport: commands, results and
+inventory must name the exact live port. `stateGeneration` is created once per
+extension worker lifetime and reused by every native reconnect in it; Chrome
+keeps the tab ids, pages and debugger attachments that the worker owns for
+exactly that long. The agent reports `stateGeneration` as the profile's
+inventory `connectionGeneration` (the placement instance above), so a
+native-host exit, an agent restart or an agent update reconnects in place and
+the profile's sessions stay live; if the agent restarted, the next action
+re-creates the controller session. A restarted worker, a reloaded or updated
+extension, or a restarted Chrome reports a new `stateGeneration` and ends the
+sessions as above. Extensions that do not send `stateGeneration` keep the
+per-port behavior, and the agent's update gate waits while one of them backs a
+live attached controller, because restarting would end its sessions. A
+quiescent attached session does not otherwise hold back an agent update.
+
 Each ended connection generation is recorded with its reason in
 `attached_browser_devices.connection_history` (the latest 50 per profile).
 The native host sends a final `native_host_closing` frame before it exits,
