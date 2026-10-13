@@ -37,6 +37,7 @@ import {
 } from "@temporalio/client";
 import { NativeConnection, Worker, type WorkflowBundleOption } from "@temporalio/worker";
 import { existsSync } from "node:fs";
+import { prepareObjectStorageProvider } from "@opengeni/storage";
 import { fileURLToPath } from "node:url";
 import type { createControlActivities } from "./activities-control";
 import type { createTurnActivities } from "./activities-turn";
@@ -194,6 +195,9 @@ export async function createDefaultWorkerActivities(
   role: OpenGeniWorkerRole,
   dependencies: ActivityDependencies = {},
 ) {
+  if (dependencies.objectStorage == null) {
+    prepareObjectStorageProvider(dependencies.settings ?? getSettings());
+  }
   return role === "control"
     ? (await import("./activities-control")).createControlActivities(dependencies)
     : (await import("./activities-turn")).createTurnActivities(dependencies);
