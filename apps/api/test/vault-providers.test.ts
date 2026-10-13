@@ -679,3 +679,223 @@ describe("provider vault link, sync and managed vaults", () => {
     expect(noHost.body.error).toBe("provider_unavailable");
   });
 });
+
+/** A structurally valid token for another 1Password account; no real key material. */
+function otherAccountToken(): string {
+  const body = {
+    signInAddress: "other.1password.test",
+    deviceUuid: "x",
+    email: "x",
+    srpX: "x",
+    muk: {},
+    secretKey: "x",
+  };
+  return `${["ops", ""].join("_")}${Buffer.from(JSON.stringify(body)).toString("base64url")}`;
+}
+
+async function callAs(
+  workspace: Workspace,
+  subjectId: string,
+  method: string,
+  path: string,
+  permissions: Permission[],
+  body?: unknown,
+) {
+  const response = await app().request(`/v1/workspaces/${workspace.workspaceId}${path}`, {
+    method,
+    headers: {
+      authorization: await bearer(workspace, subjectId, permissions),
+      "content-type": "application/json",
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    text,
+    body: (text ? JSON.parse(text) : {}) as Record<string, any>,
+  };
+}
+
+const MANAGE: Permission[] = [
+  "connections:read",
+  "connections:write",
+  "secrets:list",
+  "secrets:write",
+];
+
+describe("1Password connection management", () => {
+  test("lists the connections each person can see, without tokens", async () => {
+    if (!available) return;
+    await resetOnePasswordFakeProvidersForTests();
+    const workspace = await freshWorkspace();
+    const forEveryone = await install(workspace, {
+      token: FAKE_HEALTHY,
+      ownership: "workspace",
+      planTier: "family",
+    });
+    const personal = await install(workspace, { token: FAKE_SYNC_ERROR, ownership: "user" });
+
+    const mine = await callAs(
+      workspace,
+      "subject-a",
+      "GET",
+      "/connections/1password/service-accounts",
+      MANAGE,
+    );
+    expect(mine.status).toBe(200);
+    expect(mine.text).not.toContain(FAKE_HEALTHY);
+    expect(mine.text).not.toContain(FAKE_SYNC_ERROR);
+    const byId = new Map(
+      (mine.body.connections as Array<Record<string, any>>).map((each) => [each.id, each]),
+    );
+    expect(byId.get(forEveryone.body.connectionId)).toMatchObject({
+      ownership: "workspace",
+      accountName: "fake.1password.test",
+      planTier: "family",
+      createdBySubjectId: "subject-a",
+      canManage: true,
+    });
+    expect(byId.get(personal.body.connectionId)).toMatchObject({
+      ownership: "user",
+      canManage: true,
+    });
+
+    const theirs = await callAs(
+      workspace,
+      "subject-b",
+      "GET",
+      "/connections/1password/service-accounts",
+      MANAGE,
+    );
+    expect(theirs.body.connections.map((each: { id: string }) => each.id)).toEqual([
+      forEveryone.body.connectionId,
+    ]);
+    const viewer = await callAs(
+      workspace,
+      "subject-b",
+      "GET",
+      "/connections/1password/service-accounts",
+      ["secrets:list"],
+    );
+    expect(viewer.body.connections).toEqual([
+      expect.objectContaining({ id: forEveryone.body.connectionId, canManage: false }),
+    ]);
+  });
+
+  test("replaces the token on the same connection and keeps linked vaults", async () => {
+    if (!available) return;
+    await resetOnePasswordFakeProvidersForTests();
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace" });
+    const connectionId = installed.body.connectionId as string;
+    const linked = await call(workspace, "POST", "/vaults/link", {
+      body: {
+        provider: "onepassword",
+        connectionId,
+        externalVaultId: installed.body.vaults[0].externalVaultId,
+        ownerKind: "workspace",
+        mode: "read_only",
+      },
+    });
+    expect(linked.status).toBe(201);
+
+    const path = `/connections/${connectionId}/1password/token`;
+    const replaced = await callAs(workspace, "subject-a", "PUT", path, MANAGE, {
+      token: FAKE_HEALTHY,
+      planTier: "teams",
+    });
+    expect(replaced.status).toBe(200);
+    expect(replaced.text).not.toContain(FAKE_HEALTHY);
+    expect(replaced.body).toMatchObject({ connectionId, accountName: "fake.1password.test" });
+    expect(replaced.body.vaults[0].linkedVaultId).toBe(linked.body.id);
+
+    const listed = await callAs(
+      workspace,
+      "subject-a",
+      "GET",
+      "/connections/1password/service-accounts",
+      MANAGE,
+    );
+    expect(listed.body.connections).toEqual([
+      expect.objectContaining({ id: connectionId, planTier: "teams" }),
+    ]);
+    const vault = await call(workspace, "GET", `/vaults/${linked.body.id}`);
+    expect(vault.status).toBe(200);
+    expect(vault.body.providerConnectionId).toBe(connectionId);
+
+    const other = otherAccountToken();
+    const mismatch = await callAs(workspace, "subject-a", "PUT", path, MANAGE, { token: other });
+    expect(mismatch.status).toBe(409);
+    expect(mismatch.body.error).toBe("provider_conflict");
+    expect(mismatch.text).toContain("other.1password.test");
+    expect(mismatch.text).not.toContain(other);
+
+    const forbidden = await callAs(workspace, "subject-b", "PUT", path, ["connections:write"], {
+      token: FAKE_HEALTHY,
+    });
+    expect(forbidden.status).toBe(403);
+  });
+
+  test("disconnecting unlinks its vaults and forgets the token", async () => {
+    if (!available) return;
+    await resetOnePasswordFakeProvidersForTests();
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace" });
+    const connectionId = installed.body.connectionId as string;
+    const linked = await call(workspace, "POST", "/vaults/link", {
+      body: {
+        provider: "onepassword",
+        connectionId,
+        externalVaultId: installed.body.vaults[0].externalVaultId,
+        ownerKind: "workspace",
+        mode: "read_only",
+      },
+    });
+    expect(linked.status).toBe(201);
+
+    const personal = await install(workspace, { token: FAKE_HEALTHY, ownership: "user" });
+    const notTheirs = await callAs(
+      workspace,
+      "subject-b",
+      "DELETE",
+      `/connections/${personal.body.connectionId}/1password`,
+      MANAGE,
+    );
+    expect(notTheirs.status).toBe(404);
+
+    const removed = await callAs(
+      workspace,
+      "subject-a",
+      "DELETE",
+      `/connections/${connectionId}/1password`,
+      MANAGE,
+    );
+    expect(removed.status).toBe(200);
+    expect(removed.body).toEqual({ unlinkedVaultIds: [linked.body.id] });
+
+    expect((await call(workspace, "GET", `/vaults/${linked.body.id}`)).status).toBe(404);
+    const listed = await callAs(
+      workspace,
+      "subject-a",
+      "GET",
+      "/connections/1password/service-accounts",
+      MANAGE,
+    );
+    expect(listed.status).toBe(200);
+    expect(listed.body.connections.map((each: { id: string }) => each.id)).toEqual([
+      personal.body.connectionId,
+    ]);
+    const again = await callAs(
+      workspace,
+      "subject-a",
+      "DELETE",
+      `/connections/${connectionId}/1password`,
+      MANAGE,
+    );
+    expect(again.status).toBe(404);
+    const [row] = await shared!.admin<Array<{ status: string }>>`
+      select status from connections where id = ${connectionId}`;
+    expect(row!.status).toBe("revoked");
+  });
+});

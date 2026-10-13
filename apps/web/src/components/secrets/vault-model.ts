@@ -1,6 +1,7 @@
 import {
   vaultErrorCode,
   vaultErrorDetail,
+  type OnePasswordConnectionSummary,
   type VaultErrorCode,
   type VaultItemSummary,
   type VaultItemType,
@@ -17,24 +18,27 @@ import { userErrorText } from "@/lib/api-error";
    "Read-only", "Read & write"; "Copy reference", "Reveal", "Generate".
    -------------------------------------------------------------------------- */
 
-export type VaultGroupId = "user" | "workspace" | "managers";
+export type VaultGroupId = "user" | "workspace";
 
 export const VAULT_GROUP_TITLE: Record<VaultGroupId, string> = {
   user: "Only me",
   workspace: "This workspace",
-  managers: "Password managers",
 };
 
+/**
+ * Vaults are grouped by who can use them, whatever their source: a vault
+ * linked from a personal 1Password account sits under Only me, next to the
+ * person's own vaults. Its tile says where the items come from.
+ */
 export function vaultGroup(vault: VaultSummary): VaultGroupId | null {
   if (vault.ownerKind === "task") return null;
-  if (vault.source !== "opengeni") return "managers";
   return vault.ownerKind === "user" ? "user" : "workspace";
 }
 
 export function groupVaults(
   vaults: VaultSummary[],
 ): { id: VaultGroupId; vaults: VaultSummary[] }[] {
-  const order: VaultGroupId[] = ["user", "workspace", "managers"];
+  const order: VaultGroupId[] = ["user", "workspace"];
   return order
     .map((id) => ({
       id,
@@ -46,6 +50,55 @@ export function groupVaults(
     }))
     .filter((group) => group.vaults.length > 0);
 }
+
+/* ------------------------------------------------------------- 1Password */
+
+export type ConnectionOwner = OnePasswordConnectionSummary["ownership"];
+
+/** "Only me", "This workspace" or "Organization", as on vaults. */
+export function connectionOwnerLabel(owner: ConnectionOwner): string {
+  return OWNER_LABEL[owner];
+}
+
+/** Who can use the vaults linked through a connection, as one sentence. */
+export function connectionAudience(owner: ConnectionOwner, organizationName: string): string {
+  return owner === "user"
+    ? "Only you, and only work you start, can use its vaults."
+    : owner === "workspace"
+      ? "Everyone in this workspace can use its vaults."
+      : `Workspaces in ${organizationName} can use its vaults.`;
+}
+
+/** A connection's name: its label, else its 1Password sign-in host. */
+export function connectionName(connection: OnePasswordConnectionSummary): string {
+  return connection.label?.trim() || connection.accountName || "1Password";
+}
+
+export function vaultsOfConnection(vaults: VaultSummary[], connectionId: string): VaultSummary[] {
+  return vaults
+    .filter(
+      (vault) => vault.source === "onepassword" && vault.providerConnectionId === connectionId,
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * What a connection needs, judged from the vaults linked through it: a new
+ * token beats a failed sync. Null while everything is fine.
+ */
+export function connectionAttention(
+  vaults: VaultSummary[],
+): "token_expired" | "sync_failed" | null {
+  if (vaults.some((vault) => vault.syncStatus === "auth_expired")) return "token_expired";
+  if (vaults.some((vault) => vault.syncStatus === "error")) return "sync_failed";
+  return null;
+}
+
+export const PLAN_LABEL: Record<OnePasswordConnectionSummary["planTier"], string> = {
+  family: "Individual or Family",
+  teams: "Teams",
+  business: "Business",
+};
 
 export const OWNER_LABEL: Record<VaultSummary["ownerKind"], string> = {
   user: "Only me",

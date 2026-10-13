@@ -198,6 +198,19 @@ vaults with `POST /v1/workspaces/:workspaceId/vaults/link` (read-only or
 read-write) or create a managed vault with
 `POST /v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults`.
 
+- A connection belongs to one person (Only me), the workspace or the
+  organization, and the vaults linked through it carry the same owner. In the
+  web app, Settings › Secrets lists each connection under 1Password; its page
+  links more vaults, replaces the token and disconnects it.
+- `GET /connections/1password/service-accounts` lists the connections the
+  caller can see (never their tokens), with `canManage` when the caller could
+  have installed them.
+- `PUT /connections/:connectionId/1password/token` checks a new token and
+  stores it on the same connection, so linked vaults keep their links and sync
+  again. A token for a different 1Password account is refused with
+  `provider_conflict`.
+- `DELETE /connections/:connectionId/1password` unlinks every vault linked
+  through the connection, then revokes it. Nothing is deleted in 1Password.
 - OpenGeni mirrors item metadata only; values are fetched live and cached per
   attempt for at most 60 seconds, with at most 50 provider reads per attempt.
 - Edits in a read-write linked vault are written to 1Password first, then the
@@ -230,7 +243,8 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
-| `POST /connections/1password/install`; `GET /connections/:connectionId/provider-vaults` | 1Password connection |
+| `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
+| `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
 | `POST /vaults/link`; `POST /vaults/:vaultId/sync` | Provider vaults |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`

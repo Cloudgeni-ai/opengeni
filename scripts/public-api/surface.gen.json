@@ -1620,7 +1620,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -1641,7 +1643,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -1664,7 +1668,9 @@
         "UpdateWorkspaceRequest"
       ],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3454,6 +3460,46 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/connections/:connectionId/1password",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/connections/:connectionId/1password/token",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultSummary"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect",
       "sdk": [
@@ -3522,7 +3568,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3540,7 +3588,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3582,7 +3632,29 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/connections/1password/service-accounts",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3732,7 +3804,9 @@
       "response": [
         "ConnectionMetadata",
         "ConnectionResponse",
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -7624,7 +7698,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -7793,7 +7869,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8523,7 +8601,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8541,7 +8621,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8559,7 +8641,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8578,7 +8662,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8597,7 +8683,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8616,7 +8704,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8800,8 +8890,10 @@
         "EnsureWorkspaceRequest"
       ],
       "response": [
+        "DisconnectOnePasswordResponse",
         "EnsureWorkspaceResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -14024,6 +14116,16 @@
         "$.operationId": "string!"
       }
     },
+    "DisconnectOnePasswordResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.unlinkedVaultIds": "array!",
+        "$.unlinkedVaultIds[]": "string"
+      }
+    },
     "DiscoverMcpCapabilitiesResponse": {
       "io": [
         "output"
@@ -15606,6 +15708,14 @@
         "$": "object",
         "$.action": "enum!=[\"\\\"pause\\\"\",\"\\\"resume\\\"\"]",
         "$.expectedVersion": "integer!"
+      }
+    },
+    "GoogleDriveTargetScope": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"organization\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "GovernedLearningActivationAuthorityKind": {
@@ -19195,6 +19305,23 @@
         "$.authorizationUrl": "string! null",
         "$.expiresAt": "string!",
         "$.state": "string!"
+      }
+    },
+    "OnePasswordConnectionSummary": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountName": "string! null",
+        "$.canManage": "boolean!",
+        "$.createdAt": "string!",
+        "$.createdBySubjectId": "string! null",
+        "$.id": "string!",
+        "$.label": "string! null",
+        "$.ownership": "ref(GoogleDriveTargetScope)!",
+        "$.planTier": "enum!=[\"\\\"business\\\"\",\"\\\"family\\\"\",\"\\\"teams\\\"\"]",
+        "$.verifiedAt": "string!"
       }
     },
     "OpenGeniSlackBotDisplayName": {
@@ -28881,6 +29008,7 @@
       "DeviceEnrollmentLookupRequest": "type",
       "DeviceEnrollmentLookupResponse": "type",
       "DisableOrganizationRecoveryPolicyRequest": "type",
+      "DisconnectOnePasswordResponse": "type",
       "DiscoverMcpCapabilitiesResponse": "type",
       "Document": "type",
       "DocumentAuthorityKind": "type",
@@ -29320,6 +29448,7 @@
       "normalizeWorkspaceInstructionPolicyRoleKey": "value",
       "OAuthStartRequest": "type",
       "OAuthStartResponse": "type",
+      "OnePasswordConnectionSummary": "type",
       "OnePasswordPlanTier": "type",
       "OPENGENI_API_CONTRACT_HEADER": "value",
       "OPENGENI_API_CONTRACT_REVISION": "value",
@@ -29550,6 +29679,7 @@
       "RemoveWorkspaceSkillRequest": "type",
       "RenewSessionRealtimeRequest": "type",
       "ReorderChannelsRequest": "type",
+      "ReplaceOnePasswordTokenRequest": "type",
       "ReplacePersonalGitHubRepositorySelectionsRequest": "type",
       "ReportAuthRunRequest": "type",
       "RepositoryResourceRef": "type",
@@ -31309,6 +31439,7 @@
       "DiffViewProps": "type",
       "DisclosureChip": "type",
       "DisclosureDefaultsProvider": "value",
+      "DisconnectOnePasswordResponse": "type",
       "effortOptionsForModel": "value",
       "EmbeddedBrowserInteractionClientLike": "type",
       "EmbeddedComputerInteractionClientLike": "type",
@@ -31493,6 +31624,7 @@
       "NoticeItem": "type",
       "OlderHistoryLoader": "type",
       "OlderHistoryLoadReceipt": "type",
+      "OnePasswordConnectionSummary": "type",
       "OnePasswordPlanTier": "type",
       "OPEN_WORKSTREAM_CONTROL_EVENT": "value",
       "OpenGeniChat": "value",
@@ -31563,6 +31695,7 @@
       "registerSandboxTerminal": "value",
       "RenderAllowanceExhausted": "type",
       "RenderMessageSender": "type",
+      "ReplaceOnePasswordTokenRequest": "type",
       "ResponsiveBasis": "type",
       "RetainedArtifactLoader": "type",
       "RetainedArtifactLoaderClient": "type",
