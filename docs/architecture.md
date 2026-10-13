@@ -846,6 +846,14 @@ or development dependencies. The materializer additionally carries the exact
 read-only native runtime and its isolated executable; the final slim image
 verifies the executable's runtime identity and native ABI before publication.
 
+API/worker deployment images use `scripts/assemble-server-runtime.ts` and
+`scripts/copy-runtime-dependencies.ts` to retain only bundled entrypoints/assets
+and their frozen external dependency closures. Migration and catalog Jobs keep
+their command paths and reviewed data in the API image. Temporal's prebuilt
+workflow path does not eagerly load its source compiler; explicit compilation
+keeps the existing compiler behavior. Native conversions and role boundaries
+remain unchanged.
+
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.

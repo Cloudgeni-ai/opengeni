@@ -1750,6 +1750,21 @@ runtime and isolated executable. The materializer identity/ABI probe runs in the
 final image as the unprivileged runtime user. API/worker image capabilities and
 the sidecars' separate database roles, health ports and sandboxing are unchanged.
 
+API and ordinary worker images also use slim final stages. Their builders retain
+the full frozen development install; `scripts/assemble-server-runtime.ts` copies
+only the process bundle, runtime assets and the exact installed dependency graph
+of its external packages (including optional native bindings and required peers).
+The worker retains its prebuilt workflows and managed Codemode client; API retains
+signed machine installers, the read-only artifact runtime, bundled database
+commands with the unchanged SQL ledger, and the stock catalog-import command and
+reviewed catalog/logo assets. Office/OCR/media, Docker and source-control tools
+are unchanged. Temporal retains only its loader-selected native platform binary;
+its Rust build tree and foreign binaries are not runtime dependencies. Source
+workflow compilation remains available but its compiler is loaded only on demand.
+Run the assembled-runtime conformance gate with
+`OPENGENI_VERIFY_SERVER_RUNTIME=1 bun test scripts/server-runtime-image.test.ts`
+after building/assembling both roles; it executes without monorepo ancestors.
+
 Native dependencies remain running after `Ctrl-C`, matching Compose's warm
 restart behavior. `bun run dev:down` stops only the infrastructure recorded for
 this worktree. `bun run dev:clean -- --yes` also removes its PostgreSQL/object
