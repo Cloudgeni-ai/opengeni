@@ -47,7 +47,7 @@ export type MachinesServices = {
   settings: Settings;
 };
 
-const ACTIVE_UPDATE_STATUSES = new Set([
+export const ACTIVE_UPDATE_STATUSES: ReadonlySet<string> = new Set([
   "requested",
   "accepted",
   "waiting_for_idle",
@@ -57,7 +57,7 @@ const ACTIVE_UPDATE_STATUSES = new Set([
   "restarting",
 ]);
 
-function compareAgentVersions(left: string, right: string): number | null {
+export function compareAgentVersions(left: string, right: string): number | null {
   const parse = (value: string): { core: number[]; prerelease: string | null } | null => {
     const match = /^(?:v)?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(value.trim());
     if (!match) return null;
@@ -77,6 +77,16 @@ function compareAgentVersions(left: string, right: string): number | null {
   if (a.prerelease === null) return 1;
   if (b.prerelease === null) return -1;
   return a.prerelease.localeCompare(b.prerelease);
+}
+
+/** The build the operator promoted for a machine's update channel. */
+export function promotedAgentVersion(
+  settings: Pick<Settings, "agentStableVersion" | "agentBetaVersion">,
+  channel: string | null,
+): string {
+  return channel === "beta"
+    ? (settings.agentBetaVersion ?? settings.agentStableVersion)
+    : settings.agentStableVersion;
 }
 
 /** Older Mac updaters replace a single file inside a sealed app. They must
@@ -117,10 +127,7 @@ export function agentVersionState(
 }
 
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
-  const desiredVersion =
-    enrollment.agentUpdateChannel === "beta"
-      ? (settings.agentBetaVersion ?? settings.agentStableVersion)
-      : settings.agentStableVersion;
+  const desiredVersion = promotedAgentVersion(settings, enrollment.agentUpdateChannel);
   const update = enrollment.agentUpdate;
   const versionState = agentVersionState(enrollment.agentVersion, desiredVersion, update);
   const capability = (name: string): boolean => enrollment.agentCapabilities[name] === true;

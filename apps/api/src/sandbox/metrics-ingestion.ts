@@ -64,6 +64,7 @@ import {
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { normalizeConnectedMachineWorkspaceRoot } from "@opengeni/runtime/sandbox";
+import type { AutomaticAgentUpdater } from "./agent-update";
 import {
   AgentEvent,
   AgentUpdateStage,
@@ -504,6 +505,7 @@ export async function handleAgentEventPayload(
   payload: Uint8Array,
   subject: string,
   bus?: EventBus,
+  agentUpdates?: AutomaticAgentUpdater | null,
 ): Promise<void> {
   const ids = parseAgentEventSubject(subject);
   if (!ids) {
@@ -671,6 +673,9 @@ export async function handleAgentEventPayload(
     });
     return;
   }
+  // A live machine behind its promoted build is asked to update; the decision
+  // reads only this enrollment, and a request never blocks heartbeat ingestion.
+  agentUpdates?.consider(enrollment);
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {
@@ -746,10 +751,18 @@ export function startMetricsIngestion(deps: {
   db: Database;
   bus: EventBus;
   observability?: Observability;
+  agentUpdates?: AutomaticAgentUpdater | null;
 }): () => void {
   const scheduler = createAgentEventIngestionScheduler(
     (payload, subject) =>
-      handleAgentEventPayload(deps.db, deps.observability, payload, subject, deps.bus),
+      handleAgentEventPayload(
+        deps.db,
+        deps.observability,
+        payload,
+        subject,
+        deps.bus,
+        deps.agentUpdates,
+      ),
     {
       onHeartbeatCoalesced: () =>
         deps.observability?.incrementCounter({
