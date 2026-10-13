@@ -40,6 +40,7 @@ import {
 } from "@/components/capabilities/integration-experience";
 import type { IntegrationViewModel } from "./integration-view-model";
 import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
+import { OnePasswordCatalogLink } from "./onepassword-catalog-link";
 import {
   CatalogConnectedAccounts,
   type CatalogConnectedAccountsManagement,
@@ -242,6 +243,8 @@ export function CatalogItemPage({
     }
   } else if (item.surfaceType === "codex_apps") {
     primary = null;
+  } else if (item.surfaceType === "first_party_onepassword") {
+    primary = <OnePasswordCatalogLink workspaceId={workspaceId} connected={item.enabled} />;
   } else if (plan.mode === "social_oauth") {
     primary = socialSetupAvailable ? (
       <Button

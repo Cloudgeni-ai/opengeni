@@ -275,6 +275,39 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("1Password setup preserves the chat and links to this workspace's protected form", async () => {
+    const onePassword = CapabilityCatalogItem.parse({
+      id: "api:1password",
+      name: "1Password",
+      kind: "api",
+      source: "built_in",
+      surfaceType: "first_party_onepassword",
+      providerDomain: "1password.com",
+      runtime: { available: true },
+    });
+    const notice = {
+      ...item,
+      capability: {
+        ...item.capability!,
+        id: onePassword.id,
+        name: "1Password",
+        kind: "api" as const,
+      },
+    };
+    const h = await render(false, onePassword, onePassword, false, "workspace", notice);
+    try {
+      await act(async () => button(h.container, "Connect").click());
+      const link = h.container.querySelector<HTMLAnchorElement>('a[href*="/secrets"]');
+      expect(link?.getAttribute("href")).toBe(
+        "/workspaces/workspace/secrets?view=connect-1password",
+      );
+      expect(link?.getAttribute("target")).toBe("_blank");
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(enableCapability).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
   const fiken = CapabilityCatalogItem.parse({
     id: "api:fiken",
     name: "Fiken",
