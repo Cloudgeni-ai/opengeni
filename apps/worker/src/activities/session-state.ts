@@ -39,6 +39,7 @@ import {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   validProviderOverloadRecoveryDelay,
 } from "./agent-turn/provider-recovery-policy";
+import { writeSessionUsageReceipts } from "./agent-turn/session-usage-custody";
 import type {
   ControlActivityServices,
   ExpireSessionHumanInputInput,
@@ -314,6 +315,19 @@ export function createSessionStateActivities(
           ? "legacy_retryable_preclaim_database_failure"
           : null;
     if (recoveredClaimCode) {
+      // Known usage from the failed attempt is recorded under its original
+      // source identities before any replacement attempt can dispatch. A
+      // failure here retries this DB-only lane; nothing is re-requested.
+      const heldReceipts = postClaimIdentityMatches
+        ? (postClaimRecovery?.sessionUsageReceipts ?? [])
+        : [];
+      if (heldReceipts.length > 0) {
+        await writeSessionUsageReceipts(
+          db,
+          { accountId: input.accountId, workspaceId: input.workspaceId },
+          heldReceipts,
+        );
+      }
       const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: turn.id,

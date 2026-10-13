@@ -36,6 +36,7 @@ import {
   type SessionEvent,
 } from "@opengeni/contracts";
 import { safeErrorDiagnostic } from "./errors";
+import { holdSessionUsageReceipt } from "./session-usage-custody";
 import {
   sanitizedModelUsageInput,
   settleModelUsage,
@@ -726,6 +727,13 @@ export async function recordModelUsageAndDebitCredits(
     turnId: input.turnId,
     turnAttemptId: input.turnAttemptId,
     usageLimitMetrics: input.observability ?? null,
+    // A failed task-usage receipt write never loses or replays the response:
+    // custody writes it before the next model request or turn completion.
+    receiptCustody: (receipt) =>
+      holdSessionUsageReceipt(
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        receipt,
+      ),
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
     debitMetadata: {
       sessionId: input.sessionId,

@@ -156,6 +156,7 @@ import {
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
 } from "./model-usage";
+import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
 import {
   sessionTitleGenerationOptions,
   sessionTitleRoute,
@@ -2082,6 +2083,9 @@ export async function runTurnStreamAttempt(
     await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
     await finalizeTurnOpStreamOps();
     await finishParallelSessionTitle();
+    // Every task-usage receipt held after a failed write is durable before
+    // the turn completes (a persistent failure enters DB-only recovery).
+    await flushHeldSessionUsageReceipts(db, input.sessionId);
     if (
       !(await eventing.settle!({
         events: [
@@ -2387,6 +2391,7 @@ export async function runTurnStreamAttempt(
         const deferredSteer = await settleDeferredSteerAfterCompaction();
         if (deferredSteer) return deferredSteer;
         if (turn.source === "compaction") {
+          await flushHeldSessionUsageReceipts(db, input.sessionId);
           const settled = await eventing.settle!({
             events: [
               {

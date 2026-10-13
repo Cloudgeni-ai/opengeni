@@ -24,6 +24,7 @@ import {
 import { SESSION_USAGE_LIMIT_SEGMENT } from "@opengeni/contracts/session-usage-limit-refusal";
 import { createHash } from "node:crypto";
 import { startOfUtcMonth } from "./model-usage";
+import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
 
 export class WorkspaceHumanInputDisabledError extends Error {
   constructor(kind: "resume" | "interruption") {
@@ -287,7 +288,11 @@ export async function ensureSessionUsageLimitAllows(
   db: ActivityServices["db"],
   input: { accountId: string; workspaceId: string; sessionId: string },
 ): Promise<void> {
-  const admission = await checkSessionUsageLimitAdmission(db, input);
+  // Receipts this process holds (a settlement write failed) are made durable
+  // before the next request is admitted; a still-failing write throws a
+  // database error and blocks the request without replaying provider work.
+  await flushHeldSessionUsageReceipts(db, input.sessionId);
+  const admission = await checkSessionUsageLimitAdmission(db, { ...input, runtime: true });
   if (!admission.allowed) throw new SessionUsageLimitReachedError(admission.refusal);
 }
 
