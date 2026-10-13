@@ -6,6 +6,7 @@ import {
   USAGE_LIMIT_AMOUNT_REQUIRED,
   classifySessionUsageLimitSaveError,
   goalPausedAtUsageLimit,
+  isOutcomeUnknown,
   isSessionUsageLimitRefreshEvent,
   lineageHasRunningSession,
   parseSessionUsageLimitDraft,
@@ -124,6 +125,16 @@ describe("save errors", () => {
     expect(other.kind).toBe("other");
     expect(other.message).not.toMatch(/Opengeni API|session_usage/);
   });
+
+  test("a lost response is unknown, not a failure: saving again is safe", () => {
+    const lost = Object.assign(new Error("Failed to fetch"), { outcomeUnknown: true });
+    expect(isOutcomeUnknown(lost)).toBe(true);
+    expect(isOutcomeUnknown(new Error("x"))).toBe(false);
+    expect(classifySessionUsageLimitSaveError(lost)).toEqual({
+      kind: "unknown",
+      message: "Couldn't confirm the save. Save again to check; it won't be applied twice.",
+    });
+  });
 });
 
 describe("refresh signals", () => {
@@ -141,6 +152,21 @@ describe("refresh signals", () => {
       ),
     ).toBe(false);
     expect(isSessionUsageLimitRefreshEvent(event("agent.message", {}))).toBe(false);
+    // A child settled: its usage is not on this stream, so read the total.
+    expect(
+      isSessionUsageLimitRefreshEvent(
+        event("system.update.delivered", {
+          members: [{ id: "u1", kind: "child_terminal_result", classification: "success" }],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isSessionUsageLimitRefreshEvent(
+        event("system.update.delivered", {
+          members: [{ id: "u2", kind: "agent_message", classification: "info" }],
+        }),
+      ),
+    ).toBe(false);
   });
 
   test("a running agent anywhere in the tree keeps polling on", () => {

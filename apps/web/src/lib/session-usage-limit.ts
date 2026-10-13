@@ -82,6 +82,7 @@ export type SessionUsageLimitSaveFailure = {
     | "disabled"
     | "unavailable"
     | "invalid"
+    | "unknown"
     | "other";
   message: string;
   /** For `not_root`: the task that owns the limit. */
@@ -96,8 +97,26 @@ function detailsOf(error: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/**
+ * The save may or may not have been applied (the response was lost). Re-send
+ * the same operation to find out; the server applies an operation once.
+ */
+export function isOutcomeUnknown(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { outcomeUnknown?: unknown }).outcomeUnknown === true
+  );
+}
+
 /** What a failed save means, in words, from the response's `details.code`. */
 export function classifySessionUsageLimitSaveError(error: unknown): SessionUsageLimitSaveFailure {
+  if (isOutcomeUnknown(error)) {
+    return {
+      kind: "unknown",
+      message: "Couldn't confirm the save. Save again to check; it won't be applied twice.",
+    };
+  }
   const facts = apiErrorFacts(error);
   const details = detailsOf(error);
   const code = typeof details?.code === "string" ? details.code : facts.code;
@@ -227,6 +246,8 @@ export type SessionUsageLimitSnapshot = {
 type Entry = {
   snapshot: SessionUsageLimitSnapshot;
   inflight: Promise<SessionUsageLimit | null> | null;
+  /** One more read queued behind the one in flight (never two at once). */
+  trailing: Promise<SessionUsageLimit | null> | null;
   listeners: Set<() => void>;
 };
 
@@ -241,7 +262,7 @@ function entryFor(client: object, key: string): Entry {
   }
   let entry = entries.get(key);
   if (!entry) {
-    entry = { snapshot: EMPTY, inflight: null, listeners: new Set() };
+    entry = { snapshot: EMPTY, inflight: null, trailing: null, listeners: new Set() };
     entries.set(key, entry);
   }
   return entry;
@@ -270,7 +291,15 @@ async function readUsage(
   sessionId: string,
 ): Promise<SessionUsageLimit | null> {
   const entry = entryFor(client, `${workspaceId}/${sessionId}`);
-  if (entry.inflight) return await entry.inflight;
+  if (entry.inflight) {
+    // The read in flight may have started before whatever asked for this one
+    // (a child just settled): read once more right after it, never alongside.
+    entry.trailing ??= entry.inflight.then(() => {
+      entry.trailing = null;
+      return readUsage(client, workspaceId, sessionId);
+    });
+    return await entry.trailing;
+  }
   publish(entry, { loading: true });
   const request = client
     .getSessionUsageLimit(workspaceId, sessionId)
@@ -299,6 +328,19 @@ export function isSessionUsageLimitRefreshEvent(event: SessionEvent): boolean {
   ) {
     return true;
   }
+  // A child agent settled: its usage is not in this stream, so read the total.
+  if (event.type === "system.update.delivered") {
+    const members = (event.payload as { members?: unknown } | null | undefined)?.members;
+    return (
+      Array.isArray(members) &&
+      members.some(
+        (member) =>
+          typeof member === "object" &&
+          member !== null &&
+          (member as { kind?: unknown }).kind === "child_terminal_result",
+      )
+    );
+  }
   if (event.type !== "turn.completed") return false;
   const payload = event.payload as { segmentLimit?: unknown } | null | undefined;
   return payload?.segmentLimit === SESSION_USAGE_LIMIT_SEGMENT;
@@ -325,7 +367,11 @@ export function goalPausedAtUsageLimit(events: readonly SessionEvent[]): boolean
 
 /** Wait after a burst of usage events before reading, so one turn is one read. */
 export const SESSION_USAGE_LIMIT_EVENT_DEBOUNCE_MS = 1_000;
-/** At most this often while a visible task tree is running. */
+/**
+ * At most this often, while the page is visible and the task tree is running
+ * or could still change unseen (it has agents, or a limit is set). A child's
+ * usage is not in the parent's stream, so this bounds how stale it can get.
+ */
 export const SESSION_USAGE_LIMIT_POLL_MS = 30_000;
 
 export type UseSessionUsageLimitOptions = {
@@ -338,13 +384,18 @@ export type UseSessionUsageLimitOptions = {
   enabled: boolean;
   /**
    * Only the one owner of the live stream passes these: it reads on relevant
-   * events, polls while the task tree is active and visible, and rereads on
-   * focus and reconnect. Other views share what it reads.
+   * events, polls while visible, does a final read when the tree goes idle,
+   * and rereads on focus and reconnect. Other views share what it reads.
    */
   live?: {
     events: readonly SessionEvent[];
     /** The session or one of its agents is running. */
     active: boolean;
+    /**
+     * Keep polling while idle: the task has agents, which can start and finish
+     * between two reads of the tree without the parent's stream showing it.
+     */
+    watch?: boolean;
     connectionState?: string;
   };
 };
@@ -410,18 +461,34 @@ export function useSessionUsageLimit(options: UseSessionUsageLimitOptions): Sess
     const previous = lastRelevant.current;
     lastRelevant.current = { key, sequence: newestRelevant };
     if (!previous || previous.key !== key || newestRelevant <= previous.sequence) return;
-    const timer = window.setTimeout(() => void refresh(), SESSION_USAGE_LIMIT_EVENT_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
+    const timer = setTimeout(() => void refresh(), SESSION_USAGE_LIMIT_EVENT_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
   }, [driving, key, newestRelevant, refresh]);
 
-  // Foreground poll while the task tree is active.
+  // Foreground poll while the tree is active, or idle but able to change
+  // unseen (agents, or a limit whose reached state matters). Bounded to one
+  // read per interval; reads never overlap.
   const active = live?.active === true;
+  const watching =
+    active ||
+    live?.watch === true ||
+    (snapshot.usage !== null && snapshot.usage.limitMicros !== null);
   useEffect(() => {
-    if (!driving || !active) return;
-    const timer = window.setInterval(() => {
+    if (!driving || !watching) return;
+    const timer = setInterval(() => {
       if (document.visibilityState === "visible") void refresh();
     }, SESSION_USAGE_LIMIT_POLL_MS);
-    return () => window.clearInterval(timer);
+    return () => clearInterval(timer);
+  }, [watching, driving, refresh]);
+
+  // The tree just went idle: a final read, so the last agent's usage shows
+  // now rather than at the next interval (a child can start and finish
+  // inside one interval).
+  const wasActive = useRef(active);
+  useEffect(() => {
+    const previous = wasActive.current;
+    wasActive.current = active;
+    if (driving && previous && !active) void refresh();
   }, [active, driving, refresh]);
 
   // Back to the tab: read once.

@@ -2805,6 +2805,7 @@ function SessionChatPane(props: {
     live: {
       events: props.events,
       active: usageLimitTreeActive,
+      watch: props.agentNodes.length > 0,
       connectionState: props.connectionState,
     },
   });
@@ -2841,6 +2842,7 @@ function SessionChatPane(props: {
     usageLimitCapability !== "absent" && !terminal ? (
       <SessionUsageLimitNotice
         usage={usageLimit.usage}
+        stale={usageLimit.error !== null && usageLimit.usage !== null}
         refusal={usageLimitRefusal}
         onChangeLimit={!usageLimitChild && canControlSession ? props.onOpenUsageLimit : undefined}
         mainTaskHref={
