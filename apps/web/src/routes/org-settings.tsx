@@ -685,17 +685,22 @@ function OrganizationSettingsFrame({
     );
   }
   const body = <div className="grid min-w-0 gap-8 text-left">{children}</div>;
-  if (hideHeader) return body;
+  // One tree shape with or without the header: opening a sub-page (a Models
+  // account) must not remount the section and repeat its live provider reads.
   return (
     <>
-      <PageHeader
-        title={organizationSettingsLabel(section)}
-        description={
-          hideDescription ? undefined : organizationSettingsDescription(section, organizationLabel)
-        }
-        actions={actions}
-      />
-      <div className="mt-6">{body}</div>
+      {hideHeader ? null : (
+        <PageHeader
+          title={organizationSettingsLabel(section)}
+          description={
+            hideDescription
+              ? undefined
+              : organizationSettingsDescription(section, organizationLabel)
+          }
+          actions={actions}
+        />
+      )}
+      <div className={hideHeader ? undefined : "mt-6"}>{body}</div>
     </>
   );
 }
