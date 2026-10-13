@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- A turn stopped because its task reached its usage limit is an
 -- actionable boundary: only a person can raise or clear the limit. Count it in
--- the attention frontier exactly like the 0770 partial-index predicate, so the
+-- the attention frontier exactly like the 0771 partial-index predicate, so the
 -- rail and session tree show it as unread without any explanatory model call.
 -- No backfill: no such stop exists before this release produces one, and the
 -- cursor only advances (greatest) so older binaries remain compatible.

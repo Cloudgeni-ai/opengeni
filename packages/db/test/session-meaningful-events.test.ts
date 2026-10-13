@@ -105,9 +105,9 @@ describe("meaningful event frontier contract", () => {
         ),
     ).toBe(inclusive);
   });
-  test("0770 rolling index and 0771 cursor trigger count exactly a task usage-limit stop", async () => {
+  test("0771 rolling index and 0772 cursor trigger count exactly a task usage-limit stop", async () => {
     const migration = await readFile(
-      new URL("../drizzle/0770_session_usage_limit_attention_index.sql", import.meta.url),
+      new URL("../drizzle/0771_session_usage_limit_attention_index.sql", import.meta.url),
       "utf8",
     );
     const predicate = new PgDialect().sqlToQuery(meaningfulSessionEventSql("meaningful")).sql;
@@ -118,7 +118,7 @@ describe("meaningful event frontier contract", () => {
       ),
     ).toBe(true);
     // The runtime predicate is the 0527 one with exactly one change, so
-    // pre-0770 API processes keep their own index during the rollout.
+    // pre-0771 API processes keep their own index during the rollout.
     const previous = normalizePredicate(
       new PgDialect().sqlToQuery(commentaryExclusiveMeaningfulSessionEventSql("meaningful")).sql,
     );
@@ -129,7 +129,7 @@ describe("meaningful event frontier contract", () => {
     expect(normalizePredicate(predicate).replace(usageLimitStop, "")).toBe(previous);
     // The trigger computes the cursor frontier with the same predicate.
     const trigger = await readFile(
-      new URL("../drizzle/0771_session_usage_limit_attention_cursor.sql", import.meta.url),
+      new URL("../drizzle/0772_session_usage_limit_attention_cursor.sql", import.meta.url),
       "utf8",
     );
     expect(trigger.startsWith("-- deployment-mode: rolling\n")).toBe(true);
