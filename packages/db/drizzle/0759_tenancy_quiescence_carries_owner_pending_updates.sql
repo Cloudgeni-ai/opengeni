@@ -27,7 +27,6 @@ CREATE FUNCTION session_system_update_carries_foreign_authority(
 ) RETURNS boolean
 LANGUAGE sql
 STABLE
-SET search_path = pg_catalog, public, pg_temp
 AS $function$
   SELECT
     -- Personal connection delegations must all be the owner's.
@@ -92,6 +91,14 @@ $function$;
 
 REVOKE ALL ON FUNCTION session_system_update_carries_foreign_authority(
   session_system_updates, text, uuid) FROM PUBLIC;
+
+-- Pin the install's own schema (public on a standalone install), as 0494 does:
+-- a dedicated-schema install has no public.session_turns.
+DO $carries_foreign_authority_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION session_system_update_carries_foreign_authority(session_system_updates, text, uuid) SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END
+$carries_foreign_authority_path$;
 
 DO $migration$
 DECLARE

@@ -10,6 +10,10 @@ test("logout-all session-list fence admits only the finite legacy and current ra
     "?pinsOnly=true&limit=1&view=page",
     "?view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
     "?archiveStatus=active&parentSessionId=null&sortBy=updatedAt&limit=50&view=page",
+    // The rail's compact summary projection (#3184).
+    "?view=page&limit=1&projection=summary&pinsOnly=true",
+    "?view=page&limit=50&parentSessionId=null&projection=summary",
+    "?view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active&projection=summary",
   ])
     expect(exactLogoutAllSessionListSearch(search)).toBe(true);
 
@@ -27,6 +31,9 @@ test("logout-all session-list fence admits only the finite legacy and current ra
     "?view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active&sortBy=updatedAt",
     "?view=page&limit=50&parentSessionId=null&sortBy=updatedAt",
     "?view=page&limit=1&pinsOnly=true&archiveStatus=active",
+    "?view=page&limit=1&projection=full&pinsOnly=true",
+    "?view=page&limit=1&projection=summary&projection=summary&pinsOnly=true",
+    "?view=page&limit=1&projection=summary&pinsOnly=true&search=tenant",
   ])
     expect(exactLogoutAllSessionListSearch(search)).toBe(false);
 });
