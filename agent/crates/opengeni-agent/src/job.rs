@@ -51,6 +51,9 @@
 //! safe); a `final_ack` before completion is applied as a plain ack and the
 //! final flag ignored.
 
+// Handing a job to a successor process image is unix-only.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -62,15 +65,18 @@ use opengeni_agent_engine::retention::{
 };
 use opengeni_agent_engine::{Channel, Frame, FrameBody};
 use opengeni_agent_platform::ContainedExec;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, warn};
+
+use crate::stream_digest::{DigestState, StreamDigest};
 
 /// A command delivered to a running (or lingering completed) job through its
 /// mailbox. The supervisor translates wire messages (`OpAck`/`OpAttach`/…)
 /// into these; the pump never sees the transport.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum JobCommand {
     /// A cumulative ack + absolute credit grant from the consumer
     /// (wire: `OpAck`).
@@ -107,6 +113,15 @@ pub enum JobCommand {
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
     Cancel,
+    /// Stop pumping and hand the job, untouched, to a successor process image
+    /// (an in-place agent update). The reply carries everything needed to
+    /// resume it, or `None` if the state could not be exported, in which case
+    /// the job simply keeps running here. The child is never signaled.
+    #[cfg(unix)]
+    Handover {
+        /// Receives the exported state.
+        reply: oneshot::Sender<Option<Box<JobHandover>>>,
+    },
     /// Test-only mailbox receipt. A sender that observes this notification
     /// knows every command queued before it has been applied by the pump.
     #[cfg(test)]
@@ -173,7 +188,7 @@ pub struct JobParams {
 
 /// The typed terminal outcome of a job — the engine-side form of the wire
 /// `OpExit`; the supervisor encodes it (exit_code/timed_out/cancelled mapping).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JobOutcome {
     /// The child exited on its own; `-1` when killed by an un-caught signal
     /// (mirrors the one-shot `ExecResponse` mapping).
@@ -192,7 +207,7 @@ pub enum JobOutcome {
 }
 
 /// Why the runner failed a job (each maps to a typed wire failure).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobFailure {
     /// Retention memory + spool quotas were exhausted (`OP_OVERFLOW`).
     Overflow {
@@ -253,6 +268,123 @@ pub struct JobExit {
     pub stderr: ChannelStats,
 }
 
+impl JobExit {
+    fn record(&self) -> ExitRecord {
+        ExitRecord {
+            outcome: self.outcome.clone(),
+            duration_ms: self.duration_ms,
+            stdout_total: self.stdout.total_bytes,
+            stdout_digest: self.stdout.digest.to_hex().to_string(),
+            stderr_total: self.stderr.total_bytes,
+            stderr_digest: self.stderr.digest.to_hex().to_string(),
+        }
+    }
+}
+
+/// Serializable form of a [`JobExit`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExitRecord {
+    outcome: JobOutcome,
+    duration_ms: u64,
+    stdout_total: u64,
+    stdout_digest: String,
+    stderr_total: u64,
+    stderr_digest: String,
+}
+
+impl ExitRecord {
+    /// The terminal record this was made from.
+    ///
+    /// # Errors
+    ///
+    /// A malformed digest.
+    pub fn exit(&self) -> Result<JobExit, String> {
+        let digest = |hex: &str| {
+            blake3::Hash::from_hex(hex).map_err(|error| format!("invalid exit digest: {error}"))
+        };
+        Ok(JobExit {
+            outcome: self.outcome.clone(),
+            duration_ms: self.duration_ms,
+            stdout: ChannelStats {
+                total_bytes: self.stdout_total,
+                digest: digest(&self.stdout_digest)?,
+            },
+            stderr: ChannelStats {
+                total_bytes: self.stderr_total,
+                digest: digest(&self.stderr_digest)?,
+            },
+        })
+    }
+}
+
+/// A job handed to a successor process image: the contained exec (absent
+/// once the child was reaped and both pipes closed) and the pump state.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobHandover {
+    /// The live process parts, while there are any.
+    pub exec: Option<opengeni_agent_platform::ExecHandover>,
+    /// Everything the pump knew.
+    pub state: JobState,
+}
+
+/// The pump state carried across an in-place update. Retained frames travel
+/// in a side file because they can be large.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobState {
+    /// Every frame up to here was acknowledged and freed.
+    floor: u64,
+    /// The last assigned sequence number.
+    high: u64,
+    /// The consumer generation the pump was fenced to.
+    generation: u64,
+    /// The retained frames `(floor, high]`, in order.
+    frames: PathBuf,
+    stdout: DigestState,
+    stdout_total: u64,
+    stderr: DigestState,
+    stderr_total: u64,
+    child_done: bool,
+    child_code: i32,
+    pending_outcome: Option<JobOutcome>,
+    /// Time the job had been running for.
+    elapsed_ms: u64,
+    /// Time left before the deadline, if the job has one.
+    deadline_ms: Option<u64>,
+    /// Stdin bytes not yet written (hex), while the runner still feeds it.
+    stdin: Option<String>,
+    /// The terminal record and its frame, once produced.
+    exit: Option<(Option<u64>, ExitRecord)>,
+    exit_fence: Option<u64>,
+    collection_failure: Option<JobFailure>,
+}
+
+impl JobState {
+    /// The terminal record, once the job has produced it.
+    ///
+    /// # Errors
+    ///
+    /// A malformed record.
+    pub fn exit(&self) -> Result<Option<(Option<u64>, JobExit)>, String> {
+        self.exit
+            .as_ref()
+            .map(|(seq, record)| record.exit().map(|exit| (*seq, exit)))
+            .transpose()
+    }
+
+    /// The last assigned sequence number.
+    #[must_use]
+    pub fn high(&self) -> u64 {
+        self.high
+    }
+
+    /// The side file holding the retained frames.
+    #[must_use]
+    pub fn frames_path(&self) -> &std::path::Path {
+        &self.frames
+    }
+}
+
 /// The frame send hook: fire-and-forget, called in ascending seq order.
 type EmitFn = Box<dyn Fn(Frame) + Send>;
 /// Encodes the terminal record into the retained Exit-frame payload.
@@ -303,6 +435,9 @@ pub enum JobEnd {
     /// The mailbox was dropped/closed before a final ack (orphaned op, or
     /// supervisor-driven GC).
     Orphaned,
+    /// The job was handed to a successor process image and keeps running
+    /// there; nothing about it ended.
+    HandedOver,
 }
 
 /// Runs one job to completion: pump the child's output into retention and (as
@@ -330,7 +465,7 @@ pub async fn run_job(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    spawn_stdin_writer(child.stdin.take(), stdin);
+    let stdin = StdinFeed::spawn(child.stdin.take(), stdin);
 
     let pump = Pump {
         retention: RetentionLog::with_budgets(
@@ -345,14 +480,16 @@ pub async fn run_job(
         watermark,
         collection_failure,
         exit_fence: None,
-        child,
+        exit_record: None,
+        child: Some(child),
         child_done: false,
         child_code: -1,
+        stdin,
         stdout,
         stderr,
-        stdout_hash: blake3::Hasher::new(),
+        stdout_hash: StreamDigest::default(),
         stdout_total: 0,
-        stderr_hash: blake3::Hasher::new(),
+        stderr_hash: StreamDigest::default(),
         stderr_total: 0,
         mailbox,
         mailbox_closed: false,
@@ -361,6 +498,7 @@ pub async fn run_job(
         started: Instant::now(),
         deadline,
         config,
+        spool_dir: spool_dir.clone(),
     };
     // Boxed: the pump future carries the read buffers' state machine and this
     // sits at a task's root, so one heap allocation per job is the right trade.
@@ -368,24 +506,280 @@ pub async fn run_job(
 
     // Op teardown removes the whole spool dir (retention.rs relies on this for
     // any segment an unlink failure leaked). Best-effort; absent dir is fine.
+    // A handed-over job exported its frames to a side file first.
     let _ = std::fs::remove_dir_all(&spool_dir);
     end
+}
+
+/// Everything needed to continue a job a predecessor process image handed
+/// over (see [`JobCommand::Handover`]).
+pub struct ResumeParams {
+    /// The pump state.
+    pub state: JobState,
+    /// The adopted exec, while the job still has live process parts.
+    pub child: Option<ContainedExec>,
+    /// Retention bounds for this op.
+    pub retention: RetentionConfig,
+    /// See [`JobParams::spool_budget`].
+    pub spool_budget: Arc<GlobalSpoolBudget>,
+    /// See [`JobParams::memory_budget`].
+    pub memory_budget: Arc<GlobalMemoryBudget>,
+    /// See [`JobParams::spool_dir`].
+    pub spool_dir: PathBuf,
+    /// Pump tuning.
+    pub config: JobConfig,
+    /// See [`JobParams::watermark`].
+    pub watermark: Arc<AtomicU64>,
+    /// See [`JobParams::collection_failure`].
+    pub collection_failure: Arc<OnceLock<JobFailure>>,
+}
+
+/// Continues a handed-over job exactly where its predecessor stopped: the
+/// same sequence numbers, retained frames, digests and deadline. The
+/// consumer re-attaches to resume the stream. A job that had already
+/// produced its terminal record goes straight back to lingering for
+/// collection; its `on_exit` already ran in the predecessor and is not
+/// called again.
+///
+/// # Errors
+///
+/// The carried state or frames could not be restored. The adopted exec is
+/// returned so the caller can end it; nothing was emitted.
+#[allow(clippy::result_large_err)] // a cold path; the caller kills the returned process
+pub async fn run_job_resumed(
+    params: ResumeParams,
+    mailbox: mpsc::Receiver<JobCommand>,
+    mut hooks: JobHooks,
+) -> Result<JobEnd, (Option<ContainedExec>, String)> {
+    let ResumeParams {
+        state,
+        mut child,
+        retention: retention_config,
+        spool_budget,
+        memory_budget,
+        spool_dir,
+        config,
+        watermark,
+        collection_failure,
+    } = params;
+    let restored = (|| -> Result<_, String> {
+        let stdout_hash = StreamDigest::from_state(&state.stdout)?;
+        let stderr_hash = StreamDigest::from_state(&state.stderr)?;
+        let exit = state.exit()?;
+        let stdin = state
+            .stdin
+            .as_deref()
+            .map(hex::decode)
+            .transpose()
+            .map_err(|error| format!("invalid carried stdin: {error}"))?;
+        // A predecessor's abandoned segments must not mix with the new log.
+        let _ = std::fs::remove_dir_all(&spool_dir);
+        let mut log = RetentionLog::resuming_after(
+            retention_config.clone(),
+            spool_dir.clone(),
+            memory_budget,
+            spool_budget,
+            state.floor,
+        );
+        import_frames(&state.frames, &mut log)?;
+        if log.high_seq() != state.high.max(state.floor) {
+            return Err(format!(
+                "carried frames end at {} but the stream was at {}",
+                log.high_seq(),
+                state.high
+            ));
+        }
+        Ok((stdout_hash, stderr_hash, exit, stdin, log))
+    })();
+    let _ = std::fs::remove_file(&state.frames);
+    let (stdout_hash, stderr_hash, exit, stdin, retention) = match restored {
+        Ok(restored) => restored,
+        Err(error) => return Err((child, error)),
+    };
+    watermark.store(retention.high_seq(), Ordering::Relaxed);
+    if let Some(failure) = state.collection_failure.clone() {
+        let _ = collection_failure.set(failure);
+    }
+    let (stdin_pipe, stdout, stderr) = match child.as_mut() {
+        Some(exec) => (exec.stdin.take(), exec.stdout.take(), exec.stderr.take()),
+        None => (None, None, None),
+    };
+    let now = Instant::now();
+    let lingering = exit.is_some();
+    if lingering {
+        // Its lifecycle hook already ran in the predecessor.
+        hooks.on_exit = None;
+    }
+    let pump = Pump {
+        retention,
+        retention_config,
+        flow: CreditFlow::resumed(state.generation),
+        hooks,
+        watermark,
+        collection_failure,
+        exit_fence: state.exit_fence,
+        exit_record: exit,
+        child,
+        child_done: state.child_done,
+        child_code: state.child_code,
+        stdin: StdinFeed::spawn(stdin_pipe, stdin.unwrap_or_default()),
+        stdout,
+        stderr,
+        stdout_hash,
+        stdout_total: state.stdout_total,
+        stderr_hash,
+        stderr_total: state.stderr_total,
+        mailbox,
+        mailbox_closed: false,
+        pending_outcome: state.pending_outcome,
+        final_acked: false,
+        started: now
+            .checked_sub(Duration::from_millis(state.elapsed_ms))
+            .unwrap_or(now),
+        deadline: state.deadline_ms.map(|ms| now + Duration::from_millis(ms)),
+        config,
+        spool_dir: spool_dir.clone(),
+    };
+    let end = if lingering {
+        Box::pin(pump.linger()).await
+    } else {
+        Box::pin(pump.run()).await
+    };
+    let _ = std::fs::remove_dir_all(&spool_dir);
+    Ok(end)
+}
+
+/// Frame kinds in a handover frames file.
+const FRAME_DATA: u8 = 0;
+const FRAME_PROGRESS: u8 = 1;
+const FRAME_EXIT: u8 = 2;
+
+fn channel_code(channel: Channel) -> u8 {
+    match channel {
+        Channel::Stdout => 0,
+        Channel::Stderr => 1,
+        Channel::Content => 2,
+    }
+}
+
+/// Writes one frame as `seq u64 | kind u8 | channel u8 | len u64 | bytes`
+/// (little-endian).
+fn write_frame(out: &mut impl std::io::Write, frame: &Frame) -> std::io::Result<()> {
+    let (kind, channel, bytes): (u8, u8, &[u8]) = match &frame.body {
+        FrameBody::Data { channel, bytes } => (FRAME_DATA, channel_code(*channel), bytes),
+        FrameBody::Progress => (FRAME_PROGRESS, 0, &[]),
+        FrameBody::Exit { payload } => (FRAME_EXIT, 0, payload),
+    };
+    out.write_all(&frame.seq.to_le_bytes())?;
+    out.write_all(&[kind, channel])?;
+    out.write_all(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes())?;
+    out.write_all(bytes)
+}
+
+/// Re-appends a handover frames file to `log`, checking that every frame
+/// keeps its original sequence number.
+fn import_frames(path: &std::path::Path, log: &mut RetentionLog) -> Result<(), String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("open carried frames {}: {error}", path.display()))?;
+    let mut input = std::io::BufReader::new(file);
+    loop {
+        let mut header = [0u8; 18];
+        match input.read_exact(&mut header[..1]) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(error) => return Err(format!("read carried frames: {error}")),
+        }
+        input
+            .read_exact(&mut header[1..])
+            .map_err(|error| format!("read carried frames: {error}"))?;
+        let seq = u64::from_le_bytes(header[0..8].try_into().expect("8 bytes"));
+        let (kind, channel) = (header[8], header[9]);
+        let len = usize::try_from(u64::from_le_bytes(
+            header[10..18].try_into().expect("8 bytes"),
+        ))
+        .map_err(|_| "carried frame too large".to_string())?;
+        let mut bytes = vec![0u8; len];
+        input
+            .read_exact(&mut bytes)
+            .map_err(|error| format!("read carried frames: {error}"))?;
+        let body = match (kind, channel) {
+            (FRAME_DATA, 0) => FrameBody::Data {
+                channel: Channel::Stdout,
+                bytes,
+            },
+            (FRAME_DATA, 1) => FrameBody::Data {
+                channel: Channel::Stderr,
+                bytes,
+            },
+            (FRAME_DATA, 2) => FrameBody::Data {
+                channel: Channel::Content,
+                bytes,
+            },
+            (FRAME_PROGRESS, _) => FrameBody::Progress,
+            (FRAME_EXIT, _) => FrameBody::Exit { payload: bytes },
+            _ => return Err(format!("unknown carried frame kind {kind}/{channel}")),
+        };
+        let assigned = log
+            .append(body)
+            .map_err(|error| format!("retain carried frame {seq}: {error}"))?;
+        if assigned != seq {
+            return Err(format!("carried frame {seq} was re-assigned {assigned}"));
+        }
+    }
 }
 
 /// Feeds the child's stdin from a buffer on a side task (writing inline could
 /// deadlock against a child that fills stdout before reading stdin), then
 /// closes the handle so the child sees EOF. An empty buffer closes immediately.
-fn spawn_stdin_writer(stdin: Option<tokio::process::ChildStdin>, bytes: Vec<u8>) {
-    let Some(mut stdin) = stdin else { return };
-    if bytes.is_empty() {
-        drop(stdin);
-        return;
+/// The feed can be reclaimed mid-write for a handover.
+struct StdinFeed {
+    reclaim: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<Option<(tokio::process::ChildStdin, Vec<u8>)>>,
+}
+
+impl StdinFeed {
+    fn spawn(stdin: Option<tokio::process::ChildStdin>, bytes: Vec<u8>) -> Option<Self> {
+        let mut stdin = stdin?;
+        if bytes.is_empty() {
+            drop(stdin);
+            return None;
+        }
+        let (reclaim, mut reclaimed) = oneshot::channel::<()>();
+        let task = opengeni_agent_platform::spawn_reserved(async move {
+            let mut written = 0;
+            let mut may_reclaim = true;
+            while written < bytes.len() {
+                tokio::select! {
+                    biased;
+                    claim = &mut reclaimed, if may_reclaim => {
+                        if claim.is_ok() {
+                            return Some((stdin, bytes[written..].to_vec()));
+                        }
+                        may_reclaim = false;
+                    }
+                    // `write` is cancel-safe: a write it did not finish wrote
+                    // nothing.
+                    result = stdin.write(&bytes[written..]) => match result {
+                        // A dead child (EPIPE) is the child's business; the
+                        // pump sees its exit.
+                        Ok(0) | Err(_) => return None,
+                        Ok(n) => written += n,
+                    },
+                }
+            }
+            let _ = stdin.shutdown().await;
+            None
+        });
+        Some(Self { reclaim, task })
     }
-    opengeni_agent_platform::spawn_reserved(async move {
-        // A dead child (EPIPE) is the child's business; the pump sees its exit.
-        let _ = stdin.write_all(&bytes).await;
-        let _ = stdin.shutdown().await;
-    });
+
+    /// Stops feeding and returns the pipe with the bytes not yet written, or
+    /// `None` once everything was written and the pipe closed.
+    async fn reclaim(self) -> Option<(tokio::process::ChildStdin, Vec<u8>)> {
+        let _ = self.reclaim.send(());
+        self.task.await.ok().flatten()
+    }
 }
 
 /// One pump-loop wakeup, produced by the select and handled with full `&mut`
@@ -417,16 +811,21 @@ struct Pump {
     /// could not be retained, the high watermark — everything retained). A
     /// final ack must reach it; set exactly once when the record is produced.
     exit_fence: Option<u64>,
-    child: ContainedExec,
+    /// The terminal record once produced (carried by a lingering handover).
+    exit_record: Option<(Option<u64>, JobExit)>,
+    /// `None` only after the exec was handed to a successor.
+    child: Option<ContainedExec>,
     child_done: bool,
     /// The child's exit code once `child_done` (`-1` for signal deaths,
     /// mirroring one-shot exec response semantics).
     child_code: i32,
+    /// The stdin feed while it is still writing.
+    stdin: Option<StdinFeed>,
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
-    stdout_hash: blake3::Hasher,
+    stdout_hash: StreamDigest,
     stdout_total: u64,
-    stderr_hash: blake3::Hasher,
+    stderr_hash: StreamDigest,
     stderr_total: u64,
     mailbox: mpsc::Receiver<JobCommand>,
     mailbox_closed: bool,
@@ -437,6 +836,8 @@ struct Pump {
     started: Instant,
     deadline: Option<Instant>,
     config: JobConfig,
+    /// The op's spool directory; a handover exports frames beside it.
+    spool_dir: PathBuf,
 }
 
 impl Pump {
@@ -458,7 +859,7 @@ impl Pump {
             let may_read = self.may_read();
             let event = tokio::select! {
                 cmd = self.mailbox.recv(), if !self.mailbox_closed => Event::Command(cmd),
-                status = wait_child(&mut self.child, self.child_done) => Event::ChildExit(status),
+                status = wait_child(self.child.as_mut(), self.child_done) => Event::ChildExit(status),
                 () = sleep_until_opt(self.deadline), if self.deadline.is_some()
                     && !self.child_done
                     && self.pending_outcome.is_none() => Event::Deadline,
@@ -476,6 +877,12 @@ impl Pump {
                     if !self.child_done && self.pending_outcome.is_none() {
                         self.pending_outcome = Some(JobOutcome::Cancelled);
                         self.terminate_child();
+                    }
+                }
+                #[cfg(unix)]
+                Event::Command(Some(JobCommand::Handover { reply })) => {
+                    if self.hand_over(reply).await {
+                        return JobEnd::HandedOver;
                     }
                 }
                 Event::Command(Some(cmd)) => self.handle_command(cmd),
@@ -562,14 +969,25 @@ impl Pump {
         if let Some(on_exit) = self.hooks.on_exit.take() {
             on_exit(exit_seq, &exit);
         }
+        self.exit_record = Some((exit_seq, exit));
+        self.linger().await
+    }
 
-        // Post-exit collection: replay/acks for the retained frames (incl. the
-        // Exit) until the consumer confirms full consumption. Errors here are
-        // logged, not fatal — the terminal record already exists.
+    /// Post-exit collection: replay/acks for the retained frames (incl. the
+    /// Exit) until the consumer confirms full consumption. Errors here are
+    /// logged, not fatal — the terminal record already exists.
+    async fn linger(mut self) -> JobEnd {
         while !self.final_acked && !self.mailbox_closed {
             let Some(cmd) = self.mailbox.recv().await else {
                 break;
             };
+            #[cfg(unix)]
+            if let JobCommand::Handover { reply } = cmd {
+                if self.hand_over(reply).await {
+                    return JobEnd::HandedOver;
+                }
+                continue;
+            }
             self.handle_command(cmd);
         }
         if self.final_acked {
@@ -637,9 +1055,139 @@ impl Pump {
                     self.terminate_child();
                 }
             }
+            // Needs the await-capable path in the loops above.
+            #[cfg(unix)]
+            JobCommand::Handover { reply } => {
+                let _ = reply.send(None);
+            }
             #[cfg(test)]
             JobCommand::Barrier { completed } => completed.notify_one(),
         }
+    }
+
+    /// Hands this job to a successor process image (see
+    /// [`JobCommand::Handover`]). Returns whether it was handed over; if not,
+    /// the job is exactly as it was and keeps running here.
+    #[cfg(unix)]
+    async fn hand_over(&mut self, reply: oneshot::Sender<Option<Box<JobHandover>>>) -> bool {
+        if self.pending_outcome.is_some() && !self.exited() {
+            // A decided ending is already killing the work; let it finish.
+            let _ = reply.send(None);
+            return false;
+        }
+        let frames = self.spool_dir.with_extension("handover");
+        if let Err(error) = self.export_frames(&frames) {
+            warn!(%error, "could not export a job's retained frames for handover; it keeps running here");
+            let _ = std::fs::remove_file(&frames);
+            let _ = reply.send(None);
+            return false;
+        }
+        let (stdin_pipe, stdin_remaining) = match self.stdin.take() {
+            Some(feed) => match feed.reclaim().await {
+                Some((pipe, remaining)) => (Some(pipe), Some(remaining)),
+                None => (None, None),
+            },
+            None => (None, None),
+        };
+        let exec = if self.exited() {
+            // Fully torn down: nothing of the process remains to carry.
+            self.child = None;
+            None
+        } else if let Some(mut exec) = self.child.take() {
+            exec.stdin = stdin_pipe;
+            exec.stdout = self.stdout.take();
+            exec.stderr = self.stderr.take();
+            match exec.into_handover() {
+                Ok(handover) => Some(handover),
+                Err((mut exec, error)) => {
+                    warn!(%error, "could not hand a job's process over; it keeps running here");
+                    self.stdout = exec.stdout.take();
+                    self.stderr = exec.stderr.take();
+                    self.stdin =
+                        StdinFeed::spawn(exec.stdin.take(), stdin_remaining.unwrap_or_default());
+                    self.child = Some(exec);
+                    let _ = std::fs::remove_file(&frames);
+                    let _ = reply.send(None);
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+        let carried_stdin = exec
+            .as_ref()
+            .and_then(|exec| exec.stdin_fd)
+            .and(stdin_remaining)
+            .map(hex::encode);
+        let state = JobState {
+            floor: self.retention.floor(),
+            high: self.retention.high_seq(),
+            generation: self.flow.generation(),
+            frames,
+            stdout: self.stdout_hash.state(),
+            stdout_total: self.stdout_total,
+            stderr: self.stderr_hash.state(),
+            stderr_total: self.stderr_total,
+            child_done: self.child_done,
+            child_code: self.child_code,
+            pending_outcome: self.pending_outcome.clone(),
+            elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            deadline_ms: self.deadline.map(|deadline| {
+                u64::try_from(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX)
+            }),
+            stdin: carried_stdin,
+            exit: self
+                .exit_record
+                .as_ref()
+                .map(|(seq, exit)| (*seq, exit.record())),
+            exit_fence: self.exit_fence,
+            collection_failure: self.collection_failure.get().cloned(),
+        };
+        if let Err(Some(handover)) = reply.send(Some(Box::new(JobHandover { exec, state }))) {
+            // Nobody took it: the agent is going down. Releasing the carried
+            // death lease makes the anchor end the operation, as for a crash.
+            warn!("a handed-over job was not taken; its operation ends");
+            if let Some(exec) = handover.exec {
+                opengeni_agent_platform::ExecHandover::abandon(&exec);
+            }
+            let _ = std::fs::remove_file(handover.state.frames);
+        }
+        true
+    }
+
+    /// Writes every retained frame `(floor, high]` to `path`, in order.
+    #[cfg(unix)]
+    fn export_frames(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        let mut out = std::io::BufWriter::new(file);
+        let mut from = self.retention.floor();
+        while from < self.retention.high_seq() {
+            let frames = self
+                .retention
+                .replay_bounded(from, 8 * 1024 * 1024)
+                .map_err(std::io::Error::other)?;
+            let Some(last) = frames.last().map(|frame| frame.seq) else {
+                break;
+            };
+            for frame in &frames {
+                write_frame(&mut out, frame)?;
+            }
+            from = last;
+        }
+        out.flush()?;
+        out.get_ref().sync_all()
     }
 
     /// Whether the terminal record has been produced (we are lingering).
@@ -832,7 +1380,10 @@ impl Pump {
 
     /// SIGKILLs the containment group (idempotent), logging a residual error.
     fn terminate_child(&mut self) {
-        if let Err(error) = self.child.terminate() {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if let Err(error) = child.terminate() {
             warn!(%error, "terminating the job's process group failed");
         }
     }
@@ -879,13 +1430,12 @@ where
 /// Waits for the direct child once; pends forever after it was reaped so the
 /// select arm never polls a finished wait.
 async fn wait_child(
-    child: &mut ContainedExec,
+    child: Option<&mut ContainedExec>,
     done: bool,
 ) -> std::io::Result<std::process::ExitStatus> {
-    if done {
-        std::future::pending().await
-    } else {
-        child.wait().await
+    match child {
+        Some(child) if !done => child.wait().await,
+        _ => std::future::pending().await,
     }
 }
 
@@ -1877,5 +2427,261 @@ mod tests {
 
         job.final_ack(1, exit_seq, 1 << 20).await;
         job.join().await;
+    }
+
+    /// Every output byte reconstructed from frames, deduplicated by seq.
+    fn channel_bytes(frames: &[Frame], wanted: Channel) -> Vec<u8> {
+        let mut by_seq = BTreeMap::new();
+        for frame in frames {
+            by_seq.insert(frame.seq, frame.body.clone());
+        }
+        let mut out = Vec::new();
+        for body in by_seq.values() {
+            if let FrameBody::Data { channel, bytes } = body {
+                if *channel == wanted {
+                    out.extend_from_slice(bytes);
+                }
+            }
+        }
+        out
+    }
+
+    /// A job handed over mid-stream (stdin still being fed, output still
+    /// coming, some frames unacknowledged) resumes in a successor pump with
+    /// the same sequence numbers and produces byte-exact output, digests and
+    /// its own exit code. The child is never restarted or signaled.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one linear mid-stream handover scenario
+    async fn a_job_handed_over_mid_stream_resumes_byte_exact() {
+        // More stdin than a pipe holds, so the feed is still writing at
+        // handover: the child echoes the first line, waits, then drains the rest.
+        let mut stdin = b"first\n".to_vec();
+        stdin.extend(std::iter::repeat_n(b'x', 256 * 1024));
+        let script = "read line; echo \"got $line\"; sleep 1; \
+            for i in $(seq 1 30); do echo \"line $i\"; echo \"err $i\" >&2; sleep 0.05; done; \
+            wc -c; exit 7";
+        let mut job = job(script).stdin(&stdin).start();
+        job.attach(1, 0, 1 << 20).await;
+        let first = job.next_frame().await;
+        assert_eq!(
+            first.body,
+            FrameBody::Data {
+                channel: Channel::Stdout,
+                bytes: b"got first\n".to_vec()
+            }
+        );
+        // Wait for some more output, acknowledge only the first frame.
+        job.wait_for_watermark_at_least(4).await;
+        job.ack(1, first.seq, 1 << 20).await;
+        let mut seen = vec![first.clone()];
+        while let Ok(Some(frame)) = timeout(Duration::from_millis(50), job.frames.recv()).await {
+            seen.push(frame);
+        }
+
+        let (reply, receipt) = oneshot::channel();
+        job.send(JobCommand::Handover { reply }).await;
+        let handover = timeout(WAIT, receipt)
+            .await
+            .expect("handover reply")
+            .expect("pump answered")
+            .expect("job handed over");
+        assert_eq!(
+            timeout(WAIT, &mut job.task)
+                .await
+                .expect("pump ends")
+                .unwrap(),
+            JobEnd::HandedOver
+        );
+        let exec = handover.exec.clone().expect("live process parts");
+        assert!(exec.running, "the child keeps running across the handover");
+        assert!(
+            exec.stdin_fd.is_some()
+                && handover
+                    .state
+                    .stdin
+                    .as_ref()
+                    .is_some_and(|rest| !rest.is_empty()),
+            "the stdin feed is carried mid-write"
+        );
+        // The carried state survives serialization, as through a manifest.
+        let handover: JobHandover =
+            serde_json::from_str(&serde_json::to_string(&handover).unwrap()).unwrap();
+
+        let child = opengeni_agent_platform::ContainedExec::adopt(&exec, None).expect("adopt");
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (frame_tx, mut frames) = mpsc::unbounded_channel();
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let hooks = JobHooks::new(
+            move |frame| {
+                let _ = frame_tx.send(frame);
+            },
+            |exit| format!("{exit:?}").into_bytes(),
+            move |exit_seq, exit: &JobExit| {
+                let _ = exit_tx.send((exit_seq, exit.clone()));
+            },
+        );
+        let params = ResumeParams {
+            state: handover.state,
+            child: Some(child),
+            retention: RetentionConfig::default(),
+            spool_budget: Arc::new(GlobalSpoolBudget::unlimited()),
+            memory_budget: Arc::new(GlobalMemoryBudget::unlimited()),
+            spool_dir: job.dir.path().join("spool"),
+            config: JobConfig::default(),
+            watermark: Arc::new(AtomicU64::new(0)),
+            collection_failure: Arc::new(OnceLock::new()),
+        };
+        let resumed = tokio::spawn(async move {
+            run_job_resumed(params, cmd_rx, hooks)
+                .await
+                .map_err(|(_, error)| error)
+        });
+        // The old consumer generation is fenced; a newer one resumes after
+        // what it acknowledged.
+        cmd_tx
+            .send(JobCommand::Attach {
+                generation: 2,
+                from_seq: first.seq,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .unwrap();
+        let mut replayed = Vec::new();
+        loop {
+            let frame = timeout(WAIT, frames.recv())
+                .await
+                .expect("frame")
+                .expect("open");
+            let done = frame.body.is_exit();
+            replayed.push(frame);
+            if done {
+                break;
+            }
+        }
+        assert_eq!(
+            replayed[0].seq,
+            first.seq + 1,
+            "replay continues the same sequence"
+        );
+        for frame in &seen[1..] {
+            assert!(
+                replayed.iter().any(|again| again == frame),
+                "an unacknowledged frame is replayed unchanged"
+            );
+        }
+        let (exit_seq, exit) = timeout(WAIT, exit_rx).await.expect("exit").unwrap();
+        assert_eq!(exit_seq, Some(replayed.last().unwrap().seq));
+        assert_eq!(exit.outcome, JobOutcome::Exited { exit_code: 7 });
+
+        let mut all = vec![first];
+        all.extend(replayed);
+        let stdout = channel_bytes(&all, Channel::Stdout);
+        let stderr = channel_bytes(&all, Channel::Stderr);
+        let mut expected_out = b"got first\n".to_vec();
+        let mut expected_err = Vec::new();
+        for i in 1..=30 {
+            expected_out.extend(format!("line {i}\n").bytes());
+            expected_err.extend(format!("err {i}\n").bytes());
+        }
+        // `wc -c` saw every remaining stdin byte exactly once.
+        let rest = stdin.len() - b"first\n".len();
+        let tail = String::from_utf8(stdout[expected_out.len()..].to_vec()).unwrap();
+        assert_eq!(tail.trim(), rest.to_string());
+        assert_eq!(&stdout[..expected_out.len()], &expected_out[..]);
+        assert_eq!(stderr, expected_err);
+        assert_eq!(exit.stdout.total_bytes, stdout.len() as u64);
+        assert_eq!(exit.stdout.digest, blake3::hash(&stdout));
+        assert_eq!(exit.stderr.digest, blake3::hash(&stderr));
+
+        cmd_tx
+            .send(JobCommand::Ack {
+                generation: 2,
+                acked_seq: exit_seq.unwrap(),
+                credit_bytes: 1 << 20,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(WAIT, resumed).await.unwrap().unwrap().unwrap(),
+            JobEnd::FinalAcked
+        );
+    }
+
+    /// A completed job lingering for collection is handed over without any
+    /// process parts and keeps serving its retained result.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lingering_job_hands_over_its_result() {
+        let mut job = job("echo done; exit 3").start();
+        let (exit_seq, exit) = job.wait_exit().await;
+        let exit_seq = exit_seq.expect("exit retained");
+        let (reply, receipt) = oneshot::channel();
+        job.send(JobCommand::Handover { reply }).await;
+        let handover = timeout(WAIT, receipt).await.unwrap().unwrap().unwrap();
+        assert!(handover.exec.is_none());
+        assert_eq!(
+            handover
+                .state
+                .exit()
+                .unwrap()
+                .map(|(seq, exit)| (seq, exit.outcome)),
+            Some((Some(exit_seq), exit.outcome))
+        );
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (frame_tx, mut frames) = mpsc::unbounded_channel();
+        let hooks = JobHooks::new(
+            move |frame| {
+                let _ = frame_tx.send(frame);
+            },
+            |exit| format!("{exit:?}").into_bytes(),
+            |_, _| panic!("a lingering job's lifecycle hook already ran"),
+        );
+        let params = ResumeParams {
+            state: handover.state,
+            child: None,
+            retention: RetentionConfig::default(),
+            spool_budget: Arc::new(GlobalSpoolBudget::unlimited()),
+            memory_budget: Arc::new(GlobalMemoryBudget::unlimited()),
+            spool_dir: job.dir.path().join("spool"),
+            config: JobConfig::default(),
+            watermark: Arc::new(AtomicU64::new(0)),
+            collection_failure: Arc::new(OnceLock::new()),
+        };
+        let resumed = tokio::spawn(run_job_resumed(params, cmd_rx, hooks));
+        cmd_tx
+            .send(JobCommand::Attach {
+                generation: 2,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .unwrap();
+        let mut replayed = Vec::new();
+        loop {
+            let frame = timeout(WAIT, frames.recv()).await.unwrap().unwrap();
+            let done = frame.body.is_exit();
+            replayed.push(frame);
+            if done {
+                break;
+            }
+        }
+        assert_eq!(channel_bytes(&replayed, Channel::Stdout), b"done\n");
+        assert_eq!(replayed.last().unwrap().seq, exit_seq);
+        cmd_tx
+            .send(JobCommand::Ack {
+                generation: 2,
+                acked_seq: exit_seq,
+                credit_bytes: 1 << 20,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(WAIT, resumed).await.unwrap().unwrap(),
+            Ok(JobEnd::FinalAcked)
+        ));
     }
 }

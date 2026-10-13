@@ -2,6 +2,7 @@
 //! Reserve before spawning: an unpolled task must already prevent an idle proof.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -36,6 +37,9 @@ struct State {
     sealed: bool,
     unsettled: bool,
     routed: usize,
+    /// Routed reservations owned by jobs an in-place update can hand to its
+    /// successor process image.
+    handover: usize,
     uploads: HashSet<UploadIdentity>,
 }
 
@@ -57,6 +61,8 @@ pub enum UpdateReservation {
 pub struct Snapshot {
     /// Request/pump/physical/reply ownership, counted once per admitted request.
     pub routed: usize,
+    /// The part of `routed` owned by jobs an update can hand over.
+    pub handover: usize,
     /// Upload lifetimes independently retained between transaction requests.
     pub uploads: usize,
 }
@@ -195,6 +201,7 @@ impl UpdateDrain {
             drain: self.clone(),
             upload: false,
             identity,
+            handover: AtomicBool::new(false),
         })))
     }
 
@@ -206,6 +213,7 @@ impl UpdateDrain {
             .filter(|state| !state.unsettled)
             .map(|state| Snapshot {
                 routed: state.routed,
+                handover: state.handover,
                 uploads: state.uploads.len(),
             })
     }
@@ -222,18 +230,31 @@ impl UpdateDrain {
             drain: self.clone(),
             upload: false,
             identity: None,
+            handover: AtomicBool::new(false),
         })))
     }
 
     /// Called only after engine and controller idle proofs. Controls admitted
     /// during either proof invalidate this final check rather than racing apply.
     pub fn seal_update(&self, operation: &str) -> bool {
+        self.seal(operation, false)
+    }
+
+    /// Like [`Self::seal_update`], for an update that hands running jobs to
+    /// its successor: their own reservations do not hold it back, anything
+    /// else still does.
+    pub fn seal_update_with_handover(&self, operation: &str) -> bool {
+        self.seal(operation, true)
+    }
+
+    fn seal(&self, operation: &str, handover: bool) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
+        let excused = if handover { state.handover } else { 0 };
         if state.operation.as_deref() != Some(operation)
             || state.unsettled
-            || state.routed != 0
+            || state.routed != excused
             || !state.uploads.is_empty()
         {
             return false;
@@ -259,6 +280,18 @@ impl WorkReservation {
     pub fn mark_unsettled(&self) {
         self.0.drain.mark_unsettled();
     }
+
+    /// Marks this routed reservation as owned by a job an in-place update can
+    /// hand to its successor, so it no longer holds such an update back.
+    pub fn mark_handover(&self) {
+        if self.0.upload || self.0.handover.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Ok(mut state) = self.0.drain.state.lock() {
+            state.handover += 1;
+        }
+    }
+
     /// The begin RPC remains reserved while an accepted upload takes ownership.
     /// # Panics
     /// Panics if called without an admitted, registered upload identity.
@@ -277,6 +310,7 @@ impl WorkReservation {
         );
         Self(Arc::new(Reservation {
             drain: self.0.drain.clone(),
+            handover: AtomicBool::new(false),
             upload: true,
             identity: Some(identity),
         }))
@@ -287,6 +321,7 @@ struct Reservation {
     drain: Arc<UpdateDrain>,
     upload: bool,
     identity: Option<UploadIdentity>,
+    handover: AtomicBool,
 }
 
 impl Drop for Reservation {
@@ -298,6 +333,9 @@ impl Drop for Reservation {
                 .remove(self.identity.as_ref().expect("upload identity"));
         } else {
             state.routed -= 1;
+            if self.handover.load(Ordering::Acquire) {
+                state.handover -= 1;
+            }
         }
     }
 }
@@ -319,6 +357,34 @@ mod tests {
         assert!(drain.reserve_control().is_none());
         drain.release_update("one");
         assert!(drain.reserve_control().is_some());
+    }
+
+    #[test]
+    fn only_handover_capable_jobs_are_excused_from_a_handover_seal() {
+        let drain = Arc::new(UpdateDrain::default());
+        let job = drain.reserve_work(None).unwrap();
+        assert_eq!(drain.reserve_update("one"), UpdateReservation::Started);
+        // An ordinary update waits for every routed reservation.
+        assert!(!drain.seal_update_with_handover("one"));
+        job.mark_handover();
+        // Marking twice (clones share one reservation) counts once.
+        job.clone().mark_handover();
+        assert_eq!(drain.snapshot().unwrap().handover, 1);
+        assert!(!drain.seal_update("one"));
+        let control = drain.reserve_control().unwrap();
+        assert!(!drain.seal_update_with_handover("one"));
+        drop(control);
+        assert!(drain.seal_update_with_handover("one"));
+        assert!(drain.reserve_control().is_none());
+        drop(job);
+        assert_eq!(
+            drain.snapshot().unwrap(),
+            Snapshot {
+                routed: 0,
+                handover: 0,
+                uploads: 0
+            }
+        );
     }
 
     #[test]
@@ -400,6 +466,7 @@ mod tests {
             drain.snapshot().unwrap(),
             Snapshot {
                 routed: 0,
+                handover: 0,
                 uploads: 1
             }
         );
@@ -420,6 +487,7 @@ mod tests {
             drain.snapshot().unwrap(),
             Snapshot {
                 routed: 0,
+                handover: 0,
                 uploads: 0
             }
         );
