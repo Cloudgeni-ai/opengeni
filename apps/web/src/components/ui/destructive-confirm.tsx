@@ -45,15 +45,25 @@ export type DependencyKind =
   | "api-key"
   | "person";
 
-const DEPENDENCY_ICON: Record<DependencyKind, LucideIcon> = {
-  schedule: CalendarClockIcon,
-  chat: MessageSquareIcon,
-  environment: BoxIcon,
-  workspace: FolderIcon,
-  "variable-set": KeyRoundIcon,
-  "api-key": KeyRoundIcon,
-  person: UserIcon,
-};
+// Resolved at render, not in a module-level table: the icons can live in a
+// chunk that loads after this one, and a table would capture undefined.
+function dependencyIcon(kind: DependencyKind): LucideIcon {
+  switch (kind) {
+    case "schedule":
+      return CalendarClockIcon;
+    case "chat":
+      return MessageSquareIcon;
+    case "environment":
+      return BoxIcon;
+    case "workspace":
+      return FolderIcon;
+    case "variable-set":
+    case "api-key":
+      return KeyRoundIcon;
+    case "person":
+      return UserIcon;
+  }
+}
 
 export interface ConfirmDependency {
   id: string;
@@ -129,7 +139,7 @@ function DependencyList({
       </h3>
       <ul className="mt-2 -mx-2 flex min-w-0 flex-col">
         {dependencies.map((dependency) => {
-          const Icon = DEPENDENCY_ICON[dependency.kind];
+          const Icon = dependencyIcon(dependency.kind);
           const content = (
             <>
               <span className="grid size-8 shrink-0 place-items-center rounded-md border border-border bg-surface-2 text-fg-muted">

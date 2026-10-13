@@ -7,6 +7,7 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { compactProtectedIndexHtml } from "./vite-index-html";
+import { chunkEvaluationOrderPlugin } from "./vite-chunk-evaluation-order";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -47,6 +48,16 @@ export default defineConfig({
               // merging cannot place it behind a reciprocal session chunk.
               name: "session-status-model",
               test: /packages[\\/]react[\\/]src[\\/]session-status-model\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // The usage meter and limit notice spread these default words
+              // into their own defaults at module load. They are dependency-
+              // free; keep them in a leaf chunk so the session chunks that
+              // import each other cannot run those defaults first.
+              name: "usage-allowance-copy",
+              test: /packages[\\/]react[\\/]src[\\/]usage[\\/]allowance-copy\.ts$/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -551,6 +562,7 @@ export default defineConfig({
     viteReact(),
     tailwindcss(),
     safeReactHmrPlugin(),
+    chunkEvaluationOrderPlugin(),
     {
       name: "opengeni-browser-extension-archive",
       configureServer(server) {
