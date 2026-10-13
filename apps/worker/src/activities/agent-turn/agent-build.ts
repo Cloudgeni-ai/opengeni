@@ -800,7 +800,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           // the initiating human, else a subject initiator.
           hasActingHuman: Boolean(
             turn.initiatingHumanSubjectId ??
-            (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null),
+            (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null),
           ),
           validateQuestionVault: attemptQuestionVaultValidator({
             db,
