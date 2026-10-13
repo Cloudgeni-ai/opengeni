@@ -223,6 +223,34 @@ export type InstallOnePasswordResponse = {
   vaults: ProviderVaultMeta[];
 };
 
+/** A 1Password service account connected in a workspace. Never carries the token. */
+export type OnePasswordConnectionSummary = {
+  id: string;
+  /** Who can use the vaults linked through it. */
+  ownership: "user" | "workspace" | "organization";
+  /** Sign-in host from the token, for example "my.1password.com". */
+  accountName: string | null;
+  label: string | null;
+  planTier: OnePasswordPlanTier;
+  /** When the current token was last checked against 1Password. */
+  verifiedAt: string;
+  createdAt: string;
+  createdBySubjectId: string | null;
+  /** The caller can link vaults, replace the token and disconnect it. */
+  canManage: boolean;
+};
+
+/** A new token for an existing connection; its linked vaults keep working. */
+export type ReplaceOnePasswordTokenRequest = {
+  token: string;
+  planTier?: OnePasswordPlanTier | undefined;
+};
+
+export type DisconnectOnePasswordResponse = {
+  /** The Opengeni vaults that were unlinked. Nothing is deleted in 1Password. */
+  unlinkedVaultIds: string[];
+};
+
 export type LinkProviderVaultRequest = {
   provider: "onepassword" | "host";
   connectionId?: string | undefined;

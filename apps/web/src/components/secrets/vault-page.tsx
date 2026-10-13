@@ -101,6 +101,7 @@ export function VaultPage({
   showArchived,
   onShowArchivedChange,
   canManageAvailability,
+  providerAccount,
   actions,
 }: {
   vault: VaultSummary;
@@ -111,6 +112,8 @@ export function VaultPage({
   showArchived: boolean;
   onShowArchivedChange: (value: boolean) => void;
   canManageAvailability: boolean;
+  /** The 1Password account a linked vault comes from; opens its connection page. */
+  providerAccount?: { name: string; onOpen: () => void } | null | undefined;
   actions: VaultPageActions;
 }) {
   const [query, setQuery] = useState("");
@@ -312,7 +315,11 @@ export function VaultPage({
                     ) : undefined
                   }
                   cells={{
-                    used: item.lastUsedAt ? <RelativeTime date={item.lastUsedAt} /> : null,
+                    used: item.lastUsedAt ? (
+                      <RelativeTime date={item.lastUsedAt} />
+                    ) : (
+                      <span className="text-fg-subtle">Never</span>
+                    ),
                     updated: <RelativeTime date={item.updatedAt} />,
                   }}
                   indicator="open"
@@ -340,6 +347,20 @@ export function VaultPage({
         meta={[
           <span key="count">{itemsLabel(vault.itemCount)}</span>,
           <span key="audience">{vaultAudience(vault, organizationName)}</span>,
+          ...(providerAccount
+            ? [
+                <span key="account">
+                  from{" "}
+                  <button
+                    type="button"
+                    onClick={providerAccount.onOpen}
+                    className="rounded-sm font-medium og-link outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+                  >
+                    {providerAccount.name}
+                  </button>
+                </span>,
+              ]
+            : []),
           <span key="updated">
             updated <RelativeTime date={vault.updatedAt} inSentence />
           </span>,

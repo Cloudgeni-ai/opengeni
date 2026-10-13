@@ -432,6 +432,44 @@ export const InstallOnePasswordResponse = z.object({
 });
 export type InstallOnePasswordResponse = z.infer<typeof InstallOnePasswordResponse>;
 
+/** A 1Password service account connected in a workspace. Never carries the token. */
+export const OnePasswordConnectionSummary = z.object({
+  id: z.string().uuid(),
+  /** Who can use the vaults linked through it. */
+  ownership: z.enum(["user", "workspace", "organization"]),
+  /** Sign-in host from the token, for example "my.1password.com". */
+  accountName: z.string().nullable(),
+  label: z.string().nullable(),
+  planTier: z.enum(["family", "teams", "business"]),
+  /** When the current token was last checked against 1Password. */
+  verifiedAt: z.string(),
+  createdAt: z.string(),
+  createdBySubjectId: z.string().nullable(),
+  /** The caller can link vaults, replace the token and disconnect it. */
+  canManage: z.boolean(),
+});
+export type OnePasswordConnectionSummary = z.infer<typeof OnePasswordConnectionSummary>;
+
+export const ListOnePasswordConnectionsResponse = z.object({
+  connections: z.array(OnePasswordConnectionSummary),
+});
+export type ListOnePasswordConnectionsResponse = z.infer<typeof ListOnePasswordConnectionsResponse>;
+
+/** A new token for an existing connection; its linked vaults keep working. */
+export const ReplaceOnePasswordTokenRequest = z
+  .object({
+    token: z.string().trim().min(16).max(4_096),
+    planTier: z.enum(["family", "teams", "business"]).optional(),
+  })
+  .strict();
+export type ReplaceOnePasswordTokenRequest = z.infer<typeof ReplaceOnePasswordTokenRequest>;
+
+export const DisconnectOnePasswordResponse = z.object({
+  /** The Opengeni vaults that were unlinked. Nothing is deleted in 1Password. */
+  unlinkedVaultIds: z.array(z.string().uuid()),
+});
+export type DisconnectOnePasswordResponse = z.infer<typeof DisconnectOnePasswordResponse>;
+
 export const LinkProviderVaultRequest = z
   .object({
     provider: z.enum(["onepassword", "host"]),

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type { VaultErrorCode, VaultSummary } from "@opengeni/react";
 import {
+  connectionAttention,
   expiryLabel,
   expiryState,
   groupVaults,
@@ -11,6 +12,7 @@ import {
   secretsOffIn,
   syncLabel,
   vaultErrorText,
+  vaultsOfConnection,
 } from "./vault-model";
 import { draftSecretsRows, sessionSecretsSummary } from "./session-secrets-panel";
 import { scheduleSecretsSummary } from "./schedule-secrets-field";
@@ -57,21 +59,40 @@ function vaultApiError(status: number, code: VaultErrorCode, details?: Record<st
 }
 
 describe("vault list grouping", () => {
-  test("groups by owner, puts managers last, the default first, then by name, and hides task vaults", () => {
+  test("groups by owner whatever the source, the default first, then by name, and hides task vaults", () => {
     const groups = groupVaults([
       vault({ name: "Zeta", ownerKind: "workspace" }),
       vault({ name: "Alpha", ownerKind: "workspace" }),
       vault({ name: "Shared", ownerKind: "workspace", isDefault: true }),
       vault({ name: "Mine", ownerKind: "user" }),
+      vault({ name: "My 1P", ownerKind: "user", source: "onepassword" }),
       vault({ name: "Org", ownerKind: "organization" }),
       vault({ name: "1P", ownerKind: "workspace", source: "onepassword" }),
       vault({ name: "Task", ownerKind: "task" }),
     ]);
     expect(groups.map((group) => [group.id, group.vaults.map((each) => each.name)])).toEqual([
-      ["user", ["Mine"]],
-      ["workspace", ["Shared", "Alpha", "Org", "Zeta"]],
-      ["managers", ["1P"]],
+      ["user", ["Mine", "My 1P"]],
+      ["workspace", ["Shared", "1P", "Alpha", "Org", "Zeta"]],
     ]);
+  });
+
+  test("a connection's vaults and what it needs", () => {
+    const connectionId = "00000000-0000-4000-8000-0000000000c1";
+    const linked = [
+      vault({ name: "B", source: "onepassword", providerConnectionId: connectionId }),
+      vault({ name: "A", source: "onepassword", providerConnectionId: connectionId }),
+      vault({ name: "Other", source: "onepassword" }),
+      vault({ name: "Mine" }),
+    ];
+    const ofConnection = vaultsOfConnection(linked, connectionId);
+    expect(ofConnection.map((each) => each.name)).toEqual(["A", "B"]);
+    expect(connectionAttention(ofConnection)).toBeNull();
+    expect(connectionAttention([...ofConnection, vault({ syncStatus: "error" })])).toBe(
+      "sync_failed",
+    );
+    expect(
+      connectionAttention([vault({ syncStatus: "error" }), vault({ syncStatus: "auth_expired" })]),
+    ).toBe("token_expired");
   });
 
   test("an empty list has no groups and item counts read naturally", () => {

@@ -244,6 +244,9 @@ function routes(state: MockState): Route[] {
           itemCount: 4,
         };
         state.vaults.push(created);
+        if (body.connectionId) {
+          state.links[`${body.connectionId}/${body.externalVaultId}`] = created.id;
+        }
         return json(201, visibleVault(created));
       },
     },
@@ -580,37 +583,84 @@ function routes(state: MockState): Route[] {
   return [
     ...first,
     {
+      method: "GET",
+      pattern: /\/connections\/1password\/service-accounts$/,
+      handle: () => json(200, { connections: scenarios().has("empty") ? [] : state.connections }),
+    },
+    {
       method: "POST",
       pattern: /\/connections\/1password\/install$/,
       handle: (_m, body) => {
-        const token = String(body.token ?? "");
-        if (token.includes("invalid"))
-          return fail(400, "provider_auth_invalid", "Invalid service account token.");
-        if (token.includes("expired")) return fail(401, "provider_auth_expired", "Token expired.");
-        if (token.includes("rate"))
-          return fail(429, "provider_rate_limited", "Rate limited.", {
-            retryAt: new Date(MOCK_NOW + 20 * 60_000).toISOString(),
-          });
-        return json(201, {
-          connectionId: mockId("op-connection"),
-          accountName: "Acme (acme.1password.com)",
-          vaults: [
-            { externalVaultId: "op-eng", name: "Engineering", itemCount: 42, linkedVaultId: null },
-            { externalVaultId: "op-mkt", name: "Marketing", itemCount: 7, linkedVaultId: null },
-          ],
+        const rejected = tokenFailure(String(body.token ?? ""));
+        if (rejected) return rejected;
+        const connectionId = mockId(`op-connection-${state.connections.length}`);
+        const accountName = body.ownership === "user" ? "my.1password.com" : "acme.1password.com";
+        state.connections.push({
+          id: connectionId,
+          ownership: body.ownership,
+          accountName,
+          label: null,
+          planTier: body.planTier ?? "business",
+          verifiedAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          createdBySubjectId: null,
+          canManage: true,
         });
+        state.providerVaults[connectionId] = [
+          { externalVaultId: "op-eng-new", name: "Engineering", itemCount: 42 },
+          { externalVaultId: "op-mkt-new", name: "Marketing", itemCount: 7 },
+        ];
+        return json(201, { connectionId, accountName, vaults: providerVaultsOf(connectionId) });
+      },
+    },
+    {
+      method: "PUT",
+      pattern: /\/connections\/([^/]+)\/1password\/token$/,
+      handle: (match, body) => {
+        const connection = state.connections.find((each) => each.id === match[1]);
+        if (!connection) return fail(404, "not_found", "Connection not found.");
+        const token = String(body.token ?? "");
+        const rejected = tokenFailure(token);
+        if (rejected) return rejected;
+        if (token.includes("other"))
+          return fail(
+            409,
+            "provider_conflict",
+            `This token is for other.1password.com, not ${connection.accountName}. Connect it as another 1Password account instead.`,
+          );
+        connection.verifiedAt = new Date().toISOString();
+        if (body.planTier) connection.planTier = body.planTier;
+        for (const each of state.vaults) {
+          if (each.providerConnectionId !== connection.id) continue;
+          each.syncStatus = "ok";
+          each.syncErrorCode = null;
+          each.syncErrorMessage = null;
+          each.lastSyncedAt = new Date().toISOString();
+        }
+        return json(200, {
+          connectionId: connection.id,
+          accountName: connection.accountName,
+          vaults: providerVaultsOf(connection.id),
+        });
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: /\/connections\/([^/]+)\/1password$/,
+      handle: (match) => {
+        const connectionId = match[1]!;
+        if (!state.connections.some((each) => each.id === connectionId))
+          return fail(404, "not_found", "Connection not found.");
+        const unlinked = state.vaults.filter((each) => each.providerConnectionId === connectionId);
+        state.vaults = state.vaults.filter((each) => each.providerConnectionId !== connectionId);
+        state.connections = state.connections.filter((each) => each.id !== connectionId);
+        return json(200, { unlinkedVaultIds: unlinked.map((each) => each.id) });
       },
     },
     {
       method: "GET",
       pattern: /\/connections\/([^/]+)\/provider-vaults$/,
-      handle: () =>
-        json(200, {
-          vaults: [
-            { externalVaultId: "op-eng", name: "Engineering", itemCount: 42, linkedVaultId: null },
-            { externalVaultId: "op-mkt", name: "Marketing", itemCount: 7, linkedVaultId: null },
-          ],
-        }),
+      handle: (match) => json(200, { vaults: providerVaultsOf(match[1]!) }),
     },
     {
       method: "POST",
@@ -634,12 +684,34 @@ function routes(state: MockState): Route[] {
       },
     },
   ];
+
+  function providerVaultsOf(connectionId: string) {
+    return (state.providerVaults[connectionId] ?? []).map((each) => {
+      const linked = state.links[`${connectionId}/${each.externalVaultId}`];
+      return {
+        ...each,
+        linkedVaultId: linked && state.vaults.some((vault) => vault.id === linked) ? linked : null,
+      };
+    });
+  }
+}
+
+/** Fake tokens: "invalid", "expired" or "rate" in the token fail the way 1Password would. */
+function tokenFailure(token: string): Response | null {
+  if (token.includes("invalid"))
+    return fail(400, "provider_auth_invalid", "Invalid service account token.");
+  if (token.includes("expired")) return fail(401, "provider_auth_expired", "Token expired.");
+  if (token.includes("rate"))
+    return fail(429, "provider_rate_limited", "Rate limited.", {
+      retryAt: new Date(MOCK_NOW + 20 * 60_000).toISOString(),
+    });
+  return null;
 }
 
 const WORKSPACE_PATH = /\/v1\/workspaces\/([^/]+)(\/.*)$/;
 const WORKSPACE_READ = /\/v1\/workspaces(\/[^/]+)?$/;
 const OWNED =
-  /^\/(vaults(\/|$)|sessions\/[^/]+\/(secrets|vault-policy)$|connections\/(1password\/install|[^/]+\/(provider-vaults|managed-vaults))$)/;
+  /^\/(vaults(\/|$)|sessions\/[^/]+\/(secrets|vault-policy)$|connections\/(1password\/(install|service-accounts)|[^/]+\/(provider-vaults|managed-vaults|1password|1password\/token))$)/;
 
 /** "capability-off": the workspace's default agent has Secrets switched off. */
 function withSecretsOff(workspace: unknown): unknown {

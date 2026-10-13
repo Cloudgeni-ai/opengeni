@@ -29,6 +29,8 @@ assert<Equal<R.RevealVaultFieldResponse, C.RevealVaultFieldResponse>>();
 assert<Equal<R.SessionSecretsView, C.SessionSecretsView>>();
 assert<Equal<R.ProviderVaultMeta, C.ProviderVaultMeta>>();
 assert<Equal<R.InstallOnePasswordResponse, C.InstallOnePasswordResponse>>();
+assert<Equal<R.OnePasswordConnectionSummary, C.OnePasswordConnectionSummary>>();
+assert<Equal<R.DisconnectOnePasswordResponse, C.DisconnectOnePasswordResponse>>();
 assert<Equal<R.VaultOwnerKind, C.VaultOwnerKind>>();
 assert<Equal<R.VaultSyncStatus, C.VaultSyncStatus>>();
 assert<Equal<R.VaultItemType, C.VaultItemType>>();
@@ -43,6 +45,9 @@ assert<Assignable<R.UpdateVaultItemRequest, z.input<typeof C.UpdateVaultItemRequ
 assert<Assignable<R.MoveVaultItemRequest, z.input<typeof C.MoveVaultItemRequest>>>();
 assert<Assignable<R.InstallOnePasswordRequest, z.input<typeof C.InstallOnePasswordRequest>>>();
 assert<Assignable<R.LinkProviderVaultRequest, z.input<typeof C.LinkProviderVaultRequest>>>();
+assert<
+  Assignable<R.ReplaceOnePasswordTokenRequest, z.input<typeof C.ReplaceOnePasswordTokenRequest>>
+>();
 assert<
   Assignable<
     R.CreateManagedProviderVaultRequest,

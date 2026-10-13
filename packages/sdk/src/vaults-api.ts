@@ -4,12 +4,15 @@ import type {
   CreateManagedProviderVaultRequest,
   CreateVaultItemRequest,
   CreateVaultRequest,
+  DisconnectOnePasswordResponse,
   InstallOnePasswordRequest,
   InstallOnePasswordResponse,
   LinkProviderVaultRequest,
   ListVaultItemsQuery,
   MoveVaultItemRequest,
+  OnePasswordConnectionSummary,
   ProviderVaultMeta,
+  ReplaceOnePasswordTokenRequest,
   RevealVaultFieldResponse,
   SessionSecretsView,
   UpdateVaultItemRequest,
@@ -158,6 +161,30 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
       }),
     installOnePassword: (request: InstallOnePasswordRequest) =>
       json<InstallOnePasswordResponse>("POST", `${base}/connections/1password/install`, request),
+    /** The 1Password connections the caller can see. */
+    listOnePasswordConnections: async (signal?: AbortSignal) =>
+      (
+        await json<{ connections: OnePasswordConnectionSummary[] }>(
+          "GET",
+          `${base}/connections/1password/service-accounts`,
+          undefined,
+          {},
+          signal,
+        )
+      ).connections,
+    /** Checks a new service account token and stores it on the same connection. */
+    replaceOnePasswordToken: (connectionId: string, request: ReplaceOnePasswordTokenRequest) =>
+      json<InstallOnePasswordResponse>(
+        "PUT",
+        `${base}/connections/${enc(connectionId)}/1password/token`,
+        request,
+      ),
+    /** Unlinks the connection's vaults (nothing is deleted in 1Password) and removes its token. */
+    disconnectOnePassword: (connectionId: string) =>
+      json<DisconnectOnePasswordResponse>(
+        "DELETE",
+        `${base}/connections/${enc(connectionId)}/1password`,
+      ),
     listProviderVaults: async (connectionId: string, signal?: AbortSignal) =>
       (
         await json<{ vaults: ProviderVaultMeta[] }>(

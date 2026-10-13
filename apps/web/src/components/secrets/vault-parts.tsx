@@ -178,7 +178,7 @@ export function VaultSyncNotice({
           actionLayout="responsive"
           action={
             <Button type="button" variant="outline" size="sm" onClick={onReconnect}>
-              Reconnect
+              Replace token
             </Button>
           }
         >
