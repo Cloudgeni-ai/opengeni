@@ -1011,7 +1011,7 @@ export function useCodexSubscriptions({
     [client, workspaceId, refreshAccounts],
   );
 
-  // Spread work across accounts (rotation on) or use the primary only (off).
+  // Spread work across accounts (rotation on) or start on the primary first (off).
   const setRotation = useCallback(
     async (patch: { rotationEnabled: boolean }) => {
       setBusy(true);
