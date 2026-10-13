@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Site Data (OPE-800): persistent JSON collections and files for published
+-- Site Data: persistent JSON collections and files for published
 -- Sites. The data belongs to the Site, not a version, so it survives new
 -- versions and rollbacks; it is removed with the Site's workspace (Sites are
 -- never hard-deleted). Every table is workspace-owned, FORCE RLS and kept in

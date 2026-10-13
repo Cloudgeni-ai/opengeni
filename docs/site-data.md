@@ -1,7 +1,6 @@
 # Site Data
 
 Audience: engineers changing Sites, their storage, or the Site bridge.
-Linear: OPE-800.
 
 Site Data gives every published Site persistent collections of JSON records
 and files. Site HTML reads and writes them through `site.data` and

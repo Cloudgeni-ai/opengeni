@@ -14,7 +14,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
-// Site Data (OPE-800). Foreign keys, checks, FORCE RLS and grants are owned
+// Site Data. Foreign keys, checks, FORCE RLS and grants are owned
 // by migration 0773. This leaf intentionally does not import schema.ts,
 // avoiding a cycle. All access goes through site-data-postgres.ts.
 

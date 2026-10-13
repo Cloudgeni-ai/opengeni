@@ -1,5 +1,5 @@
 /**
- * Site Data access rules (OPE-800), kept pure so every backend enforces the
+ * Site Data access rules, kept pure so every backend enforces the
  * same matrix. A manager may manage the Site (its owner, a workspace admin, or
  * an agent acting for them); everyone else who can see the Site is a viewer.
  */

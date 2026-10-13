@@ -2,7 +2,7 @@ import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /**
- * Site Data (OPE-800): persistent JSON collections and files that belong to a
+ * Site Data: persistent JSON collections and files that belong to a
  * published Site. Shared by the HTTP API, first-party agent tools and the SDK.
  */
 

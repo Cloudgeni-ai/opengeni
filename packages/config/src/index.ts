@@ -1545,7 +1545,7 @@ const SettingsSchema = z.object({
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
-  // Site Data (OPE-800) quotas and write rate limits. Usage is recorded in the
+  // Site Data quotas and write rate limits. Usage is recorded in the
   // usage ledger only; shadow and paid modes are a later rollout step.
   siteDataRecordBytesPerSite: z.coerce
     .number()
