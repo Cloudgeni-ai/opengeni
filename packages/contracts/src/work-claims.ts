@@ -74,9 +74,8 @@ export const WorkClaimNamespace = /* @__PURE__ */ defineSchema(() =>
 );
 export type WorkClaimNamespace = z.infer<typeof WorkClaimNamespace>;
 
-export const WorkClaimCanonicalKey = boundedCanonicalText(
-  WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
-  "work claim canonical key",
+export const WorkClaimCanonicalKey = /* @__PURE__ */ defineSchema(() =>
+  boundedCanonicalText(WORK_CLAIM_CANONICAL_KEY_MAX_BYTES, "work claim canonical key"),
 );
 export type WorkClaimCanonicalKey = z.infer<typeof WorkClaimCanonicalKey>;
 

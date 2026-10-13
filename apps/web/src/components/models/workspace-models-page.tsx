@@ -11,7 +11,7 @@ import {
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { KeyRoundIcon, PlusIcon } from "lucide-react";
+import { KeyRoundIcon, LockIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -111,6 +111,8 @@ import { DetailSkeleton } from "@/components/ui/detail-sheet";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { ListRow, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRowGroup } from "@/components/ui/setting-row";
@@ -1153,9 +1155,12 @@ export function WorkspaceModelsPageBody({
         back={{ label: "Models", onClick: () => nav.openWorkspace(undefined) }}
         className={FLUSH_DETAIL_PAGE_CLASS}
       >
+        {/* Says plainly this is one workspace, the way Workspaces shows it, not the organization's page. */}
         <DetailPageHeader
+          leading={personal ? <LogoTile icon={<LockIcon />} /> : <LogoTile name={workspaceName} />}
           title={personal ? "Your Personal workspace" : workspaceName}
-          meta={personal ? ["Only you"] : undefined}
+          chips={personal ? undefined : <MetaChip variant="soft">Workspace</MetaChip>}
+          meta={personal ? ["Only you"] : ["Changes here apply only to this workspace"]}
         />
         <div className="mt-8 min-w-0">
           <ModelsList
@@ -1542,29 +1547,10 @@ function ModelsList({
       Connect account
     </RowButton>
   );
-  // Defaults first: what a new chat here starts with, and who pays for it.
+  // Accounts first, as on the organization's page: what pays for models here.
+  // Then what a new chat starts with, and how the accounts are used.
   return (
     <SectionStack>
-      <WorkspaceDefaultsSection
-        key={`defaults:${workspaceId}:${revision}`}
-        workspaceId={workspaceId}
-        organizationName={organizationName}
-        canManage={canManageSettings}
-        policy={policy}
-        describePayer={describePayer}
-        onEditAllowed={onEditAllowed}
-        onEditCompaction={onEditCompaction}
-      />
-      {personal ? null : (
-        <WorkspaceAccountRulesSection organizationName={organizationName} state={accountRules} />
-      )}
-      <PersonalFallbackPreference
-        organizationId={organizationId}
-        allowed={
-          accountRules.settings?.values.personalConnectionsAllowed === true &&
-          accountRules.settings.values.personalFallbackAllowed
-        }
-      />
       <Section
         title="Accounts"
         description="Subscriptions, API keys and credits that pay for models here."
@@ -1591,6 +1577,26 @@ function ModelsList({
         )}
         {whoCanConnect}
       </Section>
+      <WorkspaceDefaultsSection
+        key={`defaults:${workspaceId}:${revision}`}
+        workspaceId={workspaceId}
+        organizationName={organizationName}
+        canManage={canManageSettings}
+        policy={policy}
+        describePayer={describePayer}
+        onEditAllowed={onEditAllowed}
+        onEditCompaction={onEditCompaction}
+      />
+      {personal ? null : (
+        <WorkspaceAccountRulesSection organizationName={organizationName} state={accountRules} />
+      )}
+      <PersonalFallbackPreference
+        organizationId={organizationId}
+        allowed={
+          accountRules.settings?.values.personalConnectionsAllowed === true &&
+          accountRules.settings.values.personalFallbackAllowed
+        }
+      />
       {providerSections}
     </SectionStack>
   );

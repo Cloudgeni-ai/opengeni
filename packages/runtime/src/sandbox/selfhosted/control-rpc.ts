@@ -22,6 +22,7 @@
 
 import { AgentError, ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { CapabilityUnavailableReason } from "@opengeni/contracts";
+import { ControlReplyRecovery } from "./control-replay";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -404,11 +405,13 @@ export function timeoutAgentError(message = "the agent did not respond in time")
  * surfaces `agent_offline` for every request rather than throwing.
  */
 export interface NatsRequestConnection {
+  /** The transport preserves response headers for wire capability negotiation. */
+  supportsHeaders?: boolean;
   request(
     subject: string,
     payload: Uint8Array,
     opts: { timeout: number },
-  ): Promise<{ data: Uint8Array }>;
+  ): Promise<{ data: Uint8Array; headers?: { get(name: string): string } }>;
 }
 
 /** A NATS error whose `code` marks "no responder on the subject" (NATS 503). The
@@ -468,12 +471,20 @@ function isRequestTimeoutError(err: unknown): boolean {
  * shape does not change.
  */
 export class NatsControlRpc implements ControlRpc {
+  private readonly recovery: ControlReplyRecovery;
   private readonly connect: () => Promise<NatsRequestConnection | null>;
   private connection: NatsRequestConnection | undefined;
   private connecting: Promise<NatsRequestConnection | null> | undefined;
 
-  constructor(connect: () => Promise<NatsRequestConnection | null>) {
+  constructor(
+    connect: () => Promise<NatsRequestConnection | null>,
+    options: {
+      /** Transient-failure recovery allowance beyond the operation timeout (default two minutes). */
+      recoveryMs?: number;
+    } = {},
+  ) {
     this.connect = connect;
+    this.recovery = new ControlReplyRecovery(options.recoveryMs);
   }
 
   private async resolveConnection(): Promise<NatsRequestConnection | null> {
@@ -516,7 +527,7 @@ export class NatsControlRpc implements ControlRpc {
     const payload = ControlRequest.encode(req).finish();
     let reply: { data: Uint8Array };
     try {
-      reply = await conn.request(subject, payload, { timeout: opts.timeoutMs });
+      reply = await this.recovery.request(conn, subject, payload, opts.timeoutMs);
     } catch (err) {
       const denied = natsAuthorizationFailure(err);
       if (denied) throw denied;

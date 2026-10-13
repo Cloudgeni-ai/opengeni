@@ -366,12 +366,40 @@ export const AttachedBrowserDeviceAnnouncement = /* @__PURE__ */ defineSchema(()
 );
 export type AttachedBrowserDeviceAnnouncement = z.infer<typeof AttachedBrowserDeviceAnnouncement>;
 
+/** Why the machine's browser bridge saw one extension connection end. */
+export const AttachedBrowserConnectionEndReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "browser_closed_port",
+    "browser_message_invalid",
+    "browser_output_failed",
+    "native_host_lost",
+    "agent_rejected",
+  ]),
+);
+export type AttachedBrowserConnectionEndReason = z.infer<typeof AttachedBrowserConnectionEndReason>;
+
+export const AttachedBrowserConnectionEnd = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      deviceId: z.string().uuid(),
+      connectionGeneration: opaqueGeneration,
+      reason: AttachedBrowserConnectionEndReason,
+      detail: z.string().min(1).max(512).nullable(),
+      endedAt: z.string().datetime(),
+      connectedMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    })
+    .strict(),
+);
+export type AttachedBrowserConnectionEnd = z.infer<typeof AttachedBrowserConnectionEnd>;
+
 export const AttachedBrowserInventorySnapshot = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       bridgeGeneration: attachedBridgeGeneration,
       revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
       devices: z.array(AttachedBrowserDeviceAnnouncement).max(10_000),
+      /** The bridge's recent ended connections; absent from older agents. */
+      connectionEnds: z.array(AttachedBrowserConnectionEnd).max(64).optional(),
     })
     .strict()
     .superRefine((snapshot, context) => {
