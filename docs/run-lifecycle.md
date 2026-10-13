@@ -1247,6 +1247,9 @@ continuation and enqueues the existing failed-child result. It creates no attemp
 or prompt, preserves history and Pause, and changes the turn/session to failed.
 Replaying the same manifest matches the exact audit receipt, not a newer epoch.
 Without a manifest an ordinary upgrade changes only recovery discovery.
+Operator reasons and manifest fences stay in the audit timeline; any realtime
+terminal uses the existing generic failure projection and preserves earlier
+context byte-for-byte. The child result also keeps its existing failed format.
 
 Build the private manifest with a read-only query (psql variables
 `workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its

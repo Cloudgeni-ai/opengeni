@@ -75118,10 +75118,12 @@ async function settleSessionWorkBeforeAttemptClaim(
             terminalEvent: {
               id: failedEvent.id,
               type: "turn.failed",
-              payload: sessionEventPayloadRecord(
-                failedEvent.payload,
-                failedEvent.payloadCodecVersion,
-              ),
+              // Operator fences and retirement reasons are human audit, not
+              // new model-facing error text. Maintenance uses the existing
+              // generic failure projection without rewriting prior context.
+              payload: retirement
+                ? { status: "failed" }
+                : sessionEventPayloadRecord(failedEvent.payload, failedEvent.payloadCodecVersion),
             },
             now,
           });

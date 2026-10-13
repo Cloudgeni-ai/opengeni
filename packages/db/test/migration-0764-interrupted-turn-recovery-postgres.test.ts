@@ -222,6 +222,7 @@ test("the owner repair is opt-in, settles exact interrupted work and delivers on
   const taskId = crypto.randomUUID();
   const runId = crypto.randomUUID();
   const successfulRunId = crypto.randomUUID();
+  const realtimeId = crypto.randomUUID();
   // A legacy occurrence was dispatched into a paused inbox and never claimed.
   // Preserve its immutable source snapshot; retirement must use the actual
   // scheduled-run lifecycle capability, including dispatched -> failed.
@@ -239,7 +240,17 @@ test("the owner repair is opt-in, settles exact interrupted work and delivers on
       values (${scope.accountId},${scope.workspaceId},${child.session.id},'scheduled_occurrence',
         ${runId},${`scheduled-task-run:${runId}`},'Accepted occurrence',
         ${tx.json({ type: "scheduled_occurrence", text: "Accepted occurrence", scheduledTaskId: taskId, scheduledTaskRunId: runId })},${runId})`;
+    await tx`insert into session_realtime_modes(id,account_id,workspace_id,session_id,operation_id,
+      owner_subject_id,browser_instance_id,owner_key_hash,model,lease_expires_at,last_heartbeat_at)
+      values (${realtimeId},${scope.accountId},${scope.workspaceId},${child.session.id},${crypto.randomUUID()},
+        ${scope.subjectId},'fixture',repeat('0',64),'opengeni-azure/gpt-live-1',now()+interval '1 hour',now())`;
+    await tx`insert into session_realtime_entries(account_id,workspace_id,session_id,realtime_id,operation_id,
+      connection_epoch,sequence,direction,kind,text,payload)
+      values (${scope.accountId},${scope.workspaceId},${child.session.id},${realtimeId},${crypto.randomUUID()},
+        1,1,'provider_out','session_update','Existing realtime context','{}'::jsonb)`;
   });
+  const [priorRealtime] = await shared.admin`select * from session_realtime_entries
+    where realtime_id = ${realtimeId}`;
   const manifest = {
     operationId: crypto.randomUUID(),
     targets: [await target(scope, child), await target(secondScope, second)],
@@ -283,6 +294,19 @@ test("the owner repair is opt-in, settles exact interrupted work and delivers on
     await shared.admin`select status,completed_at from scheduled_task_runs where id = ${runId}`;
   expect(run!.status).toBe("failed");
   expect(run!.completed_at).not.toBeNull();
+  const realtime = [
+    ...(await shared.admin`select * from session_realtime_entries
+    where realtime_id = ${realtimeId} order by sequence`),
+  ];
+  expect(realtime).toHaveLength(2);
+  expect(realtime[0]).toEqual(priorRealtime);
+  expect(realtime[1]!.text).toBe("Delegated turn failed.");
+  expect(realtime[1]!.payload).toMatchObject({
+    code: "delegation_turn_failed",
+    terminal: { status: "failed" },
+  });
+  expect(JSON.stringify(realtime[1]!.payload)).not.toContain(manifest.operationId);
+  expect(JSON.stringify(realtime[1]!.payload)).not.toContain("interrupted_turn_retired");
   const [successfulRun] =
     await shared.admin`select status from scheduled_task_runs where id = ${successfulRunId}`;
   expect(successfulRun!.status).toBe("succeeded");
