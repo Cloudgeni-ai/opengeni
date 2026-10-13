@@ -353,7 +353,9 @@ export function databaseProviderMirrorStore(
           providerVersion: item.version,
           // Passkeys live only in hosted vaults (D20); providers never mirror them.
           type: item.type === "passkey" ? "login" : item.type,
-          name: item.name,
+          // The base name: the routine de-duplicates against the stored mirror
+          // so names stay sticky per provider item.
+          name: providerSecretName(item.providerName),
           websites: item.websites,
           primaryFieldRef: item.primaryExternalFieldId,
           fields: item.fields.map((field) => ({

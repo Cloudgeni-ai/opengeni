@@ -140,6 +140,52 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       });
       const page = await listVaultItems(w.db, w.context, { vaultId: linked.id });
       expect(page.items.map((item) => item.name)).toEqual(["Test Login"]);
+
+      // Mirror names are sticky per provider item: a later same-named item
+      // takes the next suffix, whatever its position in the provider listing.
+      const github = (ref: string) => ({
+        providerItemRef: ref,
+        providerVersion: "1",
+        type: "api_key" as const,
+        name: "GitHub",
+        fields: [
+          { providerFieldRef: "credential", name: "credential", kind: "concealed" as const },
+        ],
+      });
+      const mirror = async (refs: string[]) => {
+        await upsertProviderVaultItems(w.db, w.context, {
+          vaultId: linked.id,
+          contentVersion: "12",
+          items: refs.map((ref) =>
+            ref === "item0001"
+              ? {
+                  providerItemRef: "item0001",
+                  providerVersion: "3",
+                  type: "login" as const,
+                  name: "Test Login",
+                  fields: [
+                    { providerFieldRef: "password", name: "password", kind: "concealed" as const },
+                  ],
+                }
+              : github(ref),
+          ),
+        });
+        const rows = await shared!.admin<{ ref: string; name: string }[]>`
+          select provider_item_ref as ref, name from vault_items where vault_id = ${linked.id}`;
+        return Object.fromEntries(rows.map((row) => [row.ref, row.name]));
+      };
+      expect(await mirror(["item0001", "gh-zzz"])).toMatchObject({ "gh-zzz": "GitHub" });
+      expect(await mirror(["item0001", "gh-aaa", "gh-zzz"])).toMatchObject({
+        "gh-zzz": "GitHub",
+        "gh-aaa": "GitHub (2)",
+      });
+      expect(await mirror(["item0001", "gh-zzz", "gh-aaa"])).toMatchObject({
+        "gh-zzz": "GitHub",
+        "gh-aaa": "GitHub (2)",
+      });
+      // The first one leaving frees the base name for nobody else's reference.
+      expect(await mirror(["item0001", "gh-aaa"])).toMatchObject({ "gh-aaa": "GitHub (2)" });
+      await mirror(["item0001"]);
       const target = await getProviderVaultSyncTarget(w.db, w.context, linked.id);
       expect(target.providerContentVersion).toBe("12");
 

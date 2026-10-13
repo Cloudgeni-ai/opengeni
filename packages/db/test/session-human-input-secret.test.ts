@@ -324,6 +324,54 @@ describe("secret ask-card answers", () => {
     expect(request).toEqual({ status: "pending", response: null });
   });
 
+  test("an Only-me answer saves only for the person the task works for, in their personal workspace", async () => {
+    const fixture = await freezeSecretRequest();
+    const other = `user:other-${crypto.randomUUID()}`;
+    const [otherHome] = await shared.admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name) values (${fixture.grant.accountId}::uuid, 'Other')
+      returning id::text as id`;
+    await shared.admin`
+      insert into organization_memberships (account_id, subject_id, status, role, personal_workspace_id)
+      values (${fixture.grant.accountId}::uuid, ${other}, 'active', 'member', ${otherHome!.id}::uuid)`;
+    await expect(
+      acceptSessionHumanInputResponse(client.db, {
+        accountId: fixture.grant.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.session.id,
+        requestId: fixture.requestId,
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: CHOICE_QUESTION.id, values: ["staging"] }],
+        },
+        respondedBy: other,
+        canonicalHumanSession: true,
+        secretAnswers: [prepared("someone else's value")],
+        secretWriteContext: {
+          kind: "subject" as const,
+          accountId: fixture.grant.accountId,
+          workspaceId: fixture.workspaceId,
+          subjectId: other,
+        },
+      }),
+    ).rejects.toThrow(/only the person this task works for/);
+    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toHaveLength(0);
+
+    const accepted = await respond(fixture, {
+      answers: [{ questionId: CHOICE_QUESTION.id, values: ["staging"] }],
+      secretAnswers: [prepared("the owner's value")],
+    });
+    expect(accepted.action).toBe("accepted");
+    const [home] = await shared.admin<Array<{ vault_workspace: string; personal: string }>>`
+      select vault.workspace_id::text as vault_workspace,
+        membership.personal_workspace_id::text as personal
+      from vaults vault
+      join organization_memberships membership
+        on membership.id = vault.owner_organization_membership_id
+      where vault.account_id = ${fixture.grant.accountId}::uuid and vault.owner_kind = 'user'`;
+    expect(home!.vault_workspace).toBe(home!.personal);
+    expect(home!.vault_workspace).not.toBe(fixture.workspaceId);
+  });
+
   test("saving to Only me needs a person signed in", async () => {
     const fixture = await freezeSecretRequest();
     await expect(

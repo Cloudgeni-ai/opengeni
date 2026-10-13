@@ -64,6 +64,17 @@ export function legacyVariableSetFields(payload: unknown): string[] {
   return fields;
 }
 
+/** True when the body explicitly clears a legacy selection (`null` or `[]`). */
+export function clearsLegacyVariableSet(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const record = payload as Record<string, unknown>;
+  return (
+    (Object.hasOwn(record, "variableSetId") && record.variableSetId === null) ||
+    (Object.hasOwn(record, "environmentId") && record.environmentId === null) ||
+    (Array.isArray(record.variableSetIds) && record.variableSetIds.length === 0)
+  );
+}
+
 const LEGACY_VARIABLE_SET_FIELDS = [
   "variableSetIds",
   "variableSetId",

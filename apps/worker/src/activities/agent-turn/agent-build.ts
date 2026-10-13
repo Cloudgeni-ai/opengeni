@@ -796,7 +796,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         humanInputEnabled: agentHumanInputEnabled,
         secrets: {
           referencesEnabled: secretsCapabilityEnabled(session.agent),
-          hasActingHuman: Boolean(turn.initiatingHumanSubjectId),
+          // Same rule as the vault context (0739) and session authorization:
+          // the initiating human, else a subject initiator.
+          hasActingHuman: Boolean(
+            turn.initiatingHumanSubjectId ??
+            (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null),
+          ),
           validateQuestionVault: attemptQuestionVaultValidator({
             db,
             accountId: input.accountId,

@@ -231,13 +231,37 @@ function isFailure(
   return "code" in value;
 }
 
+/**
+ * One provider-read budget per agent attempt in this process. The API builds a
+ * resolver per browser action, gateway call and `run_on`; sharing the budget
+ * keeps a loop of calls inside one attempt at the per-attempt read cap instead
+ * of a fresh cap per call.
+ */
+const attemptBudgets = new Map<string, ProviderCallBudget>();
+const ATTEMPT_BUDGET_CACHE_LIMIT = 4096;
+
+function sharedAttemptBudget(principal: SecretPrincipal): ProviderCallBudget {
+  if (principal.kind !== "attempt") {
+    return createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt);
+  }
+  const key = `${principal.attemptId}:${principal.executionGeneration}`;
+  let budget = attemptBudgets.get(key);
+  if (!budget) {
+    budget = createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt);
+    attemptBudgets.set(key, budget);
+    while (attemptBudgets.size > ATTEMPT_BUDGET_CACHE_LIMIT) {
+      attemptBudgets.delete(attemptBudgets.keys().next().value!);
+    }
+  }
+  return budget;
+}
+
 export function createSecretResolver(
   deps: VaultServiceDeps,
   principal: SecretPrincipal,
   opts: SecretResolverOptions,
 ): SecretResolver {
-  const budget =
-    opts.attemptBudget ?? createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt);
+  const budget = opts.attemptBudget ?? sharedAttemptBudget(principal);
   const context = { kind: "principal" as const, principal };
 
   async function resolve(

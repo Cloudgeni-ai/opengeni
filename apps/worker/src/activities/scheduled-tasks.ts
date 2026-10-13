@@ -1443,6 +1443,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 sandboxBackend,
                 sandboxOs,
                 variableSetId: task.variableSetId ?? null,
+                // The schedule's vault narrowing lives on the run session so every
+                // later turn and every child inherits it through the policy chain.
+                ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
                 rigId: frozenRigId,
                 rigVersionId: frozenRigVersionId,
                 personalConnectionDelegations: [],
@@ -2531,6 +2534,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         ? { instructions: input.acceptedExecution.resolvedAgentInstructions }
         : {}),
       ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
+      ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
       ...(task.agentConfig.knowledgeSource?.destination.kind === "personal" ||
       task.visibility === "private"
         ? {

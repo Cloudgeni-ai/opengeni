@@ -1,4 +1,7 @@
-import { rejectLegacyVariableSetFields } from "../http/variable-sets-removed";
+import {
+  clearsLegacyVariableSet,
+  rejectLegacyVariableSetFields,
+} from "../http/variable-sets-removed";
 import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
@@ -373,7 +376,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const taskId = c.req.param("taskId");
     const existing = await requireVisibleScheduledTask(db, grant, taskId);
     const previous = await captureScheduledTaskRestoreState(db, existing);
-    const legacy = rejectLegacyVariableSetFields(c, await readRequestJson(c));
+    const body = await readRequestJson(c);
+    const legacy = rejectLegacyVariableSetFields(c, body);
     if ("response" in legacy) return legacy.response;
     const rawPayload = legacy.payload;
     const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
@@ -382,7 +386,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         message: "invalid scheduled task update request",
       });
     }
-    const payload = parsedPayload.data;
+    // `variableSetId: null` / `variableSetIds: []` still clear an old link, so a
+    // task tied to a set that is gone can be fixed without recreating it.
+    const payload = clearsLegacyVariableSet(body)
+      ? { ...parsedPayload.data, variableSetId: null }
+      : parsedPayload.data;
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,

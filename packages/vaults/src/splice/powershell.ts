@@ -13,7 +13,7 @@
  * | `$( … )`                          | recurse                                    |
  * | `#` and `<# … #>` comments        | reference text kept as written             |
  */
-import type { SecretReference } from "@opengeni/contracts";
+import { SecretReferenceError, type SecretReference } from "@opengeni/contracts";
 import { BindingTable, isReference, type StreamItem } from "./stream";
 
 const SINGLE_QUOTES = new Set(["'", "\u2018", "\u2019", "\u201a", "\u201b"]);
@@ -53,6 +53,28 @@ export class PowerShellSplicer {
     return `\${env:${this.table.env(reference)}}`;
   }
 
+  /**
+   * `--%` passes the rest of the line to the native command verbatim, so an
+   * expansion there would arrive as literal text. Refuse references in it.
+   */
+  private stopParsing(): void {
+    while (this.index < this.items.length) {
+      const item = this.peek()!;
+      if (isReference(item)) {
+        throw new SecretReferenceError([
+          {
+            raw: item.raw,
+            code: "unsupported_shell",
+            message:
+              "secret references cannot follow --% (PowerShell passes that text verbatim); pass the value as a normal argument or with {{secretfile:…}}",
+          },
+        ]);
+      }
+      if (item === "\n" || item === "|") return;
+      this.copyCurrent();
+    }
+  }
+
   /** Script code; `nested` stops at the `)` closing a `$(`. */
   private code(nested: boolean): void {
     let depth = 0;
@@ -70,6 +92,11 @@ export class PowerShellSplicer {
         this.copyCurrent();
         if (this.index < this.items.length && !isReference(this.peek())) this.copyCurrent();
         tokenStart = false;
+        continue;
+      }
+      if (tokenStart && item === "-" && this.peek(1) === "-" && this.peek(2) === "%") {
+        this.stopParsing();
+        tokenStart = true;
         continue;
       }
       if (item === "<" && this.peek(1) === "#") {

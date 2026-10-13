@@ -34,8 +34,12 @@ each hosted field keeps encrypted **versions**.
   **Shared** (workspace) and **Task**.
 - Every value is encrypted with the deployment's environment encryption key,
   including plain text fields. Ten versions are kept per field; older versions
-  can be restored. Deleting an item archives it; archived items can be
-  restored.
+  can be restored. Changing a field's kind needs a new value and starts its
+  history over (hiding a text field as concealed keeps it). Deleting an item
+  archives it; archived items can be restored and still count toward the
+  2,000-item vault limit until they are deleted permanently.
+- An Only-me vault lives in its owner's personal workspace when they have one,
+  so deleting another workspace does not delete it.
 - Items have a **primary field**, used when a reference names no field:
   `password` for logins, `value` for API keys, `note` for notes, `file` for
   files. Passkeys have none.
@@ -76,7 +80,7 @@ or from the session Secrets panel.
 | `secrets:list` | See vault and item metadata (names, websites, field names). |
 | `secrets:use` | Let agents resolve references under your authority. On by default for members. |
 | `secrets:write` | Create, edit, move and archive items in vaults you can reach. |
-| `secrets:read` | Reveal plaintext through the API (`reveal`, agent `secret_get`). Humans also need a verified human session; API keys need this literal permission. |
+| `secrets:read` | Reveal plaintext through the API (`reveal`, agent `secret_get`). Humans also need a verified human session; API keys need this literal permission. Copying a value into an item with `fromReference` needs the same reveal authority. |
 
 The old `variable-sets:*` permission names are aliases, so stored roles and API
 keys keep working without a rewrite. Viewers can list but not use or reveal.
@@ -160,8 +164,9 @@ vault name.
 - Only hosted vaults can be the target. Saving to Only me needs a signed-in
   human answering.
 - Slack, push and email show a link to the card instead of collecting values;
-  a value pasted into a Slack thread is not stored. Voice tells the person to
-  answer in the app.
+  a value pasted into a Slack thread is never saved as an answer or to a vault,
+  though the message itself stays in Slack and in OpenGeni's Slack inbox. Voice
+  tells the person to answer in the app.
 - `session_human_input_respond` from another agent accepts only a reference or
   a generate request, never a raw value.
 

@@ -35,6 +35,20 @@ interface PendingHeredoc {
   wordEnd: number;
 }
 
+/** Reserved words after which a command (and so `case`/`esac`) can follow. */
+const COMMAND_KEYWORDS = new Set([
+  "then",
+  "do",
+  "else",
+  "elif",
+  "if",
+  "while",
+  "until",
+  "!",
+  "{",
+  "time",
+]);
+
 /** Delimiters that are a single plain word once unquoted. */
 const PLAIN_DELIMITER = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
@@ -75,10 +89,101 @@ export class PosixSplicer {
     return this.table.env(reference);
   }
 
+  private unsupported(reference: SecretReference, message: string): never {
+    throw new SecretReferenceError([{ raw: reference.raw, code: "unsupported_shell", message }]);
+  }
+
+  /** `$` right before a reference would join the expansion (`$$` is the PID). */
+  private rejectDollarBeforeReference(): void {
+    const next = this.peek(1);
+    if (isReference(next)) {
+      this.unsupported(
+        next,
+        `a secret reference right after "$" is ambiguous; quote the "$" ('$') or separate it from ${next.raw}`,
+      );
+    }
+  }
+
+  /**
+   * True when the output so far ends where a command starts: the scope start,
+   * after a separator, or after a reserved word that takes a command.
+   */
+  private atCommandStart(scopeStart: number, cases: number): boolean {
+    let cursor = this.out.length - 1;
+    while (cursor >= scopeStart && (this.out[cursor] === " " || this.out[cursor] === "\t")) {
+      cursor -= 1;
+    }
+    if (cursor < scopeStart) return true;
+    const last = this.out[cursor]!;
+    if (";&|\n(".includes(last)) return true;
+    if (last === ")") return cases > 0;
+    let start = cursor;
+    while (start > scopeStart && /[A-Za-z!{]/.test(this.out[start - 1]!)) start -= 1;
+    const before = start > scopeStart ? this.out[start - 1]! : "\n";
+    return (
+      COMMAND_KEYWORDS.has(this.out.slice(start, cursor + 1)) &&
+      (WORD_BREAK.has(before) || before === "\n")
+    );
+  }
+
+  /** True when the next items spell `word` as a whole word. */
+  private keywordAhead(word: string): boolean {
+    for (let offset = 0; offset < word.length; offset += 1) {
+      if (this.peek(offset) !== word[offset]) return false;
+    }
+    const after = this.peek(word.length);
+    return after === undefined || (typeof after === "string" && WORD_BREAK.has(after));
+  }
+
+  /**
+   * After `$((` or `((` has been copied: arithmetic, copied through its `))`.
+   * Arithmetic re-evaluates expanded text (array subscripts run commands), so
+   * a value is never spliced there.
+   */
+  private arithmetic(): void {
+    let depth = 0;
+    while (this.index < this.items.length) {
+      const item = this.peek()!;
+      if (isReference(item)) {
+        this.unsupported(
+          item,
+          `secret references cannot be used inside (( )) arithmetic; assign it first (N={{secret:…}}) and use "$N"`,
+        );
+      }
+      if (item === "(") depth += 1;
+      else if (item === ")") {
+        if (depth === 0 && this.peek(1) === ")") {
+          this.copyCurrent();
+          this.copyCurrent();
+          return;
+        }
+        depth -= 1;
+      }
+      this.copyCurrent();
+    }
+  }
+
+  /** At `$`: `$((` arithmetic or `$(` substitution; false when neither. */
+  private dollarParen(): boolean {
+    if (this.peek(1) !== "(") return false;
+    this.copyCurrent();
+    this.copyCurrent();
+    if (this.peek() === "(") {
+      this.copyCurrent();
+      this.arithmetic();
+    } else {
+      this.substitution();
+    }
+    return true;
+  }
+
   /** A command list: top level, `$( … )` or a backtick substitution. */
   private command(closer: Closer, insideDoubleQuotedBackticks: boolean): void {
     let depth = 0;
+    // Open `case … esac` statements: their pattern `)` closes nothing.
+    let cases = 0;
     let wordStart = true;
+    const scopeStart = this.out.length;
     while (this.index < this.items.length) {
       const item = this.peek()!;
       if (isReference(item)) {
@@ -86,6 +191,21 @@ export class PosixSplicer {
         this.out += insideDoubleQuotedBackticks ? `\\"\${${name}}\\"` : `"\${${name}}"`;
         this.index += 1;
         wordStart = false;
+        continue;
+      }
+      if (
+        wordStart &&
+        (this.keywordAhead("case") || this.keywordAhead("esac")) &&
+        this.atCommandStart(scopeStart, cases)
+      ) {
+        cases = Math.max(0, cases + (item === "c" ? 1 : -1));
+        for (let copied = 0; copied < 4; copied += 1) this.copyCurrent();
+        wordStart = false;
+        continue;
+      }
+      if (item === ")" && depth === 0 && cases > 0) {
+        this.copyCurrent();
+        wordStart = true;
         continue;
       }
       if (closer === ")" && item === ")" && depth === 0) return;
@@ -122,16 +242,12 @@ export class PosixSplicer {
           continue;
         }
         case "$": {
-          const next = this.peek(1);
-          if (next === "'") {
+          this.rejectDollarBeforeReference();
+          if (this.peek(1) === "'") {
             this.copyCurrent();
             this.copyCurrent();
             this.ansiQuoted();
-          } else if (next === "(") {
-            this.copyCurrent();
-            this.copyCurrent();
-            this.substitution();
-          } else {
+          } else if (!this.dollarParen()) {
             this.copyCurrent();
           }
           wordStart = false;
@@ -145,6 +261,14 @@ export class PosixSplicer {
           continue;
         }
         case "(":
+          if (wordStart && this.peek(1) === "(") {
+            // `(( … ))` arithmetic command.
+            this.copyCurrent();
+            this.copyCurrent();
+            this.arithmetic();
+            wordStart = false;
+            continue;
+          }
           depth += 1;
           this.copyCurrent();
           wordStart = true;
@@ -243,11 +367,9 @@ export class PosixSplicer {
         if (this.index < this.items.length && !isReference(this.peek())) this.copyCurrent();
         continue;
       }
-      if (item === "$" && this.peek(1) === "(") {
-        this.copyCurrent();
-        this.copyCurrent();
-        this.substitution();
-        continue;
+      if (item === "$") {
+        this.rejectDollarBeforeReference();
+        if (this.dollarParen()) continue;
       }
       if (item === "`") {
         this.copyCurrent();
@@ -424,11 +546,9 @@ export class PosixSplicer {
           if (this.index < this.items.length && !isReference(this.peek())) this.copyCurrent();
           continue;
         }
-        if (item === "$" && this.peek(1) === "(") {
-          this.copyCurrent();
-          this.copyCurrent();
-          this.substitution();
-          continue;
+        if (item === "$") {
+          this.rejectDollarBeforeReference();
+          if (this.dollarParen()) continue;
         }
         if (item === "`") {
           this.copyCurrent();

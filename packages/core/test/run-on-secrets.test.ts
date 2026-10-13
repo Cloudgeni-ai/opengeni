@@ -23,6 +23,7 @@ class CapturingMachine implements ControlRpc {
   readonly execs: ExecRequest[] = [];
   readonly writes: Array<{ path: string; content: string; mode: number }> = [];
   readonly reads: string[] = [];
+  readonly removes: Array<{ path: string; recursive: boolean }> = [];
   readonly transport = new InMemoryOpStreamTransport();
   readonly opStream = { transport: this.transport };
   private readonly runner: FakeOpRunner;
@@ -63,6 +64,10 @@ class CapturingMachine implements ControlRpc {
           fsWrite: { bytesWritten: String(op.fsWrite.content.byteLength) },
         },
       };
+    }
+    if (op?.$case === "fsRemove") {
+      this.removes.push({ path: op.fsRemove.path, recursive: op.fsRemove.recursive });
+      return { requestId: req.requestId, result: { $case: "fsRemove", fsRemove: {} } };
     }
     if (op?.$case === "fsRead") {
       this.reads.push(op.fsRead.path);
@@ -127,7 +132,11 @@ describe("run_on secret delivery (DL-9)", () => {
     expect(file?.mode).toBe(0o600);
     expect(machine.execs[0]!.command.join(" ")).not.toContain("OGCANARY");
     expect(machine.execs[0]!.env).toMatchObject({ OPENGENI_SECRET_0: file!.path });
-    expect(machine.execs[1]!.command.join(" ")).toContain(`rm -f -- '${file!.path}'`);
+    // Cleanup is the filesystem op on the scope directory, never a shell command.
+    expect(machine.execs).toHaveLength(1);
+    expect(machine.removes).toHaveLength(1);
+    expect(machine.removes[0]!.recursive).toBe(true);
+    expect(file!.path.startsWith(`${machine.removes[0]!.path}/`)).toBe(true);
   });
 
   test("write resolves its content; read resolves nothing", async () => {

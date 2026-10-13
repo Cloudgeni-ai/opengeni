@@ -232,6 +232,18 @@ export function ItemEditorPage({
         next.fields[draft.key] = "This value is too large. Text can be up to 64 KB.";
       if (draft.file && draft.file.size > VAULT_LIMITS.fileValueMaxBytes)
         next.fields[draft.key] = "This file is too large. Files can be up to 256 KB.";
+      const saved = draft.existing
+        ? item?.fields.find((field) => field.id === draft.fieldId)
+        : undefined;
+      if (
+        saved &&
+        !draft.removed &&
+        draft.kind !== saved.kind &&
+        !draft.file &&
+        !draft.generate &&
+        !draft.value
+      )
+        next.fields[draft.key] = "Enter the value again to change what kind of field this is.";
     }
     if (!editing && type === "file" && !visibleDrafts.some((draft) => draft.file))
       next.fields[visibleDrafts.find((draft) => draft.kind === "file")?.key ?? ""] =
@@ -250,8 +262,10 @@ export function ItemEditorPage({
     if (draft.existing) {
       // Text shows its value, so an unchanged one is skipped; concealed empty keeps the saved one.
       const original = item?.fields.find((field) => field.id === draft.fieldId);
-      if (draft.kind === "text" ? value === (original?.value ?? "") : !value) return null;
-      return { ...base, value };
+      const kindChanged = original !== undefined && draft.kind !== original.kind;
+      if (!kindChanged && (draft.kind === "text" ? value === (original?.value ?? "") : !value))
+        return null;
+      return { ...base, value, ...(kindChanged ? { kind: draft.kind } : {}) };
     }
     if (!value) return null;
     return { ...base, kind: draft.kind, value };

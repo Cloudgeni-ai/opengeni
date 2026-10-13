@@ -366,6 +366,64 @@ describe("vault routes", () => {
     );
     expect(afterRestore.json).toMatchObject({ value: "sk_test_route", version: 3 });
 
+    // B1: copying a value needs reveal authority. Write alone (including the
+    // legacy aliases) would otherwise read it back through a text field.
+    const writeOnly = await apiKey(["secrets:list", "secrets:write"]);
+    const copyDenied = await call("POST", `${base}/vaults/${team.json.id}/items`, writeOnly, {
+      type: "note",
+      name: "COPIED",
+      fields: [{ name: "note", kind: "text", fromReference: "{{secret:Team/STRIPE_KEY}}" }],
+    });
+    expect(copyDenied.status).toBe(403);
+    const writeAndRead = await apiKey(["secrets:list", "secrets:write", "secrets:read"]);
+    const copied = await call("POST", `${base}/vaults/${team.json.id}/items`, writeAndRead, {
+      type: "api_key",
+      name: "COPIED",
+      fields: [{ name: "value", fromReference: "{{secret:Team/STRIPE_KEY}}" }],
+    });
+    expect(copied.status).toBe(201);
+
+    // B1: a kind change starts the field's history over, so an old concealed
+    // version can never be restored into a text field.
+    const current = await call(
+      "GET",
+      `${base}/vaults/${team.json.id}/items/${teamItem.id}`,
+      asMember,
+    );
+    const toText = await call(
+      "PATCH",
+      `${base}/vaults/${team.json.id}/items/${teamItem.id}`,
+      writeOnly,
+      {
+        expectedGeneration: current.json.generation,
+        fields: [{ fieldId: teamField.id, name: "value", kind: "text", value: "now plain" }],
+      },
+    );
+    expect(toText.status).toBe(200);
+    const textVersions = await call(
+      "GET",
+      `${base}/vaults/${team.json.id}/items/${teamItem.id}/fields/${teamField.id}/versions`,
+      asMember,
+    );
+    expect(textVersions.json.versions.map((row: { version: number }) => row.version)).toEqual([4]);
+    const crossKindRestore = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${teamItem.id}/fields/${teamField.id}/restore`,
+      writeOnly,
+      { version: 3 },
+    );
+    expect(crossKindRestore.status).toBe(404);
+    const textItem = await call(
+      "GET",
+      `${base}/vaults/${team.json.id}/items/${teamItem.id}`,
+      asMember,
+    );
+    expect(
+      (textItem.json.fields as Array<{ id: string; value?: string }>).find(
+        (field) => field.id === teamField.id,
+      )?.value,
+    ).toBe("now plain");
+
     // The item must live in the vault the path names.
     expect(
       (await call("GET", `${base}/vaults/${mine.json.id}/items/${teamItem.id}`, asMember)).status,

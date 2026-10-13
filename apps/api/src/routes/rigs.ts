@@ -51,8 +51,13 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
   if (legacyFields.length > 0) {
     throw new VariableSetsRemovedError(legacyFields);
   }
-  if (bodyRecord) delete bodyRecord.defaultVariableSetIds;
-  if (payloadRecord) delete payloadRecord.defaultVariableSetIds;
+  // An explicit [] still clears an old version's defaults; null means "unchanged".
+  if (bodyRecord && !Array.isArray(bodyRecord.defaultVariableSetIds)) {
+    delete bodyRecord.defaultVariableSetIds;
+  }
+  if (payloadRecord && !Array.isArray(payloadRecord.defaultVariableSetIds)) {
+    delete payloadRecord.defaultVariableSetIds;
+  }
   const imageOverrideUnsupported = Boolean(
     (bodyRecord && Object.hasOwn(bodyRecord, "image")) ||
     (payloadRecord && Object.hasOwn(payloadRecord, "image")),

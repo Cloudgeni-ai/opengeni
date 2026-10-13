@@ -74,6 +74,19 @@ function requireRevealAuthority(grant: AccessGrant): void {
   requirePermission(grant, "secrets:use");
 }
 
+/**
+ * Copying a value with `fromReference` returns it in the item response when the
+ * new field is text, so it needs reveal authority, not just `secrets:write`.
+ */
+function requireRevealForCopiedValues(
+  grant: AccessGrant,
+  payload: { fields?: ReadonlyArray<{ fromReference?: string | undefined }> | undefined },
+): void {
+  if (payload.fields?.some((field) => field.fromReference !== undefined)) {
+    requireRevealAuthority(grant);
+  }
+}
+
 function vaultErrorResponse(c: Context, error: VaultError): Response {
   const body: VaultApiError = {
     error: error.code,
@@ -223,6 +236,7 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
     vaultRoute(c, async () => {
       const { workspaceId, actor } = await authorize(c, "secrets:write");
       const payload = await parseRequestJson(c, CreateVaultItemRequest);
+      requireRevealForCopiedValues(actor.grant, payload);
       return c.json(
         await vaultsWithProviders(actor, workspaceId).createItem(
           actor,
@@ -248,6 +262,7 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
     vaultRoute(c, async () => {
       const { workspaceId, actor } = await authorize(c, "secrets:write");
       const payload = await parseRequestJson(c, UpdateVaultItemRequest);
+      requireRevealForCopiedValues(actor.grant, payload);
       const itemId = c.req.param("itemId")!;
       await itemInVault(actor, workspaceId, c.req.param("vaultId")!, itemId);
       return c.json(
@@ -391,6 +406,8 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         "sessions:read",
       );
+      // Item names, usernames and vault names are secret metadata.
+      requirePermission(authorization.grant, "secrets:list");
       await authorizeSession(deps, authorization.grant, sessionId, "session.read");
       return c.json(await vaults().sessionSecrets(actorFor(authorization), workspaceId, sessionId));
     }),

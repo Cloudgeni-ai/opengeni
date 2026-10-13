@@ -95,6 +95,9 @@ const encoder = new TextEncoder();
 const SELFHOSTED_FS_READ_CHUNK_BYTES = 512 * 1024;
 const SELFHOSTED_PLACEMENT_PRIVATE_PREFIX = "/tmp/opengeni-private/";
 const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
+// Private files (secretfile values up to the vault's 256 KiB file limit) stay
+// well below the 1 MiB RPC payload ceiling.
+const SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES = 512 * 1024;
 
 /**
  * Builds the exact argv for an explicitly selected shell.
@@ -1864,7 +1867,7 @@ export class SelfhostedSession {
   }): Promise<number> {
     const path = selfhostedPlacementPrivatePath(args.path);
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
-    if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
+    if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES) {
       throw new TypeError("selfhosted placement-private content is invalid");
     }
     const result = await this.call({

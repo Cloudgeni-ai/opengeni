@@ -97,7 +97,8 @@ CREATE TABLE vaults (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
   -- Same semantics as workspace_variable_sets.workspace_id: the workspace a
-  -- vault was created in; deleting that workspace deletes the vault.
+  -- vault lives in; deleting that workspace deletes the vault. New Only-me
+  -- vaults live in the owner's personal workspace when they have one.
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   owner_kind text NOT NULL CHECK (owner_kind IN ('user', 'workspace', 'organization', 'task')),
   authority_id uuid,
@@ -267,7 +268,8 @@ CREATE TABLE vault_passkey_leases (
 );
 CREATE INDEX vault_passkey_leases_holder_idx ON vault_passkey_leases (holder);
 
--- Constant defaults: no table rewrite and no row scan under FORCE RLS. IF NOT
+-- Constant defaults: no table rewrite. The CHECK constraints still validate
+-- existing rows once (a scan, not a rewrite) while ADD runs. IF NOT
 -- EXISTS lets fixtures stopped before 0739 stage the column for current adapters.
 ALTER TABLE sessions
   ADD COLUMN IF NOT EXISTS vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
@@ -1324,7 +1326,15 @@ BEGIN
     origin_workspace_id, root_session_id, name, description, allowed_workspace_ids,
     allow_personal_workspaces, is_default, created_by_subject_id
   ) VALUES (
-    new_id, account, workspace, p_owner_kind, authority,
+    -- An Only-me vault lives with its owner's personal workspace when there is
+    -- one, so deleting the workspace it was first saved from cannot take it.
+    new_id, account,
+    CASE WHEN p_owner_kind = 'user' THEN coalesce((
+      SELECT membership_row.personal_workspace_id FROM organization_memberships membership_row
+      JOIN workspaces home ON home.id = membership_row.personal_workspace_id AND home.account_id = account
+      WHERE membership_row.account_id = account AND membership_row.id = membership), workspace)
+    ELSE workspace END,
+    p_owner_kind, authority,
     CASE WHEN p_owner_kind = 'user' THEN membership END,
     CASE WHEN p_owner_kind IN ('user', 'organization') THEN workspace END,
     CASE WHEN p_owner_kind = 'task' THEN p_root_session_id END,
@@ -1652,6 +1662,16 @@ BEGIN
         field_input := field_input || pg_catalog.jsonb_build_object('newName', field_name);
       END IF;
       restored_value := NULL;
+      -- Versions carry no kind: a field's history must never be restorable as a
+      -- less concealed kind, so a kind change needs a fresh value and starts a new
+      -- history (hiding text as concealed keeps it).
+      IF field_kind IS DISTINCT FROM field_row.kind
+        AND NOT (field_row.kind = 'text' AND field_kind = 'concealed')
+        AND field_input ->> 'valueEncrypted' IS NULL THEN
+        PERFORM opengeni_private.vault_raise('invalid_secret_name',
+          'changing a field''s kind needs a new value',
+          pg_catalog.jsonb_build_object('field', field_row.name, 'kind', field_kind));
+      END IF;
       IF field_input ->> 'valueEncrypted' IS NULL AND field_input ->> 'restoreVersion' IS NOT NULL THEN
         SELECT version.value_encrypted INTO restored_value FROM vault_field_versions version
         WHERE version.field_id = field_row.id AND version.version = (field_input ->> 'restoreVersion')::integer;
@@ -1666,6 +1686,11 @@ BEGIN
         INSERT INTO vault_field_versions (field_id, version, account_id, value_encrypted, created_by_kind, created_by_subject_id)
         VALUES (field_row.id, next_version, item_row.account_id,
           coalesce(field_input ->> 'valueEncrypted', restored_value), created_by, subject);
+        IF field_kind IS DISTINCT FROM field_row.kind
+          AND NOT (field_row.kind = 'text' AND field_kind = 'concealed') THEN
+          DELETE FROM vault_field_versions version
+          WHERE version.field_id = field_row.id AND version.version <> next_version;
+        END IF;
         DELETE FROM vault_field_versions version
         WHERE version.field_id = field_row.id
           AND version.version NOT IN (
@@ -2852,21 +2877,46 @@ BEGIN
   IF vault_row.source = 'opengeni' THEN
     PERFORM opengeni_private.vault_raise('vault_permission_denied', 'only connected vaults have a provider mirror');
   END IF;
-  FOR item_input IN SELECT element FROM pg_catalog.jsonb_array_elements(coalesce(p_items, '[]'::jsonb)) element LOOP
-    kept_refs := kept_refs || (item_input ->> 'providerItemRef');
+  kept_refs := ARRAY(SELECT element ->> 'providerItemRef'
+    FROM pg_catalog.jsonb_array_elements(coalesce(p_items, '[]'::jsonb)) element);
+  -- Items gone from the provider free their names before anything is renamed.
+  DELETE FROM vault_items item
+  WHERE item.vault_id = vault_row.id AND item.provider_item_ref IS NOT NULL
+    AND NOT (item.provider_item_ref = ANY (kept_refs));
+  -- Names are sticky (references keep working): items already mirrored keep
+  -- their "Name" or "Name (n)" first, then new items take the next free suffix.
+  FOR item_input IN
+    SELECT element FROM pg_catalog.jsonb_array_elements(coalesce(p_items, '[]'::jsonb))
+      WITH ORDINALITY AS input(element, ordinal)
+    ORDER BY EXISTS (SELECT 1 FROM vault_items mirrored WHERE mirrored.vault_id = vault_row.id
+      AND mirrored.provider_item_ref = input.element ->> 'providerItemRef') DESC, input.ordinal
+  LOOP
     item_type := CASE WHEN item_input ->> 'type' IN ('login', 'api_key', 'note', 'file')
       THEN item_input ->> 'type' ELSE 'login' END;
+    item_row := NULL;
     SELECT item.* INTO item_row FROM vault_items item
     WHERE item.vault_id = vault_row.id AND item.provider_item_ref = item_input ->> 'providerItemRef';
     base_name := opengeni_private.vault_sanitize_legacy_name(item_input ->> 'name');
-    candidate := base_name;
-    suffix := 1;
-    WHILE EXISTS (SELECT 1 FROM vault_items other WHERE other.vault_id = vault_row.id
-      AND other.archived_at IS NULL AND other.name_key = vault_name_key(candidate)
-      AND other.id IS DISTINCT FROM item_row.id) LOOP
-      suffix := suffix + 1;
-      candidate := base_name || ' (' || suffix || ')';
-    END LOOP;
+    IF item_row.id IS NOT NULL
+      AND (item_row.name_key = vault_name_key(base_name)
+        OR (pg_catalog.left(item_row.name_key, pg_catalog.length(vault_name_key(base_name)) + 2)
+              = vault_name_key(base_name) || ' ('
+          AND pg_catalog.substr(item_row.name_key, pg_catalog.length(vault_name_key(base_name)) + 3)
+              ~ '^[0-9]+\)$'))
+      AND NOT EXISTS (SELECT 1 FROM vault_items other WHERE other.vault_id = vault_row.id
+        AND other.archived_at IS NULL AND other.name_key = item_row.name_key
+        AND other.id <> item_row.id) THEN
+      candidate := item_row.name;
+    ELSE
+      candidate := base_name;
+      suffix := 1;
+      WHILE EXISTS (SELECT 1 FROM vault_items other WHERE other.vault_id = vault_row.id
+        AND other.archived_at IS NULL AND other.name_key = vault_name_key(candidate)
+        AND other.id IS DISTINCT FROM item_row.id) LOOP
+        suffix := suffix + 1;
+        candidate := base_name || ' (' || suffix || ')';
+      END LOOP;
+    END IF;
     IF item_row.id IS NULL THEN
       INSERT INTO vault_items (account_id, vault_id, type, name, websites, provider_item_ref, provider_version)
       VALUES (vault_row.account_id, vault_row.id, item_type, candidate,
@@ -2910,9 +2960,6 @@ BEGIN
       LIMIT 1)
     WHERE id = item_row.id;
   END LOOP;
-  DELETE FROM vault_items item
-  WHERE item.vault_id = vault_row.id AND item.provider_item_ref IS NOT NULL
-    AND NOT (item.provider_item_ref = ANY (kept_refs));
   UPDATE vaults SET provider_content_version = p_content_version, last_synced_at = pg_catalog.now(),
     sync_status = 'ok', sync_error_code = NULL, sync_error_message = NULL, rate_limited_until = NULL,
     updated_at = pg_catalog.now()
@@ -3139,15 +3186,20 @@ DECLARE
   existing vault_items;
   item_row vault_items;
   results jsonb := '[]'::jsonb;
+  acting_human text;
 BEGIN
   PERFORM opengeni_private.vault_capability_open('write');
   context := opengeni_private.vault_context(p_principal);
-  IF NOT EXISTS (
-    SELECT 1 FROM session_turns turn_value
-    WHERE turn_value.id = p_turn AND turn_value.session_id = p_session
-      AND turn_value.account_id = (context ->> 'accountId')::uuid
-      AND turn_value.workspace_id = (context ->> 'workspaceId')::uuid
-  ) THEN
+  SELECT coalesce(
+      nullif(pg_catalog.btrim(turn_value.initiating_human_subject_id), ''),
+      CASE WHEN turn_value.initiator_kind = 'subject'
+        THEN nullif(pg_catalog.btrim(turn_value.initiator_subject_id), '') END)
+    INTO acting_human
+  FROM session_turns turn_value
+  WHERE turn_value.id = p_turn AND turn_value.session_id = p_session
+    AND turn_value.account_id = (context ->> 'accountId')::uuid
+    AND turn_value.workspace_id = (context ->> 'workspaceId')::uuid;
+  IF NOT FOUND THEN
     PERFORM opengeni_private.vault_raise('vault_not_found', 'turn not found',
       pg_catalog.jsonb_build_object('sessionId', p_session, 'turnId', p_turn));
   END IF;
@@ -3156,10 +3208,18 @@ BEGIN
       vault_row := opengeni_private.vault_reachable_row(context, (answer ->> 'vaultId')::uuid);
     ELSIF coalesce(answer ->> 'saveTo', 'user') = 'task' THEN
       vault_row := opengeni_private.vault_ensure_task(context, p_session);
-    ELSIF answer ->> 'saveTo' = 'workspace' THEN
-      vault_row := opengeni_private.vault_ensure_default(context, 'workspace');
     ELSE
-      vault_row := opengeni_private.vault_ensure_default(context, 'user');
+      -- "Only me" means the person the task acts for: someone else answering
+      -- in a shared session would otherwise fill their own Private vault.
+      IF coalesce(answer ->> 'saveTo', 'user') = 'user' AND context ->> 'kind' IS DISTINCT FROM 'attempt'
+        AND acting_human IS NOT NULL AND acting_human IS DISTINCT FROM context ->> 'subjectId' THEN
+        PERFORM opengeni_private.vault_raise('vault_permission_denied',
+          'only the person this task works for can save an Only-me answer; save it to the task or the workspace instead');
+      END IF;
+      vault_row := opengeni_private.vault_ensure_default(context,
+        CASE WHEN answer ->> 'saveTo' = 'workspace' THEN 'workspace' ELSE 'user' END);
+      -- A narrowed agent answering for a child must stay inside its own policy.
+      vault_row := opengeni_private.vault_reachable_row(context, vault_row.id);
     END IF;
     PERFORM opengeni_private.vault_assert_writable(context, vault_row);
     existing := NULL;
@@ -3225,12 +3285,14 @@ BEGIN
   FOREACH routine IN ARRAY ARRAY[
     'opengeni_private.vault_name_is_valid(text)',
     'opengeni_private.vault_sanitize_legacy_name(text)',
-    'opengeni_private.vault_policy_is_valid(jsonb)',
     'opengeni_private.vault_policy_ids(jsonb)',
     'opengeni_private.vault_policy_intersect(jsonb,jsonb)'
   ]::regprocedure[] LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', routine);
   END LOOP;
+  -- vault_policy_is_valid backs the sessions and scheduled_tasks CHECK
+  -- constraints, so every role that inserts those rows must run it. It is pure.
+  GRANT EXECUTE ON FUNCTION opengeni_private.vault_policy_is_valid(jsonb) TO PUBLIC;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
     FOREACH routine IN ARRAY ARRAY[
       format('%I.list_vaults_for_subject(uuid,jsonb)', target_schema),
@@ -3484,6 +3546,18 @@ BEGIN
 END
 $$;
 
+-- Names the platform and the shell own. A variable that shadowed one of them
+-- keeps the key in persisted env: removing PATH or HOME would break resume.
+CREATE FUNCTION opengeni_private.vault_platform_env_name(p_name text)
+RETURNS boolean
+LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog
+AS $$
+  SELECT p_name IN ('PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'PWD', 'OLDPWD', 'TERM', 'LANG',
+      'LANGUAGE', 'TZ', 'TMPDIR', 'HOSTNAME', 'DISPLAY', 'PYTHONPATH', 'NODE_PATH')
+    OR p_name LIKE 'LC\_%' OR p_name LIKE 'OPENGENI\_%' OR p_name LIKE 'XDG\_%'
+$$;
+
 ALTER TABLE workspace_variable_sets NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE workspace_variable_set_variables NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE vault_field_versions NO FORCE ROW LEVEL SECURITY;
@@ -3527,6 +3601,7 @@ BEGIN
   WITH names AS (
     SELECT account_id, pg_catalog.array_agg(DISTINCT name) AS names
     FROM workspace_variable_set_variables
+    WHERE NOT opengeni_private.vault_platform_env_name(name)
     GROUP BY account_id
   ), changed AS (
     UPDATE sandbox_session_envelopes envelope
@@ -3542,6 +3617,7 @@ BEGIN
   WITH names AS (
     SELECT account_id, pg_catalog.array_agg(DISTINCT name) AS names
     FROM workspace_variable_set_variables
+    WHERE NOT opengeni_private.vault_platform_env_name(name)
     GROUP BY account_id
   ), changed AS (
     UPDATE sandbox_leases lease
@@ -3580,3 +3656,4 @@ ALTER TABLE sandbox_leases FORCE ROW LEVEL SECURITY;
 ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
 
 DROP FUNCTION opengeni_private.vault_scrub_entry_environment(jsonb, text[]);
+DROP FUNCTION opengeni_private.vault_platform_env_name(text);

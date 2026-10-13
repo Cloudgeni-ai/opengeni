@@ -15,7 +15,6 @@ import type { VaultProviderRegistry } from "@opengeni/vaults";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   agentCapabilityEnabled,
-  referenceKey,
   type SandboxBackend,
   type SecretResolver,
 } from "@opengeni/contracts";
@@ -44,7 +43,6 @@ import {
   prepareSecretExec,
   resolveSecretLiteralText,
   runWithSecretCarry,
-  secretFilePath,
   type SecretExecCarry,
   selfhostedLiveness,
   SelfhostedSession,
@@ -904,18 +902,10 @@ function runOnOperationAdmission(
   };
 }
 
-function posixSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function runOnSecretFilePaths(carry: SecretExecCarry): string[] {
-  const paths = new Set<string>();
-  for (const token of carry.tokens) {
-    if (token.type !== "reference" || token.reference.kind !== "secretfile") continue;
-    const value = carry.values.get(referenceKey(token.reference));
-    if (value) paths.add(secretFilePath(carry.scope, value));
-  }
-  return [...paths];
+function hasSecretFileReference(carry: SecretExecCarry): boolean {
+  return carry.tokens.some(
+    (token) => token.type === "reference" && token.reference.kind === "secretfile",
+  );
 }
 
 /**
@@ -981,12 +971,10 @@ export async function executeRunOnSelfhostedMachine(
         );
       } finally {
         // A one-off has no attempt-end cleanup on this machine: remove the
-        // exact `secretfile` paths it wrote (SEC-4). Best effort.
-        const files = prepared?.carry ? runOnSecretFilePaths(prepared.carry) : [];
-        if (files.length > 0) {
-          await session
-            .exec({ cmd: `rm -f -- ${files.map(posixSingleQuote).join(" ")}` })
-            .catch(() => undefined);
+        // `secretfile` scope it wrote (SEC-4) with the filesystem op, which
+        // works on every host OS and skips command admission. Best effort.
+        if (prepared?.carry && hasSecretFileReference(prepared.carry)) {
+          await session.clearSecretFilesForAttempt().catch(() => undefined);
         }
       }
       const timedOut = res.timedOut === true;

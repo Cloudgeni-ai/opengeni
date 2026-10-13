@@ -285,7 +285,9 @@ export async function syncBrowserPasskeys(input: {
   if (!principal) return null;
   const now = input.now ?? Date.now;
   const holder = passkeyLeaseHolder(input.browserSessionId);
-  const cacheKey = `${input.browserSessionId}:${input.controllerGeneration}`;
+  // Per attempt: a later turn may act for another person, so it leases (and
+  // replaces browserd's credential set with) its own passkeys first.
+  const cacheKey = `${input.browserSessionId}:${input.controllerGeneration}:${principal.attemptId}`;
   let state = passkeySessions.get(cacheKey);
   if (state?.unsupported) return null;
   const lease = async (): Promise<BrowserPasskeyCredential[]> => {

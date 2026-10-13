@@ -31,6 +31,21 @@ const VALUES: Record<string, string> = {
 type Case = { name: string; cmd: string; expected: string; skip?: string[] };
 
 const POSIX_CASES: Case[] = [
+  {
+    name: "case pattern inside $( )",
+    cmd: 'printf %s "$(case x in x) printf %s {{secret:H}} ;; esac)"',
+    expected: VALUES.H!,
+  },
+  {
+    name: "arithmetic with << next to a reference",
+    cmd: 'printf %s "$((1<<2))-{{secret:J}}"',
+    expected: `4-${VALUES.J}`,
+  },
+  {
+    name: "case as an argument does not open a case",
+    cmd: 'printf %s "$(printf %s case)" {{secret:J}}',
+    expected: `case${VALUES.J}`,
+  },
   { name: "unquoted word", cmd: "printf %s {{secret:H}}", expected: VALUES.H! },
   { name: "double quotes", cmd: 'printf %s "{{secret:H}}"', expected: VALUES.H! },
   {
@@ -493,6 +508,18 @@ describe("splice text", () => {
   test("a quoted heredoc with a non-word delimiter refuses references", () => {
     expect(() => splice("cat <<'E F'\n{{secret:A}}\nE F", "posix")).toThrow(/unsupported_shell/);
     expect(splice("cat <<'E F'\nplain\nE F", "posix").bindings).toEqual([]);
+  });
+
+  test("references right after $, inside arithmetic or after --% are refused", () => {
+    expect(() => splice('printf %s "${{secret:A}}"', "posix")).toThrow(/unsupported_shell/);
+    expect(() => splice("printf %s ${{secret:A}}", "posix")).toThrow(/unsupported_shell/);
+    expect(() => splice("cat <<E\n${{secret:A}}\nE", "posix")).toThrow(/unsupported_shell/);
+    expect(() => splice("echo $(( {{secret:A}} + 1 ))", "posix")).toThrow(/unsupported_shell/);
+    expect(() => splice("(( n = {{secret:A}} ))", "posix")).toThrow(/unsupported_shell/);
+    expect(() => splice("tool.exe --% /p:{{secret:A}}", "powershell")).toThrow(/unsupported_shell/);
+    expect(splice("printf %s '$' {{secret:A}}", "posix").text).toBe(
+      "printf %s '$' \"${OPENGENI_SECRET_0}\"",
+    );
   });
 
   test.each(["cmd", "fish", "unknown"] as const)("%s refuses references", (dialect) => {
