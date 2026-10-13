@@ -7,14 +7,15 @@
 // `og-*` token system — no new visual language, just the missing depth.
 // ----------------------------------------------------------------------------
 import {
-  AlertTriangleIcon,
   ArrowLeftIcon,
   BuildingIcon,
   ChevronRightIcon,
   CpuIcon,
   LaptopIcon,
+  PlugIcon,
   RadioIcon,
   ServerIcon,
+  TriangleAlertIcon,
   Trash2Icon,
   UserIcon,
   UsersIcon,
@@ -22,7 +23,14 @@ import {
 import { cn } from "../../lib/cn";
 import { formatRelativeTime } from "../../lib/format";
 import type { MachineView, MetricSample } from "../../types/machines";
+import { AgentStatusIcon } from "./agent-status-icon";
 import { deriveHealth, HEALTH_TOKEN, healthPulses } from "./health";
+import {
+  describeAgentConnection,
+  describeAgentRuntime,
+  runnerConflict,
+  STATUS_TONE_TEXT,
+} from "./machine-status";
 import { MetricHistoryChart } from "./metric-history-chart";
 import { MetricSparkline } from "./metric-sparkline";
 import { METRICS, METRIC_WINDOWS, pointsFor, WINDOW_LABEL, type MetricWindow } from "./series";
@@ -46,6 +54,9 @@ export type MachineDetailProps = {
   /** Open "Who can use it?" for a connected machine. Omit when the viewer
    * can't change it; the row then shows the current audience read-only. */
   onChangeAudience?: ((machine: MachineView) => void) | undefined;
+  /** Start, retry or resend the signed agent update. Omit when the viewer can't. */
+  onUpdateAgent?: ((machine: MachineView) => void) | undefined;
+  updatingAgent?: boolean | undefined;
   now?: number | undefined;
   className?: string | undefined;
 };
@@ -121,6 +132,106 @@ function KindIcon({ kind, session }: { kind: string; session: boolean }) {
   return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
 }
 
+/**
+ * The connected agent: its build and update on one row, its connection on the
+ * next. Past events read as quiet history; only a live problem gets a color.
+ */
+function MachineAgentPanel({
+  machine,
+  now,
+  onUpdateAgent,
+  updatingAgent,
+}: {
+  machine: MachineView;
+  now: number;
+  onUpdateAgent?: ((machine: MachineView) => void) | undefined;
+  updatingAgent?: boolean | undefined;
+}) {
+  const authority = machine.connectionAuthority;
+  const runtime = machine.runtime;
+  if (!runtime && authority.state === "not_applicable") return null;
+  const agent = runtime ? describeAgentRuntime(runtime, now) : null;
+  const action =
+    agent?.action && machine.enrollmentId && onUpdateAgent && machine.state !== "offline"
+      ? agent.action
+      : null;
+  const connection =
+    authority.state === "not_applicable" ? null : describeAgentConnection(authority);
+  const conflict = runnerConflict(authority, now);
+  const conflictAgo = conflict?.lastAt ? formatRelativeTime(conflict.lastAt, new Date(now)) : null;
+
+  return (
+    <section
+      data-machine-agent
+      aria-label="Agent"
+      className="flex flex-col divide-y divide-og-border rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm"
+    >
+      {agent ? (
+        <div data-agent-runtime className="flex min-h-14 items-center gap-3 px-4 py-3">
+          <AgentStatusIcon tone={agent.tone} className="size-4" />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-og-sm font-medium text-og-fg">{agent.title}</span>
+            <span
+              data-agent-status={agent.tone}
+              className={cn("text-og-xs", STATUS_TONE_TEXT[agent.tone])}
+            >
+              {agent.status}
+            </span>
+            {agent.note ? <span className="text-og-xs text-og-fg-muted">{agent.note}</span> : null}
+          </div>
+          {action ? (
+            <button
+              type="button"
+              data-update-agent
+              data-update-action={action.kind}
+              disabled={updatingAgent}
+              onClick={() => onUpdateAgent?.(machine)}
+              className="inline-flex min-h-9 shrink-0 items-center rounded-og-sm border border-og-border px-3 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/50 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+            >
+              {updatingAgent ? "Starting…" : action.label}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {connection ? (
+        <div
+          data-connection-authority={authority.state}
+          className="flex min-h-14 items-start gap-3 px-4 py-3"
+        >
+          <PlugIcon className="mt-0.5 size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-og-sm font-medium text-og-fg">{connection.label}</span>
+            {connection.detail ? (
+              <span className="text-og-xs text-og-fg-muted">{connection.detail}</span>
+            ) : null}
+            {conflict?.active ? (
+              <span
+                data-runner-conflict="active"
+                className="mt-1 flex items-start gap-1.5 text-og-xs text-og-fg-muted"
+              >
+                <TriangleAlertIcon
+                  className="mt-px size-3.5 shrink-0 text-og-status-waiting"
+                  aria-hidden
+                />
+                A second copy of the agent is running on this machine. It's kept out, so work isn't
+                affected. Stop the extra copy.
+              </span>
+            ) : conflict ? (
+              <span data-runner-conflict="past" className="text-og-xs text-og-fg-subtle">
+                Kept out {conflict.count} extra {conflict.count === 1 ? "copy" : "copies"} of the
+                agent
+                {conflictAgo
+                  ? `, most recently ${conflictAgo === "now" ? "just now" : `${conflictAgo} ago`}`
+                  : ""}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function MachineDetail({
   machine,
   series,
@@ -132,6 +243,8 @@ export function MachineDetail({
   onUpdateOperationPolicy,
   updatingOperationPolicy,
   onChangeAudience,
+  onUpdateAgent,
+  updatingAgent,
   now = Date.now(),
   className,
 }: MachineDetailProps) {
@@ -139,10 +252,6 @@ export function MachineDetail({
   const tone = HEALTH_TOKEN[health.level];
   const latest = machine.metrics;
   const sampledAgo = latest ? formatRelativeTime(latest.sampledAt, new Date(now)) : null;
-  const authority = machine.connectionAuthority;
-  const duplicateDeniedAgo = authority.duplicateRunnerDeniedAt
-    ? formatRelativeTime(authority.duplicateRunnerDeniedAt, new Date(now))
-    : null;
 
   // Only render metrics that have a value (GPU is dropped on headless boxes).
   const visible = METRICS.filter((m) => !(m.key === "gpu" && latest?.gpuUtilPct == null));
@@ -292,31 +401,14 @@ export function MachineDetail({
             })}
           </div>
         )}
-
-        {authority.state !== "not_applicable" ? (
-          <div
-            data-connection-authority={authority.state}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-og-md border border-og-border bg-og-surface-1/75 px-3 py-2 text-og-xs"
-          >
-            <span className="text-og-fg-muted">
-              Runner {authority.state.replace("_", " ")} · generation {authority.generation}
-              {authority.supersededCount > 0
-                ? ` · ${authority.supersededCount} earlier ${authority.supersededCount === 1 ? "runner" : "runners"} fenced`
-                : ""}
-            </span>
-            {authority.duplicateRunnerDeniedCount > 0 ? (
-              <span className="inline-flex items-center gap-1.5 text-og-status-failed">
-                <AlertTriangleIcon className="size-3.5" aria-hidden />
-                Blocked {authority.duplicateRunnerDeniedCount} competing runner
-                {authority.duplicateRunnerDeniedCount === 1 ? "" : "s"}
-                {duplicateDeniedAgo
-                  ? ` · ${duplicateDeniedAgo === "now" ? "now" : `${duplicateDeniedAgo} ago`}`
-                  : ""}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
       </div>
+
+      <MachineAgentPanel
+        machine={machine}
+        now={now}
+        onUpdateAgent={onUpdateAgent}
+        updatingAgent={updatingAgent}
+      />
 
       {machine.enrollmentId && !machine.isSessionGroup ? (
         <MachineAudienceRow machine={machine} onChange={onChangeAudience} />
