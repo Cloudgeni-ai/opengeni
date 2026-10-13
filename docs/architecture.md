@@ -92,6 +92,12 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
+Settled one-shot and bounded interval schedules retire to `paused` when they
+cannot fire again. The existing 24-hour Temporal catch-up window and pending
+occurrences remain authoritative. Retirement atomically enqueues external
+schedule reconciliation; its per-schedule lock rereads the latest saved task,
+so a concurrent future reschedule is preserved.
+
 Temporal coordinates; activities read Postgres obligations, not signals.
 Conversation/goals/queues/usage/provider/tool transcripts never enter workflow history.
 
@@ -279,6 +285,11 @@ See [`goals.md`](goals.md).
 | `session_goals` | Standing objective/continuation obligation | Workflow-local state |
 | Sandbox leases/envelopes | Provider identity/routing/recovery/workspace-generation truth | Conversation state |
 | Knowledge/instructions/Skills/organization identity | Scoped retrieval/governance authorities and lifecycle | Conversation history/temporary task notes |
+
+Terminal turn transitions retire their `agent_run_states` snapshots atomically
+at the database boundary, including SQL lifecycle writers. Nonterminal approval,
+recovery and capacity waits retain them; later turns use paired canonical history,
+not a terminal turn's control snapshots.
 
 The wake reaper repairs already-pending authentic terminal results for idle
 goalless parents through bounded identity-only discovery and scoped, fenced

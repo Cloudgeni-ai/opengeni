@@ -2319,6 +2319,16 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
       EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
     END IF;
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'opengeni_private.list_exhausted_scheduled_tasks(integer)',
+      'opengeni_private.list_scheduled_task_schedule_reconciliations(integer)',
+      format('%I.scheduled_task_is_exhausted(uuid)', ${literal(schema)})
+    ] LOOP
+      IF to_regprocedure(routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', routine_signature);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     -- Read-only maintenance work checks (0730, 0732) carry exactly the authority of
     -- the claim each one previews: same owner, no PUBLIC, runtime EXECUTE.
     DECLARE

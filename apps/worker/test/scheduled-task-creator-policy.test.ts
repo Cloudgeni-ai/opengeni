@@ -10,6 +10,7 @@ import {
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   TurnExecutionPolicyV1,
+  type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
@@ -190,6 +191,73 @@ async function dispatchGeneratedSession(
 }
 
 describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
+  for (const runMode of ["reusable_session", "existing_session"] as const) {
+    test.each(["defaults", "explicit", "legacy", "empty"] as const)(
+      `${runMode} notification selection respects %s intent and freezes at admission`,
+      async (intent) => {
+        if (!available) return;
+        const grant = await workspaceGrant();
+        const { settings } = activities();
+        const stored: FirstPartyMcpToolName[] = intent === "empty" ? [] : ["set_session_title"];
+        const target = await createSession(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          initialMessage: "Scheduled notification fixture",
+          resources: [],
+          tools: [],
+          metadata: {},
+          model: settings.openaiModel,
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          firstPartyMcpTools: stored,
+          toolPolicy: {
+            mode: "workspace_default",
+            inheritedFromSessionId: null,
+            ...(intent === "defaults"
+              ? { firstPartyMode: "workspace_default" as const }
+              : intent === "legacy"
+                ? {}
+                : { firstPartyMode: "explicit" as const }),
+          },
+        });
+        const task = await generatedTask(grant, null, { runMode, targetSessionId: target.id });
+        const { session, accepted, result, run } = await dispatchGeneratedSession(grant, task.id);
+        const frozen = structuredClone(accepted!);
+        const expected =
+          intent === "defaults" ? resolveFirstPartyMcpToolPolicy(settings).default : stored;
+        expect(accepted!.targetSessionExecution!.firstPartyMcpTools).toEqual(stored);
+        expect(accepted!.targetSessionExecution!.effectiveFirstPartyMcpTools).toEqual(expected);
+        expect(expected.includes("notify_user")).toBe(intent === "defaults");
+
+        // Removing defaults after admission cannot rewrite this occurrence or
+        // its already accepted selection, even before its turn is claimed.
+        await shared!
+          .admin`update workspaces set settings = settings || '{"sessionToolDefaults":{"firstPartyMcpTools":[]}}'::jsonb where id = ${grant.workspaceId}`;
+        const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+          sessionId: session.id,
+          workflowId: result.workflowId,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+        if (claimed.action !== "claimed") throw new Error(`unexpected claim: ${claimed.action}`);
+        expect(claimed.turn.metadata.scheduledFirstPartyMcpTools).toEqual(expected);
+        expect(
+          await getScheduledTaskRunAcceptedExecution(client.db, {
+            workspaceId: grant.workspaceId,
+            runId: run.id,
+          }),
+        ).toEqual(frozen);
+        const unchanged = await getSession(client.db, grant.workspaceId, target.id);
+        expect(unchanged!.firstPartyMcpTools).toEqual(stored);
+        expect(unchanged!.toolPolicy).toEqual(target.toolPolicy);
+      },
+      60_000,
+    );
+  }
+
   test("existing targets freeze effective built-ins separately from their admission proof", async () => {
     if (!available) return;
     const grant = await workspaceGrant();

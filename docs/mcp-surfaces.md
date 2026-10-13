@@ -552,6 +552,18 @@ reset and still matches the stored selection. Migration does not infer intent fr
 connector mode or similarity to today's defaults. Scheduled accepted selections
 remain exact snapshots; they are never re-resolved during recovery.
 
+When diagnosing a missing built-in, the stored `firstPartyMcpTools` array is not
+the effective selection of a default-following session. `session_turns.tools`
+records tool references (including MCP server references), not the broad server's
+individual built-ins.
+Inspect the exact attempt's hydrated tool catalog instead: catalog entries may
+be stored in `session_content_blobs` through `content_refs`, leaving the inline
+`entries` array empty. For an existing or reusable schedule target, inspect
+`targetSessionExecution.effectiveFirstPartyMcpTools` in the accepted execution
+and `scheduledFirstPartyMcpTools` on its claimed turn. A human access refresh of
+the schedule does not rewrite its target session's explicit pins; fresh
+occurrence admission resolves that target's default intent independently.
+
 GitHub App installation credentials are deliberately absent from this catalog.
 Repository discovery and browser connect status remain model-visible, but token
 minting and credential-file renewal stay host-side in the worker/runtime. No
