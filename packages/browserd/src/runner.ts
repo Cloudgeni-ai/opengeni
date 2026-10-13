@@ -783,26 +783,35 @@ async function linuxChromeStderrDrainWrapper(
 
 type LinuxUserScopeLauncher = { systemdRun: string; busctl: string };
 
-/** A transient scope is used only when this process can reach its own user
- * service manager; otherwise the browser launches exactly as before. */
+/** A transient scope is used only when this process can create one. The probe
+ * performs exactly the launch's own operation (a throwaway `systemd-run
+ * --scope`), because a reachable manager is not enough: from another PID
+ * namespace, a container for example, the manager answers bus calls but
+ * cannot place the caller's PID. Otherwise the browser launches as before. */
 async function linuxUserScopeLauncher(): Promise<LinuxUserScopeLauncher | null> {
   if (!process.env.XDG_RUNTIME_DIR && !process.env.DBUS_SESSION_BUS_ADDRESS) return null;
   const systemdRun = await firstExecutableInPath(["systemd-run"]);
   const busctl = await firstExecutableInPath(["busctl"]);
-  if (!systemdRun || !busctl) return null;
-  const reachable = await processSucceeds(
-    busctl,
+  const shell = await firstExecutable(["/bin/sh"]);
+  if (!systemdRun || !busctl || !shell) return null;
+  const scopeCreated = await processSucceeds(
+    systemdRun,
     [
       "--user",
-      "call",
-      "org.freedesktop.systemd1",
-      "/org/freedesktop/systemd1",
-      "org.freedesktop.DBus.Peer",
-      "Ping",
+      "--scope",
+      "--quiet",
+      "--collect",
+      "--property=Delegate=yes",
+      `--slice=${BROWSER_SCOPE_SLICE}`,
+      `--unit=opengeni-browser-probe-${randomUUID()}.scope`,
+      "--",
+      shell,
+      "-c",
+      "exit 0",
     ],
     SYSTEMD_PROBE_TIMEOUT_MS,
   );
-  return reachable ? { systemdRun, busctl } : null;
+  return scopeCreated ? { systemdRun, busctl } : null;
 }
 
 /** Chromium moves its own browser process into an `app-<id>-<pid>.scope` at
