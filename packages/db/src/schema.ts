@@ -9646,9 +9646,9 @@ export const sessionEvents = pgTable(
     meaningfulAttention: index("session_events_meaningful_attention_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(commentaryInclusiveMeaningfulSessionEventSql("session_events")),
-    // Pre-0760 attention probes (task usage-limit stops not yet meaningful)
+    // Pre-0770 attention probes (task usage-limit stops not yet meaningful)
     // during a rolling deploy. Drop it in a later rolling migration once no
-    // pre-0760 API can run.
+    // pre-0770 API can run.
     meaningfulAttentionWithoutCommentary: index("session_events_meaningful_attention_v2_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(commentaryExclusiveMeaningfulSessionEventSql("session_events")),
