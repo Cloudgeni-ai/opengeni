@@ -864,8 +864,15 @@ API/worker deployment images use `scripts/assemble-server-runtime.ts` and
 and their frozen external dependency closures. Migration and catalog Jobs keep
 their command paths and reviewed data in the API image. Temporal's prebuilt
 workflow path does not eagerly load its source compiler; explicit compilation
-keeps the existing compiler behavior. Native conversions and role boundaries
-remain unchanged.
+keeps the existing compiler behavior. Documents upload parsing already runs on
+the control worker via Temporal: only the worker image carries LiteParse's native
+closure, LibreOffice and English OCR data. API-local voice normalization/segmentation
+retains FFmpeg,
+with no additional hop or cold start; native artifact rendering retains fonts.
+Worker-side video validation needs FFprobe from the FFmpeg package. Desktop
+recording executes inside the desktop sandbox, not the worker host. Native
+artifact import/export uses the artifact runtime, not LibreOffice. Embedded API
+compositions can still use inline indexing and must supply its host dependencies.
 
 Contract schema initializers use pure `defineSchema` factory boundaries so
 release bundlers can omit unused validators, including nested constructors.

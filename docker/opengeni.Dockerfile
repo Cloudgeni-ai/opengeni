@@ -103,6 +103,9 @@ ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # daemon socket. Interactive/cancellable commands use the Agents SDK's
 # host-side Python PTY bridge, so Python must live in this worker image rather
 # than only inside the sandbox. The daemon remains outside this image.
+# Control activities parse Documents with LibreOffice and native OCR data;
+# turn activities validate video with ffprobe (provided by ffmpeg). Desktop
+# recordings execute ffmpeg in the sandbox, not on this worker host.
 USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client python3 tesseract-ocr-eng \
@@ -170,12 +173,12 @@ ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # API-owned browser/computer sessions use the Docker sandbox adapter directly,
 # including `docker network connect`. Install only the client; the daemon stays
 # outside this image and is reached through the mounted host socket.
+# Voice normalization/segmentation executes ffmpeg here, without a worker hop.
+# Artifact rasterization needs fonts. Documents upload parsing is queued to the
+# existing control worker, so LibreOffice and OCR data belong only in worker.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client tesseract-ocr-eng \
-  && install -d -o root -g root -m 0555 /opt/opengeni/tessdata \
-  && find /usr/share/tesseract-ocr -name eng.traineddata -exec cp {} /opt/opengeni/tessdata/eng.traineddata \; \
-  && chmod 0444 /opt/opengeni/tessdata/eng.traineddata \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -188,8 +191,7 @@ RUN apt-get update \
 COPY --from=api-build --chown=bun:bun /app/.release/server-runtime/api/ /app/
 COPY --from=api-build --chown=root:root /app/artifact-runtime/ /app/artifact-runtime/
 USER bun
-ENV TESSDATA_PREFIX=/opt/opengeni/tessdata \
-  OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
   OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
 RUN bun artifact-runtime-doctor.js doctor --json
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
