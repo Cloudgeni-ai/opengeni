@@ -74,7 +74,9 @@ COPY --chown=bun:bun . .
 
 ENV NODE_ENV=production
 USER root
-RUN install -d -o bun -g bun -m 0755 /workspace
+# WORKDIR leaves /app root-owned. Build stages run as bun and assemble their
+# runtime closures under /app/.release, which a build context may not contain.
+RUN install -d -o bun -g bun -m 0755 /workspace /app/.release
 USER bun
 
 # Most workloads share the same network/source-control tools. Keep that stable
