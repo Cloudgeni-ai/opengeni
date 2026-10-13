@@ -5,6 +5,8 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  mutateSessionControlInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
 // Contract: a skip-overlap schedule that reuses one session skips only while
@@ -58,7 +60,7 @@ async function reusableSession(status: string) {
     await tx`update sessions set status = ${status}, active_turn_id = null
       where id = ${session.id}::uuid`;
   });
-  return { ...scope, sessionId: session.id };
+  return { ...scope, subjectId: grant.subjectId, sessionId: session.id };
 }
 
 async function nextOccurrence(target: Awaited<ReturnType<typeof reusableSession>>) {
@@ -99,4 +101,19 @@ test.each([
   const occurrence = await nextOccurrence(target);
   expect(occurrence.reason as string).toBe(expected);
   expect(occurrence.rejections).toEqual([expected === "added" ? null : "session_not_idle"]);
+});
+
+test("Pause skips a reusable occurrence without reserving an unserviceable queued boundary", async () => {
+  const target = await reusableSession("idle");
+  const control = (action: "pause" | "resume") => withWorkspaceSubjectSessionActivityRls(
+    client.db, target.workspaceId!, target.subjectId, db => mutateSessionControlInTransaction(db, {
+      accountId: target.accountId, workspaceId: target.workspaceId!, sessionId: target.sessionId,
+      action, actor: {type: "human", subjectId: target.subjectId}, operationKey: crypto.randomUUID(),
+    }));
+  await control("pause");
+  expect((await nextOccurrence(target)).reason).toBe("session_not_idle");
+  const [row] = await shared.admin`select status from sessions where id = ${target.sessionId}`;
+  expect(row!.status).toBe("idle");
+  await control("resume");
+  expect((await nextOccurrence(target)).reason).toBe("added");
 });

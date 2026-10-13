@@ -32,6 +32,11 @@ import {
   createSkillMetadataMigrationStage,
   stageSkillMetadataMigration,
 } from "./skill-metadata-migration";
+import {
+  INTERRUPTED_TURN_RETIREMENT_MARKER, INTERRUPTED_TURN_RETIREMENT_MIGRATION,
+  migrateInterruptedTurnRetirement, parseInterruptedTurnRetirementManifest,
+  type InterruptedTurnRetirementManifest,
+} from "./interrupted-turn-retirement-migration";
 
 /**
  * The drained M4 provider cutovers with a codec stage (design 5.3 "Cutover
@@ -93,6 +98,9 @@ export interface ConcurrentIndexMigration {
 }
 
 export type MigrationRuntimeOptions = {
+  /** Explicit historical retirement, never inferred from Pause or row age.
+   * The exact version/sequence-fenced manifest is consumed only by 0764. */
+  interruptedTurnRetirement?: InterruptedTurnRetirementManifest;
   /**
    * Existing operator key; used only by the closed maintenance conversions:
    * Claude (0598), Codex (0680) and the provider cutover codec stages
@@ -240,8 +248,24 @@ export async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
-  options?: Pick<MigrationRuntimeOptions, "preinstalledVector" | "environmentsEncryptionKey">,
+  options?: Pick<MigrationRuntimeOptions, "preinstalledVector" | "environmentsEncryptionKey" | "interruptedTurnRetirement">,
 ): Promise<void> {
+  if (sqlText.includes(INTERRUPTED_TURN_RETIREMENT_MARKER)) {
+    if (file !== INTERRUPTED_TURN_RETIREMENT_MIGRATION)
+      throw new Error("Interrupted-turn retirement is restricted to migration 0764");
+    const parts = sqlText.split(INTERRUPTED_TURN_RETIREMENT_MARKER);
+    if (parts.length !== 2) throw new Error("0764 requires exactly one interrupted-turn retirement stage");
+    await sql.begin(async transaction => {
+      await transaction`select set_config('lock_timeout', '5s', true),
+        set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+        set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+      await transaction.unsafe(parts[0]!);
+      await migrateInterruptedTurnRetirement(transaction, options?.interruptedTurnRetirement);
+      await transaction.unsafe(parts[1]!);
+      await transaction`insert into schema_migrations(name) values (${file}) on conflict do nothing`;
+    });
+    return;
+  }
   if (file === "0000_initial.sql" && options?.preinstalledVector) {
     sqlText = await initialMigrationWithPreinstalledVector(sql, sqlText);
   }
@@ -618,6 +642,10 @@ export async function migrate(
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const depthPolicy = deploymentDepthPolicy(runtimeOptions);
   const preinstalledVector = preinstalledVectorPolicy(runtimeOptions);
+  const retirementPath = process.env.OPENGENI_MIGRATION_INTERRUPTED_TURN_RETIREMENT_MANIFEST;
+  const retirement = runtimeOptions?.interruptedTurnRetirement ?? (retirementPath
+    ? parseInterruptedTurnRetirementManifest(JSON.parse(await readFile(retirementPath, "utf8")))
+    : undefined);
   const sql = postgres(databaseUrl, { max: 1 });
   try {
     // Serialize concurrent migrate() runs; the session-level lock is released
@@ -677,6 +705,7 @@ export async function migrate(
           : undefined);
       await executeMigrationFile(sql, file, sqlText, {
         preinstalledVector,
+        ...(retirement ? { interruptedTurnRetirement: retirement } : {}),
         ...(configuredKey ? { environmentsEncryptionKey: configuredKey } : {}),
       });
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;

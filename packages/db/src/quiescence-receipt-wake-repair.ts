@@ -5,6 +5,7 @@ import {
   registerSessionWorkflowWakeInTransaction,
 } from "./session-control";
 import * as schema from "./schema";
+import { peekSessionWork } from "./index";
 
 export type QuiescenceReceiptWakeRepairCursor = { workspaceId: string; sessionId: string };
 type Candidate = QuiescenceReceiptWakeRepairCursor & { accountId: string };
@@ -38,7 +39,6 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
       if (
         !session ||
         session.accountId !== candidate.accountId ||
-        session.status !== "recovering" ||
         session.activeTurnId === null
       )
         return false;
@@ -54,7 +54,7 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
         )
         .for("update")
         .limit(1);
-      const [eligible] = await rawRows<{ eligible: boolean }>(
+      const [eligible] = await rawRows<{ eligible: boolean; receipt_missing: boolean }>(
         tx as unknown as Database,
         sql`
         select exists (
@@ -77,7 +77,7 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
             and turn.active_attempt_id is null
             and attempt.state = 'closed'
             and attempt.outcome = 'interrupted_recoverable'
-            and attempt.quiesced_at is null
+            and (attempt.quiesced_at is not null or ${session.status} = 'recovering')
             and attempt.closed_at < now() - interval '2 minutes'
             and (
               exists (
@@ -100,15 +100,29 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
             and wake.session_id = ${candidate.sessionId}
             and (wake.wake_revision > wake.delivered_revision
               or wake.updated_at >= now() - interval '10 minutes')
-        ) as eligible`,
+        ) as eligible,
+        coalesce((
+          select attempt.quiesced_at is null from session_turn_attempts attempt
+          where attempt.workspace_id = ${candidate.workspaceId}
+            and attempt.session_id = ${candidate.sessionId}
+            and attempt.turn_id = ${session.activeTurnId}
+          order by attempt.execution_generation desc, attempt.updated_at desc, attempt.id desc
+          limit 1
+        ), false) as receipt_missing`,
       );
       if (!eligible?.eligible) return false;
+      // Missing receipts must still be reconciled under Pause. A durable
+      // receipt, however, permits execution only through ordinary admission;
+      // do not wake intentionally paused or independently blocked work.
+      if (!eligible.receipt_missing &&
+        (await peekSessionWork(tx as unknown as Database, candidate.workspaceId, candidate.sessionId)).kind !== "runnable")
+        return false;
       await registerSessionWorkflowWakeInTransaction(tx as unknown as Database, {
         accountId: candidate.accountId,
         workspaceId: candidate.workspaceId,
         sessionId: candidate.sessionId,
         temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
-        reason: "attempt_quiescence_repair",
+        reason: eligible.receipt_missing ? "attempt_quiescence_repair" : "turn_recovery_repair",
       });
       return true;
     }),
