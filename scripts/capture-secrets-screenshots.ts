@@ -260,7 +260,7 @@ type CaptureState = {
   user?: string;
   workspace?: string;
   requires: Requirement;
-  path: (ids: Ids) => string | null;
+  path: (ids: Ids, theme: "light" | "dark") => string | null;
   intercept?: (context: BrowserContext, ids: Ids) => Promise<void>;
   steps?: (page: Page, ids: Ids) => Promise<void>;
   /** `--mock`: role and scenario for the in-page mock; replaces `intercept`. */
@@ -481,7 +481,7 @@ export const CAPTURE_STATES: CaptureState[] = [
     "S9",
     "kit",
     "Ask card secret field states in the UI kit",
-    () => "/dev/ui-kit?section=secret-ask-card&theme=light&chrome=0",
+    (_ids, theme) => `/dev/ui-kit?section=secret-ask-card&theme=${theme}&chrome=0`,
     { requires: "none" },
   ),
   // S10 / S11 session Secrets panel (the composer's "+" menu > Secrets), composer
@@ -675,7 +675,7 @@ async function capture(
     return { ...base, reason: "pending F2/W3: vault API not present (GET /vaults 404)" };
   if (state.requires === "vaults" && !ids.secretsRoute)
     return { ...base, reason: "pending W3: Secrets route not present" };
-  const path = state.path(ids);
+  const path = state.path(ids, theme);
   if (!path)
     return { ...base, reason: "pending seed (W6): the seeded record for this state was not found" };
   const context = await browser.newContext({
