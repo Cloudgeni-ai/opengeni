@@ -56,7 +56,9 @@ export function finalizeCommandEntry(input: {
   if (!imported.test(input.output)) {
     throw new Error(`Bundled command ${input.command} does not import its runner ${input.runner}`);
   }
-  return `${input.output.trimEnd()}\nawait ${input.runner}();\n`;
+  // Keep the source's entry-point guard: importing the bundled module (tests,
+  // image smoke checks, other tools) must never run the command itself.
+  return `${input.output.trimEnd()}\nif (import.meta.main) await ${input.runner}();\n`;
 }
 
 const operatorCommands = [
