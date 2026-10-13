@@ -8,6 +8,7 @@ import {
 import { sessionUsageLimitReachedMessage } from "@opengeni/contracts/session-usage-limit-refusal";
 import { currentCreditDebitAttribution } from "./credit-debit-attribution";
 import {
+  isTransactionHandle,
   rawRows,
   setSubjectRlsContext,
   withRlsContext,
@@ -91,7 +92,14 @@ function sqlState(error: unknown): string | undefined {
   return undefined;
 }
 
-async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+/**
+ * Retry serialization failures and deadlocks. Inside a caller's transaction
+ * a failed statement aborts the whole transaction, so retrying there would
+ * only repeat "current transaction is aborted"; the error is surfaced for the
+ * caller's own transaction retry instead.
+ */
+async function withRetry<T>(db: Database, fn: () => Promise<T>, attempts = 4): Promise<T> {
+  if (isTransactionHandle(db)) return await fn();
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
@@ -158,13 +166,28 @@ async function runCommand(
  * with `inherited: true`). `subjectId` applies private-session visibility; a
  * hidden session is reported as `not_found`. `prepare` advances one bounded
  * page of a pending historical import inline.
+ *
+ * `runtime` is for server-internal admission on behalf of an already
+ * authorized task attempt: the session is resolved tenant-bounded with private
+ * visibility cleared, so a private root is enforced rather than read as
+ * missing. `openSourceId` (runtime only) opens a pending custody marker for a
+ * single call in the same statement, only when the call is admitted.
  */
 export async function readSessionUsageLimit(
   db: Database,
-  input: Scope & { sessionId: string; subjectId?: string | null; prepare?: boolean },
-): Promise<SessionUsageLimitReadResult> {
+  input: Scope & {
+    sessionId: string;
+    subjectId?: string | null;
+    prepare?: boolean;
+    runtime?: boolean;
+    openSourceId?: string;
+  },
+): Promise<SessionUsageLimitReadResult & { fenced?: boolean; opened?: boolean }> {
+  if (input.openSourceId !== undefined && input.runtime !== true) {
+    throw new Error("Only runtime admission can open a usage custody marker");
+  }
   try {
-    return await withRetry(() =>
+    return await withRetry(db, () =>
       withRlsContext(
         db,
         input,
@@ -176,9 +199,16 @@ export async function readSessionUsageLimit(
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             prepare: input.prepare === true,
+            ...(input.runtime === true ? { runtime: true } : {}),
+            ...(input.openSourceId !== undefined ? { openSourceId: input.openSourceId } : {}),
           });
           if (result.outcome !== "ok") return { outcome: "not_found" as const };
-          return { outcome: "ok" as const, state: projectSessionUsageLimitState(result.state) };
+          return {
+            outcome: "ok" as const,
+            state: projectSessionUsageLimitState(result.state),
+            fenced: result.fenced === true,
+            opened: result.opened === true,
+          };
         },
         undefined,
         "none",
@@ -215,20 +245,87 @@ export function sessionUsageLimitRefusal(
 
 /**
  * Admission check for one new model request, message or goal resume. Reads
- * the latest durable root counter (one indexed row, no event scan). A missing
- * or hidden session is admitted as unlimited only because no session exists to
- * account against; any read failure throws `SessionUsageLimitUnavailableError`.
+ * the latest durable root counter (one indexed row, no event scan).
+ *
+ * People-facing checks admit a missing or hidden session as unlimited only
+ * because no session exists to account against. Runtime checks fail closed:
+ * the attempt already owns the session, so a missing tree, a read failure or a
+ * fenced custody marker (an earlier single call whose usage could not be
+ * recorded) throws `SessionUsageLimitUnavailableError`.
  */
 export async function checkSessionUsageLimitAdmission(
   db: Database,
-  input: Scope & { sessionId: string; subjectId?: string | null },
+  input: Scope & {
+    sessionId: string;
+    subjectId?: string | null;
+    runtime?: boolean;
+    openSourceId?: string;
+  },
 ): Promise<SessionUsageLimitAdmission> {
   const read = await readSessionUsageLimit(db, input);
-  if (read.outcome !== "ok") return { allowed: true, state: null };
+  if (read.outcome !== "ok") {
+    if (input.runtime === true) {
+      throw new SessionUsageLimitUnavailableError("The task for this model request was not found");
+    }
+    return { allowed: true, state: null };
+  }
+  if (read.fenced === true) {
+    throw new SessionUsageLimitUnavailableError(
+      "Usage from an earlier model request in this task is not recorded yet",
+    );
+  }
   const refusal = sessionUsageLimitRefusal(read.state);
   return refusal
     ? { allowed: false, refusal, state: read.state }
     : { allowed: true, state: read.state };
+}
+
+/**
+ * Mark an open custody marker as fenced after its owner failed to fill it, so
+ * the task blocks new model requests at once instead of after the overdue
+ * window. Best effort: callers keep the unrecorded receipt for retry.
+ */
+export async function fenceSessionUsageReceipt(
+  db: Database,
+  input: Scope & { sessionId: string; sourceId: string },
+): Promise<"fenced" | "not_pending" | "source_gone"> {
+  return (await markerCommand(db, "fence", input)) as "fenced" | "not_pending" | "source_gone";
+}
+
+/**
+ * Remove an unfenced custody marker whose single call returned no response
+ * (the provider request failed before any usage was reported).
+ */
+export async function releaseSessionUsageReceipt(
+  db: Database,
+  input: Scope & { sessionId: string; sourceId: string },
+): Promise<"released" | "not_pending" | "source_gone"> {
+  return (await markerCommand(db, "release", input)) as "released" | "not_pending" | "source_gone";
+}
+
+async function markerCommand(
+  db: Database,
+  action: "fence" | "release",
+  input: Scope & { sessionId: string; sourceId: string },
+): Promise<string> {
+  return await withRetry(db, () =>
+    withRlsContext(
+      db,
+      input,
+      async (scoped) => {
+        const result = await runCommand(scoped, {
+          action,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sourceId: input.sourceId,
+        });
+        return String(result.outcome);
+      },
+      undefined,
+      "none",
+    ),
+  );
 }
 
 /**
@@ -256,7 +353,21 @@ export async function settleSessionUsageReceipt(
   ) {
     throw new Error("Session usage receipt amount must be a non-negative safe integer");
   }
-  return await withRetry(() =>
+  try {
+    return await settleOnce(db, input);
+  } catch (error) {
+    // The session's tree was deleted while this settlement waited on its
+    // counter row: the receipt's root no longer exists. Same as source_gone.
+    if (sqlState(error) === "23503") return { outcome: "source_gone", state: null };
+    throw error;
+  }
+}
+
+async function settleOnce(
+  db: Database,
+  input: Parameters<typeof settleSessionUsageReceipt>[1],
+): Promise<{ outcome: SessionUsageReceiptOutcome; state: SessionUsageLimit | null }> {
+  return await withRetry(db, () =>
     withRlsContext(
       db,
       input,
@@ -396,17 +507,44 @@ export async function setSessionUsageLimitInTransaction(
   return { outcome, state, rootSessionId, eventId: event.id };
 }
 
+export type SessionUsageLimitMaintenanceResult = {
+  /** Roots whose import advanced a page. */
+  processed: number;
+  /** Roots whose import page failed and was backed off. */
+  failed: number;
+  /** Content-free failure diagnostics: SQLSTATE to count. */
+  errors: Record<string, number>;
+  /** Custody markers left unfilled past the lost window, now disclosed as unpriced. */
+  resolvedLost: number;
+};
+
 /**
- * One bounded, resumable step of the historical import for roots created
- * before this feature. Safe to call from any periodic maintenance loop.
+ * One bounded, resumable maintenance pass: advance the historical import for
+ * roots created before this feature (failed pages back off exponentially and
+ * keep their SQLSTATE) and resolve lost single-call custody markers. Safe to
+ * call from any periodic maintenance loop.
  */
 export async function maintainSessionUsageLimits(
   db: Database,
   input: { limit?: number; budget?: number } = {},
-): Promise<number> {
-  const [row] = await rawRows<{ processed: number }>(
+): Promise<SessionUsageLimitMaintenanceResult> {
+  const [row] = await rawRows<{ result: Record<string, unknown> | null }>(
     db,
-    sql`select maintain_session_usage_limits(${input.limit ?? 20}::integer, ${input.budget ?? 500}::integer) as processed`,
+    sql`select maintain_session_usage_limits(${input.limit ?? 20}::integer, ${input.budget ?? 500}::integer) as result`,
   );
-  return Number(row?.processed ?? 0);
+  const result = row?.result ?? {};
+  const count = (value: unknown): number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const errors: Record<string, number> = {};
+  if (result.errors && typeof result.errors === "object") {
+    for (const [code, value] of Object.entries(result.errors as Record<string, unknown>)) {
+      if (/^[0-9A-Z]{5}$/.test(code)) errors[code] = count(value);
+    }
+  }
+  return {
+    processed: count(result.processed),
+    failed: count(result.failed),
+    errors,
+    resolvedLost: count(result.resolvedLost),
+  };
 }

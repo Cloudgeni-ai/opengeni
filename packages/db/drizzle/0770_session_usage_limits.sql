@@ -36,6 +36,7 @@ CREATE TABLE opengeni_private.session_usage_limit_roots (
   import_cursor jsonb CHECK (import_cursor IS NULL OR jsonb_typeof(import_cursor) = 'object'),
   import_imported bigint NOT NULL DEFAULT 0 CHECK (import_imported >= 0),
   import_error text CHECK (import_error IS NULL OR octet_length(import_error) <= 64),
+  import_attempts integer NOT NULL DEFAULT 0 CHECK (import_attempts >= 0),
   import_next_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -52,6 +53,14 @@ CREATE INDEX session_usage_limit_roots_import_due
 -- One receipt per canonical producer identity. The source session is kept as an
 -- opaque identifier without a foreign key so deleting a quiescent child never
 -- refunds or erases the surviving root's spend.
+--
+-- `pending` is a content-free custody marker opened before an
+-- attempt-authenticated single model call is dispatched (never a reservation:
+-- it carries no amount and is not counted). Settlement fills it exactly once.
+-- A pending marker that is fenced (its fill failed) or overdue blocks new
+-- model requests in the task tree until it is filled; one that stays unfilled
+-- is finally resolved as `unpriced`, so a lost receipt is disclosed as
+-- incomplete coverage instead of silently disappearing.
 CREATE TABLE opengeni_private.session_usage_limit_receipts (
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
@@ -59,22 +68,29 @@ CREATE TABLE opengeni_private.session_usage_limit_receipts (
   source_id text NOT NULL CHECK (octet_length(source_id) BETWEEN 1 AND 1100),
   source_session_id uuid NOT NULL,
   turn_id uuid,
-  status text NOT NULL CHECK (status IN ('priced','free','unpriced')),
+  status text NOT NULL CHECK (status IN ('priced','free','unpriced','pending')),
   amount_micros bigint,
   pricing_source text CHECK (pricing_source IS NULL
     OR pricing_source IN ('configured_list_price','gateway_reported')),
   model text CHECK (model IS NULL OR octet_length(model) BETWEEN 1 AND 512),
   origin text NOT NULL CHECK (origin IN ('live','legacy')),
+  fenced boolean NOT NULL DEFAULT false,
   recorded_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, source_id),
   FOREIGN KEY (workspace_id, root_session_id)
     REFERENCES opengeni_private.session_usage_limit_roots(workspace_id, root_session_id) ON DELETE CASCADE,
   CHECK ((status = 'priced' AND amount_micros > 0 AND pricing_source IS NOT NULL)
     OR (status = 'free' AND amount_micros = 0 AND pricing_source IS NOT NULL)
-    OR (status = 'unpriced' AND amount_micros IS NULL))
+    OR (status = 'unpriced' AND amount_micros IS NULL)
+    OR (status = 'pending' AND amount_micros IS NULL AND pricing_source IS NULL)),
+  CHECK (NOT fenced OR status = 'pending')
 );
 CREATE INDEX session_usage_limit_receipts_root
   ON opengeni_private.session_usage_limit_receipts (workspace_id, root_session_id, recorded_at);
+-- Open custody markers are few (in-flight single calls); admission probes them per root.
+CREATE INDEX session_usage_limit_receipts_pending
+  ON opengeni_private.session_usage_limit_receipts (workspace_id, root_session_id, recorded_at)
+  WHERE status = 'pending';
 
 -- Exact CAS/idempotency receipt and audit record for every authorized change.
 CREATE TABLE opengeni_private.session_usage_limit_config_receipts (
@@ -137,6 +153,11 @@ BEGIN
   EXECUTE format('CREATE POLICY session_usage_limit_import_inventory ON opengeni_private.session_usage_limit_roots
     FOR SELECT USING (current_user=%L AND %I.session_usage_limit_capability_active(NULL::uuid,NULL::uuid))',
     owner_name, target_schema);
+  -- Global, id-only inventory of unfilled custody markers for maintenance.
+  EXECUTE format('CREATE POLICY session_usage_limit_pending_inventory ON opengeni_private.session_usage_limit_receipts
+    FOR SELECT USING (current_user=%L AND status=''pending''
+      AND %I.session_usage_limit_capability_active(NULL::uuid,NULL::uuid))',
+    owner_name, target_schema);
 END $policies$;
 
 -- Content-free projection of one counter row. `usedMicros` is null while the
@@ -167,9 +188,12 @@ RETURNS jsonb LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
 $$;
 
 -- Apply one receipt to a locked root row. Exactly-once per (workspace,
--- source): a duplicate is a no-op, an unknown receipt may be filled once with
--- a known amount, and a conflicting known amount is counted and rejected,
--- never debited twice. Returns the outcome label.
+-- source): a duplicate is a no-op, a pending custody marker or an unknown
+-- receipt may be filled once with a known amount, and a conflicting known
+-- amount is counted and rejected, never debited twice. An amount outside
+-- 0..2^53-1 is unknown (never an error that could wedge an import or drop a
+-- live receipt), and an over-long or empty model label is dropped by byte
+-- length. Returns the outcome label.
 CREATE FUNCTION session_usage_limit_apply_receipt(p_account uuid, p_workspace uuid, p_root uuid,
   p_source_id text, p_source_session uuid, p_turn uuid, p_amount bigint, p_pricing_source text,
   p_model text, p_origin text)
@@ -178,23 +202,25 @@ DECLARE
   v_status text;
   v_pricing text := CASE WHEN p_pricing_source IN ('configured_list_price','gateway_reported')
     THEN p_pricing_source END;
+  v_amount bigint := CASE WHEN p_amount BETWEEN 0 AND 9007199254740991 THEN p_amount END;
+  v_model text := CASE WHEN octet_length(p_model) BETWEEN 1 AND 512 THEN p_model END;
   existing opengeni_private.session_usage_limit_receipts%ROWTYPE;
 BEGIN
-  IF p_amount IS NOT NULL AND (p_amount < 0 OR p_amount > 9007199254740991) THEN
-    RAISE EXCEPTION 'invalid session usage amount' USING ERRCODE='22023';
+  IF p_source_id IS NULL OR octet_length(p_source_id) NOT BETWEEN 1 AND 1100 THEN
+    RAISE EXCEPTION 'invalid session usage source' USING ERRCODE='22023';
   END IF;
-  v_status := CASE WHEN p_amount IS NULL OR v_pricing IS NULL THEN 'unpriced'
-    WHEN p_amount = 0 THEN 'free' ELSE 'priced' END;
+  v_status := CASE WHEN v_amount IS NULL OR v_pricing IS NULL THEN 'unpriced'
+    WHEN v_amount = 0 THEN 'free' ELSE 'priced' END;
   INSERT INTO opengeni_private.session_usage_limit_receipts(account_id,workspace_id,root_session_id,
     source_id,source_session_id,turn_id,status,amount_micros,pricing_source,model,origin)
   VALUES (p_account,p_workspace,p_root,p_source_id,p_source_session,p_turn,v_status,
-    CASE WHEN v_status='unpriced' THEN NULL ELSE p_amount END,
+    CASE WHEN v_status='unpriced' THEN NULL ELSE v_amount END,
     CASE WHEN v_status='unpriced' THEN NULL ELSE v_pricing END,
-    nullif(left(p_model,512),''),p_origin)
+    v_model,p_origin)
   ON CONFLICT (workspace_id, source_id) DO NOTHING;
   IF FOUND THEN
     UPDATE opengeni_private.session_usage_limit_roots SET
-      known_micros = known_micros + coalesce(CASE WHEN v_status='unpriced' THEN 0 ELSE p_amount END,0),
+      known_micros = known_micros + coalesce(CASE WHEN v_status='unpriced' THEN 0 ELSE v_amount END,0),
       priced_calls = priced_calls + (v_status='priced')::int,
       free_calls = free_calls + (v_status='free')::int,
       unpriced_calls = unpriced_calls + (v_status='unpriced')::int,
@@ -211,8 +237,25 @@ BEGIN
       WHERE workspace_id = p_workspace AND root_session_id = p_root;
     RETURN 'conflict';
   END IF;
+  IF existing.status = 'pending' THEN
+    -- The custody marker opened before dispatch: fill it exactly once.
+    UPDATE opengeni_private.session_usage_limit_receipts SET status = v_status,
+      amount_micros = CASE WHEN v_status='unpriced' THEN NULL ELSE v_amount END,
+      pricing_source = CASE WHEN v_status='unpriced' THEN NULL ELSE v_pricing END,
+      model = coalesce(v_model, existing.model), turn_id = coalesce(p_turn, existing.turn_id),
+      origin = p_origin, fenced = false, recorded_at = clock_timestamp()
+    WHERE workspace_id = p_workspace AND source_id = p_source_id;
+    UPDATE opengeni_private.session_usage_limit_roots SET
+      known_micros = known_micros + coalesce(CASE WHEN v_status='unpriced' THEN 0 ELSE v_amount END,0),
+      priced_calls = priced_calls + (v_status='priced')::int,
+      free_calls = free_calls + (v_status='free')::int,
+      unpriced_calls = unpriced_calls + (v_status='unpriced')::int,
+      usage_revision = usage_revision + 1, updated_at = clock_timestamp()
+    WHERE workspace_id = p_workspace AND root_session_id = p_root;
+    RETURN 'recorded';
+  END IF;
   IF existing.status = v_status AND existing.amount_micros IS NOT DISTINCT FROM
-    (CASE WHEN v_status='unpriced' THEN NULL ELSE p_amount END) THEN
+    (CASE WHEN v_status='unpriced' THEN NULL ELSE v_amount END) THEN
     RETURN 'duplicate';
   END IF;
   IF v_status = 'unpriced' THEN
@@ -221,10 +264,10 @@ BEGIN
   END IF;
   IF existing.status = 'unpriced' THEN
     UPDATE opengeni_private.session_usage_limit_receipts SET status = v_status,
-      amount_micros = p_amount, pricing_source = v_pricing
+      amount_micros = v_amount, pricing_source = v_pricing
     WHERE workspace_id = p_workspace AND source_id = p_source_id;
     UPDATE opengeni_private.session_usage_limit_roots SET
-      known_micros = known_micros + p_amount,
+      known_micros = known_micros + v_amount,
       priced_calls = priced_calls + (v_status='priced')::int,
       free_calls = free_calls + (v_status='free')::int,
       unpriced_calls = unpriced_calls - 1,
@@ -237,12 +280,42 @@ BEGIN
   RETURN 'conflict';
 END $$;
 
+-- The meter value of one stored per-call snapshot. Missing token telemetry is
+-- unknown usage, not a known-free call: an amount counts only when the
+-- provider reported a priced (gateway) cost or the call has nonzero
+-- input/output tokens. A legitimately rounded $0 cost of a real call stays a
+-- known (free) amount. Out-of-range amounts are unknown.
+CREATE FUNCTION session_usage_limit_meter_amount(p_amount numeric, p_pricing text,
+  p_input numeric, p_output numeric)
+RETURNS bigint LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
+  SELECT CASE WHEN p_amount BETWEEN 0 AND 9007199254740991
+      AND p_pricing IN ('configured_list_price','gateway_reported')
+      AND (p_pricing = 'gateway_reported' OR coalesce(p_input,0) + coalesce(p_output,0) > 0)
+    THEN p_amount::bigint END
+$$;
+
+-- The same rule for an `agent.model.usage` payload (bounded numeric parsing).
+CREATE FUNCTION session_usage_limit_event_amount(p_payload jsonb)
+RETURNS bigint LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
+  SELECT session_usage_limit_meter_amount(
+    CASE WHEN jsonb_typeof(p_payload->'estimatedProviderCostMicros') = 'number'
+      AND (p_payload->>'estimatedProviderCostMicros') ~ '^[0-9]{1,16}$'
+      THEN (p_payload->>'estimatedProviderCostMicros')::numeric END,
+    p_payload->>'pricingSource',
+    CASE WHEN jsonb_typeof(p_payload->'inputTokens') = 'number'
+      AND (p_payload->>'inputTokens') ~ '^[0-9]{1,15}$' THEN (p_payload->>'inputTokens')::numeric END,
+    CASE WHEN jsonb_typeof(p_payload->'outputTokens') = 'number'
+      AND (p_payload->>'outputTokens') ~ '^[0-9]{1,15}$' THEN (p_payload->>'outputTokens')::numeric END)
+$$;
+
 -- Import one bounded page of stored per-call cost snapshots for a preparing
 -- root: authoritative model_call_facts first, then recoverable
 -- agent.model.usage events, per tree session in id order, by keyset cursor.
 -- Stored rates only; unknown historical amounts stay unknown. Both sources and
--- live receipts share one identity, so nothing is counted twice. Caller holds
--- the root row lock and the tenant capability. Returns true when complete.
+-- live receipts share one identity, so nothing is counted twice. A fact
+-- without a turn or with an over-long source key is still counted, under its
+-- own fact identity. Caller holds the root row lock and the tenant capability.
+-- Returns true when complete.
 CREATE FUNCTION session_usage_limit_import_page(p_account uuid, p_workspace uuid, p_root uuid,
   p_budget integer)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
@@ -279,7 +352,7 @@ BEGIN
     IF v_phase = 'facts' THEN
       fetched := 0;
       FOR row_fact IN SELECT f.id, f.occurred_at, f.turn_id, f.source_key, f.model,
-          f.estimated_provider_cost_micros, f.pricing_source
+          f.estimated_provider_cost_micros, f.pricing_source, f.input_tokens, f.output_tokens
         FROM model_call_facts f
         WHERE f.workspace_id = p_workspace AND f.session_id = v_session
           AND (f.occurred_at, f.id) > (v_fact_at, v_fact_id)
@@ -287,8 +360,14 @@ BEGIN
       LOOP
         fetched := fetched + 1;
         v_outcome := session_usage_limit_apply_receipt(p_account, p_workspace, p_root,
-          row_fact.turn_id::text || ':' || row_fact.source_key, v_session, row_fact.turn_id,
-          row_fact.estimated_provider_cost_micros, row_fact.pricing_source, row_fact.model, 'legacy');
+          CASE WHEN row_fact.turn_id IS NOT NULL
+              AND octet_length(row_fact.source_key) BETWEEN 1 AND 1024
+            THEN row_fact.turn_id::text || ':' || row_fact.source_key
+            ELSE 'fact:' || row_fact.id::text END,
+          v_session, row_fact.turn_id,
+          session_usage_limit_meter_amount(row_fact.estimated_provider_cost_micros,
+            row_fact.pricing_source, row_fact.input_tokens, row_fact.output_tokens),
+          row_fact.pricing_source, row_fact.model, 'legacy');
         IF v_outcome IN ('recorded','filled') THEN imported := imported + 1; END IF;
         v_fact_at := row_fact.occurred_at; v_fact_id := row_fact.id;
       END LOOP;
@@ -311,9 +390,7 @@ BEGIN
           OR jsonb_typeof(row_event.payload->'sourceKey') IS DISTINCT FROM 'string'
           OR octet_length(row_event.payload->>'sourceKey') NOT BETWEEN 1 AND 1024;
         v_pricing := row_event.payload->>'pricingSource';
-        v_amount := CASE WHEN jsonb_typeof(row_event.payload->'estimatedProviderCostMicros') = 'number'
-            AND (row_event.payload->>'estimatedProviderCostMicros') ~ '^[0-9]{1,16}$'
-          THEN (row_event.payload->>'estimatedProviderCostMicros')::bigint END;
+        v_amount := session_usage_limit_event_amount(row_event.payload);
         v_outcome := session_usage_limit_apply_receipt(p_account, p_workspace, p_root,
           row_event.turn_id::text || ':' || (row_event.payload->>'sourceKey'), v_session,
           row_event.turn_id, v_amount, v_pricing,
@@ -342,13 +419,14 @@ BEGIN
   IF session_usage_limit_import_page(p_account, p_workspace, p_root, p_budget) THEN
     -- Absence of an older record is not proof of no usage: stay partial.
     UPDATE opengeni_private.session_usage_limit_roots SET history_state = 'legacy_partial',
-      import_next_at = NULL, import_error = NULL, usage_revision = usage_revision + 1,
+      import_next_at = NULL, import_error = NULL, import_attempts = 0,
+      usage_revision = usage_revision + 1,
       updated_at = clock_timestamp()
     WHERE workspace_id = p_workspace AND root_session_id = p_root;
     RETURN true;
   END IF;
   UPDATE opengeni_private.session_usage_limit_roots SET import_next_at = clock_timestamp(),
-    import_error = NULL
+    import_error = NULL, import_attempts = 0
   WHERE workspace_id = p_workspace AND root_session_id = p_root;
   RETURN false;
 END $$;
@@ -376,14 +454,93 @@ END $$;
 CREATE TRIGGER session_usage_limit_root_seed AFTER INSERT ON sessions
   FOR EACH ROW EXECUTE FUNCTION seed_session_usage_limit_root();
 
+-- Meter every persisted `agent.model.usage` event in its appending
+-- transaction, under the same producer identity (`<turnId>:<sourceKey>`) and
+-- the stored per-call snapshot. Upgraded writers have already recorded that
+-- identity synchronously, so this is a no-op duplicate for them. It closes the
+-- rolling-deploy window in which an older worker writes only the event (a
+-- root seeded `complete` must not miss that usage), and it durably recovers a
+-- live receipt whose own write failed after the event committed. A root
+-- without a counter row is left to the bounded import, which reads the same
+-- events. Malformed or unattributable payloads are ignored, never valued.
+-- Lock order: runs after the event-write prefix of its transaction and then
+-- locks only the private root counter row, as the canonical order requires.
+CREATE FUNCTION meter_session_usage_limit_event()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE opened integer; v_root uuid; previous_subject text; previous_account text;
+  previous_workspace text;
+BEGIN
+  IF NEW.turn_id IS NULL OR jsonb_typeof(NEW.payload) IS DISTINCT FROM 'object'
+    OR jsonb_typeof(NEW.payload->'sourceKey') IS DISTINCT FROM 'string'
+    OR octet_length(NEW.payload->>'sourceKey') NOT BETWEEN 1 AND 1024 THEN
+    RETURN NULL;
+  END IF;
+  -- Content-free metering of the inserted row's own tenant, whatever the
+  -- writer's context: not restricted by private-session visibility, and an
+  -- older writer's transaction need not carry the tenant settings.
+  previous_subject := current_setting('opengeni.subject_id', true);
+  previous_account := current_setting('opengeni.account_id', true);
+  previous_workspace := current_setting('opengeni.workspace_id', true);
+  PERFORM set_config('opengeni.subject_id', '', true);
+  PERFORM set_config('opengeni.account_id', NEW.account_id::text, true);
+  PERFORM set_config('opengeni.workspace_id', NEW.workspace_id::text, true);
+  SELECT s.root_session_id INTO v_root FROM sessions s
+    WHERE s.id = NEW.session_id AND s.workspace_id = NEW.workspace_id
+      AND s.account_id = NEW.account_id;
+  IF v_root IS NOT NULL THEN
+    INSERT INTO opengeni_private.session_usage_limit_capabilities VALUES
+      (pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,NEW.workspace_id)
+      ON CONFLICT DO NOTHING;
+    GET DIAGNOSTICS opened = ROW_COUNT;
+    IF EXISTS (SELECT 1 FROM opengeni_private.session_usage_limit_roots r
+      WHERE r.workspace_id = NEW.workspace_id AND r.root_session_id = v_root) THEN
+      PERFORM session_usage_limit_apply_receipt(NEW.account_id, NEW.workspace_id, v_root,
+        NEW.turn_id::text || ':' || (NEW.payload->>'sourceKey'), NEW.session_id, NEW.turn_id,
+        session_usage_limit_event_amount(NEW.payload), NEW.payload->>'pricingSource',
+        CASE WHEN jsonb_typeof(NEW.payload->'model') = 'string' THEN NEW.payload->>'model' END,
+        'live');
+    END IF;
+    IF opened = 1 THEN
+      DELETE FROM opengeni_private.session_usage_limit_capabilities
+        WHERE backend_pid=pg_backend_pid() AND transaction_id=pg_current_xact_id_if_assigned()
+          AND data_schema=TG_TABLE_SCHEMA AND account_id=NEW.account_id
+          AND workspace_id=NEW.workspace_id;
+    END IF;
+  END IF;
+  PERFORM set_config('opengeni.subject_id', coalesce(previous_subject, ''), true);
+  PERFORM set_config('opengeni.account_id', coalesce(previous_account, ''), true);
+  PERFORM set_config('opengeni.workspace_id', coalesce(previous_workspace, ''), true);
+  RETURN NULL;
+END $$;
+CREATE TRIGGER session_usage_limit_meter_event AFTER INSERT ON session_events
+  FOR EACH ROW WHEN (NEW.type = 'agent.model.usage')
+  EXECUTE FUNCTION meter_session_usage_limit_event();
+
 -- The only runtime entry point. Actions:
---   read    {sessionId[, prepare]}           -> {outcome, state}
+--   read    {sessionId[, prepare][, runtime][, openSourceId]}
+--                                            -> {outcome, state, fenced[, opened]}
 --   set     {sessionId, limitMicros, expectedVersion, operationId, actorSubjectId,
 --            actorType, producerEnabled}     -> {outcome, state, rootSessionId}
 --   settle  {sessionId, sourceId, turnId?, amountMicros, pricingSource, model}
 --                                            -> {outcome, state}
--- Session visibility is evaluated under the caller's RLS context, so a private
--- or hidden session is indistinguishable from a missing one.
+--   fence   {sessionId, sourceId}           -> {outcome}
+--   release {sessionId, sourceId}           -> {outcome}
+-- Reads and writes for people resolve the session under the caller's RLS
+-- context, so a private or hidden session is indistinguishable from a missing
+-- one. Server-internal runtime admission (`runtime`), settlement and fencing
+-- resolve the session's root within the tenant regardless of private-session
+-- visibility: a session hidden from its causal human (for example after a
+-- membership change) is still enforced and metered, never admitted on an
+-- unread state or silently dropped. Their results only ever reach that task's
+-- own refusal.
+--
+-- `openSourceId` opens a pending custody marker for an attempt-authenticated
+-- single call in the same statement, only when the call is admitted. `fenced`
+-- reports a fenced or overdue (15 minutes) marker in the task tree: new model
+-- requests are not admitted until it is filled, and the reported coverage is
+-- partial meanwhile. `release` removes an unfenced marker whose call returned
+-- no response (the provider request failed); a fenced marker stays until it is
+-- filled or resolved by maintenance.
 CREATE FUNCTION session_usage_limit_command(p_input jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
@@ -400,6 +557,10 @@ DECLARE
   v_expected bigint;
   v_outcome text;
   previous_subject text;
+  v_runtime boolean;
+  v_fenced boolean := false;
+  v_opened boolean := false;
+  v_state jsonb;
   result jsonb;
   v_data_schema text := (SELECT n.nspname FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
     WHERE t.oid='workspaces'::regclass);
@@ -408,14 +569,25 @@ BEGIN
     OR opengeni_private.workspace_rls_visible(a, w) IS DISTINCT FROM true THEN
     RAISE EXCEPTION 'session usage limit scope denied' USING ERRCODE = '42501';
   END IF;
-  IF action NOT IN ('read','set','settle') THEN
+  IF action NOT IN ('read','set','settle','fence','release') THEN
     RAISE EXCEPTION 'unknown session usage limit action' USING ERRCODE = '22023';
   END IF;
-  -- Visibility under the caller's own policies (workspace and private-session).
+  v_runtime := action IN ('settle','fence','release')
+    OR (action = 'read' AND coalesce((p_input->>'runtime')::boolean, false));
+  -- People: visibility under the caller's own policies (workspace and
+  -- private-session). Runtime: tenant-bounded, private visibility cleared.
+  IF v_runtime THEN
+    previous_subject := current_setting('opengeni.subject_id', true);
+    PERFORM set_config('opengeni.subject_id', '', true);
+  END IF;
   SELECT s.root_session_id INTO v_root FROM sessions s
     WHERE s.id = v_session AND s.workspace_id = w AND s.account_id = a;
+  IF v_runtime THEN
+    PERFORM set_config('opengeni.subject_id', coalesce(previous_subject, ''), true);
+  END IF;
   IF v_root IS NULL THEN
-    RETURN jsonb_build_object('outcome', CASE WHEN action='settle' THEN 'source_gone' ELSE 'not_found' END);
+    RETURN jsonb_build_object('outcome', CASE WHEN action IN ('settle','fence','release') THEN 'source_gone'
+      ELSE 'not_found' END);
   END IF;
   IF action = 'set' AND v_root <> v_session THEN
     RETURN jsonb_build_object('outcome','not_root','rootSessionId',v_root);
@@ -424,6 +596,32 @@ BEGIN
     VALUES (pg_backend_pid(), pg_current_xact_id(), v_data_schema, a, w)
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened = ROW_COUNT;
+  IF action = 'fence' THEN
+    -- The owner of a custody marker could not fill it: block the task tree
+    -- now instead of only after the overdue window.
+    UPDATE opengeni_private.session_usage_limit_receipts SET fenced = true
+      WHERE workspace_id = w AND root_session_id = v_root AND source_id = p_input->>'sourceId'
+        AND status = 'pending';
+    result := jsonb_build_object('outcome', CASE WHEN FOUND THEN 'fenced' ELSE 'not_pending' END);
+    IF opened = 1 THEN
+      DELETE FROM opengeni_private.session_usage_limit_capabilities WHERE backend_pid=pg_backend_pid()
+        AND transaction_id=pg_current_xact_id_if_assigned() AND data_schema=v_data_schema
+        AND workspace_id=w;
+    END IF;
+    RETURN result;
+  END IF;
+  IF action = 'release' THEN
+    DELETE FROM opengeni_private.session_usage_limit_receipts
+      WHERE workspace_id = w AND root_session_id = v_root AND source_id = p_input->>'sourceId'
+        AND status = 'pending' AND NOT fenced;
+    result := jsonb_build_object('outcome', CASE WHEN FOUND THEN 'released' ELSE 'not_pending' END);
+    IF opened = 1 THEN
+      DELETE FROM opengeni_private.session_usage_limit_capabilities WHERE backend_pid=pg_backend_pid()
+        AND transaction_id=pg_current_xact_id_if_assigned() AND data_schema=v_data_schema
+        AND workspace_id=w;
+    END IF;
+    RETURN result;
+  END IF;
   IF action = 'read' AND NOT coalesce((p_input->>'prepare')::boolean, false) THEN
     -- Hot admission read: one indexed row, no lock, no event scan.
     SELECT * INTO root_row FROM opengeni_private.session_usage_limit_roots
@@ -459,8 +657,25 @@ BEGIN
   END IF;
 
   IF action = 'read' THEN
-    result := jsonb_build_object('outcome','ok',
-      'state', session_usage_limit_state(root_row, v_root <> v_session));
+    v_fenced := EXISTS (SELECT 1 FROM opengeni_private.session_usage_limit_receipts r
+      WHERE r.workspace_id = w AND r.root_session_id = v_root AND r.status = 'pending'
+        AND (r.fenced OR r.recorded_at < clock_timestamp() - interval '15 minutes'));
+    v_state := session_usage_limit_state(root_row, v_root <> v_session);
+    IF v_fenced THEN v_state := v_state || jsonb_build_object('coverage','partial'); END IF;
+    IF p_input ? 'openSourceId' AND v_runtime AND NOT v_fenced
+      AND (root_row.limit_micros IS NULL OR root_row.history_state = 'preparing'
+        OR root_row.known_micros < root_row.limit_micros) THEN
+      IF octet_length(coalesce(p_input->>'openSourceId','')) NOT BETWEEN 1 AND 1100 THEN
+        RAISE EXCEPTION 'invalid session usage source' USING ERRCODE = '22023';
+      END IF;
+      INSERT INTO opengeni_private.session_usage_limit_receipts(account_id,workspace_id,
+        root_session_id,source_id,source_session_id,status,origin)
+      VALUES (a, w, v_root, p_input->>'openSourceId', v_session, 'pending', 'live')
+      ON CONFLICT (workspace_id, source_id) DO NOTHING;
+      v_opened := true;
+    END IF;
+    result := jsonb_build_object('outcome','ok','state', v_state,'fenced', v_fenced,
+      'opened', v_opened);
   ELSIF action = 'settle' THEN
     v_outcome := session_usage_limit_apply_receipt(a, w, v_root,
       p_input->>'sourceId', v_session, nullif(p_input->>'turnId','')::uuid,
@@ -495,7 +710,13 @@ BEGIN
         result := jsonb_build_object('outcome','operation_conflict',
           'state', session_usage_limit_state(root_row, false));
       ELSE
+        -- An exact replay returns the operation's committed configuration
+        -- (its limit and resulting version), not a later change; usage stays
+        -- live and separately versioned by usageRevision.
+        root_row.limit_micros := prior_receipt.limit_micros;
+        root_row.config_version := prior_receipt.result_version;
         result := jsonb_build_object('outcome','replayed','resultVersion',prior_receipt.result_version,
+          'previousLimitMicros', prior_receipt.previous_limit_micros,
           'state', session_usage_limit_state(root_row, false));
       END IF;
     ELSIF root_row.config_version <> v_expected THEN
@@ -529,31 +750,39 @@ BEGIN
   RETURN result;
 END $$;
 
--- Cross-workspace import maintenance. Inventory uses an owner-only global
--- capability; each import step runs under its exact tenant GUC/capability so
--- every source read is evaluated by the ordinary RLS policies. Failures retry
--- later with a bounded error code; they never mark a root complete.
+-- Cross-workspace maintenance, one bounded pass:
+-- 1. Import: inventory uses an owner-only global capability; each import step
+--    runs under its exact tenant GUC/capability so every source read is
+--    evaluated by the ordinary RLS policies. A failing root is never marked
+--    complete: it keeps `preparing`, records the SQLSTATE, and backs off
+--    exponentially (1 minute doubling to 1 hour); the failure is counted in
+--    the result so the caller reports it. Connection loss aborts the call.
+-- 2. Lost custody: a pending marker unfilled for 30 minutes is resolved as an
+--    unpriced call, so the task is no longer blocked and its coverage stays
+--    honestly partial. A later fill of the same identity still records it.
 CREATE FUNCTION maintain_session_usage_limits(p_limit integer, p_budget integer)
-RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   target record; opened integer; tenant_opened integer; processed integer := 0;
+  failed integer := 0; resolved integer := 0; v_limit integer := greatest(1, least(coalesce(p_limit, 20), 100));
   previous_account text := current_setting('opengeni.account_id', true);
   previous_workspace text := current_setting('opengeni.workspace_id', true);
   previous_subject text := current_setting('opengeni.subject_id', true);
   v_data_schema text := (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE c.oid='workspaces'::regclass);
+  error_codes jsonb := '{}'::jsonb;
 BEGIN
   INSERT INTO opengeni_private.session_usage_limit_capabilities VALUES(pg_backend_pid(),pg_current_xact_id(),
     v_data_schema,'00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000')
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened = ROW_COUNT;
-  -- Private-session visibility does not restrict this content-free import.
+  -- Private-session visibility does not restrict this content-free work.
   PERFORM set_config('opengeni.subject_id', '', true);
   FOR target IN SELECT account_id, workspace_id, root_session_id
     FROM opengeni_private.session_usage_limit_roots
     WHERE history_state = 'preparing' AND import_next_at <= clock_timestamp()
     ORDER BY import_next_at, workspace_id, root_session_id
-    LIMIT greatest(1, least(coalesce(p_limit, 20), 100))
+    LIMIT v_limit
   LOOP
     PERFORM set_config('opengeni.account_id', target.account_id::text, true);
     PERFORM set_config('opengeni.workspace_id', target.workspace_id::text, true);
@@ -571,11 +800,45 @@ BEGIN
         processed := processed + 1;
       END IF;
     EXCEPTION WHEN OTHERS THEN
+      failed := failed + 1;
+      error_codes := jsonb_set(error_codes, ARRAY[SQLSTATE],
+        to_jsonb(coalesce((error_codes->>SQLSTATE)::integer, 0) + 1));
       UPDATE opengeni_private.session_usage_limit_roots SET
-        import_next_at = clock_timestamp() + interval '1 minute', import_error = SQLSTATE
+        import_attempts = import_attempts + 1,
+        import_next_at = clock_timestamp()
+          + least(interval '1 hour', interval '1 minute' * power(2, least(import_attempts, 6))),
+        import_error = SQLSTATE
       WHERE workspace_id = target.workspace_id AND root_session_id = target.root_session_id
         AND history_state = 'preparing';
     END;
+    IF tenant_opened = 1 THEN DELETE FROM opengeni_private.session_usage_limit_capabilities
+      WHERE backend_pid=pg_backend_pid() AND transaction_id=pg_current_xact_id_if_assigned()
+        AND data_schema=v_data_schema AND workspace_id=target.workspace_id; END IF;
+  END LOOP;
+  FOR target IN SELECT account_id, workspace_id, root_session_id, source_id
+    FROM opengeni_private.session_usage_limit_receipts
+    WHERE status = 'pending' AND recorded_at < clock_timestamp() - interval '30 minutes'
+    ORDER BY recorded_at LIMIT v_limit
+  LOOP
+    PERFORM set_config('opengeni.account_id', target.account_id::text, true);
+    PERFORM set_config('opengeni.workspace_id', target.workspace_id::text, true);
+    INSERT INTO opengeni_private.session_usage_limit_capabilities VALUES(pg_backend_pid(),pg_current_xact_id(),
+      v_data_schema,target.account_id,target.workspace_id) ON CONFLICT DO NOTHING;
+    GET DIAGNOSTICS tenant_opened = ROW_COUNT;
+    PERFORM 1 FROM opengeni_private.session_usage_limit_roots
+      WHERE workspace_id = target.workspace_id AND root_session_id = target.root_session_id
+      FOR NO KEY UPDATE SKIP LOCKED;
+    IF FOUND THEN
+      UPDATE opengeni_private.session_usage_limit_receipts SET status = 'unpriced', fenced = false
+        WHERE workspace_id = target.workspace_id AND source_id = target.source_id
+          AND status = 'pending';
+      IF FOUND THEN
+        UPDATE opengeni_private.session_usage_limit_roots SET unpriced_calls = unpriced_calls + 1,
+          usage_revision = usage_revision + 1, updated_at = clock_timestamp()
+        WHERE workspace_id = target.workspace_id AND root_session_id = target.root_session_id;
+        resolved := resolved + 1;
+      END IF;
+    END IF;
     IF tenant_opened = 1 THEN DELETE FROM opengeni_private.session_usage_limit_capabilities
       WHERE backend_pid=pg_backend_pid() AND transaction_id=pg_current_xact_id_if_assigned()
         AND data_schema=v_data_schema AND workspace_id=target.workspace_id; END IF;
@@ -587,7 +850,8 @@ BEGIN
   PERFORM set_config('opengeni.account_id', coalesce(previous_account, ''), true);
   PERFORM set_config('opengeni.workspace_id', coalesce(previous_workspace, ''), true);
   PERFORM set_config('opengeni.subject_id', coalesce(previous_subject, ''), true);
-  RETURN processed;
+  RETURN jsonb_build_object('processed', processed, 'failed', failed, 'errors', error_codes,
+    'resolvedLost', resolved);
 END $$;
 
 -- Pin search paths, strip default/hostile grants, and grant the two runtime
@@ -602,7 +866,10 @@ BEGIN
     'session_usage_limit_apply_receipt(uuid,uuid,uuid,text,uuid,uuid,bigint,text,text,text)',
     'session_usage_limit_import_page(uuid,uuid,uuid,integer)',
     'session_usage_limit_import_step(uuid,uuid,uuid,integer)',
-    'seed_session_usage_limit_root()']
+    'session_usage_limit_meter_amount(numeric,text,numeric,numeric)',
+    'session_usage_limit_event_amount(jsonb)',
+    'seed_session_usage_limit_root()',
+    'meter_session_usage_limit_event()']
   LOOP
     EXECUTE format('ALTER FUNCTION %I.%s SET search_path=pg_catalog,%I,pg_temp',target_schema,function_name,target_schema);
     FOR role_name IN SELECT DISTINCT r.rolname FROM pg_proc p,
@@ -632,3 +899,21 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION session_usage_limit_command(jsonb), maintain_session_usage_limits(integer,integer) TO %I',role_name);
   END LOOP;
 END $acl$;
+
+-- A scheduled occurrence for an existing task that already reached its usage
+-- limit is refused as a visible skipped run (`session_usage_limit`) instead of
+-- appending another message that the claim would only stop. Preserve the
+-- immutable 0539 refusal lifecycle (as extended by 0552 and 0612), adding only
+-- this reason. Exact anchoring refuses an unexpected deployed guard
+-- definition. Old binaries never write the new reason.
+DO $scheduled_usage_limit_refusal$
+DECLARE
+  definition text:=pg_get_functiondef('opengeni_private.guard_scheduled_admission_refusal()'::regprocedure);
+  anchor text:='''allowance_exhausted'', ''scheduled_model_unavailable'')';
+BEGIN
+  IF strpos(definition,anchor)=0 OR strpos(substr(definition,strpos(definition,anchor)+length(anchor)),anchor)>0 THEN
+    RAISE EXCEPTION '0770 unexpected scheduled refusal guard definition' USING ERRCODE='55000';
+  END IF;
+  EXECUTE replace(definition,anchor,
+    '''allowance_exhausted'', ''scheduled_model_unavailable'', ''session_usage_limit'')');
+END $scheduled_usage_limit_refusal$;

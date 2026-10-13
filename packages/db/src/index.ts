@@ -19378,7 +19378,8 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
-  | "monthly_agent_run_limit";
+  | "monthly_agent_run_limit"
+  | "session_usage_limit";
 
 /**
  * Record a refused occurrence as an immutable run receipt under its producer

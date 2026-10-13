@@ -13,17 +13,25 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   forkSessionContent,
+  deleteSessionTreeIfQuiescent,
+  fenceSessionUsageReceipt,
+  getOrganizationPrivateSessionSettings,
   inspectRuntimeDatabasePosture,
   maintainSessionUsageLimits,
   migrate,
   provisionRoles,
   readSessionUsageLimit,
+  releaseSessionUsageReceipt,
   RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
   SessionUsageLimitForbiddenError,
+  SessionUsageLimitUnavailableError,
   setSessionUsageLimitInTransaction,
   settleSessionUsageReceipt,
+  transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   withCreditDebitAttribution,
   withRlsContext,
+  withSessionRlsActorContext,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
@@ -493,9 +501,9 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     for (const [sessionId, turnId, sourceKey, cost, pricing, occurredAt] of facts) {
       await shared.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,
           source_key,provider,provider_api,model,billing_path,estimated_provider_cost_micros,
-          pricing_source,occurred_at)
+          pricing_source,input_tokens,output_tokens,occurred_at)
         values(${scope.accountId},${scope.workspaceId},${sessionId},${turnId},${sourceKey},'test',
-          'responses','test','external',${cost},${pricing},${occurredAt})`;
+          'responses','test','external',${cost},${pricing},100,10,${occurredAt})`;
     }
     // Recoverable events: one duplicates a fact identity, one exists only as an
     // event, one has no turn and one is malformed.
@@ -512,6 +520,8 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
       sourceKey: "response-0",
       estimatedProviderCostMicros: 1_000,
       pricingSource: "configured_list_price",
+      inputTokens: 100,
+      outputTokens: 10,
     });
     await event(child, turnB, {
       sourceKey: "response-event-only",
@@ -543,7 +553,7 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
       const processed = await withRlsContext(app.db, { accountId: scope.accountId }, async () =>
         maintainSessionUsageLimits(app.db, { limit: 5, budget: 2 }),
       );
-      expect(processed).toBeGreaterThanOrEqual(0);
+      expect(processed.processed).toBeGreaterThanOrEqual(0);
       await shared.admin`update opengeni_private.session_usage_limit_roots set import_next_at=now()
         where root_session_id=${root} and history_state='preparing'`;
     }
@@ -579,9 +589,9 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     await shared.admin`delete from opengeni_private.session_usage_limit_roots where root_session_id=${root}`;
     await shared.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,
         source_key,provider,provider_api,model,billing_path,estimated_provider_cost_micros,
-        pricing_source,occurred_at)
+        pricing_source,input_tokens,occurred_at)
       values(${scope.accountId},${scope.workspaceId},${root},${crypto.randomUUID()},'r1','test',
-        'responses','test','external',42,'configured_list_price',now())`;
+        'responses','test','external',42,'configured_list_price',5,now())`;
     const state = await read(scope, root, true);
     expect(state).toMatchObject({ history: "legacy_partial", usedMicros: 42 });
   });
@@ -683,4 +693,494 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
       await owner.release();
     }
   }, 300_000);
+});
+
+async function insertUsageEvent(
+  scope: Scope,
+  sessionId: string,
+  turnId: string | null,
+  payload: Record<string, unknown> | string,
+) {
+  const [cursor] = await shared.admin`update sessions set last_sequence=last_sequence+1
+    where id=${sessionId} returning last_sequence`;
+  const sequence = Number(cursor!.last_sequence);
+  const json = typeof payload === "string" ? payload : JSON.stringify(payload);
+  await shared.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,
+      turn_id,payload)
+    values(${scope.accountId},${scope.workspaceId},${sessionId},${sequence},'agent.model.usage',
+      ${turnId},${json}::text::jsonb)`;
+}
+
+async function receiptRow(sourceId: string) {
+  const [row] = await shared.admin`select status, amount_micros::text as amount, fenced, origin
+    from opengeni_private.session_usage_limit_receipts where source_id=${sourceId}`;
+  return row ?? null;
+}
+
+function runtimeAdmission(scope: Scope, sessionId: string, openSourceId?: string) {
+  return checkSessionUsageLimitAdmission(app.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId,
+    runtime: true,
+    ...(openSourceId ? { openSourceId } : {}),
+  });
+}
+
+async function makeLegacyRoot(rootSessionId: string) {
+  await shared.admin`delete from opengeni_private.session_usage_limit_roots
+    where root_session_id=${rootSessionId}`;
+}
+
+async function runMaintenanceUntilSettled(scope: Scope, root: string) {
+  for (let step = 0; step < 30; step += 1) {
+    if ((await read(scope, root)).history !== "preparing") return;
+    await shared.admin`update opengeni_private.session_usage_limit_roots set import_next_at=now()
+      where root_session_id=${root} and history_state='preparing'`;
+    await maintainSessionUsageLimits(app.db, { limit: 100, budget: 50 });
+  }
+  throw new Error("import did not converge");
+}
+
+async function quiesceTree(scope: Scope, root: string) {
+  await shared.admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.lossless_content_writer','1',true),
+      set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+      set_config('opengeni.pending_tool_event_output_v1','1',true),
+      set_config('opengeni.session_variable_set_attachments_v1','1',true),
+      set_config('opengeni.shared_personal_choice_v1','1',true),
+      set_config('opengeni.account_id', ${scope.accountId}, true),
+      set_config('opengeni.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`update sessions set status='idle' where root_session_id=${root}`;
+  });
+}
+
+describe("session usage limit remediation (real PostgreSQL, non-bypass app role)", () => {
+  test("F2/AC13: a single call's durable custody marker is filled once, fenced, overdue, released or disclosed", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    const child = await newSession(scope, root);
+    await setLimit(scope, root, 1_000_000, 0);
+    // Admission opens the marker in the same statement; people reads cannot.
+    expect((await runtimeAdmission(scope, child, "model_call:a")).allowed).toBe(true);
+    expect(await receiptRow("model_call:a")).toMatchObject({ status: "pending", fenced: false });
+    await expect(
+      readSessionUsageLimit(app.db, { ...scope, sessionId: child, openSourceId: "model_call:x" }),
+    ).rejects.toThrow(/runtime/);
+    // A pending marker is neither spend nor a disclosed gap while it is fresh.
+    expect(await read(scope, root)).toMatchObject({ usedMicros: 0, coverage: "complete" });
+    expect((await settle(scope, child, "model_call:a", 300_000)).outcome).toBe("recorded");
+    expect((await settle(scope, child, "model_call:a", 300_000)).outcome).toBe("duplicate");
+    expect(await read(scope, root)).toMatchObject({ usedMicros: 300_000, pricedCalls: 1 });
+
+    // Another process could not record its call: the fence blocks the whole
+    // tree on every replica at once, and coverage is no longer complete.
+    expect((await runtimeAdmission(scope, child, "model_call:b")).allowed).toBe(true);
+    expect(
+      await fenceSessionUsageReceipt(app.db, {
+        ...scope,
+        sessionId: child,
+        sourceId: "model_call:b",
+      }),
+    ).toBe("fenced");
+    await expect(runtimeAdmission(scope, root)).rejects.toBeInstanceOf(
+      SessionUsageLimitUnavailableError,
+    );
+    expect((await read(scope, root)).coverage).toBe("partial");
+    expect((await settle(scope, child, "model_call:b", 100)).outcome).toBe("recorded");
+    expect((await runtimeAdmission(scope, root)).allowed).toBe(true);
+    expect(await read(scope, root)).toMatchObject({ usedMicros: 300_100, coverage: "complete" });
+
+    // A crashed process never fences: the marker blocks once overdue and is
+    // disclosed as unpriced by maintenance; a late fill still lands its price.
+    expect((await runtimeAdmission(scope, child, "model_call:c")).allowed).toBe(true);
+    await shared.admin`update opengeni_private.session_usage_limit_receipts
+      set recorded_at = now() - interval '16 minutes' where source_id='model_call:c'`;
+    await expect(runtimeAdmission(scope, child)).rejects.toBeInstanceOf(
+      SessionUsageLimitUnavailableError,
+    );
+    await shared.admin`update opengeni_private.session_usage_limit_receipts
+      set recorded_at = now() - interval '31 minutes' where source_id='model_call:c'`;
+    const maintenance = await maintainSessionUsageLimits(app.db, { limit: 100, budget: 10 });
+    expect(maintenance.resolvedLost).toBeGreaterThanOrEqual(1);
+    expect(await receiptRow("model_call:c")).toMatchObject({ status: "unpriced", fenced: false });
+    expect(await read(scope, root)).toMatchObject({ unpricedCalls: 1, coverage: "partial" });
+    expect((await runtimeAdmission(scope, child)).allowed).toBe(true);
+    expect((await settle(scope, child, "model_call:c", 50)).outcome).toBe("filled");
+    expect(await read(scope, root)).toMatchObject({ usedMicros: 300_150, unpricedCalls: 0 });
+
+    // A provider failure releases its unfenced marker; a fenced one stays.
+    expect((await runtimeAdmission(scope, child, "model_call:d")).allowed).toBe(true);
+    expect(
+      await releaseSessionUsageReceipt(app.db, {
+        ...scope,
+        sessionId: child,
+        sourceId: "model_call:d",
+      }),
+    ).toBe("released");
+    expect(await receiptRow("model_call:d")).toBeNull();
+
+    // A reached task opens nothing.
+    await setLimit(scope, root, 1_000, 1);
+    const refused = await runtimeAdmission(scope, child, "model_call:e");
+    expect(refused.allowed).toBe(false);
+    expect(await receiptRow("model_call:e")).toBeNull();
+  });
+
+  test("F5/AC14/AC21: an old writer's usage event during the rollout window is metered on a complete root", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    const child = await newSession(scope, root);
+    await setLimit(scope, root, 1_000_000, 0);
+    const turn = crypto.randomUUID();
+    // An upgraded-schema/old-binary writer appends only the usage event.
+    await insertUsageEvent(scope, child, turn, {
+      sourceKey: "old-writer-1",
+      model: "test",
+      estimatedProviderCostMicros: 2_500_000,
+      pricingSource: "configured_list_price",
+      inputTokens: 1000,
+      outputTokens: 100,
+    });
+    expect(await read(scope, root)).toMatchObject({
+      usedMicros: 2_500_000,
+      status: "reached",
+      history: "complete",
+      coverage: "complete",
+    });
+    expect((await runtimeAdmission(scope, child)).allowed).toBe(false);
+    // The new writer's direct receipt for the same response is the same call.
+    expect((await settle(scope, child, `${turn}:old-writer-1`, 2_500_000)).outcome).toBe(
+      "duplicate",
+    );
+    // A zero-token response without a provider-reported cost is unknown, not free.
+    await insertUsageEvent(scope, child, turn, {
+      sourceKey: "old-writer-2",
+      estimatedProviderCostMicros: 0,
+      pricingSource: "configured_list_price",
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+    // A provider-reported amount needs no token telemetry.
+    await insertUsageEvent(scope, child, turn, {
+      sourceKey: "old-writer-3",
+      estimatedProviderCostMicros: 7,
+      pricingSource: "gateway_reported",
+    });
+    expect(await read(scope, root)).toMatchObject({
+      usedMicros: 2_500_007,
+      pricedCalls: 2,
+      freeCalls: 0,
+      unpricedCalls: 1,
+      coverage: "partial",
+    });
+    // A tree whose counter does not exist yet is left to the import.
+    const legacyRoot = await newSession(scope);
+    await makeLegacyRoot(legacyRoot);
+    await insertUsageEvent(scope, legacyRoot, turn, {
+      sourceKey: "legacy-1",
+      estimatedProviderCostMicros: 9,
+      pricingSource: "gateway_reported",
+    });
+    const [counter] = await shared.admin`select count(*)::int as count from
+      opengeni_private.session_usage_limit_roots where root_session_id=${legacyRoot}`;
+    expect(counter!.count).toBe(0);
+    await read(scope, legacyRoot);
+    await runMaintenanceUntilSettled(scope, legacyRoot);
+    expect(await read(scope, legacyRoot)).toMatchObject({
+      usedMicros: 9,
+      history: "legacy_partial",
+    });
+  });
+
+  test("F6/AC14/AC23: malformed historical amounts, byte-long models and turnless events never wedge the import", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    await makeLegacyRoot(root);
+    const turn = crypto.randomUUID();
+    const fact = async (
+      turnId: string | null,
+      sourceKey: string,
+      cost: string | null,
+      model = "test",
+      inputTokens = 10,
+    ) => {
+      await shared.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,
+          source_key,provider,provider_api,model,billing_path,estimated_provider_cost_micros,
+          pricing_source,input_tokens,occurred_at)
+        values(${scope.accountId},${scope.workspaceId},${root},${turnId},${sourceKey},'test',
+          'responses',${model},'external',${cost}::numeric,'configured_list_price',${inputTokens},now())`;
+    };
+    await fact(turn, "ok", "1000");
+    await fact(turn, "above-safe-integer", "9007199254740992");
+    await fact(turn, "zero-tokens", "4000", "test", 0);
+    // Facts always carry a turn; a turnless event has no stable source and is skipped.
+    await insertUsageEvent(scope, root, null, {
+      sourceKey: "turnless",
+      estimatedProviderCostMicros: 3000,
+      pricingSource: "configured_list_price",
+      inputTokens: 5,
+    });
+    // Facts bound model bytes; an older event payload does not.
+    await insertUsageEvent(scope, root, turn, {
+      sourceKey: "long-model",
+      model: "é".repeat(300),
+      estimatedProviderCostMicros: 2000,
+      pricingSource: "configured_list_price",
+      inputTokens: 5,
+    });
+    await insertUsageEvent(
+      scope,
+      root,
+      turn,
+      '{"sourceKey":"too-big","estimatedProviderCostMicros":9999999999999999,"pricingSource":"configured_list_price","inputTokens":5}',
+    );
+    await read(scope, root);
+    await runMaintenanceUntilSettled(scope, root);
+    expect(await read(scope, root)).toMatchObject({
+      history: "legacy_partial",
+      coverage: "partial",
+      usedMicros: 1_000 + 2_000,
+      pricedCalls: 2,
+      unpricedCalls: 3,
+    });
+    const [model] =
+      await shared.admin`select model from opengeni_private.session_usage_limit_receipts
+      where source_id=${`${turn}:long-model`}`;
+    expect(model!.model).toBeNull();
+  });
+
+  test("F6/AC14: a failing import page backs off with its SQLSTATE and recovers", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    await makeLegacyRoot(root);
+    await read(scope, root);
+    await shared.admin`update opengeni_private.session_usage_limit_roots
+      set import_cursor='{"session":"not-a-uuid"}'::jsonb, import_next_at=now()
+      where root_session_id=${root}`;
+    const failed = await maintainSessionUsageLimits(app.db, { limit: 100, budget: 10 });
+    expect(failed.failed).toBeGreaterThanOrEqual(1);
+    expect(failed.errors["22P02"]).toBeGreaterThanOrEqual(1);
+    const [row] = await shared.admin`select import_attempts, import_error,
+      import_next_at > now() + interval '50 seconds' as backed_off
+      from opengeni_private.session_usage_limit_roots where root_session_id=${root}`;
+    expect(row).toMatchObject({ import_attempts: 1, import_error: "22P02", backed_off: true });
+    // Never a false zero while preparing.
+    expect(await read(scope, root)).toMatchObject({ status: "preparing", usedMicros: null });
+    await shared.admin`update opengeni_private.session_usage_limit_roots set import_cursor=null
+      where root_session_id=${root}`;
+    await runMaintenanceUntilSettled(scope, root);
+    expect((await read(scope, root)).history).toBe("legacy_partial");
+  });
+
+  test("F4/AC10: an exact replay returns the operation's committed configuration, not a later one", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    const operationA = crypto.randomUUID();
+    const first = await setLimit(scope, root, 5_000_000, 0, operationA);
+    expect(first.state).toMatchObject({ limitMicros: 5_000_000, version: 1 });
+    await settle(scope, root, "turn-r:replay", 123);
+    expect((await setLimit(scope, root, 10_000_000, 1)).state?.version).toBe(2);
+    const replay = await setLimit(scope, root, 5_000_000, 0, operationA);
+    expect(replay.outcome).toBe("replayed");
+    expect(replay.state).toMatchObject({ limitMicros: 5_000_000, version: 1, usedMicros: 123 });
+    // The live configuration is unchanged by the replay.
+    expect(await read(scope, root)).toMatchObject({ limitMicros: 10_000_000, version: 2 });
+  });
+
+  test("F7/AC12/AC13: a private root hidden from the worker's causal context is still enforced and metered", async () => {
+    if (!shared) return;
+    // The definer function must run as a non-superuser migration owner so
+    // FORCE RLS and private visibility apply exactly as in production.
+    const owner = await acquireOwnerMigratedTestDatabase("session-usage-limit-private");
+    if (!owner) throw new Error("Owner-migrated PostgreSQL database unavailable");
+    let ownerApp: ReturnType<typeof createDb> | undefined;
+    try {
+      await migrate(owner.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
+      await provisionRoles(owner.adminUrl, {
+        appRole: "opengeni_app",
+        appPassword: owner.appPassword,
+        rlsStrategy: "force",
+      });
+      const runtimeUrl = new URL(owner.adminUrl);
+      runtimeUrl.username = "opengeni_app";
+      runtimeUrl.password = owner.appPassword;
+      ownerApp = createDb(runtimeUrl.toString());
+      await privateRootScenario(ownerApp.db, owner.admin);
+    } finally {
+      await ownerApp?.close();
+      await owner.release();
+    }
+  }, 300_000);
+
+  async function privateRootScenario(
+    db: ReturnType<typeof createDb>["db"],
+    admin: SharedTestDatabase["admin"],
+  ) {
+    const ownerUserId = `usage-limit-private-${crypto.randomUUID()}`;
+    const ownerSubjectId = `user:${ownerUserId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId: ownerUserId,
+      email: `${ownerUserId}@example.test`,
+      name: "Private owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    await admin`insert into session_tenancy_activations (account_id, activation_version,
+        inventory_digest, parity_digest, activated_by)
+      values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
+    const settings = await getOrganizationPrivateSessionSettings(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: ownerSubjectId,
+    });
+    await updateOrganizationPrivateSessionSettings(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: ownerSubjectId,
+      enabled: true,
+      expectedVersion: settings.version,
+      operationId: crypto.randomUUID(),
+    });
+    const scope: Scope = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: ownerSubjectId,
+    };
+    const root = (
+      await withSessionRlsActorContext({ subjectId: ownerSubjectId }, () =>
+        createSession(db, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          initialMessage: "private usage limit",
+          resources: [],
+          metadata: {},
+          model: "test",
+          reasoningEffort: "low",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: ownerSubjectId },
+          createdByContext: {},
+        }),
+      )
+    ).id;
+    const transition = await transitionSessionVisibility(db, {
+      workspaceId: scope.workspaceId,
+      sessionId: root,
+      actorSubjectId: ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `private-${root}`,
+    });
+    expect(transition.visibility).toBe("user_private");
+    // People-facing reads keep private visibility.
+    expect(
+      await readSessionUsageLimit(db, {
+        ...scope,
+        sessionId: root,
+        subjectId: `user:outsider-${root}`,
+      }),
+    ).toEqual({ outcome: "not_found" });
+    const set = await withWorkspaceSubjectSessionActivityRls(
+      db,
+      scope.workspaceId,
+      scope.subjectId,
+      async (tx) =>
+        await setSessionUsageLimitInTransaction(tx, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          sessionId: root,
+          limitMicros: 0,
+          expectedVersion: 0,
+          operationId: crypto.randomUUID(),
+          actor: { subjectId: scope.subjectId, type: "human" },
+          producerEnabled: true,
+        }),
+    );
+    expect(set.outcome).toBe("ok");
+    // The worker's ambient actor without a causal human cannot see the root,
+    // yet runtime admission refuses and settlement records.
+    const worker = <T>(fn: () => Promise<T>) =>
+      withSessionRlsActorContext(
+        { subjectId: "service:agent-turn", initiatingHumanSubjectId: null },
+        fn,
+      );
+    const tenant = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    // A people-style read in that context really cannot see it (the failure
+    // mode the runtime path must not inherit).
+    expect(
+      await readSessionUsageLimit(db, {
+        ...tenant,
+        sessionId: root,
+        subjectId: "service:agent-turn",
+      }),
+    ).toEqual({ outcome: "not_found" });
+    const admission = await worker(() =>
+      checkSessionUsageLimitAdmission(db, { ...tenant, sessionId: root, runtime: true }),
+    );
+    expect(admission.allowed).toBe(false);
+    expect(
+      (
+        await worker(() =>
+          settleSessionUsageReceipt(db, {
+            ...tenant,
+            sessionId: root,
+            sourceId: "private:r1",
+            amountMicros: 77,
+            pricingSource: "configured_list_price",
+          }),
+        )
+      ).outcome,
+    ).toBe("recorded");
+    // A missing tree under runtime admission fails closed.
+    await expect(
+      checkSessionUsageLimitAdmission(db, {
+        ...tenant,
+        sessionId: crypto.randomUUID(),
+        runtime: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionUsageLimitUnavailableError);
+  }
+
+  test("F9: the scheduled refusal guard accepts the session_usage_limit reason", async () => {
+    if (!shared) return;
+    const [row] = await shared.admin`select
+      pg_get_functiondef('opengeni_private.guard_scheduled_admission_refusal()'::regprocedure)
+        like '%''session_usage_limit''%' as accepts`;
+    expect(row!.accepts).toBe(true);
+  });
+
+  test("AC15: the real tree deletion helper races settlements without deadlock; late receipts are source_gone", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    const child = await newSession(scope, root);
+    await setLimit(scope, root, 10_000_000, 0);
+    await settle(scope, child, "delete:0", 1_000);
+    await quiesceTree(scope, root);
+    const [deadlocksBefore] = await shared.admin`select deadlocks::int as count
+      from pg_stat_database where datname = current_database()`;
+    const settlements = Array.from({ length: 8 }, (_, index) =>
+      settle(scope, child, `delete:${index + 1}`, 10),
+    );
+    const deletion = deleteSessionTreeIfQuiescent(app.db, {
+      workspaceId: scope.workspaceId,
+      subjectId: scope.subjectId,
+      sessionId: root,
+    });
+    const [outcomes, deleted] = await Promise.all([Promise.all(settlements), deletion]);
+    expect(deleted.status).toBe("deleted");
+    for (const outcome of outcomes) expect(["recorded", "source_gone"]).toContain(outcome.outcome);
+    expect((await settle(scope, child, "delete:late", 10)).outcome).toBe("source_gone");
+    const [left] = await shared.admin`select
+      (select count(*) from opengeni_private.session_usage_limit_roots where root_session_id=${root})::int as roots,
+      (select count(*) from opengeni_private.session_usage_limit_receipts where root_session_id=${root})::int as receipts`;
+    expect(left).toMatchObject({ roots: 0, receipts: 0 });
+    const [deadlocksAfter] = await shared.admin`select deadlocks::int as count
+      from pg_stat_database where datname = current_database()`;
+    expect(deadlocksAfter!.count).toBe(deadlocksBefore!.count);
+  });
 });
