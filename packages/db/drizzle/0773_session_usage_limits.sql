@@ -917,7 +917,7 @@ DECLARE
   anchor text:='''allowance_exhausted'', ''scheduled_model_unavailable'')';
 BEGIN
   IF strpos(definition,anchor)=0 OR strpos(substr(definition,strpos(definition,anchor)+length(anchor)),anchor)>0 THEN
-    RAISE EXCEPTION '0771 unexpected scheduled refusal guard definition' USING ERRCODE='55000';
+    RAISE EXCEPTION '0773 unexpected scheduled refusal guard definition' USING ERRCODE='55000';
   END IF;
   EXECUTE replace(definition,anchor,
     '''allowance_exhausted'', ''scheduled_model_unavailable'', ''session_usage_limit'')');

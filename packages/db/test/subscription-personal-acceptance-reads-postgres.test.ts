@@ -607,7 +607,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
         ([routine]) => `maintenance work check ${routine} is missing or has unsafe posture`,
       ),
     );
-    // 0771 (per-task usage limits).
+    // 0773 (per-task usage limits).
     heldBack.push(
       ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
         (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,

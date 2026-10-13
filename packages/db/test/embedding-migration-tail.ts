@@ -260,5 +260,5 @@ export const embeddingMigrationTail = [
   // (and 0502/0513) by exact text; replay after them.
   "0738_private_sessions_share_sandboxes.sql",
   // Replaces the 0585 cursor trigger routine over its withheld column.
-  "0773_session_usage_limit_attention_cursor.sql",
+  "0775_session_usage_limit_attention_cursor.sql",
 ];

@@ -18,5 +18,5 @@ export const allowanceMigrationTail = [
   "0721_private_scheduled_task_summaries.sql",
   // Extends the scheduled refusal guard patched by withheld 0612 (exact
   // anchor) and meters into the allowance-era usage receipts; replay after it.
-  "0771_session_usage_limits.sql",
+  "0773_session_usage_limits.sql",
 ] as const;
