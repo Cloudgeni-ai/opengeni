@@ -15,8 +15,9 @@
  * File payloads, each of which otherwise costs a full resend of the patch:
  * a repeated trailing `*** End Patch`, an interior `*** End Patch` (optionally
  * with a new `*** Begin Patch`) before the next file section, a stray interior
- * `*** Begin Patch`, and Add File content lines missing their `+` prefix
- * (including bare empty lines). Every repair applies only to input the SDK
+ * `*** Begin Patch`, bare empty lines inside an Add File section, and Add File
+ * content whose `+` prefixes stop after some line (see
+ * `canPrefixAddFileSection`). Every repair applies only to input the SDK
  * would reject, so patches it accepts today parse exactly as before.
  */
 
@@ -47,6 +48,30 @@ function isBlank(line: string): boolean {
 }
 
 /**
+ * Whether the Add File section starting at `start` dropped its `+` prefixes
+ * from some line onward (often all but the first line), so prefixing the
+ * unprefixed lines is the only reading. Once a line lacks the prefix, a later
+ * `+` line is ambiguous (`++i;` or a `+ item` bullet may be content), and a
+ * `@@` line means an Update hunk was sent under Add File; both are left for
+ * the SDK to reject.
+ */
+function canPrefixAddFileSection(lines: readonly string[], start: number): boolean {
+  let unprefixedSeen = false;
+  for (let index = start; index < lines.length - 1; index += 1) {
+    const line = lines[index]!;
+    if (isFileOperationHeader(line) || line === END_PATCH) break;
+    if (line === "" || line === BEGIN_PATCH) continue;
+    if (line.startsWith("+")) {
+      if (unprefixedSeen) return false;
+    } else {
+      if (line.startsWith("@@")) return false;
+      unprefixedSeen = true;
+    }
+  }
+  return true;
+}
+
+/**
  * Repair framing slips the SDK parser would reject but whose intent is
  * unambiguous. Expects `lines` to start with `*** Begin Patch`; returns a new
  * array. Valid content lines are never altered, so a file that legitimately
@@ -68,6 +93,7 @@ export function withLenientPatchFraming(lines: readonly string[]): string[] {
 
   const output = [body[0]!];
   let inAddFile = false;
+  let prefixRepairable = false;
   let pendingBlankAddLines = 0;
   for (let index = 1; index < body.length; index += 1) {
     const line = body[index]!;
@@ -92,6 +118,7 @@ export function withLenientPatchFraming(lines: readonly string[]): string[] {
       // Bare empty lines that end an Add File section are separators.
       pendingBlankAddLines = 0;
       inAddFile = isHeader && line.startsWith(ADD_FILE);
+      prefixRepairable = inAddFile && canPrefixAddFileSection(body, index + 1);
       output.push(line);
       continue;
     }
@@ -101,8 +128,7 @@ export function withLenientPatchFraming(lines: readonly string[]): string[] {
       pendingBlankAddLines += 1;
       continue;
     }
-    if (inAddFile && line !== END_PATCH) {
-      // Every Add File line is content; a missing `+` cannot mean anything else.
+    if (inAddFile && (line.startsWith("+") || (prefixRepairable && line !== END_PATCH))) {
       for (; pendingBlankAddLines > 0; pendingBlankAddLines -= 1) output.push("+");
       output.push(line.startsWith("+") ? line : `+${line}`);
       continue;

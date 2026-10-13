@@ -256,6 +256,18 @@ describe("apply_patch Add File follows Codex trailing-newline semantics", () => 
     expect(withCodexAddFilePatch(stray)).toBe(
       "*** Begin Patch\n*** Add File: a\n+x\n*** End Patch\n+y\n+\n*** End Patch",
     );
+    // Ambiguous sections are left for the SDK to reject: a `+` line after an
+    // unprefixed one may be content (`++i;`, a `+ item` bullet), and `@@`
+    // means an Update hunk was sent under Add File.
+    const ambiguousPlus =
+      "*** Begin Patch\n*** Add File: n.md\n# List\n+ item\n++i;\n*** End Patch";
+    expect(withCodexAddFilePatch(ambiguousPlus)).toBe(
+      "*** Begin Patch\n*** Add File: n.md\n# List\n+ item\n++i;\n+\n*** End Patch",
+    );
+    const hunk = "*** Begin Patch\n*** Add File: new.txt\n@@\n one\n-two\n+three\n*** End Patch";
+    expect(withCodexAddFilePatch(hunk)).toBe(
+      "*** Begin Patch\n*** Add File: new.txt\n@@\n one\n-two\n+three\n+\n*** End Patch",
+    );
     const missingEnd = "*** Begin Patch\n*** Add File: a\n+x\n\n";
     expect(withCodexAddFilePatch(missingEnd)).toBe(missingEnd);
   });
