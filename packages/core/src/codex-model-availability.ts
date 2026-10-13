@@ -250,11 +250,14 @@ export async function loadWorkspaceCodexCatalogReadiness(
     }
     // A reachable Free account cannot establish that an unreachable Pro
     // account lacks entitlement. Only definitive observations may deny it.
-    const uncertain = permitted.find(({ ok }) => !ok);
+    // Omit a negative observation when a permitted account is unknown. The
+    // shared catalog projects this as selectable/unknown, not unavailable;
+    // actual placement still rechecks scope, health and plan per account.
+    if (permitted.some(({ ok }) => !ok)) continue;
     observations[model.definitionVersion] = {
       status: "unavailable",
-      reason: uncertain ? "provider_unhealthy" : "not_entitled",
-      checkedAt: (uncertain ?? permitted[0])?.checkedAt ?? new Date().toISOString(),
+      reason: "not_entitled",
+      checkedAt: permitted[0]?.checkedAt ?? new Date().toISOString(),
     };
   }
   return { active: true, observations };

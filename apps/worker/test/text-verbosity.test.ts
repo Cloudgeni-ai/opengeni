@@ -377,6 +377,7 @@ async function buildWorkerAgent(settings: Settings, modelId: string, modelOverri
       resolvedModel,
       turnExecutionPolicy: {
         providerId: resolvedModel.provider.id,
+        reasoningEffort: "medium",
         latencyMode: "standard",
         upstreamModelId: resolvedModel.configured.upstreamModelId,
       } as BuildTurnAgentDeps["turnExecutionPolicy"],

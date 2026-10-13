@@ -709,8 +709,7 @@ test("a core-placed SuperGrok turn never reaches the legacy image or video crede
     .replace(/^\s*\/\/.*$/gm, "")
     .replace(/\s+/g, " ");
   const source = file.slice(file.indexOf("export async function buildTurnAgent("));
-  // Image: a core turn returns the core operation path before any legacy
-  // image authority is read.
+  // Image: a core turn uses the operation path; retired authority is absent.
   const imageCore =
     'if (resolvedModel?.provider.kind === "xai-subscription") { const core = providerTurn.xaiSubscriptionCore; if (core) {';
   expect(source.includes(imageCore)).toBe(true);
@@ -721,20 +720,17 @@ test("a core-placed SuperGrok turn never reaches the legacy image or video crede
     xaiImage,
   );
   expect(coreImageCall).toBeGreaterThan(xaiImage);
-  expect(legacyImageAuthority).toBeGreaterThan(coreImageCall);
-  // Video: the legacy credential reads run only on the legacy route for a turn
-  // the core did not place.
+  expect(legacyImageAuthority).toBe(-1);
+  // Video: there is no legacy credential branch after retirement.
   const videoGate =
     'if (route === "legacy" && !providerTurn.xaiSubscriptionCore && encryptionKey && subjectId) {';
-  expect(source.includes(videoGate)).toBe(true);
-  // The legacy credential reads exist only behind that gate.
+  expect(source.includes(videoGate)).toBe(false);
   for (const legacy of [
     "materializeXaiCredentialForRun(",
     "resolveXaiProviderAccountAuthoritySnapshotForAcceptance(",
     "getXaiSessionAccountPin(",
   ]) {
-    expect(source.split(legacy).length).toBe(2);
-    expect(source.indexOf(legacy)).toBeGreaterThan(source.indexOf(videoGate));
+    expect(source.includes(legacy)).toBe(false);
   }
 });
 

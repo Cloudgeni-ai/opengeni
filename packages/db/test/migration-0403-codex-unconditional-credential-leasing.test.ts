@@ -80,7 +80,7 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
       readFile(rotationDocUrl, "utf8"),
     ]);
     const heartbeat = await readFile(
-      new URL("../src/subscription-credential-leases.ts", import.meta.url),
+      new URL("./fixtures/legacy-subscriptions/subscription-credential-leases.ts", import.meta.url),
       "utf8",
     );
     expect(dbIndex).toContain("heartbeatSubscriptionCredentialLeaseUntil");

@@ -511,7 +511,7 @@ describe("SuperGrok turn finalization by route", () => {
     };
   }
 
-  test("the legacy route keeps the per-turn quota call; the core skips it and finalizes its binding", async () => {
+  test("finalization never calls the retired quota path and finalizes only a core-placed binding", async () => {
     const quota = spy(xaiSubscription, "fetchXaiSubscriptionQuota").mockResolvedValue(
       null as never,
     );
@@ -519,11 +519,11 @@ describe("SuperGrok turn finalization by route", () => {
       undefined,
     );
     await finalizeTurnAttempt(finalizationDeps(false).deps);
-    expect(quota).toHaveBeenCalledTimes(1);
+    expect(quota).not.toHaveBeenCalled();
     expect(finalize).not.toHaveBeenCalled();
     const placed = finalizationDeps(true);
     await finalizeTurnAttempt(placed.deps);
-    expect(quota).toHaveBeenCalledTimes(1);
+    expect(quota).not.toHaveBeenCalled();
     expect(finalize).toHaveBeenCalledTimes(1);
     expect(placed.release).toHaveBeenCalledTimes(1);
   });

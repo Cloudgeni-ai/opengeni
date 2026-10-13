@@ -336,6 +336,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   } as BuildTurnAgentDeps["trigger"];
   let turnExecutionPolicy = {
     providerId: "openai",
+    reasoningEffort: "low",
     productModelId: "scripted-model",
     upstreamModelId: "scripted-model",
     latencyMode: "standard",
