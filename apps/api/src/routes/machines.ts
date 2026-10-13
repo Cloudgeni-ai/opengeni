@@ -15,6 +15,8 @@
 //     The downsampled (~1/min) history for ONE machine over a time window.
 
 import {
+  ChangeMachineAudienceRequest,
+  MachineAudiencePreviewRequest,
   OpenMachinePrivacySettingsRequest,
   MachineMetricsSeriesResponse,
   MachineOperationPolicy,
@@ -27,16 +29,19 @@ import {
 import {
   advanceEnrollmentAgentUpdate,
   beginEnrollmentAgentUpdate,
+  changeMachineAudience,
   getLiveEnrollmentConnection,
   listEnrollments,
+  previewMachineAudienceChange,
   readMachineMetricsSeries,
   requireSession,
   updateEnrollmentOperationPolicy,
 } from "@opengeni/db";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
+  mayStartOnlyMe,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireSessionAuthorization,
@@ -52,6 +57,12 @@ import {
   openMachinePrivacySettings,
 } from "../sandbox/screen-control";
 import { listMachines, machineUpdateBlockedReason, metricRowToSample } from "../sandbox/machines";
+import {
+  machineAudienceChangeResponse,
+  machineAudiencePreview,
+  machineAudienceRefusalError,
+  machineAudienceRequestFor,
+} from "../sandbox/machine-audience";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import { ControlRequest, ErrorCode } from "@opengeni/agent-proto";
 import { NatsControlRpc, subjectFor } from "@opengeni/runtime/sandbox";
@@ -189,6 +200,77 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(MachineOperationPolicy.parse(updated.operationPolicy));
+  });
+
+  // ── Who can use a machine: Workspace or Only me, changed in place ──────────
+  // POST .../audience/preview lists what the change would affect with the
+  // caller's choices applied; PUT .../audience applies it in one transaction at
+  // the previewed generation. The enrollment, sandbox ID, credentials and live
+  // connection stay, so chats, schedules and the installed agent keep working.
+  // People decide this, not agents: an agent attempt is refused.
+  async function requireAudienceCaller(c: Context, workspaceId: string) {
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    if (grantHasAgentAttemptAuthority(grant)) {
+      throw new HTTPException(403, {
+        message: "only a person can change who can use a machine",
+      });
+    }
+    return grant;
+  }
+
+  // The new owner's Workspace schedules on the machine become Only me when
+  // they may have Only me schedules; otherwise they pause.
+  async function schedulesMayBeOnlyMe(workspaceId: string, ownerSubjectId: string | null) {
+    return ownerSubjectId === null
+      ? false
+      : await mayStartOnlyMe(db, settings, workspaceId, ownerSubjectId);
+  }
+
+  app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAudienceCaller(c, workspaceId);
+    const enrollmentId = c.req.param("enrollmentId");
+    const body = await parseRequestJson(c, MachineAudiencePreviewRequest);
+    const machine = await requireScopedEnrollment(grant, enrollmentId);
+    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const preview = await previewMachineAudienceChange(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      enrollmentId,
+      target: body.audience,
+      ownerSubjectId,
+      schedulesMayBeOnlyMe: await schedulesMayBeOnlyMe(workspaceId, ownerSubjectId),
+    });
+    if (typeof preview === "string") throw machineAudienceRefusalError(preview);
+    return c.json(machineAudiencePreview(preview));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAudienceCaller(c, workspaceId);
+    const enrollmentId = c.req.param("enrollmentId");
+    const body = await parseRequestJson(c, ChangeMachineAudienceRequest);
+    const machine = await requireScopedEnrollment(grant, enrollmentId);
+    const { ownerSubjectId } = machineAudienceRequestFor(grant, workspaceId, machine, body);
+    const changed = await changeMachineAudience(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      enrollmentId,
+      target: body.audience,
+      ownerSubjectId,
+      schedulesMayBeOnlyMe: await schedulesMayBeOnlyMe(workspaceId, ownerSubjectId),
+      expectedGeneration: body.expectedGeneration,
+    });
+    return c.json(machineAudienceChangeResponse(changed));
   });
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/screen-control ─────────────

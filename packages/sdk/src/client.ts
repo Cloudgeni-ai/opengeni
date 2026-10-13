@@ -461,6 +461,10 @@ import type {
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
   EnableMachineScreenControlResponse,
+  ChangeMachineAudienceRequest,
+  ChangeMachineAudienceResponse,
+  MachineAudiencePreview,
+  MachineAudiencePreviewRequest,
   OpenMachinePrivacySettingsRequest,
   OpenMachinePrivacySettingsResponse,
   SwapActiveSandboxRequest,
@@ -2366,6 +2370,35 @@ export class OpenGeniClient {
     return await this.requestJson<OpenMachinePrivacySettingsResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/privacy-settings`,
+      input,
+    );
+  }
+
+  /** List what changing who can use a Connected Machine (Workspace or Only me)
+   * would affect, with the given chat choices applied. Reads only. */
+  async previewMachineAudience(
+    workspaceId: string,
+    enrollmentId: string,
+    input: MachineAudiencePreviewRequest,
+  ): Promise<MachineAudiencePreview> {
+    return await this.requestJson<MachineAudiencePreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/audience/preview`,
+      input,
+    );
+  }
+
+  /** Change who can use a Connected Machine in place, at the previewed
+   * generation. The machine keeps its sandbox ID, credentials and connection.
+   * A 409 means something changed or still needs a decision: preview again. */
+  async changeMachineAudience(
+    workspaceId: string,
+    enrollmentId: string,
+    input: ChangeMachineAudienceRequest,
+  ): Promise<ChangeMachineAudienceResponse> {
+    return await this.requestJson<ChangeMachineAudienceResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/audience`,
       input,
     );
   }

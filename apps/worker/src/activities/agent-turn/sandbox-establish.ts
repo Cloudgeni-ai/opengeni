@@ -542,7 +542,9 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
             transactionalFsWriteSupported:
               liveMachineEnrollment?.agentCapabilities.transactionalFsWrite === true,
-            ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
+            // Carried for shared machines too: the audience can narrow to Only me
+            // mid-turn, and each operation then rechecks this authority.
+            ...(fileAuthoritySubjectId
               ? {
                   personalMachineAttempt: {
                     accountId: input.accountId,

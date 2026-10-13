@@ -7,6 +7,7 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./session-target";
 export * from "./human-input-secret-answers";
+export * from "./connected-machine-audience";
 import { sessionRetentionFromRow } from "./session-archive";
 import {
   applyPreparedSecretAnswersInTransaction,
@@ -73017,8 +73018,9 @@ export async function settleSessionAttemptInterruptions(
       }
 
       const terminalCancel = session.status === "cancelled";
-      // Revoked membership and an owner's "make private anyway" stop both end
-      // the turn: the authority it was accepted under no longer applies.
+      // Revoked membership, an owner's "make private anyway" stop and a machine
+      // that became someone else's Only me machine (0765) all end the turn:
+      // the authority it was accepted under no longer applies.
       const membershipAuthorityRevoked = interruptions.some(
         (interruption) =>
           interruption.kind === "organization_membership_revoked" ||

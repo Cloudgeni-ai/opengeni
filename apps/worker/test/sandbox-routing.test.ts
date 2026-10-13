@@ -30,9 +30,11 @@ import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import type { OpStreamConnection } from "@opengeni/events";
 import {
   createEnrollment,
+  changeMachineAudience,
   createSandbox,
   createSession,
   createDb,
+  ensureManagedAccessForUser,
   acquireLease,
   claimEnrollmentConnection,
   claimSessionWorkForAttempt,
@@ -1423,6 +1425,195 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       }),
     ).rejects.toThrow();
     expect(providerRequests).toBe(2);
+  }, 60_000);
+
+  test("live sessions follow an in-place audience change without rebuilding or losing the machine", async () => {
+    if (!available) return;
+    const ownerUserId = `audience-route-${crypto.randomUUID()}`;
+    const owner = `user:${ownerUserId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId: ownerUserId,
+      email: `${ownerUserId}@example.test`,
+      name: "Machine owner",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("owner has no workspace grant");
+    const { accountId, workspaceId } = grant;
+    await admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'audience-route-test')`;
+    await admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${owner}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${accountId}::uuid, ${workspaceId}::uuid, 'workspace',
+          ${`ed25519:${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64',
+          'Shared build machine', false
+        )`;
+      return row!;
+    });
+    const machineState = async () => {
+      const [row] = await admin<
+        Array<{ scope: string; generation: number; credentialGeneration: number }>
+      >`
+        select authority_scope as scope, generation::int as generation,
+          credential_generation as "credentialGeneration"
+        from enrollments where id = ${machine.enrollmentId}`;
+      return row!;
+    };
+    const original = await machineState();
+    const connectionInstanceId = await claimTestConnection({
+      accountId,
+      workspaceId,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: original.credentialGeneration,
+    });
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "run the long build",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "selfhosted",
+      createdBy: { kind: "subject", subjectId: owner },
+      subjectId: owner,
+      visibility: "user_private",
+    } as never);
+    await admin`
+      update sessions set active_sandbox_id = ${machine.sandboxId}
+      where account_id = ${accountId} and workspace_id = ${workspaceId} and id = ${session.id}`;
+    const attempt = await claimRoutingAttempt({ accountId, workspaceId, sessionId: session.id });
+    let providerRequests = 0;
+    const bus = busWithAgent(
+      workspaceId,
+      machine.enrollmentId,
+      connectionInstanceId,
+      "shared-build-machine",
+      () => {
+        providerRequests += 1;
+      },
+    ) as never;
+    const exactAttempt = {
+      accountId,
+      subjectId: owner,
+      turnId: attempt.turnId,
+      attemptId: attempt.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    };
+    // Both live shapes a turn uses: a routed (swapped) session cached by
+    // sandbox and epoch, and the machine-primary session pinned at turn start.
+    // Both were built while the machine was shared.
+    const swapped = wrapTurnBoxWithRouting(
+      { db, settings, bus, opJournal: testOpJournal },
+      {
+        workspaceId,
+        sessionId: session.id,
+        workspaceMutationFence: attempt,
+        resourceAccountId: accountId,
+        resourceSubjectId: owner,
+        personalMachineAttempt: exactAttempt,
+      },
+      fakeGroupBox("unused-home"),
+    ).session as { exec(args: unknown): Promise<unknown> };
+    const pinnedArgs = {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      controlWorkspaceId: workspaceId,
+      agentId: machine.enrollmentId,
+      connectionInstanceId,
+      workspaceRoot: "/home/user/project",
+      opStream: true,
+      operationResourcePolicy: {
+        memoryMaxBytes: null,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 0,
+        updatedAt: null,
+      },
+      operationResourcePolicySupported: false,
+      operationCpuQuotaSupported: false,
+      epoch: 0,
+      environment: {},
+      workingDir: null,
+    };
+    const pinned = (
+      await establishSelfhostedTurnSession(
+        { db, settings, bus, opJournal: testOpJournal },
+        { ...pinnedArgs, personalMachineAttempt: { ...exactAttempt, sessionId: session.id } },
+      )
+    ).session as { exec(args: unknown): Promise<unknown> };
+    // A turn without an initiating human (no personal authority to recheck).
+    const unattended = (
+      await establishSelfhostedTurnSession(
+        { db, settings, bus, opJournal: testOpJournal },
+        pinnedArgs,
+      )
+    ).session as { exec(args: unknown): Promise<unknown> };
+    const hostname = async (target: { exec(args: unknown): Promise<unknown> }) =>
+      ((await target.exec({ cmd: "hostname" })) as { stdout: string }).stdout.trim();
+
+    expect(await hostname(swapped)).toBe("shared-build-machine");
+    expect(await hostname(pinned)).toBe("shared-build-machine");
+    expect(await hostname(unattended)).toBe("shared-build-machine");
+    expect(providerRequests).toBe(3);
+
+    const narrowed = await changeMachineAudience(db, {
+      accountId,
+      workspaceId,
+      subjectId: owner,
+      enrollmentId: machine.enrollmentId,
+      target: "only_me",
+      ownerSubjectId: owner,
+      schedulesMayBeOnlyMe: true,
+      expectedGeneration: original.generation,
+    });
+    expect(narrowed).toMatchObject({ outcome: "changed", sandboxId: machine.sandboxId });
+    // The owner's running turn keeps the machine through both session shapes;
+    // the unattended turn has no personal authority: the switch interrupts it
+    // for good, and until the worker settles that it is fenced before any
+    // operation reaches the machine.
+    expect(await hostname(swapped)).toBe("shared-build-machine");
+    expect(await hostname(pinned)).toBe("shared-build-machine");
+    await expect(unattended.exec({ cmd: "hostname" })).rejects.toThrow();
+    expect(providerRequests).toBe(5);
+
+    const widened = await changeMachineAudience(db, {
+      accountId,
+      workspaceId,
+      subjectId: owner,
+      enrollmentId: machine.enrollmentId,
+      target: "workspace",
+      ownerSubjectId: null,
+      schedulesMayBeOnlyMe: true,
+      expectedGeneration: original.generation + 1,
+    });
+    expect(widened).toMatchObject({ outcome: "changed", audience: "workspace" });
+    // Sessions built while the machine was Only me keep working once it is
+    // shared again; routing alone admits the unattended session again.
+    expect(await hostname(swapped)).toBe("shared-build-machine");
+    expect(await hostname(pinned)).toBe("shared-build-machine");
+    expect(await hostname(unattended)).toBe("shared-build-machine");
+    expect(providerRequests).toBe(8);
+    expect(await machineState()).toMatchObject({
+      scope: "workspace",
+      credentialGeneration: original.credentialGeneration,
+    });
   }, 60_000);
 
   test("operation-level 404/NOT_FOUND preserves the warm provider identity and epoch", async () => {
