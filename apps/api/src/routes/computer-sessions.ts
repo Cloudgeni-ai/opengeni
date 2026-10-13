@@ -127,6 +127,7 @@ import {
   resolveInteractionSecretValues,
   type InteractionSecretsPort,
 } from "../interaction-secrets";
+import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -629,6 +630,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: collectStringsDeep(request.arguments),
             use: { surface: "desktop", toolName: request.tool, operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.nativeCall(
             ComputerNativeCommand.parse({
@@ -684,6 +691,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: computerActionSecretTexts(request.action),
             use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.action(
             ComputerActionCommand.parse({

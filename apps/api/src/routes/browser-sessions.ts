@@ -234,6 +234,7 @@ import {
   syncBrowserPasskeys,
   type InteractionSecretsPort,
 } from "../interaction-secrets";
+import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
@@ -1200,6 +1201,12 @@ export function registerBrowserSessionRoutes(
               toolName: "browser_act",
               operationId: request.operationId,
             },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           try {
             return await sessionClient.action(
