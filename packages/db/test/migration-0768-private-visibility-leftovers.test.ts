@@ -19,8 +19,8 @@ import {
 } from "../src/index";
 
 // Migration 0768 and the visibility work settlement: leftover records never
-// block making a chat Only me. Visible work needs consent, a live attempt is
-// stopped first, and blocks that protect another person's authority stay.
+// block making a chat Only me. Visible work needs consent and a live attempt is
+// stopped first. Since 0769 nothing else refuses the change either.
 let shared: SharedTestDatabase;
 let client: DbClient;
 
@@ -208,8 +208,14 @@ describe("making a chat Only me settles leftovers", () => {
 
       expect(await inspectSessionVisibilityChange(client.db, f)).toMatchObject({
         visibility: "workspace_shared",
-        blocker: null,
-        work: { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
+        work: {
+          runningTurnCount: 0,
+          queuedTurnCount: 0,
+          activeGoal: false,
+          liveVoice: false,
+          otherPeoplePendingUpdateCount: 0,
+          otherPeopleAccountChoiceCount: 0,
+        },
       });
 
       const result = await privatize(f);
@@ -239,49 +245,57 @@ describe("making a chat Only me settles leftovers", () => {
     });
   }
 
-  test("a foreign background-command notice is cancelled; other foreign input still blocks", async () => {
+  test("a foreign background-command notice is dropped silently; other foreign input is listed", async () => {
     const f = await fixture();
     const foreignTurn = crypto.randomUUID();
-    const blocking = await insertPendingUpdate(f, "session_wait_timeout", foreignTurn);
+    const timer = await insertPendingUpdate(f, "session_wait_timeout", foreignTurn);
     const notice = await insertPendingUpdate(f, "background_command_result", foreignTurn);
 
-    expect((await inspectSessionVisibilityChange(client.db, f)).blocker).toBe(
-      "pending_system_update",
-    );
-    await expect(privatize(f)).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "pending_system_update",
+    // Only the timer is listed; the finished notice is a leftover.
+    expect((await inspectSessionVisibilityChange(client.db, f)).work).toMatchObject({
+      runningTurnCount: 0,
+      otherPeoplePendingUpdateCount: 1,
     });
-    // Atomic: the refused change cancelled nothing.
-    const [stillPending] = await shared.admin<Array<{ state: string }>>`
-      select state from session_system_updates where id = ${notice}`;
-    expect(stillPending!.state).toBe("pending");
+    await expect(privatize(f)).rejects.toMatchObject({
+      name: "SessionVisibilityWorkConflictError",
+      reason: "active_work",
+      work: { otherPeoplePendingUpdateCount: 1 },
+    });
+    // Atomic: the unconfirmed change cancelled nothing.
+    const pending = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates where id in (${timer}, ${notice})`;
+    expect(pending.map((row) => row.state)).toEqual(["pending", "pending"]);
 
-    await forge(
-      (tx) => tx`update session_system_updates set state = 'cancelled' where id = ${blocking}`,
-    );
-    expect((await inspectSessionVisibilityChange(client.db, f)).blocker).toBeNull();
-    const result = await privatize(f);
-    expect(result).toMatchObject({ visibility: "user_private", cancelledUpdateCount: 1 });
-    const [cancelled] = await shared.admin<Array<{ state: string }>>`
-      select state from session_system_updates where id = ${notice}`;
-    expect(cancelled!.state).toBe("cancelled");
-    const [event] = await shared.admin<Array<{ payload: { updateId: string; reason: string } }>>`
+    const result = await privatize(f, { stopActiveWork: true });
+    expect(result).toMatchObject({ visibility: "user_private", cancelledUpdateCount: 2 });
+    const cancelled = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates where id in (${timer}, ${notice})`;
+    expect(cancelled.map((row) => row.state)).toEqual(["cancelled", "cancelled"]);
+    const events = await shared.admin<Array<{ payload: { updateId: string; reason: string } }>>`
       select payload from session_events where session_id = ${f.sessionId}
-        and type = 'system.update.cancelled'`;
-    expect(event!.payload).toEqual({ updateId: notice, reason: "authority_changed" });
+        and type = 'system.update.cancelled' order by sequence`;
+    expect(new Set(events.map((event) => event.payload.updateId))).toEqual(
+      new Set([timer, notice]),
+    );
+    expect(events.every((event) => event.payload.reason === "authority_changed")).toBe(true);
   });
 
-  test("an exhausted schedule no longer blocks; a live schedule still does", async () => {
+  test("a finished-notice leftover alone needs no confirmation", async () => {
     const f = await fixture();
-    const live = await scheduleTargeting(f, -2);
+    const notice = await insertPendingUpdate(f, "background_command_result", crypto.randomUUID());
+    expect(await privatize(f)).toMatchObject({
+      visibility: "user_private",
+      cancelledUpdateCount: 1,
+    });
+    const [row] = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates where id = ${notice}`;
+    expect(row!.state).toBe("cancelled");
+  });
+
+  test("no schedule blocks, live or exhausted", async () => {
+    const f = await fixture();
+    await scheduleTargeting(f, -2);
     await scheduleTargeting(f, 48);
-    expect((await inspectSessionVisibilityChange(client.db, f)).blocker).toBe(
-      "active_scheduled_task",
-    );
-    await expect(privatize(f)).rejects.toMatchObject({ blocker: "active_scheduled_task" });
-    await forge((tx) => tx`update scheduled_tasks set status = 'paused' where id = ${live}`);
     expect(await privatize(f)).toMatchObject({ visibility: "user_private", changed: true });
   });
 });
@@ -298,7 +312,14 @@ describe("making a chat Only me anyway", () => {
       await tx`insert into session_goals (account_id, workspace_id, session_id, text, status)
         values (${f.accountId}, ${f.workspaceId}, ${f.sessionId}, 'Ship it', 'active')`;
     });
-    const work = { runningTurnCount: 1, queuedTurnCount: 1, activeGoal: true };
+    const work = {
+      runningTurnCount: 1,
+      queuedTurnCount: 1,
+      activeGoal: true,
+      liveVoice: false,
+      otherPeoplePendingUpdateCount: 0,
+      otherPeopleAccountChoiceCount: 0,
+    };
     expect((await inspectSessionVisibilityChange(client.db, f)).work).toEqual(work);
     await expect(privatize(f)).rejects.toMatchObject({
       name: "SessionVisibilityWorkConflictError",
@@ -385,33 +406,5 @@ describe("making a chat Only me anyway", () => {
       changed: true,
     });
     expect(await sessionRow(f)).toMatchObject({ status: "idle", activeTurnId: null });
-  });
-
-  test("stopping refuses up front when another block would remain", async () => {
-    const f = await fixture();
-    const running = await submit(f, "running right now");
-    await claimSessionWorkForAttempt(client.db, f.workspaceId, {
-      sessionId: f.sessionId,
-      workflowId: `session-${f.sessionId}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    await scheduleTargeting(f, -2);
-    await expect(
-      stopSessionWorkForVisibilityChange(client.db, {
-        ...f,
-        expectedAuthorityEpoch: 1,
-        operationKey: `stop-${crypto.randomUUID()}`,
-      }),
-    ).rejects.toMatchObject({ reason: "not_quiescent", blocker: "active_scheduled_task" });
-    const [turn] = await shared.admin<Array<{ status: string }>>`
-      select status from session_turns where id = ${running}`;
-    expect(turn!.status).toBe("running");
-    const [interruptions] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count from session_attempt_interruptions
-      where session_id = ${f.sessionId}`;
-    expect(interruptions!.count).toBe(0);
   });
 });

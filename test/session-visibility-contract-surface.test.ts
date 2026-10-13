@@ -22,6 +22,14 @@ import { join } from "node:path";
 
 const repo = join(import.meta.dir, "..");
 
+/** Owner-only preview reads, named by the visibility-work reader instead of the adapter. */
+const OWNER_PREVIEW_ROUTINES = [
+  // 0768's preview of a standing block; since 0769 it always answers NULL and
+  // stays granted only for older releases.
+  "session_visibility_change_blocker",
+  // Owner-only counts of other people's access a private change drops (0769).
+  "session_visibility_foreign_authority_items",
+] as const;
 const SQL_ENTRY_POINTS = [
   "transition_session_visibility",
   "fork_session_content",
@@ -31,8 +39,7 @@ const SQL_ENTRY_POINTS = [
   // functions: it is granted to `opengeni_app`, so any new importer would
   // otherwise pass every guard in the tree.
   "replay_applied_session_fork",
-  // Owner-only read of what a private change would still refuse (0768).
-  "session_visibility_change_blocker",
+  ...OWNER_PREVIEW_ROUTINES,
 ] as const;
 const ADAPTER_ENTRY_POINTS = [
   "transitionSessionVisibility",
@@ -76,7 +83,12 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   // Settles leftovers inside the private transition and adds the owner-only
   // blocker preview; same owner-only boundary and locks.
   "packages/db/drizzle/0768_private_visibility_ignores_leftovers.sql",
+  // Never refuses the private transition: drops other people's pending
+  // updates and account choices inside it; same owner-only boundary and locks.
+  "packages/db/drizzle/0769_private_visibility_never_blocks.sql",
   "packages/db/src/session-tenancy.ts",
+  // Reads the owner-only foreign-authority counts for the preview and consent.
+  "packages/db/src/session-visibility-work.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",
 ]);
@@ -134,9 +146,15 @@ describe("session visibility and fork product activation stays on its exact publ
 
   test("the adapter still exists so the db test lane keeps proving the fenced behaviour", async () => {
     const adapter = await readFile(join(repo, "packages/db/src/session-tenancy.ts"), "utf8");
+    const previews = new Set<string>(OWNER_PREVIEW_ROUTINES);
     for (const marker of [...SQL_ENTRY_POINTS, ...ADAPTER_ENTRY_POINTS]) {
-      expect(adapter).toContain(marker);
+      if (!previews.has(marker)) expect(adapter).toContain(marker);
     }
+    const workReader = await readFile(
+      join(repo, "packages/db/src/session-visibility-work.ts"),
+      "utf8",
+    );
+    expect(workReader).toContain("session_visibility_foreign_authority_items");
     const posture = await readFile(join(repo, "packages/db/src/runtime-posture.ts"), "utf8");
     for (const marker of SQL_ENTRY_POINTS) {
       expect(posture).toContain(marker);

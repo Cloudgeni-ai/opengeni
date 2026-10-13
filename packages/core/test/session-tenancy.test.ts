@@ -819,7 +819,7 @@ describe("managed-human session tenancy application service", () => {
     });
   }, 180_000);
 
-  test("make private anyway stops a response a worker is running, then changes visibility", async () => {
+  test("make private anyway stops a running response and drops another member's authority in one call", async () => {
     if (!shared || !client) return;
     const db = client.db;
     const userId = `core-private-anyway-${crypto.randomUUID()}`;
@@ -882,6 +882,50 @@ describe("managed-human session tenancy application service", () => {
       throw new Error("turn was not claimed");
     }
     await submit("queued behind it");
+    // Another member's authority in the chat: a pending update carrying their
+    // delegation and their personal subscription account chosen for the chat.
+    const otherSubjectId = `user:core-private-anyway-member-${crypto.randomUUID()}`;
+    const foreignUpdateId = crypto.randomUUID();
+    const foreignConnectionId = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role=replica`;
+      await tx`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, classification, source_id, dedupe_key,
+         summary, payload, lineage, personal_connection_delegations,
+         xai_provider_account_authority_snapshot)
+        values (${foreignUpdateId}, ${grant.accountId}, ${grant.workspaceId}, ${session.id},
+          'session_wait_timeout', 'info', ${foreignUpdateId}, ${foreignUpdateId}, 'Wait ended',
+          ${tx.json({ type: "session_wait_timeout", deadlineAt: new Date().toISOString() })},
+          ${tx.json({ connectionAuthoritySubjectId: otherSubjectId })},
+          ${tx.json([
+            {
+              kind: "oauth2",
+              serverId: `account-${foreignConnectionId}`,
+              connectionId: foreignConnectionId,
+              connectionType: "mcp",
+              ownerSubjectId: otherSubjectId,
+              providerDomain: "mcp.example.test",
+              canonicalServerId: "example-mcp",
+            },
+          ])},
+          ${tx.json({ version: 1, scope: "workspace" })})`;
+      await tx`insert into subscription_connections (
+          id, account_id, provider, credential_encrypted, ownership, scope_kind,
+          owner_organization_membership_id, owner_subject_id, authority_id,
+          authority_resource_kind, authority_generation, provider_account_id
+        ) values (
+          ${foreignConnectionId}::uuid, ${grant.accountId}::uuid, 'codex', 'sealed', 'personal',
+          'people', ${crypto.randomUUID()}::uuid, ${otherSubjectId}, ${crypto.randomUUID()}::uuid,
+          'subscription_connection', 1, ${`chatgpt-${foreignConnectionId}`}
+        )`;
+      await tx`insert into subscription_session_bindings (
+          account_id, workspace_id, session_id, provider, connection_id, model_id, choice,
+          last_switch_reason
+        ) values (
+          ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${session.id}::uuid, 'codex',
+          ${foreignConnectionId}::uuid, 'gpt-test', 'explicit', 'explicit_choice'
+        )`;
+    });
 
     const authorization: AccessGrantAuthorization = {
       grant,
@@ -920,7 +964,14 @@ describe("managed-human session tenancy application service", () => {
       visibility: "workspace",
       targetVisibility: "private",
       authorityEpoch: 1,
-      work: { runningTurnCount: 1, queuedTurnCount: 1, activeGoal: false },
+      work: {
+        runningTurnCount: 1,
+        queuedTurnCount: 1,
+        activeGoal: false,
+        liveVoice: false,
+        otherPeoplePendingUpdateCount: 1,
+        otherPeopleAccountChoiceCount: 1,
+      },
       blocker: null,
     });
     const request = {
@@ -958,6 +1009,13 @@ describe("managed-human session tenancy application service", () => {
     const published = bus.published.flat().map((event) => event.type);
     expect(published).toContain("turn.cancelled");
     expect(published.at(-1)).toBe("session.visibility.changed");
+    // Nothing of the other member's is usable from the private chat.
+    const [foreignUpdate] = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates where id = ${foreignUpdateId}`;
+    expect(foreignUpdate?.state).toBe("cancelled");
+    expect(
+      await shared.admin`select 1 from subscription_session_bindings where session_id = ${session.id}`,
+    ).toHaveLength(0);
     expect(
       await previewManagedHumanSessionVisibilityChange(
         deps,
@@ -969,7 +1027,6 @@ describe("managed-human session tenancy application service", () => {
     ).toMatchObject({
       visibility: "private",
       work: { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
-      blocker: null,
     });
   }, 180_000);
 

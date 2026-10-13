@@ -119,7 +119,14 @@ describe("session HTTP authorization classification", () => {
       retryable: false,
       details: { reason: "not_quiescent", blocker: "shared_sandbox_group" },
     });
-    const work = { runningTurnCount: 1, queuedTurnCount: 2, activeGoal: true };
+    const work = {
+      runningTurnCount: 1,
+      queuedTurnCount: 2,
+      activeGoal: true,
+      liveVoice: false,
+      otherPeoplePendingUpdateCount: 1,
+      otherPeopleAccountChoiceCount: 0,
+    };
     expect(
       sessionTenancyHttpError(new SessionVisibilityWorkConflictError("active_work", work, 1)),
     ).toMatchObject({

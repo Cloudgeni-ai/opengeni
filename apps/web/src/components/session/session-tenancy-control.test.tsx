@@ -248,7 +248,7 @@ describe("SessionTenancyControl", () => {
     );
     expect(memberActions).not.toBeNull();
     await act(async () => memberActions!.click());
-    expect(container.textContent).not.toContain("Limit this session to me…");
+    expect(container.textContent).not.toContain("Limit this session to me");
     expect(container.textContent).toContain("Fork session");
 
     await act(async () => root.unmount());
@@ -311,7 +311,7 @@ describe("SessionTenancyControl", () => {
       );
     });
 
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(container.textContent).toContain(
@@ -624,8 +624,14 @@ describe("SessionTenancyControl", () => {
       visibility: "workspace" as const,
       targetVisibility: "private" as const,
       authorityEpoch: 4,
-      work: { runningTurnCount: 1, queuedTurnCount: 2, activeGoal: true },
-      blocker: null,
+      work: {
+        runningTurnCount: 1,
+        queuedTurnCount: 2,
+        activeGoal: true,
+        liveVoice: false,
+        otherPeoplePendingUpdateCount: 1,
+        otherPeopleAccountChoiceCount: 0,
+      },
     }));
     const container = document.createElement("div");
     document.body.append(container);
@@ -651,17 +657,20 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await flush();
     expect(previewSessionVisibilityChange).toHaveBeenCalledWith(
       "workspace-a",
       "session-a",
       "private",
     );
-    expect(container.textContent).toContain("This also stops work in progress");
+    expect(container.textContent).toContain("This will also");
     expect(container.textContent).toContain("Stop the response that is in progress");
     expect(container.textContent).toContain("Cancel 2 queued messages");
     expect(container.textContent).toContain("Pause the active goal");
+    expect(container.textContent).toContain(
+      "Drop a pending update that uses someone else's access",
+    );
     expect(container.textContent).not.toContain("waits for all current work");
 
     await act(async () => dialogButton(container, "Stop work and limit to me").click());
@@ -712,8 +721,14 @@ describe("SessionTenancyControl", () => {
       visibility: "workspace" as const,
       targetVisibility: "private" as const,
       authorityEpoch: 4,
-      work: { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
-      blocker: null,
+      work: {
+        runningTurnCount: 0,
+        queuedTurnCount: 0,
+        activeGoal: false,
+        liveVoice: false,
+        otherPeoplePendingUpdateCount: 0,
+        otherPeopleAccountChoiceCount: 0,
+      },
     }));
     const getSession = mock(async () => baseSession);
     const container = document.createElement("div");
@@ -741,12 +756,12 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await chooseAccessAction(container, "Limit this session to me…");
+    // Nothing in the way: the change is sent without a dialog.
+    await chooseAccessAction(container, "Limit this session to me");
     await flush();
-    expect(container.textContent).not.toContain("This also stops work in progress");
-    await act(async () => dialogButton(container, "Limit to me").click());
-    await flush();
+    expect(requests).toHaveLength(1);
     expect(requests[0]?.stopActiveWork).toBeUndefined();
+    expect(container.textContent).toContain("This will also");
     expect(container.textContent).toContain("Stop the response that is in progress");
     expect(getSession).not.toHaveBeenCalled();
 
@@ -764,13 +779,33 @@ describe("SessionTenancyControl", () => {
     container.remove();
   });
 
-  test("names a block that stopping work would not clear", async () => {
+  test("drops other people's access with one confirmation that stops nothing", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const updateSessionVisibility = mock(async (_workspaceId, _sessionId, request) => {
+      requests.push(request);
+      return {
+        operationId: crypto.randomUUID(),
+        eventId: crypto.randomUUID(),
+        eventSequence: 9,
+        visibility: "private" as const,
+        authorityEpoch: 5,
+        changed: true,
+        replay: false,
+        revokedGrantCount: 0,
+      };
+    });
     const previewSessionVisibilityChange = mock(async () => ({
       visibility: "workspace" as const,
       targetVisibility: "private" as const,
       authorityEpoch: 4,
-      work: { runningTurnCount: 1, queuedTurnCount: 0, activeGoal: false },
-      blocker: "active_scheduled_task" as const,
+      work: {
+        runningTurnCount: 0,
+        queuedTurnCount: 0,
+        activeGoal: false,
+        liveVoice: false,
+        otherPeoplePendingUpdateCount: 2,
+        otherPeopleAccountChoiceCount: 1,
+      },
     }));
     const container = document.createElement("div");
     document.body.append(container);
@@ -779,7 +814,12 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={baseSession}
-          client={{ previewSessionVisibilityChange } as unknown as OpenGeniBrowserClient}
+          client={
+            {
+              updateSessionVisibility,
+              previewSessionVisibilityChange,
+            } as unknown as OpenGeniBrowserClient
+          }
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -791,13 +831,19 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await flush();
-    expect(container.textContent).toContain("This session can't be limited to you yet");
+    expect(requests).toHaveLength(0);
     expect(container.textContent).toContain(
-      "Pause the scheduled task that targets this session first.",
+      "Drop 2 pending updates that use other people's access",
     );
-    expect(container.textContent).not.toContain("This also stops work in progress");
+    expect(container.textContent).toContain("Stop using another person's account in this session");
+    expect(container.textContent).not.toContain("Stop work and limit to me");
+
+    await act(async () => dialogButton(container, "Limit to me").click());
+    await flush();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ visibility: "private", stopActiveWork: true });
 
     await act(async () => root.unmount());
     container.remove();
@@ -830,7 +876,7 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
@@ -880,7 +926,7 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
@@ -928,7 +974,7 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
@@ -991,14 +1037,14 @@ describe("SessionTenancyControl", () => {
     document.body.append(container);
     let root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     await act(async () => root.unmount());
 
     root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await chooseAccessAction(container, "Retry: Limit this session to me…");
+    await chooseAccessAction(container, "Retry: Limit this session to me");
     expect(container.textContent).toContain("Retry limit to me");
     await act(async () => dialogButton(container, "Retry limit to me").click());
     await flush();
@@ -1056,14 +1102,14 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(container.textContent).toContain(
       "Session access changed in another tab. The latest state has been loaded.",
     );
 
-    await chooseAccessAction(container, "Limit this session to me…");
+    await chooseAccessAction(container, "Limit this session to me");
     await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(epochs).toEqual([4, 5]);
@@ -1107,7 +1153,7 @@ describe("SessionTenancyControl", () => {
           />,
         );
       });
-      await chooseAccessAction(container, "Limit this session to me…");
+      await chooseAccessAction(container, "Limit this session to me");
       await act(async () => dialogButton(container, "Limit to me").click());
       current = false;
       pending.resolve({

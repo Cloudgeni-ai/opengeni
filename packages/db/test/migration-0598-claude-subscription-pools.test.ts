@@ -95,6 +95,7 @@ const subscriptionCoreMigrations = [
   "0760_terminal_turn_run_state_cleanup.sql",
   "0761_exhausted_scheduled_tasks.sql",
   "0768_private_visibility_ignores_leftovers.sql",
+  "0769_private_visibility_never_blocks.sql",
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

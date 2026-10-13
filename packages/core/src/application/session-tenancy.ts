@@ -19,6 +19,7 @@ import {
   getPrivateSessionCreatePolicy,
   getSessionEventForSubject,
   inspectSessionVisibilityChange,
+  EMPTY_SESSION_VISIBILITY_WORK,
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   replayAppliedSessionFork,
@@ -399,17 +400,16 @@ export async function previewManagedHumanSessionVisibilityChange(
     actorSubjectId: authorization.grant.subjectId,
   });
   const current = sessionVisibilityToPublic(preview.visibility);
-  // Only a change to Only me stops work or meets owner-only blocks; sharing a
-  // private chat with the workspace never needs either.
+  // Only a change to Only me stops work or drops other people's access;
+  // sharing a private chat with the workspace never does either.
   const changesToPrivate = targetVisibility === "private" && current !== "private";
   return SessionVisibilityChangePreview.parse({
     visibility: current,
     targetVisibility,
     authorityEpoch: preview.authorityEpoch,
-    work: changesToPrivate
-      ? preview.work
-      : { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
-    blocker: changesToPrivate ? preview.blocker : null,
+    work: changesToPrivate ? preview.work : EMPTY_SESSION_VISIBILITY_WORK,
+    // Kept for older clients; nothing refuses the change any more.
+    blocker: null,
   });
 }
 

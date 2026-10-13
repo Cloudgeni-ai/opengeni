@@ -2,7 +2,6 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   Session,
   SessionEvent,
-  SessionTenancyBlocker,
   SessionVisibility,
   SessionVisibilityWork,
 } from "@opengeni/sdk";
@@ -39,10 +38,11 @@ import {
   classifySessionTenancyFailure,
   isCurrentSessionTenancyTarget,
   isStoppingSessionWorkError,
+  normalizeSessionVisibilityWork,
   privateSessionSandboxNote,
   retryableSessionTenancyReconciliationFailure,
-  sessionTenancyBlockerMessage,
   sessionVisibilityWorkIsEmpty,
+  sessionVisibilityWorkStopsWork,
   sessionVisibilityWorkSummary,
   type SessionTenancyTarget,
 } from "@/lib/session-tenancy";
@@ -61,13 +61,13 @@ type Confirmation =
   | { kind: "fork"; visibility: SessionVisibility };
 
 /**
- * What a change to Only me would do, read when its dialog opens. `unavailable`
- * (an older server or a failed read) still lets the person confirm: the server
- * answers `active_work` with the same summary if work is in progress.
+ * What a change to Only me would stop or drop, read before anything is shown.
+ * Nothing in the way: the change just happens. `unavailable` (an older server
+ * or a failed read) opens the plain confirmation; the server answers
+ * `active_work` with the same summary if something is in the way.
  */
 type VisibilityChangePreview =
-  | { status: "loading" }
-  | { status: "ready"; work: SessionVisibilityWork; blocker: SessionTenancyBlocker | null }
+  | { status: "ready"; work: SessionVisibilityWork }
   | { status: "unavailable" };
 
 /** Each request already waits for the stop to settle; a few more cover a slow worker. */
@@ -304,40 +304,6 @@ export function SessionTenancyControl({
 
   const displayedTenancy = override;
   const mayManage = Boolean(displayedTenancy?.ownedByCurrentUser && managedSession);
-  const previewsPrivateChange =
-    confirmation?.kind === "visibility" &&
-    confirmation.visibility === "private" &&
-    displayedTenancy?.visibility === "workspace" &&
-    mayManage;
-
-  useEffect(() => {
-    if (!previewsPrivateChange) {
-      setVisibilityPreview(null);
-      return;
-    }
-    let current = true;
-    setVisibilityPreview({ status: "loading" });
-    void Promise.resolve()
-      .then(
-        async () =>
-          await client.previewSessionVisibilityChange(
-            target.workspaceId,
-            target.sessionId,
-            "private",
-          ),
-      )
-      .then((preview) => {
-        if (current) {
-          setVisibilityPreview({ status: "ready", work: preview.work, blocker: preview.blocker });
-        }
-      })
-      .catch(() => {
-        if (current) setVisibilityPreview({ status: "unavailable" });
-      });
-    return () => {
-      current = false;
-    };
-  }, [client, previewsPrivateChange, target]);
 
   const mayFork = Boolean(
     displayedTenancy &&
@@ -523,8 +489,9 @@ export function SessionTenancyControl({
         if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
         const classified = classifySessionTenancyFailure(error);
         if (classified.kind === "active_work" && classified.work) {
-          // Work started after the preview: show what will stop and ask again.
-          setVisibilityPreview({ status: "ready", work: classified.work, blocker: null });
+          // Something appeared after the preview: show what it is and ask once.
+          setVisibilityPreview({ status: "ready", work: classified.work });
+          setConfirmation({ kind: "visibility", visibility });
         }
         let authoritative: Session | null = null;
         if (classified.reconcile) {
@@ -580,6 +547,45 @@ export function SessionTenancyControl({
       scopeLabel,
       target,
     ],
+  );
+
+  /**
+   * Sharing always asks. Limiting to me reads what it would stop or drop first:
+   * nothing in the way just makes the change; anything else is listed in one
+   * confirmation whose single button does it all.
+   */
+  const startVisibilityChange = useCallback(
+    async (visibility: SessionVisibility) => {
+      setFailure(null);
+      setVisibilityPreview(null);
+      if (visibility !== "private") {
+        setConfirmation({ kind: "visibility", visibility });
+        return;
+      }
+      const operationSequence = operationSequenceRef.current;
+      setBusy(true);
+      let preview: VisibilityChangePreview;
+      try {
+        const result = await client.previewSessionVisibilityChange(
+          target.workspaceId,
+          target.sessionId,
+          visibility,
+        );
+        const work = normalizeSessionVisibilityWork(result.work);
+        preview = work ? { status: "ready", work } : { status: "unavailable" };
+      } catch {
+        preview = { status: "unavailable" };
+      }
+      if (!mountedRef.current || operationSequenceRef.current !== operationSequence) return;
+      setBusy(false);
+      if (preview.status === "ready" && sessionVisibilityWorkIsEmpty(preview.work)) {
+        await changeVisibility(visibility, false);
+        return;
+      }
+      setVisibilityPreview(preview);
+      setConfirmation({ kind: "visibility", visibility });
+    },
+    [changeVisibility, client, target],
   );
 
   const forkSession = useCallback(
@@ -687,22 +693,17 @@ export function SessionTenancyControl({
     pendingVisibility.expectedAuthorityEpoch === displayedTenancy.authorityEpoch;
   const visibilityAction = privateSession
     ? "Share this session with workspace…"
-    : "Limit this session to me…";
+    : "Limit this session to me";
   const readyPreview = visibilityPreview?.status === "ready" ? visibilityPreview : null;
-  const standingBlocker = readyPreview?.blocker
-    ? (sessionTenancyBlockerMessage(readyPreview.blocker) ??
-      "Something else in this session still needs to finish first.")
-    : null;
-  // Stopping work is offered only when it would let the change complete.
+  // What the one confirmation also stops or drops; null when nothing is listed.
   const workToStop =
-    readyPreview && !standingBlocker && !sessionVisibilityWorkIsEmpty(readyPreview.work)
-      ? readyPreview.work
-      : null;
+    readyPreview && !sessionVisibilityWorkIsEmpty(readyPreview.work) ? readyPreview.work : null;
+  const stopsWork = workToStop !== null && sessionVisibilityWorkStopsWork(workToStop);
   const visibilityConfirmLabel = privateSession
     ? retryingVisibility
       ? "Retry share with workspace"
       : "Share with workspace"
-    : workToStop
+    : stopsWork
       ? "Stop work and limit to me"
       : retryingVisibility
         ? "Retry limit to me"
@@ -768,9 +769,7 @@ export function SessionTenancyControl({
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    onSelect={() =>
-                      setConfirmation({ kind: "visibility", visibility: alternateVisibility })
-                    }
+                    onSelect={() => void startVisibilityChange(alternateVisibility)}
                   >
                     {privateSession ? <UsersIcon /> : <LockKeyholeIcon />}
                     {retryingVisibility ? `Retry: ${visibilityAction}` : visibilityAction}
@@ -821,6 +820,7 @@ export function SessionTenancyControl({
         onOpenChange={(open) => {
           if (!open) {
             setConfirmation(null);
+            setVisibilityPreview(null);
             onForkClose?.();
           }
         }}
@@ -858,16 +858,12 @@ export function SessionTenancyControl({
             : visibilityConfirmLabel
         }
         pendingLabel={
-          confirmation?.kind === "visibility" && workToStop ? "Stopping work…" : "Working…"
-        }
-        confirmDisabled={
-          confirmation?.kind === "visibility" &&
-          (visibilityPreview?.status === "loading" || standingBlocker !== null)
+          confirmation?.kind === "visibility" && stopsWork ? "Stopping work…" : "Working…"
         }
         // A fork only widens exposure when a private source is copied into the
         // workspace. Changing an existing session to workspace visibility always
-        // does, and making it private destroys the work it stops. A
-        // shared-to-shared fork exposes nothing new.
+        // does, and making it private destroys the work and access it drops.
+        // A shared-to-shared fork exposes nothing new.
         destructive={
           confirmation?.kind === "fork"
             ? displayedTenancy.visibility === "private" && confirmation.visibility === "workspace"
@@ -882,22 +878,8 @@ export function SessionTenancyControl({
             : forkSession(confirmation.visibility);
         }}
       >
-        {confirmation?.kind === "visibility" && visibilityPreview?.status === "loading" ? (
-          <p className="flex items-center gap-2 text-sm text-fg-muted" role="status">
-            <Loader2Icon
-              className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
-              aria-hidden
-            />
-            Checking current work…
-          </p>
-        ) : null}
-        {confirmation?.kind === "visibility" && standingBlocker && !failure ? (
-          <Notice tone="waiting" title="This session can't be limited to you yet">
-            {standingBlocker}
-          </Notice>
-        ) : null}
         {confirmation?.kind === "visibility" && workToStop ? (
-          <Notice tone="waiting" title="This also stops work in progress">
+          <Notice tone="waiting" title="This will also">
             <ul className="list-disc space-y-0.5 pl-4">
               {sessionVisibilityWorkSummary(workToStop).map((line) => (
                 <li key={line}>{line}</li>

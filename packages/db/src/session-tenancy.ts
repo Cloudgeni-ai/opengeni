@@ -7,12 +7,14 @@ import {
 import {
   rawRows,
   type Database,
+  type SessionActivityDatabase,
   rlsContextForWorkspace,
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { registerSessionWorkflowWakeInTransaction } from "./session-control";
+import { endSessionRealtimeForPrivateTransitionInTransaction } from "./session-realtime";
 import {
   interruptSessionAttemptsForVisibilityChangeInTransaction,
   lockSessionForVisibilityWork,
@@ -24,6 +26,7 @@ import {
 } from "./session-visibility-work";
 
 export type { SessionVisibilityWork } from "./session-visibility-work";
+export { EMPTY_SESSION_VISIBILITY_WORK } from "./session-visibility-work";
 
 // Frozen SQL protocol argument: every organization is activated at version 1
 // since migration 0611, but the lifecycle routines still require it explicitly.
@@ -455,6 +458,7 @@ export async function transitionSessionVisibility(
         const settlement =
           input.targetVisibility === "user_private"
             ? await settleWorkBeforePrivateTransition(scopedDb, {
+                accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 actorSubjectId: input.actorSubjectId,
@@ -540,8 +544,9 @@ async function lockSessionTenancyExclusively(db: Database, workspaceId: string):
  * a live attempt count so the caller can stop them first.
  */
 async function settleWorkBeforePrivateTransition(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
+    accountId: string;
     workspaceId: string;
     sessionId: string;
     actorSubjectId: string;
@@ -563,6 +568,7 @@ async function settleWorkBeforePrivateTransition(
     return null;
   }
   const inventory = await readSessionVisibilityWork(db, {
+    accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     sessionStatus: lock.session.status,
@@ -575,13 +581,31 @@ async function settleWorkBeforePrivateTransition(
       inventory.liveAttempts.length,
     );
   }
-  return await settleSessionVisibilityWorkInTransaction(db, {
+  // A live voice session ends with consent; an expired lease ends silently.
+  const voice = await endSessionRealtimeForPrivateTransitionInTransaction(db, lock.session);
+  const settlement = await settleSessionVisibilityWorkInTransaction(db, {
     session: lock.session,
     actorSubjectId: input.actorSubjectId,
     cancelTurnIds: inventory.pendingTurnIds,
     pauseGoal: input.stopActiveWork && inventory.work.activeGoal,
     liveTurnId: null,
   });
+  if (!voice) return settlement;
+  const wakeRevision = Math.max(
+    voice.workflowWakeRevision,
+    settlement.workflowWake?.wakeRevision ?? 0,
+  );
+  return {
+    ...settlement,
+    eventIds: [voice.eventId, ...settlement.eventIds],
+    workflowWake: {
+      accountId: lock.session.accountId,
+      workspaceId: lock.session.workspaceId,
+      sessionId: lock.session.id,
+      temporalWorkflowId: lock.session.temporalWorkflowId ?? `session-${lock.session.id}`,
+      wakeRevision,
+    },
+  };
 }
 
 async function visibilityReceiptExists(
@@ -608,8 +632,7 @@ async function visibilityReceiptExists(
 export type SessionVisibilityChangePreview = {
   visibility: SessionTenancyVisibility;
   authorityEpoch: number;
-  /** What the transition would still refuse after the session's own work stops. */
-  blocker: SessionTenancyBlocker | null;
+  /** What a confirmed change to Only me stops or removes; nothing else refuses it. */
   work: SessionVisibilityWork;
 };
 
@@ -625,12 +648,6 @@ export async function inspectSessionVisibilityChange(
       input.workspaceId,
       input.actorSubjectId,
       async (scopedDb) => {
-        const [row] = await rawRows<{ blocker: string | null }>(
-          scopedDb,
-          sql`select session_visibility_change_blocker(
-            ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid
-          ) as blocker`,
-        );
         const [session] = await rawRows<{
           visibility: SessionTenancyVisibility;
           authorityEpoch: number;
@@ -642,16 +659,17 @@ export async function inspectSessionVisibilityChange(
           where workspace_id = ${input.workspaceId}::uuid and id = ${input.sessionId}::uuid`,
         );
         if (!session) throw new SessionTenancyAccessError();
+        // Owner-only: the routine behind the other-people counts refuses
+        // anyone else before anything is returned.
         const inventory = await readSessionVisibilityWork(scopedDb, {
+          accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           sessionStatus: session.status,
         });
-        const blocker = SessionTenancyBlockerSchema.safeParse(row?.blocker);
         return {
           visibility: session.visibility,
           authorityEpoch: Number(session.authorityEpoch),
-          blocker: blocker.success ? blocker.data : null,
           work: inventory.work,
         };
       },
@@ -672,8 +690,7 @@ export type StopSessionWorkForVisibilityChangeResult = {
  * First half of a consented "make private anyway" when a worker is executing
  * the chat: durably interrupt each live attempt (the worker cancels the turn
  * when it settles), cancel everything queued or parked, and pause the goal.
- * It commits on its own and refuses up front when something other than the
- * session's own work would still block the private transition.
+ * It commits on its own; the transition that follows drops everything else.
  */
 export async function stopSessionWorkForVisibilityChange(
   db: Database,
@@ -708,20 +725,8 @@ export async function stopSessionWorkForVisibilityChange(
         if (lock.session.authorityEpoch !== input.expectedAuthorityEpoch) {
           throw new SessionTenancyConflictError("authority_epoch");
         }
-        const [standing] = await rawRows<{ blocker: string | null }>(
-          scopedDb,
-          sql`select session_visibility_change_blocker(
-            ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid
-          ) as blocker`,
-        );
-        if (standing?.blocker) {
-          const blocker = SessionTenancyBlockerSchema.safeParse(standing.blocker);
-          throw new SessionTenancyConflictError(
-            "not_quiescent",
-            blocker.success ? blocker.data : null,
-          );
-        }
         const inventory = await readSessionVisibilityWork(scopedDb, {
+          accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           sessionStatus: lock.session.status,

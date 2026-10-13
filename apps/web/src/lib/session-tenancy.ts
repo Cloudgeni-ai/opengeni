@@ -68,7 +68,7 @@ export function sessionTenancyBlockerMessage(blocker: unknown): string | null {
 }
 
 export function sessionVisibilityWorkIsEmpty(work: SessionVisibilityWork): boolean {
-  return work.runningTurnCount === 0 && work.queuedTurnCount === 0 && !work.activeGoal;
+  return sessionVisibilityWorkSummary(work).length === 0;
 }
 
 /** One line per consequence of "make private anyway", in the order they happen. */
@@ -83,12 +83,37 @@ export function sessionVisibilityWorkSummary(work: SessionVisibilityWork): strin
     );
   }
   if (work.activeGoal) lines.push("Pause the active goal");
+  if (work.liveVoice) lines.push("End the live voice conversation");
+  if (work.otherPeoplePendingUpdateCount > 0) {
+    lines.push(
+      work.otherPeoplePendingUpdateCount === 1
+        ? "Drop a pending update that uses someone else's access"
+        : `Drop ${work.otherPeoplePendingUpdateCount} pending updates that use other people's access`,
+    );
+  }
+  if (work.otherPeopleAccountChoiceCount > 0) {
+    lines.push(
+      work.otherPeopleAccountChoiceCount === 1
+        ? "Stop using another person's account in this session"
+        : "Stop using other people's accounts in this session",
+    );
+  }
   return lines;
+}
+
+/** True when confirming stops something running, not only drops other people's access. */
+export function sessionVisibilityWorkStopsWork(work: SessionVisibilityWork): boolean {
+  return work.runningTurnCount > 0 || work.queuedTurnCount > 0 || work.activeGoal || work.liveVoice;
+}
+
+function count(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 function visibilityWorkFromDetails(details: unknown): SessionVisibilityWork | null {
   if (!details || typeof details !== "object") return null;
-  const { runningTurnCount, queuedTurnCount, activeGoal } = details as Record<string, unknown>;
+  const value = details as Record<string, unknown>;
+  const { runningTurnCount, queuedTurnCount, activeGoal } = value;
   if (
     typeof runningTurnCount !== "number" ||
     typeof queuedTurnCount !== "number" ||
@@ -96,7 +121,20 @@ function visibilityWorkFromDetails(details: unknown): SessionVisibilityWork | nu
   ) {
     return null;
   }
-  return { runningTurnCount, queuedTurnCount, activeGoal };
+  // An older server reports only the first three fields.
+  return {
+    runningTurnCount,
+    queuedTurnCount,
+    activeGoal,
+    liveVoice: value.liveVoice === true,
+    otherPeoplePendingUpdateCount: count(value.otherPeoplePendingUpdateCount),
+    otherPeopleAccountChoiceCount: count(value.otherPeopleAccountChoiceCount),
+  };
+}
+
+/** A preview from any server release, with fields an older one omits filled in. */
+export function normalizeSessionVisibilityWork(work: unknown): SessionVisibilityWork | null {
+  return visibilityWorkFromDetails(work);
 }
 
 /** The consented stop is still settling; the same request finishes it. */

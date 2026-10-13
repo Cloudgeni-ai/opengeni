@@ -1522,19 +1522,29 @@ export type SessionTenancyBlocker =
   | "active_sandbox_access"
   | "shared_sandbox_group";
 
-/** The chat's own work that a change to Only me stops when `stopActiveWork` is sent. */
+/**
+ * What a change to Only me stops or removes when `stopActiveWork` is sent:
+ * the chat's visible work and anything that carries another person's access.
+ */
 export type SessionVisibilityWork = {
   runningTurnCount: number;
   queuedTurnCount: number;
   activeGoal: boolean;
+  /** A voice session is live in the chat. */
+  liveVoice: boolean;
+  /** Pending updates that carry another person's access. */
+  otherPeoplePendingUpdateCount: number;
+  /** Account choices for the chat that only another person may use. */
+  otherPeopleAccountChoiceCount: number;
 };
 
 export type SessionVisibilityChangePreview = {
   visibility: SessionVisibility;
   targetVisibility: SessionVisibility;
   authorityEpoch: number;
+  /** Nothing else refuses the change; an empty value means it just happens. */
   work: SessionVisibilityWork;
-  /** A block that remains even after that work stops, such as an active schedule. */
+  /** @deprecated Always `null`: nothing refuses a change to Only me any more. */
   blocker: SessionTenancyBlocker | null;
 };
 

@@ -1204,7 +1204,7 @@ describe("migration 0303 session tenancy product activation", () => {
     ).toEqual({ ...committed, replay: true });
   }, 180_000);
 
-  test("blocks transition to private while an interaction holder retains sandbox access", async () => {
+  test("an interaction holder on the sandbox blocks forks but not a change to private", async () => {
     if (!shared || !client) return;
     const value = await sessionVisibilityFixture();
     const [sessionRow] = await shared.admin<{ sandboxGroupId: string }[]>`
@@ -1226,6 +1226,16 @@ describe("migration 0303 session tenancy product activation", () => {
         'interaction', ${holderId}, ${value.session.id}
       )`;
 
+    // The full quiescence predicate (whole-session forks) still waits for it.
+    const failure = await shared.admin`select assert_session_tenancy_quiescent(
+        ${value.ownerGrant.accountId}::uuid, ${value.ownerGrant.workspaceId}::uuid,
+        ${value.session.id}::uuid, false)`.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ code: "55P03", detail: "active_sandbox_access" });
+    // Since 0769 it does not refuse Only me: a viewer's stream token carries the
+    // authority epoch it was minted under and is re-authorized on refresh.
     await expect(
       transitionSessionVisibility(client.db, {
         workspaceId: value.ownerGrant.workspaceId,
@@ -1233,26 +1243,7 @@ describe("migration 0303 session tenancy product activation", () => {
         actorSubjectId: value.ownerSubjectId,
         targetVisibility: "user_private",
         expectedAuthorityEpoch: 1,
-        operationKey: `interaction-blocked:${crypto.randomUUID()}`,
-      }),
-    ).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "active_sandbox_access",
-    });
-    const [unchanged] = await shared.admin<{ visibility: string; epoch: number }[]>`
-      select visibility, authority_epoch as epoch from sessions where id = ${value.session.id}`;
-    expect(unchanged).toEqual({ visibility: "workspace_shared", epoch: 1 });
-
-    await shared.admin`delete from sandbox_lease_holders where lease_id = ${lease!.id}`;
-    await expect(
-      transitionSessionVisibility(client.db, {
-        workspaceId: value.ownerGrant.workspaceId,
-        sessionId: value.session.id,
-        actorSubjectId: value.ownerSubjectId,
-        targetVisibility: "user_private",
-        expectedAuthorityEpoch: 1,
-        operationKey: `interaction-released:${crypto.randomUUID()}`,
+        operationKey: `interaction-held:${crypto.randomUUID()}`,
       }),
     ).resolves.toMatchObject({ visibility: "user_private", authorityEpoch: 2 });
   });

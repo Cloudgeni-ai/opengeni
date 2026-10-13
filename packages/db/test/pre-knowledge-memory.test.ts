@@ -69,6 +69,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         // Rewrites the current quiescence function body, which the withheld
         // migrations shape differently here; it adds no storage this test reads.
         "0768_private_visibility_ignores_leftovers.sql",
+        // Rewrites the same routines again; no storage this test reads.
+        "0769_private_visibility_never_blocks.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);
