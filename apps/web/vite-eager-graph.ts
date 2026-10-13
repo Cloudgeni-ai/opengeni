@@ -39,6 +39,14 @@ export type EagerGraphReport = Readonly<{
     fileName: string;
     unusedBytes: number;
     unusedModules: readonly Readonly<{ id: string; bytes: number }>[];
+    /** Modules in the chunk that the graph does import: why the chunk loads. */
+    neededModules: readonly string[];
+    /**
+     * Module import edges (`importer -> imported`) from other loaded chunks
+     * into this one. When no module in the chunk is needed, these unused
+     * edges are why it loads.
+     */
+    importedVia: readonly Readonly<{ from: string; to: string }>[];
   }>[];
 }>;
 
@@ -81,7 +89,24 @@ export function measureEagerGraphs(
           .map(([id, bytes]) => ({ id, bytes }))
           .sort((left, right) => right.bytes - left.bytes);
         const unusedBytes = unusedModules.reduce((sum, module) => sum + module.bytes, 0);
-        return { fileName, unusedBytes, unusedModules };
+        const neededModules = Object.entries(byFile.get(fileName)?.modules ?? {})
+          .filter(([id, bytes]) => bytes > 0 && needed.has(id))
+          .map(([id]) => id)
+          .sort();
+        const importedVia: Array<{ from: string; to: string }> = [];
+        for (const importer of loaded) {
+          const chunk = byFile.get(importer);
+          if (!chunk?.imports.includes(fileName)) continue;
+          for (const from of Object.keys(chunk.modules)) {
+            for (const to of staticImports(from)) {
+              if (chunkOf.get(to) === fileName) importedVia.push({ from, to });
+            }
+          }
+        }
+        importedVia.sort((left, right) =>
+          `${left.from} ${left.to}`.localeCompare(`${right.from} ${right.to}`),
+        );
+        return { fileName, unusedBytes, unusedModules, neededModules, importedVia };
       })
       .filter((chunk) => chunk.unusedBytes > 0)
       .sort((left, right) => right.unusedBytes - left.unusedBytes);
@@ -118,6 +143,18 @@ export function describeEagerGraphOverflow(
         .map((module) => `${relative(module.id)} (${module.bytes})`)
         .join(", ");
       lines.push(`  ${chunk.fileName}: ${chunk.unusedBytes} unused, e.g. ${top}`);
+      const needed = chunk.neededModules.slice(0, 6).map(relative);
+      if (needed.length > 0) {
+        const more = chunk.neededModules.length > needed.length ? ", ..." : "";
+        lines.push(`    loaded for ${needed.join(", ")}${more}`);
+      } else {
+        const edges = chunk.importedVia
+          .slice(0, 6)
+          .map((edge) => `${relative(edge.from)} -> ${relative(edge.to)}`);
+        lines.push(
+          `    nothing in it is used; loaded through ${edges.join(", ") || "another chunk's import"}`,
+        );
+      }
     }
   }
   return lines.join("\n");
