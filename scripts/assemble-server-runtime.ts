@@ -72,6 +72,7 @@ const operatorCommands = [
   "backfill-connection-authority",
   "verify-resource-classification",
   "sweep-organization-retention",
+  "admission-settings",
 ] as const;
 
 export async function assembleServerRuntime(root: string, role: "api" | "worker") {
