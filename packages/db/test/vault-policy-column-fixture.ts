@@ -83,3 +83,36 @@ export function withoutAbsentVaultPosture(violations: readonly string[]): string
   }
   return kept;
 }
+
+const laterCapabilities = new Set([
+  "target-schema runtime capability scheduled_task_is_exhausted(uuid) is missing or ambiguous",
+  "target-schema runtime capability session_visibility_change_blocker(uuid, uuid, uuid) is missing or ambiguous",
+]);
+
+/**
+ * A fixture stopped before 0761 and 0768 has no exhausted-schedule outbox,
+ * predicate or visibility preview, so current readiness reports them missing.
+ * Drop exactly those messages (and only that table from a combined
+ * "... tables are missing" line).
+ */
+export function withoutAbsentLaterPosture(violations: readonly string[]): string[] {
+  const table = "scheduled_task_schedule_outbox";
+  const kept: string[] = [];
+  for (const violation of violations) {
+    if (laterCapabilities.has(violation)) continue;
+    const prefix = [
+      "protected tables are missing: ",
+      "runtime privilege tables are missing: ",
+    ].find((candidate) => violation.startsWith(candidate));
+    if (prefix) {
+      const others = violation
+        .slice(prefix.length)
+        .split(", ")
+        .filter((name) => name !== table);
+      if (others.length > 0) kept.push(`${prefix}${others.join(", ")}`);
+      continue;
+    }
+    kept.push(violation);
+  }
+  return kept;
+}

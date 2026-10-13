@@ -64,6 +64,11 @@ describe("pre-knowledge Memory storage compatibility", () => {
         // The retirement requires both cutovers.
         "0751_subscription_core_legacy_retirement.sql",
         "0752_subscription_personal_sharing.sql",
+        // A one-time data repair that also reads the withheld 0560 import column.
+        "0763_queue_steer_admission_recheck_repair.sql",
+        // Rewrites the current quiescence function body, which the withheld
+        // migrations shape differently here; it adds no storage this test reads.
+        "0768_private_visibility_ignores_leftovers.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);
