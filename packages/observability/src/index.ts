@@ -4,6 +4,8 @@ import { SandboxBackend } from "@opengeni/contracts";
 import {
   CLIENT_ERROR_REVISION_PATTERN,
   CLIENT_ERROR_ROUTE_PATTERN,
+  isProjectedClientErrorText,
+  type ClientErrorDetailField,
 } from "@opengeni/contracts/client-error-report";
 import {
   currentTraceContext,
@@ -432,6 +434,23 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // enum and a code-registered workflow type name, never an identifier.
   ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
   ["workflowType", TEMPORAL_TYPE_NAME_PATTERN],
+]);
+
+/**
+ * Web client error diagnostics: the only free-text fields allowed across the
+ * public boundary, reviewed as a deliberate exception so that a browser crash
+ * report says why the page failed, not only where. They are error text that
+ * can occasionally quote user content. A value is admitted only when it is
+ * already exactly what the shared client-error projection produces (scrubbed
+ * of obvious credentials and URL query strings, and within its per-field
+ * byte bound), so a caller that passes raw text under one of these names
+ * publishes nothing. No other caller uses these names.
+ */
+const PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES = new Map<string, ClientErrorDetailField>([
+  ["clientErrorName", "name"],
+  ["clientErrorMessage", "message"],
+  ["clientErrorStack", "stack"],
+  ["clientComponentStack", "componentStack"],
 ]);
 
 const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
@@ -1687,6 +1706,10 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     Object.entries(attributes).filter(([key, value]) => {
       if (value === undefined) return false;
       if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+      const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
+      if (clientErrorField) {
+        return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
+      }
       const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
       return typeof value === "string" && pattern?.test(value) === true;
     }),

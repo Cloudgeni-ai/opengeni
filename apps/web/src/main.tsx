@@ -26,7 +26,8 @@ import {
 import "./styles.css";
 
 retainIdentityLinkContinuation(window);
-// Content-free operational error counter; see lib/client-error-reporting.ts.
+// Error counter and diagnostics (scrubbed, bounded error text); see
+// lib/client-error-reporting.ts.
 // An undeliverable report is retried once when the browser is next online.
 const sendBeacon = beaconSender(`${apiBaseUrl}${CLIENT_ERRORS_PATH}`, globalThis.fetch, {
   retryTarget: window,

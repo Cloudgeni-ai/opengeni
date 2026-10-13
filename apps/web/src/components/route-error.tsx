@@ -1,4 +1,5 @@
 import { Link, type ErrorComponentProps } from "@tanstack/react-router";
+import type { ErrorInfo } from "react";
 
 import { ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -88,6 +89,8 @@ export function NotFoundPanel() {
  * instead of replacing the whole app. Not-found signals are routed to the
  * not-found component by TanStack before `onCatch` runs. A failure that
  * follows a chunk-load failure in the same document is not reported again.
+ * The router passes React's `ErrorInfo` as the second argument, so a render
+ * failure is reported with its component stack.
  */
 export function routerErrorOptions(
   routePattern: () => string,
@@ -95,8 +98,10 @@ export function routerErrorOptions(
 ) {
   return {
     defaultErrorComponent: RouteErrorPanel,
-    defaultOnCatch: (error: Error) =>
-      reportCaughtClientError(error, "route_error", routePattern, report),
+    defaultOnCatch: (error: Error, errorInfo?: Partial<ErrorInfo>) =>
+      reportCaughtClientError(error, "route_error", routePattern, report, {
+        componentStack: errorInfo?.componentStack,
+      }),
   } as const;
 }
 
