@@ -707,7 +707,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
       payload = withoutEmptyLegacyVariableSetFields(payload);
       CreateSessionRequest.parse(payload);
-      // OPE-798: only a person present in the app or the host's server sets a
+      // only a person present in the app or the host's server sets a
       // task usage limit; an agent acting for a person cannot, even null.
       if (
         (payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined &&
@@ -1267,7 +1267,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         : Promise.resolve(new Set<string>()),
       loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
     ]);
-    // OPE-798: the task's usage projection. A failed read is `unavailable`,
+    // the task's usage projection. A failed read is `unavailable`,
     // never $0 or unlimited; it does not fail the session read.
     const usageLimit = await sessionUsageLimitForRead(db, session, {
       subjectId: grant.subjectId,
@@ -2587,7 +2587,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
-  // OPE-798 per-task usage limit. Reads follow session read access; a child
+  // Per-task usage limit. Reads follow session read access; a child
   // returns its root's shared state. Writes are compare-and-set on the ROOT
   // by a person in the app or the host's server key only, never an agent
   // (including one acting for a person), and never wake or resume work.
@@ -5409,7 +5409,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
-  // OPE-798 task usage limit: read with the session; change as a control write
+  // Task usage limit: read with the session; change as a control write
   // (the route additionally admits only a person or the host server key).
   if (suffix === "/usage-limit") {
     if (verb === "GET") return "session.read";
@@ -6249,7 +6249,7 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof SessionUsageLimitHttpError) {
-    // OPE-798: a create-time usage limit the caller may not set (agents and
+    // a create-time usage limit the caller may not set (agents and
     // children) or that this server does not accept yet (producer flag off).
     return c.json(
       {

@@ -1,6 +1,6 @@
 /**
  * DB-only recovery for task usage receipts of attempt-authenticated single
- * model calls (OPE-798).
+ * model calls.
  *
  * The provider response has already been returned, so a failed settlement is
  * never fixed by calling the provider again. Instead the exact settlement is

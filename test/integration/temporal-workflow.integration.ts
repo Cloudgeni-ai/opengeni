@@ -1920,7 +1920,7 @@ describe("Temporal workflow integration", () => {
     goalContinuationTestTimeoutMs,
   );
 
-  // OPE-798 (V-T). The activities are scripted with the production contract:
+  // The activities are scripted with the production contract:
   // a claim refused by the task usage limit settles a completed stop and
   // returns `idle` without model work, and goal materialization pauses an
   // active goal (reason `session_usage_limit`) instead of continuing it. The

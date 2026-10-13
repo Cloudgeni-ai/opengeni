@@ -204,7 +204,7 @@ export async function settleModelUsage(
     : estimatedProviderCostMicros !== null
       ? ("configured_list_price" as const)
       : null;
-  // Per-task usage limit meter (OPE-798). Synchronous and awaited before any
+  // Per-task usage limit meter. Synchronous and awaited before any
   // credit/usage write: the canonical pre-margin estimate is recorded once
   // per source identity against the session's task root, for every funding
   // path. A failure throws so no further model request is dispatched until

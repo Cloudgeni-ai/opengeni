@@ -1032,7 +1032,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       !(await eventing.settle!(
         error.sessionUsageLimit
           ? {
-              // OPE-798: the task's usage limit was reached between model
+              // the task's usage limit was reached between model
               // calls. Already admitted usage is recorded; history is kept.
               events: sessionUsageLimitStopEvents(error.sessionUsageLimit),
               turnStatus: "completed",

@@ -10,7 +10,7 @@ import {
 } from "../src/billing/model-usage-settlement";
 import { SESSION_USAGE_LIMIT_EVENTS_METRIC } from "../src/session-usage-limit-metrics";
 
-// OPE-798 AC02/AC13: every funding path records the canonical pre-margin
+// every funding path records the canonical pre-margin
 // `estimatedProviderCostMicros` once against the task, before and without
 // changing any credit, usage or entitlement write.
 
@@ -166,7 +166,7 @@ const paths: Array<{
   },
 ];
 
-describe("per-task usage limit settlement across funding paths (OPE-798)", () => {
+describe("per-task usage limit settlement across funding paths", () => {
   for (const path of paths) {
     test(`${path.name}: one receipt at the canonical pre-margin cost; credits unchanged`, async () => {
       // Control: the same response with no task (no receipt).

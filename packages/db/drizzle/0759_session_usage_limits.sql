@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Per-task (root session) API-equivalent usage limits (OPE-798).
+-- Per-task (root session) API-equivalent usage limits.
 --
 -- Accounting facts only: one durable receipt per settled model response,
 -- keyed by the canonical producer identity (`<turnId>:<sourceKey>` for agent

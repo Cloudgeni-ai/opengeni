@@ -19,7 +19,7 @@ import * as schema from "./schema";
 import { lockSessionEventWriteRows } from "./session-control";
 
 /**
- * Per-task (root session) API-equivalent usage limits (OPE-798).
+ * Per-task (root session) API-equivalent usage limits.
  *
  * All state lives in owner-only FORCE-RLS private tables reached through one
  * SECURITY DEFINER command routine. Settlement is synchronous and exactly-once

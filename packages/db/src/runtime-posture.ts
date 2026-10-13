@@ -1337,7 +1337,7 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "files",
   "documents",
 ] as const;
-/** Per-task usage limits (OPE-798): the only runtime entry points. */
+/** Per-task usage limits: the only runtime entry points. */
 export const SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE =
   "session_usage_limit_capability_active(uuid, uuid)";
 export const SESSION_USAGE_LIMIT_RUNTIME_ROUTINES = [
@@ -3146,7 +3146,7 @@ export async function inspectRuntimeDatabasePosture(
   );
 }
 
-/** OPE-798 private per-task usage accounting; FORCE-RLS, owner-only. */
+/** Private per-task usage accounting; FORCE-RLS, owner-only. */
 export const RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES = [
   "session_usage_limit_roots",
   "session_usage_limit_receipts",
@@ -5272,7 +5272,9 @@ export function evaluateRuntimeDatabasePosture(
       sessionUsageLimitCapability.delete ||
       sessionUsageLimitCapability.truncate
     ) {
-      violations.push("session usage limit capability has unsafe owner or direct runtime privileges");
+      violations.push(
+        "session usage limit capability has unsafe owner or direct runtime privileges",
+      );
     }
   }
   const nativeOriginCapability = posture.privateTables.find(

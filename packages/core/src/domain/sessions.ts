@@ -2595,7 +2595,7 @@ async function createSessionForRequestInFileScope(
       throw error;
     }
   }
-  // OPE-798: a create-time usage limit belongs to a new ROOT task and only a
+  // a create-time usage limit belongs to a new ROOT task and only a
   // person or the trusted host may set it. Agents (including children, which
   // always share their root's limit) are rejected even when the value is null.
   let initialUsageLimitActor: ReturnType<typeof sessionUsageLimitWriteActorForAccess> | null = null;
@@ -4295,7 +4295,7 @@ async function acceptSessionUserMessageInFileScope(
     // pure read with no side effects.
     const existingSession = await requireSession(db, workspaceId, sessionId);
     assertSessionIsNotImported(existingSession);
-    // OPE-798: a reached task usage limit refuses a fresh Send/Steer here,
+    // a reached task usage limit refuses a fresh Send/Steer here,
     // after exact replays returned above and before any queue/interrupt write.
     await requireSessionUsageLimitAllows(
       db,

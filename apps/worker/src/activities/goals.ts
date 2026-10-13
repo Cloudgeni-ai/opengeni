@@ -141,7 +141,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
             ? { ...turnExecutionPolicy, credentialRestriction }
             : turnExecutionPolicy;
         }
-        // OPE-798: a reached task usage limit pauses the goal with its own
+        // a reached task usage limit pauses the goal with its own
         // reason before any funding gate; a read failure aborts materialization.
         const usageLimitBlocked = modelPolicyBlocked
           ? null

@@ -9,7 +9,7 @@ import * as rls from "../src/access-grant-rls";
 import { PendingUsageSettlements } from "../src/model-calls/pending-usage-settlements";
 import { createModelCallService } from "../src/model-calls/service";
 
-// OPE-798 AC06: an attempt-authenticated single-model call (an agent's code
+// an attempt-authenticated single-model call (an agent's code
 // calling the chat completions API with its attempt credential) counts
 // against that task's usage limit and is refused once it is reached. Calls by
 // people, hosts and services have no task and are unaffected.

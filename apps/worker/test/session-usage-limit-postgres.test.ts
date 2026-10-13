@@ -28,7 +28,7 @@ import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/ru
 import { createActivityTestHarness } from "../src/activities";
 import { POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE } from "../src/activities/types";
 
-// OPE-798 V-W: per-task usage limits through the real worker turn path, real
+// per-task usage limits through the real worker turn path, real
 // PostgreSQL (non-bypass application role, FORCE RLS) and the real SDK call
 // flow with an offline ScriptedModel. No provider, network or paid model.
 setDefaultTimeout(120_000);

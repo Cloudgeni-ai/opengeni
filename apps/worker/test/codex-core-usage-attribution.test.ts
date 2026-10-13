@@ -13,7 +13,7 @@ import {
   recordAuthoritativeModelCallFact,
 } from "../src/activities/agent-turn/model-usage";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
-// Fake databases have no per-task usage limit state (OPE-798).
+// Fake databases have no per-task usage limit state.
 useNoSessionUsageLimitForFakeDatabases();
 
 // Billing attribution of core Codex model calls (M3 PR 2c): every usage path

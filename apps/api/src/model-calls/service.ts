@@ -163,7 +163,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       const subscription = source.kind === "connected_subscription" ? source.provider : null;
       const chargesOpenGeniCredits = model.billing.metering === "opengeni_credits";
       const countsTowardTokenCap = model.billing.upstreamPayer === "deployment";
-      // OPE-798: a call made by a live agent attempt (its grant was verified
+      // a call made by a live agent attempt (its grant was verified
       // by the attempt boundary) counts against that task's usage limit and is
       // refused once the limit is reached. Other callers have no task.
       const usageLimitSessionId = attemptSessionId(input.grant);
@@ -268,7 +268,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             model: model.id,
             errorName: error instanceof Error ? error.name : typeof error,
           });
-          // OPE-798: a transient database failure leaves this task's usage
+          // a transient database failure leaves this task's usage
           // unrecorded. Retain the exact settlement for DB-only recovery; the
           // task's next call waits for it instead of being admitted on an
           // undercount. The provider is never called again for this answer.

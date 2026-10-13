@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * OPE-798 AC22: measure per-task usage limit admission and settlement on a
+ * Measure per-task usage limit admission and settlement on a
  * real, disposable PostgreSQL (OPENGENI_TEST_PG_URL) with the non-bypass
  * application role and FORCE RLS.
  *
@@ -127,7 +127,7 @@ async function main(): Promise<void> {
       return distribution(values);
     };
 
-    // The existing per-call workspace allowance read (unchanged by OPE-798)
+    // The existing per-call workspace allowance read (unchanged by task usage limits)
     // is the same-host baseline the new read is compared against.
     const timeExistingAllowanceRead = async () => {
       const values: number[] = [];

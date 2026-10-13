@@ -27,7 +27,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
-// OPE-798: per-task (root session) API-equivalent usage limits on real
+// per-task (root session) API-equivalent usage limits on real
 // PostgreSQL with the non-bypass application role and FORCE RLS.
 setDefaultTimeout(120_000);
 let shared: SharedTestDatabase;

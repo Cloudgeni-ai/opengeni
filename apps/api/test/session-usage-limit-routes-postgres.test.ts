@@ -13,7 +13,7 @@ import {
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
 
-// OPE-798 V-API: per-task usage limit routes, edge refusal and write authority
+// per-task usage limit routes, edge refusal and write authority
 // through the real HTTP app and real PostgreSQL (non-bypass role, FORCE RLS).
 setDefaultTimeout(120_000);
 const SECRET = "session-usage-limit-api-secret";

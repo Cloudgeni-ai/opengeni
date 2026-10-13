@@ -1,4 +1,4 @@
-// Per-task usage limits (OPE-798) on the production web and React components:
+// Per-task usage limits on the production web and React components:
 // new chat, header menu to the Agent tab editor, compare-and-set saves, typed
 // failures, coverage states, the reached stop and notice, a refused Send, and
 // read-only states; keyboard, focus, 390/1440 px, light/dark and axe.

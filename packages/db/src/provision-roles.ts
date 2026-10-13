@@ -789,7 +789,7 @@ BEGIN
               AND attnum>0 AND NOT attisdropped),runtime_table,${literal(role)});
       END LOOP;
     END IF;
-    -- OPE-798 per-task usage limits: only the command/maintenance entry
+    -- Per-task usage limits: only the command/maintenance entry
     -- points are runtime-callable; helpers and private tables stay owner-only.
     IF to_regprocedure(format('%I.session_usage_limit_command(jsonb)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.session_usage_limit_capability_active(uuid,uuid) TO PUBLIC', ${literal(schema)});

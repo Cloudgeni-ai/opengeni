@@ -1,7 +1,7 @@
 import type { Observability } from "@opengeni/observability";
 
 /**
- * Content-free diagnostics for per-task usage limits (OPE-798). Every label is
+ * Content-free diagnostics for per-task usage limits. Every label is
  * a closed set: where the decision was made and what it was. No workspace,
  * session, subject, model, prompt or amount ever becomes a label, so the
  * series count is bounded by these two lists.

@@ -6,7 +6,7 @@ import {
   SESSION_USAGE_LIMIT_METRIC_OUTCOMES,
 } from "../src/session-usage-limit-metrics";
 
-// OPE-798 AC23: diagnostics distinguish each outcome with closed-set labels
+// diagnostics distinguish each outcome with closed-set labels
 // only; telemetry never changes an admission or settlement outcome.
 describe("session usage limit metrics", () => {
   test("distinguishes reached, unpriced, preparing, unavailable, CAS conflict and accounting failure", () => {

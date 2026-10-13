@@ -590,7 +590,7 @@ const SettingsSchema = z.object({
   // into @opengeni/db once at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
   childLifecycleNoticesEnabled: EnvBoolean.default(false),
-  // Per-task (root session) API-equivalent usage limits (OPE-798): producer
+  // Per-task (root session) API-equivalent usage limits: producer
   // flag only. Off (default) rejects NEW non-null limits on create and on the
   // usage-limit route and hides the editor; limits already persisted are still
   // metered and enforced, and clearing stays allowed. Metering and enforcement

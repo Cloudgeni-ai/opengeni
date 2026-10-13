@@ -198,7 +198,7 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
 ];
 
-/** Per-task usage limit producer flag (OPE-798; API + both workers). Default
+/** Per-task usage limit producer flag (API + both workers). Default
  * off in @opengeni/config; a valueEnv passthrough emitted only when set.
  * Persisted limits are enforced regardless; enable only after every consumer
  * (API, workers, web, SDK/React, embedded hosts) understands the new stop. */

@@ -1789,7 +1789,7 @@ describe("deployment contract", () => {
     expect(absent.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
   });
 
-  test("renders the session usage limits producer flag only when configured (OPE-798)", () => {
+  test("renders the session usage limits producer flag only when configured", () => {
     expect(SESSION_USAGE_LIMITS_PASSTHROUGH_ENV).toEqual(["OPENGENI_SESSION_USAGE_LIMITS_ENABLED"]);
     const outputs = {
       temporal_host: { value: "host:7233" },

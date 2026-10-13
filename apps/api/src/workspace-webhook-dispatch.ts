@@ -98,8 +98,8 @@ async function deliverOne(
 }
 
 /**
- * One bounded, resumable page of the per-task usage limit legacy import
- * (OPE-798). Roots created before the feature stay `preparing` (never shown or
+ * One bounded, resumable page of the per-task usage limit legacy import.
+ * Roots created before the feature stay `preparing` (never shown or
  * admitted as $0 for a write) until this converges them. A failure is retried
  * on a later tick and never blocks webhook delivery.
  */

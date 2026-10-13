@@ -362,7 +362,7 @@ export async function applyInitialSessionUsageLimit(
 }
 
 /**
- * Edge admission for per-task usage limits (OPE-798). Called after an exact
+ * Edge admission for per-task usage limits. Called after an exact
  * committed replay has been returned and before any queue, interrupt, draft or
  * turn side effect, so a refused Send/Steer leaves nothing behind and the
  * composer keeps its draft.

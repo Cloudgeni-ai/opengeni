@@ -15,7 +15,7 @@ import {
   setSessionUsageLimit,
 } from "../src/session-usage-limits";
 
-// OPE-798 AC18: additive SDK surface, exact echo so a mixed-version server can
+// additive SDK surface, exact echo so a mixed-version server can
 // never silently accept an unenforced limit, a typed refusal that is never
 // mapped to credits, and a browser proxy that cannot write limits.
 

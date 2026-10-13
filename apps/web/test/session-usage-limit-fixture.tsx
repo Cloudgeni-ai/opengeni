@@ -1,4 +1,4 @@
-// Per-task usage limits (OPE-798): production components and styles with
+// Per-task usage limits: production components and styles with
 // synthetic tasks, amounts and a scripted client. No API, no database.
 import {
   ChatComposer,

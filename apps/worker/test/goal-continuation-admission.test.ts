@@ -12,7 +12,7 @@ import { testSettings } from "@opengeni/testing";
 import { createGoalActivities } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
-// Fake databases have no per-task usage limit state (OPE-798).
+// Fake databases have no per-task usage limit state.
 useNoSessionUsageLimitForFakeDatabases();
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";

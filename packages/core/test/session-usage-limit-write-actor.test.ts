@@ -7,7 +7,7 @@ import {
   type AccessGrantAuthorization,
 } from "../src";
 
-// OPE-798 AC06: only a person present in the app or the host's server key may
+// only a person present in the app or the host's server key may
 // change a task usage limit. principalKind alone is never proof of a person.
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";

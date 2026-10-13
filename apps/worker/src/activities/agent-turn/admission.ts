@@ -236,7 +236,7 @@ export class BudgetExhaustedError extends Error {
     message: string,
     readonly serializedRunState: string | null,
     readonly allowance: AllowanceRefusal | null = null,
-    /** A reached per-task usage limit (OPE-798): its own stop marker, never credits. */
+    /** A reached per-task usage limit: its own stop marker, never credits. */
     readonly sessionUsageLimit: SessionUsageLimitReachedRefusal | null = null,
   ) {
     super(message);
@@ -315,7 +315,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   countsTowardTokenCap: boolean;
   initiatingHumanSubjectId: string | null;
   modelId?: string;
-  /** The session whose task root usage limit gates this request (OPE-798). */
+  /** The session whose task root usage limit gates this request. */
   sessionId?: string;
   serializedRunState?: () => string | null;
 }): Promise<number | undefined> {
@@ -370,7 +370,7 @@ export async function ensureRunAllowed(
   sessionId?: string,
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
-  // Per-task usage limit (OPE-798): independent of funding, so it applies to
+  // Per-task usage limit: independent of funding, so it applies to
   // credit, subscription, workspace-key and free paths alike.
   if (sessionId) await ensureSessionUsageLimitAllows(db, { accountId, workspaceId, sessionId });
   // Upstream settlement and workspace-facing cost are independent. External

@@ -1,5 +1,5 @@
 /**
- * Unit-test support for per-task usage limits (OPE-798).
+ * Unit-test support for per-task usage limits.
  *
  * Model admission and settlement read and write the task root's usage counter
  * synchronously through `@opengeni/db`. Unit tests that drive those paths with

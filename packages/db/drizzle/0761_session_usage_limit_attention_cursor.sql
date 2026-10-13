@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- A turn stopped because its task reached its usage limit (OPE-798) is an
+-- A turn stopped because its task reached its usage limit is an
 -- actionable boundary: only a person can raise or clear the limit. Count it in
 -- the attention frontier exactly like the 0760 partial-index predicate, so the
 -- rail and session tree show it as unread without any explanatory model call.

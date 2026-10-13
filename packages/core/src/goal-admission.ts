@@ -158,7 +158,7 @@ export async function goalRunBudgetBlocked(
 }
 
 /**
- * Per-task usage limit gate for goal continuation and resume (OPE-798). A
+ * Per-task usage limit gate for goal continuation and resume. A
  * reached root limit blocks with its own reason; raising or clearing the limit
  * never resumes a goal by itself. A read failure throws (never unlimited).
  */

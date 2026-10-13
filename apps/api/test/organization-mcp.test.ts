@@ -169,7 +169,7 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId",
         "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
-        // OPE-798: a task's usage limit bounds agent spending; agents never change it.
+        // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
       ].sort(),
     );

@@ -84,7 +84,7 @@ const SESSION_USAGE_LIMIT_ERROR_CODES: Record<SessionUsageLimitHttpError["code"]
 };
 
 /**
- * Per-task usage limits (OPE-798). A reached root limit is a non-retryable 402
+ * Per-task usage limits. A reached root limit is a non-retryable 402
  * `session_usage_limit_reached` whose details carry only the public refusal
  * fields; it is never `allowance_exhausted`, `payment_required` or a purchase
  * prompt. Limit writes map to stable `details.code` values. Unreadable usage

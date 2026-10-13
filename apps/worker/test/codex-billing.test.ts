@@ -5,7 +5,7 @@ import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import { ensureRunAllowed, recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
-// Fake databases have no per-task usage limit state (OPE-798).
+// Fake databases have no per-task usage limit state.
 useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "acct-1";
