@@ -5,6 +5,7 @@ import {
   browserProduct,
   extensionArchitecture,
   extensionPlatform,
+  isAllowedDebuggerMethod,
   parseExtensionCommand,
   parseExtensionReady,
   type AttachedTab,
@@ -23,15 +24,6 @@ const INVENTORY_DEBOUNCE_MS = 100;
 const MAX_DEBUGGER_EVENTS = 10_000;
 const MAX_DEBUGGER_EVENT_BYTES = 512 * 1024;
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
-const ALLOWED_DEBUGGER_DOMAINS = new Set([
-  "Accessibility",
-  "DOM",
-  "Input",
-  "Log",
-  "Network",
-  "Page",
-  "Runtime",
-]);
 
 type StoredState = {
   deviceId?: string;
@@ -380,8 +372,7 @@ function numericTabId(value: string): number {
 }
 
 function assertAllowedDebuggerMethod(method: string): void {
-  const domain = method.slice(0, method.indexOf("."));
-  if (!ALLOWED_DEBUGGER_DOMAINS.has(domain)) {
+  if (!isAllowedDebuggerMethod(method)) {
     throw new BridgeCommandError(
       "invalid_request",
       "debugger method is outside the browser driver surface",

@@ -5,7 +5,11 @@ import {
   AttachedBrowserBridgeError,
   type AttachedBrowserBridgeOptions,
 } from "./attached-bridge";
-import { type BrowserCdpConnection, type BrowserCommandRunner } from "./cdp-driver";
+import {
+  AgentBrowserDriver,
+  type BrowserCdpConnection,
+  type BrowserCommandRunner,
+} from "./cdp-driver";
 import {
   CdpCommandTimeoutError,
   CdpProtocolError,
@@ -59,6 +63,25 @@ export async function createAttachedChromeTransport(options: AttachedChromeDrive
     connection,
     runner: new AttachedChromeRunner(bridge, connection),
   };
+}
+
+/** The semantic driver for one session on an attached Chrome transport. */
+export function createAttachedChromeDriver(
+  session: { browserSessionId: string; controllerGeneration: string },
+  transport: { runner: BrowserCommandRunner; connection: AttachedChromeCdpConnection },
+): AgentBrowserDriver {
+  return new AgentBrowserDriver({
+    browserSessionId: session.browserSessionId,
+    controllerGeneration: session.controllerGeneration,
+    runner: transport.runner,
+    targetLifecycle: "cdp",
+    connect: async () => transport.connection,
+    engine: "chrome",
+    permissionControl: false,
+    // Agent tabs open in the background so the user's foreground stays
+    // theirs; focus emulation keeps them rendering and taking input.
+    focusEmulation: true,
+  });
 }
 
 export class AttachedChromeRunner implements BrowserCommandRunner {
@@ -549,6 +572,7 @@ const READ_ONLY_TAB_METHODS = new Set([
   "DOM.getDocument",
   "DOM.querySelectorAll",
   "DOM.resolveNode",
+  "Emulation.setFocusEmulationEnabled",
   "Log.enable",
   "Network.enable",
   "Page.captureScreenshot",

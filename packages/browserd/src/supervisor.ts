@@ -43,7 +43,7 @@ import {
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
-import { createAttachedChromeTransport } from "./attached-cdp";
+import { createAttachedChromeDriver, createAttachedChromeTransport } from "./attached-cdp";
 import { CdpConnection } from "./cdp";
 import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
@@ -2089,15 +2089,7 @@ async function createBrowserDriver(
         ? { authorityFile: context.transport.authorityFile }
         : {}),
     });
-    return new AgentBrowserDriver({
-      browserSessionId: context.browserSessionId,
-      controllerGeneration: context.controllerGeneration,
-      runner: attached.runner,
-      targetLifecycle: "cdp",
-      connect: async () => attached.connection,
-      engine: "chrome",
-      permissionControl: false,
-    });
+    return createAttachedChromeDriver(context, attached);
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {
