@@ -931,6 +931,65 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("session_create advertises only the caller's deployment-allowed selection", async () => {
+    const routeDeps = deps();
+    routeDeps.settings.allowedFirstPartyMcpTools = ["session_create", "session_get"];
+    const server = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create", "sessions:read"], ["session_create", "command_wait"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "bounded-child-catalog", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "session_create",
+      )!;
+      expect(tool.inputSchema.properties?.firstPartyMcpTools).toMatchObject({
+        items: { enum: ["session_create"] },
+      });
+      expect(JSON.stringify(tool.inputSchema.properties?.firstPartyMcpTools)).not.toContain(
+        "command_wait",
+      );
+      expect(
+        registeredToolInputSchema(server, "session_create").safeParse({
+          initialMessage: "Work",
+          firstPartyMcpTools: ["session_get"],
+        }).success,
+      ).toBe(false);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("session_create safely normalizes JSON strings in object-only fields", () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
+    const schema = registeredToolInputSchema(server, "session_create") as z4.ZodType;
+    const agent = { capabilities: { from: "all", subagents: false } };
+    const goal = { text: "Run checks", successCriteria: "Checks pass" };
+    const parsed = schema.safeParse({
+      initialMessage: "  Work  ",
+      agent: JSON.stringify(agent),
+      goal: JSON.stringify(goal),
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data).toEqual({ initialMessage: "  Work  ", agent, goal });
+    for (const value of ["{", "[]", "null", '"all"', '{"text":42}']) {
+      expect(schema.safeParse({ initialMessage: "Work", goal: value }).success).toBe(false);
+    }
+    const extraGoal = { text: "Work", unknown: true };
+    expect(schema.safeParse({ initialMessage: "Work", goal: JSON.stringify(extraGoal) })).toEqual(
+      schema.safeParse({ initialMessage: "Work", goal: extraGoal }),
+    );
+    expect(
+      schema.safeParse({ initialMessage: "Work", agent: '{"capabilities":"all","x":1}' }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ initialMessage: "Work", sandbox: '{"groupId":"bad"}' }).success).toBe(
+      false,
+    );
+  });
+
   test("session_create nested parser failures are actionable without reflecting input", async () => {
     let databaseTouches = 0;
     const routeDeps = deps();

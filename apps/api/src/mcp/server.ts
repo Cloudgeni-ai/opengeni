@@ -261,6 +261,7 @@ import {
   scheduledTaskAccess,
   scheduledTaskViewerForGrant,
   siteViewerForGrant,
+  resolveNewSiteAudience,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -655,7 +656,21 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
   ),
 );
 
-const sessionCreateToolInput = staticToolInput(() => {
+const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCreateToolInput>>();
+
+/** Distinct selections are few; cache each built contract for reuse. */
+function sessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
+  const key = allowedTools.join(",");
+  let input = sessionCreateToolInputs.get(key);
+  if (!input) {
+    if (sessionCreateToolInputs.size >= 256) sessionCreateToolInputs.clear();
+    input = buildSessionCreateToolInput(allowedTools);
+    sessionCreateToolInputs.set(key, input);
+  }
+  return input;
+}
+
+function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolName[]) {
   const capabilityToggle = z4.boolean().optional();
   const sessionCreateAgentInput = z4
     .object({
@@ -759,10 +774,14 @@ const sessionCreateToolInput = staticToolInput(() => {
           "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
         ),
       firstPartyMcpTools: z4
-        .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
+        .array(
+          allowedTools.length
+            ? z4.enum(allowedTools as [FirstPartyMcpToolName, ...FirstPartyMcpToolName[]])
+            : z4.never(),
+        )
         .optional()
         .describe(
-          "Exact model-visible first-party tool selection for the child. Usually omit to inherit this session's effective selection. An explicit array replaces the entire inherited selection, including browser, computer, and scheduling tools; it is not an additions list. Do not construct a partial list merely because a worker has a specialist role or bounded task. For a worker that must not coordinate other sessions, prefer agent.capabilities with from: 'all' and subagents: false. Use an explicit array only for deliberate per-tool restrictions. Every listed tool must already be available to this session; a wider list is rejected and [] selects no tools from this server. This does not grant permissions.",
+          "Exact model-visible first-party tool selection for the child. Omit it in almost every case: omission inherits this session's effective selection, which is what workers normally need. The allowed values are exactly the tools this session holds that a child may keep. An explicit array replaces the entire inherited selection, including browser, computer, and scheduling tools; it is not an additions list. Do not construct a partial list merely because a worker has a specialist role or bounded task. For a worker that must not coordinate other sessions, prefer agent.capabilities with from: 'all' and subagents: false. Use an explicit array only for deliberate per-tool restrictions. A tool outside the allowed values is rejected, and [] selects no tools from this server. This does not grant permissions.",
         ),
       // The child's agent-access scope and end-user label are never model
       // choices: it inherits this session's exactly. Only the Memory
@@ -781,8 +800,10 @@ const sessionCreateToolInput = staticToolInput(() => {
       agent: sessionCreateAgentInput,
     })
     .strict();
-  return contractToolInput(sessionCreateInput);
-});
+  return contractToolInput(sessionCreateInput, sessionCreateInput, {
+    jsonObjectFields: ["agent", "goal", "machineTarget"],
+  });
+}
 
 class PolicyMcpServer extends McpServer {
   private registeredToolCount = 0;
@@ -794,6 +815,22 @@ class PolicyMcpServer extends McpServer {
     private readonly sessionAdminAccess: boolean = false,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
+  }
+
+  /**
+   * Whether a selection-governed tool is both selected and authorized for this
+   * grant. Admin-access tools are never selection-governed, so a child
+   * selection can never carry them.
+   */
+  holdsSelectableTool(toolName: FirstPartyMcpToolName): boolean {
+    const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
+    if (policy.adminAccessRequired) return false;
+    const authorized =
+      (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
+        true) &&
+      (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
+        true);
+    return authorized && (this.selectedTools === null || this.selectedTools.has(toolName));
   }
 
   override registerTool<
@@ -821,14 +858,9 @@ class PolicyMcpServer extends McpServer {
         // permissions, decides: the tools act as the person who gave it.
         admitted = this.sessionId !== null && this.sessionAdminAccess;
       } else {
-        const authorized =
+        admitted =
           (!policy.sessionRequired || this.sessionId !== null) &&
-          (policy.allOf?.every((permission) => hasPermission(this.grant.permissions, permission)) ??
-            true) &&
-          (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
-            true);
-        const selected = this.selectedTools === null || this.selectedTools.has(toolName);
-        admitted = authorized && selected;
+          this.holdsSelectableTool(toolName);
       }
     }
     if (!admitted) {
@@ -1062,21 +1094,22 @@ export function buildOpenGeniMcpServer(
     "artifacts_list",
     {
       description:
-        "List the generic published artifacts in this workspace and their current versions.",
+        "List the published Sites you can see in this workspace (shared with the workspace, or Only me Sites that belong to the person you act for) and their current versions and audience.",
       inputSchema: {},
     },
     async () => {
       if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
-      const listed = redactWorkspaceArtifactListProvenance(
-        await listWorkspaceArtifacts(
-          deps.db,
-          grant.workspaceId,
-          await siteViewerForGrant(deps.db, grant),
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(
+            deps.db,
+            grant.workspaceId,
+            await siteViewerForGrant(deps.db, grant),
+          ),
         ),
       );
-      return json({ ...listed, artifacts: listed.artifacts.map(withoutSiteAudience) });
     },
   );
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
@@ -1150,6 +1183,11 @@ export function buildOpenGeniMcpServer(
     can,
     sessionId,
     sessionCreateVisible,
+    // A child selection may only narrow this session's: advertise exactly the
+    // deployment-allowed tools this session holds, never the whole catalog.
+    allowedFirstPartyMcpToolsForSession(deps.settings, FIRST_PARTY_MCP_TOOL_NAMES).filter((tool) =>
+      server.holdsSelectableTool(tool),
+    ),
     json,
   );
   registerProjectTools(server, deps, grant, can, json);
@@ -3269,14 +3307,6 @@ async function authorizeFirstPartySession(
   });
 }
 
-/** Agent tool results keep a Site's established shape, without its audience. */
-function withoutSiteAudience<T extends { visibility?: unknown; ownerSubjectId?: unknown }>(
-  artifact: T,
-): Omit<T, "visibility" | "ownerSubjectId"> {
-  const { visibility: _visibility, ownerSubjectId: _ownerSubjectId, ...rest } = artifact;
-  return rest;
-}
-
 function registerWorkspaceArtifactTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3299,13 +3329,8 @@ function registerWorkspaceArtifactTools(
         if (error instanceof SessionAuthorizationDeniedError) return false;
         throw error;
       });
-  const mutation = async (response: WorkspaceArtifactMutationResponse) => {
-    const projected = await projectWorkspaceArtifactMutationProvenance(
-      response,
-      canReadProvenanceSession,
-    );
-    return { ...projected, artifact: withoutSiteAudience(projected.artifact) };
-  };
+  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
+    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3393,7 +3418,7 @@ function registerWorkspaceArtifactTools(
       ]);
       const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
       return json({
-        detail: { ...detail, artifact: withoutSiteAudience(detail.artifact) },
+        detail,
         version: projectedVersion,
         downloads,
       });
@@ -3404,7 +3429,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        "Create and publish a generic workspace artifact from a complete HTML document. Everyone in the workspace who can read artifacts can open it, even when this chat is private; only the chat link stays hidden. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.",
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3438,6 +3463,7 @@ function registerWorkspaceArtifactTools(
           )
           .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
           .optional(),
+        visibility: z4.enum(["private", "workspace"]).optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
@@ -3448,16 +3474,19 @@ function registerWorkspaceArtifactTools(
       html,
       source,
       requestedTools,
+      visibility,
       idempotencyKey,
       uploadId,
     }) => {
       await authorize();
-      // Shared with the workspace, as agent-published Sites always are; the
-      // person it was made for owns it and can limit it from the Site page.
-      const audience = {
-        visibility: "workspace_shared" as const,
-        ownerSubjectId: (await siteViewerForGrant(deps.db, grant)).subjectId,
-      };
+      const audience = await resolveNewSiteAudience({
+        db: deps.db,
+        settings: deps.settings,
+        grant,
+        viewer: await siteViewerForGrant(deps.db, grant),
+        requested: visibility,
+        sourceSessionId: attempt().sessionId,
+      });
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
@@ -4804,6 +4833,7 @@ function registerWorkspaceOrchestrationTools(
   can: (permission: Permission) => boolean,
   callerSessionId: string | null,
   sessionCreateVisible: boolean,
+  childSelectableTools: readonly FirstPartyMcpToolName[],
   json: JsonResult,
 ): void {
   const acknowledgeReads = async (children: { sessionId: string; sequences: number[] }[]) => {
@@ -5721,7 +5751,7 @@ function registerWorkspaceOrchestrationTools(
       {
         description:
           "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, Opengeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
-        inputSchema: sessionCreateToolInput(),
+        inputSchema: sessionCreateToolInput(childSelectableTools),
       },
       async (args) => {
         try {
