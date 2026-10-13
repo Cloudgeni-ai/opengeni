@@ -6,26 +6,28 @@ import { stampDelegatedHumanAuthorization, type ApiRouteDeps } from "@opengeni/c
 import type { SessionWorkflowClient } from "@opengeni/core";
 import { createDb, createOrganizationApiKey, settleSessionUsageReceipt } from "@opengeni/db";
 import {
-  acquireSharedTestDatabase,
+  acquireRestrictedRuntimeTestDatabase,
   MemoryEventBus,
   testSettings,
-  type SharedTestDatabase,
+  type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
 
-// per-task usage limit routes, edge refusal and write authority
-// through the real HTTP app and real PostgreSQL (non-bypass role, FORCE RLS).
+// per-task usage limit routes, edge refusal and write authority through the
+// real HTTP app and real PostgreSQL in the production posture: NOSUPERUSER
+// NOBYPASSRLS migration owner, dedicated data schema, restricted application
+// role and FORCE RLS (definer routines are bound by RLS as deployed).
 setDefaultTimeout(120_000);
 const SECRET = "session-usage-limit-api-secret";
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("session-usage-limit-api");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("session-usage-limit-api");
   if (!acquired) throw new Error("Session usage limit API tests require PostgreSQL");
   shared = acquired;
-  client = createDb(shared.appUrl);
-}, 180_000);
+  client = createDb(shared.appUrl, { searchPath: shared.schema });
+}, 600_000);
 afterAll(async () => {
   await client?.close();
   await shared?.release();

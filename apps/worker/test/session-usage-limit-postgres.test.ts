@@ -2,13 +2,13 @@ import { afterAll, beforeAll, expect, setDefaultTimeout, spyOn, test } from "bun
 import { tool } from "@openai/agents";
 import * as opengeniDb from "@opengeni/db";
 import {
-  acquireSharedTestDatabase,
+  acquireRestrictedRuntimeTestDatabase,
   MemoryEventBus,
   testSettings,
   ScriptedModel,
   functionCall,
   assistantMessage,
-  type SharedTestDatabase,
+  type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing";
 import {
   acceptSessionApprovalDecision,
@@ -36,18 +36,19 @@ import {
   resetSessionUsageReceiptCustodyForTests,
 } from "../src/activities/agent-turn/session-usage-custody";
 
-// per-task usage limits through the real worker turn path, real
-// PostgreSQL (non-bypass application role, FORCE RLS) and the real SDK call
+// per-task usage limits through the real worker turn path, real PostgreSQL in
+// the production posture (NOSUPERUSER NOBYPASSRLS migration owner, dedicated
+// data schema, restricted application role, FORCE RLS) and the real SDK call
 // flow with an offline ScriptedModel. No provider, network or paid model.
 setDefaultTimeout(120_000);
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let app: ReturnType<typeof createDb>;
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("session-usage-limit-worker");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("session-usage-limit-worker");
   if (!acquired) throw new Error("Native PostgreSQL required for session usage limit tests");
   shared = acquired;
-  app = createDb(shared.appUrl);
-}, 180_000);
+  app = createDb(shared.appUrl, { searchPath: shared.schema });
+}, 600_000);
 afterAll(async () => {
   await app?.close();
   await shared?.release();
@@ -490,8 +491,8 @@ test("AC09: an approval given after the limit is reached resumes into a stop wit
   const requested = (await events(ctx, session.id)).find(
     (event) => event.type === "session.requiresAction",
   );
-  const approvalId = (requested?.payload as { approvals?: Array<{ id: string }> }).approvals?.[0]
-    ?.id;
+  const approvalId = (requested?.payload as { approvals?: Array<{ id: string }> } | undefined)
+    ?.approvals?.[0]?.id;
   expect(approvalId).toBeTruthy();
   const decision = await acceptSessionApprovalDecision(app.db, {
     accountId: ctx.accountId,
