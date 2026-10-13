@@ -9592,6 +9592,200 @@ export function sessionSystemUpdateBatchHistoryItem(
   };
 }
 
+const SESSION_GOAL_CONTEXT_PREFIX = `${SESSION_GOAL_CONTEXT_LABEL}\n`;
+const SESSION_GOAL_CONTEXT_HEADER =
+  /^(?:Standing|Previous) session goal \(frozen at logical-turn acceptance; objective revision (\d+); status ([a-z_]+)\)/;
+const SESSION_GOAL_CONTEXT_UNCHANGED =
+  /^Standing session goal unchanged: identical to the full goal text shown earlier \(objective revision (\d+); status ([a-z_]+)\)\.$/;
+const SESSION_SYSTEM_UPDATE_BATCH_BODY_LABELS = [
+  "[Opengeni internal updates]",
+  SCHEDULED_OCCURRENCE_TASK_LABEL,
+] as const;
+
+type SessionGoalContextIdentity = { objectiveRevision: string; state: string };
+
+function sessionGoalContextIdentity(block: string): SessionGoalContextIdentity | null {
+  if (!block.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const match = SESSION_GOAL_CONTEXT_HEADER.exec(block.slice(SESSION_GOAL_CONTEXT_PREFIX.length));
+  return match ? { objectiveRevision: match[1]!, state: match[2]! } : null;
+}
+
+function unchangedSessionGoalContextIdentity(block: string): SessionGoalContextIdentity | null {
+  if (!block.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const match = SESSION_GOAL_CONTEXT_UNCHANGED.exec(
+    block.slice(SESSION_GOAL_CONTEXT_PREFIX.length),
+  );
+  return match ? { objectiveRevision: match[1]!, state: match[2]! } : null;
+}
+
+/**
+ * The short stand-in for a goal context identical to the most recent one the
+ * model has already been given in the same request.
+ */
+export function renderUnchangedSessionGoalContext(goalContextBlock: string): string | undefined {
+  const identity = sessionGoalContextIdentity(goalContextBlock);
+  if (!identity) return undefined;
+  return `${SESSION_GOAL_CONTEXT_PREFIX}Standing session goal unchanged: identical to the full goal text shown earlier (objective revision ${identity.objectiveRevision}; status ${identity.state}).`;
+}
+
+/** Split a durable system-batch string into its leading goal block and body. */
+function splitSystemBatchGoalContext(content: string): { goal: string; body: string } | null {
+  if (!content.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const boundaries = SESSION_SYSTEM_UPDATE_BATCH_BODY_LABELS.flatMap((label) => {
+    const index = content.indexOf(`\n\n${label}\n`);
+    return index >= 0 ? [index] : [];
+  });
+  if (boundaries.length === 0) return null;
+  const boundary = Math.min(...boundaries);
+  return {
+    goal: content.slice(0, boundary),
+    body: content.slice(boundary + 2),
+  };
+}
+
+type GoalContextRewrite = (block: string) => string;
+
+function rewriteGoalContextBlocks<T extends Record<string, unknown>>(
+  items: readonly T[],
+  rewrite: GoalContextRewrite,
+): T[] {
+  let changedAny = false;
+  const result = items.map((item) => {
+    if (item.type !== "message" || (item.role !== "user" && item.role !== "system")) return item;
+    const content = item.content;
+    if (typeof content === "string") {
+      const split = splitSystemBatchGoalContext(content);
+      if (!split) return item;
+      const goal = rewrite(split.goal);
+      if (goal === split.goal) return item;
+      changedAny = true;
+      return { ...item, content: `${goal}\n\n${split.body}` };
+    }
+    if (!Array.isArray(content)) return item;
+    let changed = false;
+    const parts = content.map((part: unknown) => {
+      if (!part || typeof part !== "object") return part;
+      const record = part as Record<string, unknown>;
+      if (typeof record.text !== "string" || !record.text.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) {
+        return part;
+      }
+      const text = rewrite(record.text);
+      if (text === record.text) return part;
+      changed = true;
+      return { ...record, text };
+    });
+    if (!changed) return item;
+    changedAny = true;
+    return { ...item, content: parts };
+  });
+  return changedAny ? result : (items as T[]);
+}
+
+/**
+ * Restore every "unchanged" stand-in to the full goal context it refers to,
+ * using the most recent full context earlier in the same list. A stand-in
+ * without a matching earlier context is left as it is.
+ */
+export function expandUnchangedSessionGoalContexts<T extends Record<string, unknown>>(
+  items: readonly T[],
+): T[] {
+  let latest: { block: string; identity: SessionGoalContextIdentity } | null = null;
+  return rewriteGoalContextBlocks(items, (block) => {
+    const unchanged = unchangedSessionGoalContextIdentity(block);
+    if (unchanged) {
+      return latest &&
+        latest.identity.objectiveRevision === unchanged.objectiveRevision &&
+        latest.identity.state === unchanged.state
+        ? latest.block
+        : block;
+    }
+    const identity = sessionGoalContextIdentity(block);
+    if (identity) latest = { block, identity };
+    return block;
+  });
+}
+
+/**
+ * Accepted turns freeze the session goal onto their input, so a long session
+ * repeats the same goal on every message. Give the model each distinct goal
+ * context once: a context identical to the most recent one earlier in the list
+ * becomes a one-line "unchanged" stand-in, while a changed goal (new revision,
+ * state or text) is rendered in full. Each item depends only on the items
+ * before it, so appending history never rewrites an earlier request prefix.
+ */
+export function collapseRepeatedSessionGoalContexts<T extends Record<string, unknown>>(
+  items: readonly T[],
+): T[] {
+  const expanded = expandUnchangedSessionGoalContexts(items);
+  let latest: string | null = null;
+  return rewriteGoalContextBlocks(expanded, (block) => {
+    if (unchangedSessionGoalContextIdentity(block)) return block;
+    if (block === latest) return renderUnchangedSessionGoalContext(block) ?? block;
+    if (sessionGoalContextIdentity(block)) latest = block;
+    return block;
+  });
+}
+
+/**
+ * Machine-update kinds that only report status of work the agent already
+ * started (or a nudge to continue). Once newer input exists, the compaction
+ * summary carries what they said; retaining them verbatim only repeats it.
+ */
+const TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS: ReadonlySet<string> = new Set<SessionSystemUpdateKind>(
+  [
+    "goal_continuation",
+    "session_wait_timeout",
+    "background_command_result",
+    "child_progress",
+    "child_waiting_capacity",
+    "child_requires_action_resolved",
+  ],
+);
+
+/**
+ * True when a durable machine-update batch message consists only of transient
+ * status updates. Scheduled occurrences, agent messages, steering, child
+ * results and anything unparseable are never transient.
+ */
+export function isTransientSessionSystemUpdateBatch(item: Record<string, unknown>): boolean {
+  if (item.type !== "message" || item.role !== "system" || typeof item.content !== "string") {
+    return false;
+  }
+  const body = splitSystemBatchGoalContext(item.content)?.body ?? item.content;
+  if (!body.startsWith("[Opengeni internal updates]\n")) return false;
+  const json = body.split("\n").find((line) => line.startsWith('{"updates":'));
+  if (!json) return false;
+  try {
+    const parsed = JSON.parse(json) as { updates?: unknown };
+    if (!Array.isArray(parsed.updates) || parsed.updates.length === 0) return false;
+    return parsed.updates.every(
+      (update) =>
+        update !== null &&
+        typeof update === "object" &&
+        typeof (update as { kind?: unknown }).kind === "string" &&
+        TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS.has((update as { kind: string }).kind),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The full goal context leading a message, if any. */
+export function leadingSessionGoalContext(item: Record<string, unknown>): string | undefined {
+  if (item.type !== "message") return undefined;
+  const content = item.content;
+  if (typeof content === "string") {
+    const goal = splitSystemBatchGoalContext(content)?.goal;
+    return goal && sessionGoalContextIdentity(goal) ? goal : undefined;
+  }
+  if (!Array.isArray(content)) return undefined;
+  for (const part of content) {
+    const text = (part as { text?: unknown } | null)?.text;
+    if (typeof text === "string" && sessionGoalContextIdentity(text)) return text;
+  }
+  return undefined;
+}
+
 export const VariableSetVariableName = z
   .string()
   .regex(/^[A-Z][A-Z0-9_]*$/)

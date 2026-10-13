@@ -22,6 +22,9 @@ import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_REFS_FIELD,
+  collapseRepeatedSessionGoalContexts,
+  expandUnchangedSessionGoalContexts,
+  isTransientSessionSystemUpdateBatch,
   latestSkillCatalogContext,
   readSkillCatalogContext,
 } from "@opengeni/contracts";
@@ -1624,9 +1627,62 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 }
 
 /**
+ * Shared preparation for both retention builders.
+ *
+ * - `source` has every "unchanged goal" stand-in restored to its full goal
+ *   context, so whichever message ends up oldest in the retained window can
+ *   still carry the goal in full.
+ * - `charged` is what the model will see for each message once repeated goal
+ *   contexts collapse; the retention budget is charged on this form so
+ *   repeated goal copies do not crowd out real input.
+ * - Transient machine-status batches (command results, wait timeouts, child
+ *   progress, goal nudges) are not retained verbatim once newer input exists:
+ *   the summary already carries them. The newest input is always retained,
+ *   and it carries the current goal context.
+ */
+function prepareRetainedInputs(
+  items: readonly CompactionItem[],
+  isCandidate: (item: CompactionItem) => boolean,
+): {
+  source: CompactionItem[];
+  charged: CompactionItem[];
+  skip: (index: number) => boolean;
+  goalAllowanceTokens: (index: number) => number;
+} {
+  const source = expandUnchangedSessionGoalContexts(items);
+  const charged = collapseRepeatedSessionGoalContexts(source);
+  let newest = -1;
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    if (isCandidate(source[index]!)) {
+      newest = index;
+      break;
+    }
+  }
+  return {
+    source,
+    charged,
+    skip: (index) => index !== newest && isTransientSessionSystemUpdateBatch(source[index]!),
+    goalAllowanceTokens: (index) =>
+      source[index] === charged[index]
+        ? 0
+        : Math.max(
+            0,
+            estimateTextTokens(messageText(source[index]!)) -
+              estimateTextTokens(messageText(charged[index]!)),
+          ),
+  };
+}
+
+function isPortableRetentionCandidate(item: CompactionItem): boolean {
+  return isPortableInputMessage(item) && !isCompactionSummary(item) && !isAttachmentCatalog(item);
+}
+
+/**
  * Build the active history after compaction:
  * the newest user/system input messages that fit one cumulative, model-bounded budget
  * (prior summaries excluded, retained images preserved) plus one marked summary item.
+ * Each distinct session goal context is kept once, and answered transient
+ * machine-status batches are left to the summary.
  */
 export function buildCompactionReplacementHistory(
   items: readonly CompactionItem[],
@@ -1639,15 +1695,21 @@ export function buildCompactionReplacementHistory(
     0,
     Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
   );
-  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const item = items[index]!;
-    if (!isPortableInputMessage(item) || isCompactionSummary(item) || isAttachmentCatalog(item)) {
+  const prepared = prepareRetainedInputs(items, isPortableRetentionCandidate);
+  for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = prepared.charged[index]!;
+    if (!isPortableRetentionCandidate(item) || prepared.skip(index)) {
       continue;
     }
     const textTokens = estimateTextTokens(messageText(item));
     const nonTextTokens = Math.max(0, retainedItemTokens(item) - textTokens);
     if (nonTextTokens >= remaining) continue;
-    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
+    retainedReversed.push(
+      compactRetainedMessage(
+        prepared.source[index]!,
+        remaining - nonTextTokens + prepared.goalAllowanceTokens(index),
+      ),
+    );
     if (textTokens + nonTextTokens > remaining) {
       remaining = 0;
       break;
@@ -1655,7 +1717,10 @@ export function buildCompactionReplacementHistory(
     remaining -= textTokens + nonTextTokens;
   }
   const currentCatalog = latestSkillCatalogContext(items);
-  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
+  const history = [
+    ...(currentCatalog ? [currentCatalog] : []),
+    ...collapseRepeatedSessionGoalContexts(retainedReversed.reverse()),
+  ];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push(buildSummaryItem(summaryBody));
@@ -1700,29 +1765,41 @@ export function buildRemoteV2ReplacementHistory(
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
 ): CompactionItem[] {
   if (!isRemoteCompactionItem(compactionItem)) {
-    throw new EmptyCompactionSummaryError({ stage: "remote_v2_compaction_item" });
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_compaction_item",
+    });
   }
   const retainedReversed: CompactionItem[] = [];
   let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
-  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const item = items[index]!;
+  const prepared = prepareRetainedInputs(
+    items,
+    (item) => readSkillCatalogContext(item) === null && isRetainedRemoteV2Message(item),
+  );
+  for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = prepared.charged[index]!;
     if (readSkillCatalogContext(item) !== null) continue;
     if (!isRetainedRemoteV2Message(item)) continue;
+    if (prepared.skip(index)) continue;
     const textTokens = estimateTextTokens(messageText(item));
     const chargeTokens = Math.max(1, retainedItemTokens(item));
     const nonTextTokens = Math.max(0, chargeTokens - textTokens);
     if (nonTextTokens >= remaining) continue;
+    const full = prepared.source[index]!;
+    const allowance = prepared.goalAllowanceTokens(index);
     if (chargeTokens <= remaining) {
-      retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
+      retainedReversed.push(compactRetainedMessage(full, remaining - nonTextTokens + allowance));
       remaining -= chargeTokens;
       continue;
     }
-    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
+    retainedReversed.push(compactRetainedMessage(full, remaining - nonTextTokens + allowance));
     remaining = 0;
     break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
-  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
+  const history = [
+    ...(currentCatalog ? [currentCatalog] : []),
+    ...collapseRepeatedSessionGoalContexts(retainedReversed.reverse()),
+  ];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push({
@@ -1801,7 +1878,10 @@ export function buildRemoteCompactionV2PromptInput(
 /** Extract exactly one compaction output item from a Responses payload. */
 export function extractRemoteCompactionV2OutputItem(response: unknown): CompactionItem {
   if (!response || typeof response !== "object") {
-    throw new EmptyCompactionSummaryError({ stage: "remote_v2_extract", reason: "no_response" });
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_extract",
+      reason: "no_response",
+    });
   }
   const record = response as Record<string, unknown>;
   const output = Array.isArray(record.output) ? record.output : [];
