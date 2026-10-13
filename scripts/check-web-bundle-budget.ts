@@ -129,7 +129,9 @@ const budgets = {
   // Usage allowances add typed refusal rendering to the session timeline and
   // usage event types to shared contracts; Rolldown splits one shared members
   // chunk into two (807 gzip bytes). Aggregate initial gzip stays under its cap.
-  initialFiles: 18,
+  // Leaf chunks that keep module-load reads out of chunk cycles (session status
+  // model, usage allowance copy) add two files to the initial graph.
+  initialFiles: 20,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
   // direct-session raw envelope to the next whole KiB; its gzip, file-count,
@@ -457,7 +459,9 @@ const budgets = {
   // resource-page frame) adds its utilities: main 6f4be148e measures 43,000
   // gzip bytes and the merged retheme 44,100 (Bun 1.4 Linux/x64). Keep the
   // next whole-KiB envelope; every other cap remains fixed.
-  cssGzip: wholeKibEnvelope(44_100),
+  // Product UI added since then (secrets, vaults, retention, artifact library)
+  // measures 46,869 gzip bytes on Bun 1.4 Linux/x64.
+  cssGzip: wholeKibEnvelope(46_869),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -687,6 +691,13 @@ const effectiveBudgets = {
     // ~3 KiB to this graph; Linux/x64 CI on main 69b99b61e measures 2,617,458
     // raw. Keep the established 1.5 KiB allowance; every other cap stays fixed.
     wholeKibEnvelope(2_617_458, 1.5 * kib),
+    // Ten days of features (tool review, secrets and vaults, session retention,
+    // artifact library and dock) add statically imported code to direct chat
+    // loads. Measured after removing the lazy editor and settings code that
+    // chunk grouping had folded into this graph (now rejected at build time by
+    // apps/web/vite-eager-graph.ts): 2,933,830 raw / 838,954 gzip / 52 files on
+    // Bun 1.4 Linux/x64. Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(2_933_830, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
@@ -784,12 +795,17 @@ const effectiveBudgets = {
     wholeKibEnvelope(717_339, 1.5 * kib),
     // Same current-main integration and grouping trial documented above.
     wholeKibEnvelope(726_074, 1.5 * kib),
+    // Same feature growth, measured with the misplaced lazy code removed.
+    wholeKibEnvelope(838_954, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
     // Measured merged graph described above; unrelated file caps stay fixed.
     39,
+    // Same feature growth; most added files are the evaluation-order leaf
+    // chunks that keep chunk cycles from reading uninitialized bindings.
+    52,
   ),
 } as const;
 
