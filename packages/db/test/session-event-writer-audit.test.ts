@@ -352,6 +352,12 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
+  // The visibility settlement's local append helper; its enclosing settlement
+  // takes the canonical event-write locks before any call.
+  "packages/db/src/session-visibility-work.ts#insertEvents": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
 };
 
 const genericControlWriters = new Set([
@@ -385,6 +391,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "steerQueuedTurnInTransaction",
     "submitHumanPromptInTransaction",
   ],
+  insertEvents: ["settleSessionVisibilityWorkInTransaction"],
   closePendingSessionToolCallsInTransaction: [
     "armSubscriptionCoreCapacityWait",
     "cancelSessionSubtreeInTransaction",
@@ -394,6 +401,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "requestSessionTurnRecovery",
     "recoverSessionOwner",
+    "settleSessionVisibilityWorkInTransaction",
   ],
 };
 
@@ -1050,6 +1058,62 @@ function callPositionsWithStringArgument(
   return positions.sort((left, right) => left - right);
 }
 
+const VISIBILITY_SETTLEMENT = "settleSessionVisibilityWorkInTransaction";
+
+/**
+ * The visibility settlement locks its event-write rows with controlLock
+ * "already_locked": each caller first runs lockSessionForVisibilityWork, which
+ * takes the workspace control share before the canonical event-write rows. Pin
+ * that exact chain and its closed caller set instead of widening the generic
+ * prefix rule.
+ */
+function visibilitySettlementPrefixIsPinned(): boolean {
+  const callers = new Set<string>();
+  const definitions = new Map<string, FunctionLikeDeclaration[]>();
+  for (const path of productionTypeScriptFiles()) {
+    const source = readFileSync(path, "utf8");
+    if (!source.includes(VISIBILITY_SETTLEMENT)) continue;
+    const visit = (node: t.Node): void => {
+      if (isNamedFunctionNode(node)) {
+        const named = namedEnclosingFunction(node);
+        if (named)
+          definitions.set(named.name, [...(definitions.get(named.name) ?? []), named.node]);
+      }
+      if (isCallExpression(node) && callName(node) === VISIBILITY_SETTLEMENT) {
+        const enclosing = namedEnclosingFunction(node);
+        if (enclosing) callers.add(enclosing.name);
+      }
+      forEachChild(node, visit);
+    };
+    visit(parseSourceFile(path, source).program);
+  }
+  const only = (name: string): FunctionLikeDeclaration => {
+    const found = definitions.get(name) ?? [];
+    expect(found, name).toHaveLength(1);
+    return found[0]!;
+  };
+  const lock = only("lockSessionForVisibilityWork");
+  const controlShare = callPositionsWithStringArgument(
+    lock,
+    "lockWorkspaceInferenceControl",
+    2,
+    "share",
+  )[0];
+  expect(controlShare).toBeDefined();
+  expect(controlShare!).toBeLessThan(callPositions(lock, "lockSessionEventWriteRows")[0]!);
+  expect([...callers].sort()).toEqual([
+    "settleWorkBeforePrivateTransition",
+    "stopSessionWorkForVisibilityChange",
+  ]);
+  for (const caller of callers) {
+    const node = only(caller);
+    const prefix = callPositions(node, "lockSessionForVisibilityWork")[0];
+    expect(prefix, caller).toBeDefined();
+    expect(prefix!, caller).toBeLessThan(callPositions(node, VISIBILITY_SETTLEMENT)[0]!);
+  }
+  return true;
+}
+
 function controlAwarePrefixPositions(functionNode: FunctionLikeDeclaration): number[] {
   return [
     ...callPositionsWithStringProperty(
@@ -1694,7 +1758,8 @@ describe("session_events writer inventory", () => {
         expect(
           controlAwarePrefixPositions(callerNode).length > 0 ||
             genericPrefixPositions(callerNode).length > 0 ||
-            Object.hasOwn(expectedOwnedSuffixCallers, caller),
+            Object.hasOwn(expectedOwnedSuffixCallers, caller) ||
+            (caller === VISIBILITY_SETTLEMENT && visibilitySettlementPrefixIsPinned()),
         ).toBe(true);
         const firstLock = canonicalLocks[0];
         const delegatedCalls = [...ownedSuffixCallers.keys()].flatMap((ownedWriter) =>
