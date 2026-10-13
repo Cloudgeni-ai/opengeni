@@ -658,6 +658,12 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     std::fs::write(&plist_path, body)
         .map_err(|e| format!("write {}: {e}", plist_path.display()))?;
     info!(path = %plist_path.display(), "wrote LaunchAgent plist");
+    // launchd opens StandardErrorPath itself and does not create its parent.
+    let stderr_log = service::launchd_stderr_log_path(&user_home);
+    if let Some(directory) = stderr_log.parent() {
+        crate::log_file::create_private_directory(directory)
+            .map_err(|e| format!("mkdir {}: {e}", directory.display()))?;
+    }
 
     let uid = unsafe_uid();
     let domain = format!("gui/{uid}");

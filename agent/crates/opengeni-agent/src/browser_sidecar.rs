@@ -57,6 +57,28 @@ struct Sidecar {
     token_file: PathBuf,
     allowed_origins: Vec<String>,
     pending_update: Option<String>,
+    exit_reported: bool,
+}
+
+impl Sidecar {
+    /// Polls the controller process, recording an unexpected exit and its
+    /// status once. Its stderr is already in the agent log; the status is what
+    /// tells a crash (signal) from a clean exit apart afterwards.
+    fn try_wait_logged(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if let Some(status) = status {
+            if !self.exit_reported {
+                self.exit_reported = true;
+                tracing::warn!(
+                    service = "opengeni-browserd",
+                    port = self.endpoint.port,
+                    %status,
+                    "browser controller exited unexpectedly"
+                );
+            }
+        }
+        Ok(status)
+    }
 }
 
 /// Process owner for browserd children installed beside the connected agent.
@@ -249,6 +271,7 @@ impl BrowserSidecarManager {
             token_file,
             allowed_origins: allowed_origins.to_vec(),
             pending_update: None,
+            exit_reported: false,
         })
     }
 }
@@ -329,8 +352,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
                 .map_err(|_| PlatformError::os("browser controller idle probe unavailable"))?;
             for sidecar in sidecars.values_mut() {
                 if sidecar
-                    .child
-                    .try_wait()
+                    .try_wait_logged()
                     .map_err(|_| {
                         self.update_drain.mark_unsettled();
                         PlatformError::os("browser controller process state unavailable")
@@ -378,8 +400,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
         let mut sidecars = self.sidecars.lock().await;
         if let Some(existing) = sidecars.get_mut(scope_id) {
             let live = existing
-                .child
-                .try_wait()
+                .try_wait_logged()
                 .map_err(|error| {
                     self.update_drain.mark_unsettled();
                     PlatformError::from_io("inspect browser controller sidecar", &error)
@@ -444,8 +465,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
             ));
         }
         if sidecar
-            .child
-            .try_wait()
+            .try_wait_logged()
             .map_err(|error| {
                 self.update_drain.mark_unsettled();
                 PlatformError::from_io("inspect browser controller sidecar", &error)
@@ -513,7 +533,7 @@ async fn sidecars_update_admission(
         let mut idle = true;
         let mut failure = None;
         for sidecar in sidecars.values_mut() {
-            if !matches!(sidecar.child.try_wait(), Ok(None)) {
+            if !matches!(sidecar.try_wait_logged(), Ok(None)) {
                 manager.update_drain.mark_unsettled();
                 failure = Some(PlatformError::os("browser controller is no longer running"));
                 continue;
