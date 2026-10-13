@@ -1044,6 +1044,13 @@ describe("deployment contract", () => {
     expect(contract.access.mode).toBe("externalGateway");
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
+    expect(vars).toContain("OPENGENI_RESEND_API_KEY");
+    const emailDisabledVars = requiredRuntimeEnvVars(contract, {
+      OPENGENI_MANAGED_EMAIL_DELIVERY: "disabled",
+    });
+    expect(emailDisabledVars).toContain("OPENGENI_MANAGED_EMAIL_DELIVERY");
+    expect(emailDisabledVars).not.toContain("OPENGENI_RESEND_API_KEY");
+    expect(emailDisabledVars).not.toContain("OPENGENI_EMAIL_FROM");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID");
     expect(vars).toContain("OPENGENI_MODEL_PRICING_JSON");

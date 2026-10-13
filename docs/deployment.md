@@ -1322,7 +1322,11 @@ this setting does not remove production email-provider configuration requirement
 
 Migration 0351 is rolling and additive. Before inviting users, configure
 `OPENGENI_RESEND_API_KEY` and `OPENGENI_EMAIL_FROM`; production managed-mode
-configuration validation requires the provider key. Embedded hosts may bind an
+configuration validation requires the provider key unless
+`OPENGENI_MANAGED_EMAIL_DELIVERY=disabled`. That explicit setting is for
+deployments that provision accounts another way: the provider key must then be
+unset, nothing is ever sent, and sign-up verification, organization user setup
+and sign-in method notices settle as failed with `delivery_disabled`. Embedded hosts may bind an
 equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
 does not relax the deployment preflight today. Keep
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
