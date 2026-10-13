@@ -182,7 +182,6 @@ describe("worker accepted-turn credential restriction installation", () => {
         groupBoxBackend: "selfhosted",
         sandboxCreationBackend: "selfhosted",
         effectiveRunCredentialBackend: "selfhosted",
-        sandboxWorkspaceEnvironmentValues: {},
         connectionScope: scope,
       } as PrepareRunCredentialsDeps);
       try {

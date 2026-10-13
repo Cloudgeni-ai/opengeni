@@ -32,7 +32,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
-import { useOpenNativeLink } from "../environment";
+import { useOpenNativeLink } from "../links";
 import { Icon } from "./icon";
 import { NativeImageViewer } from "./image-viewer";
 import type { NativeInteractiveBlock } from "./markdown";

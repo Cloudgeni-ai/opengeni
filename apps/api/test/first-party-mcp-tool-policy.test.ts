@@ -5,7 +5,6 @@ import {
   GoalSpec,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
-  MAX_SELECTED_VARIABLE_SETS,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   SESSION_ADMIN_ACCESS_TOOL_NAME_SET,
@@ -212,6 +211,49 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("secret tools follow the secrets selection and permissions; secret_get needs literal secrets:read (AG-1)", () => {
+    const secretTools = (permissions: Permission[], selection?: FirstPartyMcpToolName[]) =>
+      registeredToolNames(buildOpenGeniMcpServer(deps(), grant(permissions, selection))).filter(
+        (name) => name.startsWith("secret_"),
+      );
+    const all: FirstPartyMcpToolName[] = [
+      "secret_search",
+      "secret_save",
+      "secret_get",
+      "secret_move",
+      "secret_delete",
+    ];
+    expect(secretTools(["secrets:list", "secrets:write", "secrets:use"], all)).toEqual([
+      "secret_delete",
+      "secret_move",
+      "secret_save",
+      "secret_search",
+    ]);
+    expect(secretTools(["secrets:list", "secrets:write", "secrets:read"], all)).toEqual([
+      "secret_delete",
+      "secret_get",
+      "secret_move",
+      "secret_save",
+      "secret_search",
+    ]);
+    expect(secretTools(["secrets:list"], all)).toEqual(["secret_search"]);
+    // Capability off: the resolved selection holds no secret tools.
+    expect(secretTools(["secrets:list", "secrets:write", "secrets:read"], ["session_get"])).toEqual(
+      [],
+    );
+    // The retired Variable Set tools are never registered, even when selected.
+    const retired = registeredToolNames(
+      buildOpenGeniMcpServer(
+        deps(),
+        grant(
+          ["variable-sets:list", "variable-sets:read", "variable-sets:write", "secrets:list"],
+          ["variable_set_list", "environment_list", "variable_set_set_variable"],
+        ),
+      ),
+    );
+    expect(retired.filter((name) => /^(variable_set|environment)_/.test(name))).toEqual([]);
+  });
+
   test("project tools follow existing session permissions and exact selection", () => {
     const human = (permissions: Permission[]): AccessGrant => ({
       accountId,
@@ -766,7 +808,6 @@ describe("first-party MCP tool visibility policy", () => {
   });
 
   test("model-facing session_create omits absolute depth and literal shared traps", async () => {
-    const variableSetId = crypto.randomUUID();
     let databaseTouches = 0;
     const routeDeps = deps();
     routeDeps.db = new Proxy(
@@ -806,8 +847,9 @@ describe("first-party MCP tool visibility policy", () => {
       expect(serialized).not.toContain('"const":"shared"');
       expect(serialized).not.toContain('"enum":["shared"');
       expect(serialized).toContain("machineTarget");
-      expect(serialized).toContain("variableSetIds");
-      expect(serialized).toContain(`"maxItems":${MAX_SELECTED_VARIABLE_SETS}`);
+      // Variable Sets were replaced by vaults: no legacy selection fields.
+      expect(serialized).not.toContain("variableSetId");
+      expect(serialized).not.toContain("environmentId");
       expect(serialized).toContain("targetSandboxId");
       expect(serialized).toContain("workingDir");
       expect(serialized).toContain('"required":["targetSandboxId"]');
@@ -820,25 +862,11 @@ describe("first-party MCP tool visibility policy", () => {
       for (const arguments_ of [
         { initialMessage: "bad cwd", workingDir: "/tmp" },
         {
-          initialMessage: "bad shared variable set",
-          variableSetId: crypto.randomUUID(),
-          sandbox: "shared",
-        },
-        {
           initialMessage: "bad shared rig",
           rigId: crypto.randomUUID(),
           sandbox: "shared",
         },
         { initialMessage: "bad depth", maxNestedAgentDepth: 0 },
-        {
-          initialMessage: "duplicate variable sets",
-          variableSetIds: [variableSetId, variableSetId],
-        },
-        {
-          initialMessage: "mismatched variable set alias",
-          variableSetIds: [variableSetId, crypto.randomUUID()],
-          variableSetId,
-        },
       ]) {
         const result = await client.callTool({ name: "session_create", arguments: arguments_ });
         expect(result).toMatchObject({ isError: true });
@@ -901,6 +929,65 @@ describe("first-party MCP tool visibility policy", () => {
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+  });
+
+  test("session_create advertises only the caller's deployment-allowed selection", async () => {
+    const routeDeps = deps();
+    routeDeps.settings.allowedFirstPartyMcpTools = ["session_create", "session_get"];
+    const server = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create", "sessions:read"], ["session_create", "command_wait"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "bounded-child-catalog", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "session_create",
+      )!;
+      expect(tool.inputSchema.properties?.firstPartyMcpTools).toMatchObject({
+        items: { enum: ["session_create"] },
+      });
+      expect(JSON.stringify(tool.inputSchema.properties?.firstPartyMcpTools)).not.toContain(
+        "command_wait",
+      );
+      expect(
+        registeredToolInputSchema(server, "session_create").safeParse({
+          initialMessage: "Work",
+          firstPartyMcpTools: ["session_get"],
+        }).success,
+      ).toBe(false);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("session_create safely normalizes JSON strings in object-only fields", () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
+    const schema = registeredToolInputSchema(server, "session_create") as z4.ZodType;
+    const agent = { capabilities: { from: "all", subagents: false } };
+    const goal = { text: "Run checks", successCriteria: "Checks pass" };
+    const parsed = schema.safeParse({
+      initialMessage: "  Work  ",
+      agent: JSON.stringify(agent),
+      goal: JSON.stringify(goal),
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data).toEqual({ initialMessage: "  Work  ", agent, goal });
+    for (const value of ["{", "[]", "null", '"all"', '{"text":42}']) {
+      expect(schema.safeParse({ initialMessage: "Work", goal: value }).success).toBe(false);
+    }
+    const extraGoal = { text: "Work", unknown: true };
+    expect(schema.safeParse({ initialMessage: "Work", goal: JSON.stringify(extraGoal) })).toEqual(
+      schema.safeParse({ initialMessage: "Work", goal: extraGoal }),
+    );
+    expect(
+      schema.safeParse({ initialMessage: "Work", agent: '{"capabilities":"all","x":1}' }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ initialMessage: "Work", sandbox: '{"groupId":"bad"}' }).success).toBe(
+      false,
+    );
   });
 
   test("session_create nested parser failures are actionable without reflecting input", async () => {
@@ -1060,55 +1147,6 @@ describe("first-party MCP tool visibility policy", () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain("private-");
-  });
-
-  test("model-facing session_create accepts ordered Variable Sets and authorizes attachment before storage", async () => {
-    const firstVariableSetId = crypto.randomUUID();
-    const secondVariableSetId = crypto.randomUUID();
-    let databaseTouches = 0;
-    const routeDeps = deps();
-    routeDeps.db = new Proxy(
-      {},
-      {
-        get() {
-          databaseTouches += 1;
-          throw new Error("accepted model request reached storage");
-        },
-      },
-    ) as ApiRouteDeps["db"];
-
-    const authorized = buildOpenGeniMcpServer(
-      routeDeps,
-      grant(["sessions:create", "variable-sets:attach", "variable-sets:use"], ["session_create"]),
-    );
-    const accepted = await callRegisteredTool(authorized, "session_create", {
-      initialMessage: "use both sets",
-      variableSetIds: [firstVariableSetId, secondVariableSetId],
-      variableSetId: secondVariableSetId,
-    });
-    expect(accepted.isError).toBe(true);
-    expect(databaseTouches).toBeGreaterThan(0);
-
-    databaseTouches = 0;
-    const denied = buildOpenGeniMcpServer(
-      routeDeps,
-      grant(["sessions:create"], ["session_create"]),
-    );
-    const databaseTouchesBeforeDeniedCall = databaseTouches;
-    const rejected = await callRegisteredTool(denied, "session_create", {
-      initialMessage: "must not attach",
-      variableSetIds: [firstVariableSetId, secondVariableSetId],
-    });
-    expect(rejected).toMatchObject({
-      isError: true,
-      structuredContent: {
-        error: {
-          code: "session_create_forbidden",
-          message: "missing permission: variable-sets:attach",
-        },
-      },
-    });
-    expect(databaseTouches).toBe(databaseTouchesBeforeDeniedCall);
   });
 
   test("orchestration failures return bounded structured code and message", async () => {

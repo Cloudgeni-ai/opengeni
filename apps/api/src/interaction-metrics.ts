@@ -8,7 +8,6 @@ import type {
   ComputerActionRequest,
   ComputerSessionMutationResponse,
   InteractionInterventionMutationResponse,
-  ProtectedAuthFillResponse,
 } from "@opengeni/contracts";
 import {
   interactionAuthMetricObserver,
@@ -22,7 +21,7 @@ type InteractionActionReceipt = BrowserActionReceipt | ComputerActionReceipt;
 type InteractionLifecycleMutation =
   | BrowserSessionMutationResponse
   | ComputerSessionMutationResponse;
-type AuthMutation = AuthRunMutationResponse | ProtectedAuthFillResponse;
+type AuthMutation = AuthRunMutationResponse;
 
 const STALE_INTERACTION_ERROR_CODES = new Set([
   "controller_stale",
@@ -231,7 +230,6 @@ const INTERACTION_ROUTE_OPERATIONS = new Map<string, InteractionRouteOperation>(
       ["POST", `${B}/actions`, "browser", "act", "semantic", true],
       ["POST", `${B}/auth-runs`, "browser", "auth_start", "auth", true],
       ["POST", `${B}/auth-runs/:authRunId/report`, "browser", "auth_report", "auth", true],
-      ["POST", `${B}/auth-runs/:authRunId/protected-fill`, "browser", "auth_fill", "auth", true],
       ["POST", `${B}/auth-runs/:authRunId/external-auth`, "browser", "auth_start", "auth", true],
       [
         "POST",

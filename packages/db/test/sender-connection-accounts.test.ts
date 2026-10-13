@@ -377,6 +377,13 @@ test("owner inventory works without private conversation activation and isolates
     await sql.unsafe(
       `grant execute on all functions in schema public, opengeni_private to "${executionOwner}"`,
     );
+    // The migration owner owns the subscription internals, which the live
+    // authority fence calls once a provider has a cutover receipt (SuperGrok
+    // since 0718).
+    await sql.unsafe(`grant usage on schema opengeni_subscription_internal to "${executionOwner}"`);
+    await sql.unsafe(
+      `grant execute on all functions in schema opengeni_subscription_internal to "${executionOwner}"`,
+    );
     for (const routine of routines)
       await sql.unsafe(`alter function ${routine.signature} owner to "${executionOwner}"`);
     const accepted = await submit([selection]);
@@ -527,7 +534,6 @@ test("owner inventory works without private conversation activation and isolates
         resources: [],
         tools: [{ kind: "mcp", id: "mail" }],
         metadata: {},
-        connectionAccounts: [],
       },
       metadata: {},
     });

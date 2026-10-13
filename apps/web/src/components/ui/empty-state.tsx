@@ -123,7 +123,7 @@ export function EmptyStateLink({
       type="button"
       onClick={onClick}
       className={cn(
-        "inline-flex items-center gap-1 rounded-[6px] text-sm leading-5 font-medium text-brand underline-offset-4 transition-colors duration-[120ms] hover:underline pointer-coarse:min-h-11",
+        "inline-flex items-center gap-1 rounded-[6px] text-sm leading-5 font-medium og-link pointer-coarse:min-h-11",
         className,
       )}
     >

@@ -144,7 +144,8 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
     if (
       personalAuthority &&
       session.owner_subject_id &&
-      session.owner_membership_id === personalAuthority.ownerMembershipId &&
+      (session.owner_membership_id === personalAuthority.ownerMembershipId ||
+        personalAuthority.sharedSessionChoice?.sessionId === request.sessionId) &&
       request.initiatingHumanSubjectId
     ) {
       const [authorization] = await rawRows<{ authorized: boolean }>(
@@ -204,6 +205,22 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
       ];
     }
 
+    if (
+      personalAuthorityAuthorized &&
+      personalAuthority &&
+      personalAuthority.ownerMembershipId !== session.owner_membership_id
+    ) {
+      // The personal-access SQL gate proved this accepting human's live
+      // membership. Do not replace the independently verified chat owner.
+      people = [
+        ...people,
+        {
+          membershipId: personalAuthority.ownerMembershipId,
+          active: true,
+          personalFallbackOptIn: false,
+        },
+      ];
+    }
     const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
     const workspaceAllowedModelIds =
       workspacePolicy.allowedProviders === null && workspacePolicy.allowedModels === null
@@ -260,6 +277,9 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
                 {
                   provider: personalAuthority.provider,
                   ownerMembershipId: personalAuthority.ownerMembershipId,
+                  ...(personalAuthority.sharedSessionChoice
+                    ? { sharedSessionChoice: personalAuthority.sharedSessionChoice }
+                    : {}),
                 },
               ]
             : [],

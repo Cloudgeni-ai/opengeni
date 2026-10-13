@@ -23,6 +23,7 @@ import { accessGrantAuthorizationFromContext, type ApiRouteDeps } from "@opengen
 import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
 import {
   approveWorkspaceToolTarget,
+  createTargetFence,
   invokeWorkspaceToolTarget,
   type TargetGatewayOptions,
 } from "../src/workspace-tool-target";
@@ -63,6 +64,8 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
       const grant = access.workspaceGrants[0]!;
       const authorization = accessGrantAuthorizationFromContext(access, grant);
       authorization.canonicalManagedHumanSession = true;
+      // The route's fresh human grant (a person's live caller part).
+      const live = { reauthorize: async () => undefined };
       let effects = 0;
       let changedSchema = false;
       const provider = Bun.serve({
@@ -112,11 +115,14 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
         });
       const args = kind === "raw" ? { query: "test" } : {};
       const provenance = async (legacy = false) => {
+        // Targeted preparation is always fenced; the fence closes after cleanup.
+        const fence = createTargetFence(deps, authorization, live, true);
         const prepared = legacy
           ? await prepareWorkspaceToolGatewayForGrant(deps, grant, [identity])
           : await prepareWorkspaceToolGateway(deps, authorization, {
               target: { identity },
               firstPartySettings: "caller",
+              fence,
             });
         try {
           const call = await prepared.toolGateway.prepareCall(
@@ -132,6 +138,7 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
           return { effect: call.effectDigest, authority: call.approvalAuthorityDigest };
         } finally {
           await prepared.close();
+          fence.close();
         }
       };
       try {
@@ -140,26 +147,36 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
           const request = { identity, operationId: crypto.randomUUID(), arguments: args };
           const asked = await provenance();
           const legacyAsk = await provenance(true);
-          const approved = await approveWorkspaceToolTarget(deps, authorization, request);
+          const approved = await approveWorkspaceToolTarget(deps, authorization, request, live);
           await setPolicy("allow");
           const allowed = await provenance();
           expect(allowed).toEqual(asked);
           expect((await provenance(true)).authority).not.toBe(legacyAsk.authority);
-          const called = await invokeWorkspaceToolTarget(deps, authorization, {
-            ...request,
-            target: { identity },
-            ...(supplyToken ? { approvalToken: approved.approvalToken } : {}),
-          });
+          const called = await invokeWorkspaceToolTarget(
+            deps,
+            authorization,
+            {
+              ...request,
+              target: { identity },
+              ...(supplyToken ? { approvalToken: approved.approvalToken } : {}),
+            },
+            live,
+          );
           expect(called.result.isError).not.toBe(true);
           expect(called.tool.entry.approval).toBe("policy");
           expect(called.tool.definitionDigest).not.toBe(approved.tool.definitionDigest);
           for (const token of [approved.approvalToken, undefined])
             await expect(
-              invokeWorkspaceToolTarget(deps, authorization, {
-                ...request,
-                target: { identity },
-                ...(token ? { approvalToken: token } : {}),
-              }),
+              invokeWorkspaceToolTarget(
+                deps,
+                authorization,
+                {
+                  ...request,
+                  target: { identity },
+                  ...(token ? { approvalToken: token } : {}),
+                },
+                live,
+              ),
             ).rejects.toMatchObject({ status: 409, retryable: false, outcomeUnknown: true });
         }
         expect(effects).toBe(kind === "raw" ? 2 : 0);
@@ -174,7 +191,7 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
           await setPolicy("ask");
           const request = { identity, operationId: crypto.randomUUID(), arguments: args };
           const before = await provenance();
-          const approved = await approveWorkspaceToolTarget(deps, authorization, request);
+          const approved = await approveWorkspaceToolTarget(deps, authorization, request, live);
           await setPolicy("allow");
           if (drift === "schema") changedSchema = true;
           if (drift === "headers") config.headers = { "x-private-test-authority": "changed" };
@@ -184,11 +201,16 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
           else expect(after.authority).not.toBe(before.authority);
           for (const supplyToken of [true, false])
             await expect(
-              invokeWorkspaceToolTarget(deps, authorization, {
-                ...request,
-                target: { identity },
-                ...(supplyToken ? { approvalToken: approved.approvalToken } : {}),
-              }),
+              invokeWorkspaceToolTarget(
+                deps,
+                authorization,
+                {
+                  ...request,
+                  target: { identity },
+                  ...(supplyToken ? { approvalToken: approved.approvalToken } : {}),
+                },
+                live,
+              ),
             ).rejects.toMatchObject({ status: 409 });
         }
         expect(effects).toBe(kind === "raw" ? 2 : 0);
@@ -286,8 +308,12 @@ describe("adapter-generated v2 approval provenance on PostgreSQL", () => {
     let privateAuthority = "a".repeat(64);
     let effects = 0;
     const options: TargetGatewayOptions = {
+      reauthorize: async () => undefined,
       authorizeSite: async () => undefined,
-      prepare: async () => {
+      prepare: async (_deps, _authorization, preparation) => {
+        // A hand-built gateway has no connector route; it installs an inert
+        // one because a targeted fence denies until its route is installed.
+        preparation?.fence?.setRoute(async () => undefined);
         const { gateway, catalog } = createWorkspaceToolGateway({
           ...grant,
           generation: 1,

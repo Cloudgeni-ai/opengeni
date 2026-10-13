@@ -18,6 +18,8 @@ export const ModelConnectionAccessPolicy = z
      * subscription core support it (`peopleSupported`).
      */
     allowedPeople: z.array(z.string().uuid()).max(1000).nullable().optional(),
+    /** Explicit owner consent to convert a personal subscription into a shared account. */
+    sharePersonal: z.literal(true).optional(),
     version: z.number().int().positive(),
   })
   .strict();
@@ -52,4 +54,6 @@ export const ModelConnectionAccessResponse = z.object({
   localWorkspaceIds: z.array(z.string().uuid()).max(500).optional(),
   /** The workspace whose administrators also manage the account, if any. */
   managedByWorkspaceId: z.string().uuid().nullable().optional(),
+  /** Exact personal owner is also an organization administrator; sharing requires explicit consent. */
+  personalSharingSupported: z.boolean().optional(),
 });

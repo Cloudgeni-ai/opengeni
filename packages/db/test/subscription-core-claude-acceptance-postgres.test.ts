@@ -32,7 +32,7 @@ const lookup = (providerId: string): SubscriptionCoreProvider =>
     : realProvider(providerId);
 mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.dir), () => ({
   ...realRegistry,
-  subscriptionCoreProviderIds: () => [...productionProviderIds, "claude"].sort(),
+  subscriptionCoreProviderIds: () => [...new Set([...productionProviderIds, "claude"])].sort(),
   subscriptionCoreProvider: lookup,
   subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
 }));
@@ -238,7 +238,13 @@ let beforeReceipt: { v2: unknown; claude: unknown } | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-claude-acceptance");
+  // A world before Claude's drained cutover: this test registers Claude itself.
+  shared = await acquireSharedTestDatabase("subscription-core-claude-acceptance", {
+    withheldMigrations: [
+      "0748_subscription_core_claude_cutover.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+    ],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });
   org = await organization();
@@ -266,7 +272,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
-  test("runs as the restricted application role; production registers no Claude", async () => {
+  test("runs as the restricted application role; production registers Claude", async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
       client!.db,
       sql`select current_user as "currentUser", rolsuper as superuser,
@@ -274,12 +280,14 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
         from pg_catalog.pg_roles where rolname = current_user`,
     );
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
-    expect(productionProviderIds).not.toContain("claude");
+    expect(productionProviderIds).toContain("claude");
     expect(realRegistry.subscriptionCoreProviderIds()).toContain("claude");
   });
 
-  test("before the receipt the legacy v1 value came from live state", () => {
-    expect(beforeReceipt!.claude).toEqual({ version: 1, scope: "organization" });
+  test("even before the receipt, acceptance writes claude's v1 default, never live state", () => {
+    // The legacy runtime that derived it from the live organization pool is
+    // retired (0751); the carrier keeps only its column default.
+    expect(beforeReceipt!.claude).toEqual({ version: 1, scope: "workspace" });
   });
 
   test("a Claude access change wakes from Claude's binding", () => {

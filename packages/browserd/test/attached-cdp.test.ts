@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { AttachedBrowserBridgeError } from "../src/attached-bridge";
+import { CdpCommandTimeoutError, CdpTransportError } from "../src/cdp";
 import {
   AttachedChromeCdpConnection,
   type AttachedBrowserBridgeTransport,
@@ -65,6 +67,42 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
 }
 
 describe("AttachedChromeCdpConnection", () => {
+  test("keeps target command timeouts distinct from lost bridge transport", async () => {
+    const bridge = new FakeBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    try {
+      const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+        flatten: true,
+      });
+      const request = bridge.request.bind(bridge);
+      let code: "timeout" | "transport_failed" = "timeout";
+      bridge.request = async (payload) => {
+        if (payload.type === "debugger.command")
+          throw new AttachedBrowserBridgeError(code, "synthetic bridge failure", true);
+        return request(payload);
+      };
+      await expect(connection.send("Runtime.evaluate", {}, { sessionId })).rejects.toBeInstanceOf(
+        CdpCommandTimeoutError,
+      );
+      await expect(connection.send("Page.getFrameTree", {}, { sessionId })).rejects.toMatchObject({
+        method: "Page.getFrameTree",
+        sessionId,
+      });
+      code = "transport_failed";
+      const lost = await connection
+        .send("Page.getFrameTree", {}, { sessionId })
+        .catch((error: unknown) => error);
+      expect(lost).toBeInstanceOf(CdpTransportError);
+      expect(lost).not.toBeInstanceOf(CdpCommandTimeoutError);
+    } finally {
+      connection.close();
+    }
+  });
+
   test.each([
     ["darwin", "Macintosh"],
     ["win32", "Windows NT"],

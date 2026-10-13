@@ -12,14 +12,13 @@ const task = {
   name: "Native connection schedule",
   schedule: { type: "manual" },
   agentConfig: { prompt: "Use the selected connection", tools: [] },
-  connectionAccounts: [],
 };
 
-test("schedule contracts retain ordinary connection selection", () => {
-  expect(CreateScheduledTaskRequest.parse(task).connectionAccounts).toEqual([]);
-  expect(UpdateScheduledTaskRequest.parse({ connectionAccounts: [] }).connectionAccounts).toEqual(
-    [],
-  );
+test("schedule contracts carry only person pins", () => {
+  const pinnedAccounts = [{ serverId: "example", connectionId: crypto.randomUUID() }];
+  const created = CreateScheduledTaskRequest.parse({ ...task, pinnedAccounts });
+  expect("pinnedAccounts" in created ? created.pinnedAccounts : undefined).toEqual(pinnedAccounts);
+  expect(UpdateScheduledTaskRequest.parse({ pinnedAccounts: [] }).pinnedAccounts).toEqual([]);
 });
 
 test.each([

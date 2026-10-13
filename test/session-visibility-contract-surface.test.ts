@@ -66,6 +66,9 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0502_active_message_boundary_forks.sql",
   // Check only copied history for compaction when forking at a retained message.
   "packages/db/drizzle/0513_message_fork_prefix_compaction.sql",
+  // Lets an Only-me session keep its shared sandbox group: flips only the
+  // singleton-group assertion in the visibility transition and fork bodies.
+  "packages/db/drizzle/0738_private_sessions_share_sandboxes.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",

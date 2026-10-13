@@ -45,7 +45,13 @@ export const AGENT_CAPABILITY_GROUPS: readonly AgentCapabilityGroup[] = [
   {
     id: "workspace",
     label: "Workspace",
-    capabilities: ["knowledge", "workspaceFiles", "workspaceConnectors", "workspaceAdmin"],
+    capabilities: [
+      "knowledge",
+      "secrets",
+      "workspaceFiles",
+      "workspaceConnectors",
+      "workspaceAdmin",
+    ],
   },
 ];
 

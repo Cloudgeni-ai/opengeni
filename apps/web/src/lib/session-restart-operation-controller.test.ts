@@ -22,7 +22,6 @@ describe("SessionRestartOperationController", () => {
       {
         visibility: "workspace",
         rigId: "rig-a",
-        variableSetIds: ["set-low", "set-high"],
       },
       () => `restart-${++generated}`,
     );
@@ -36,7 +35,6 @@ describe("SessionRestartOperationController", () => {
       {
         visibility: "workspace",
         rigId: "rig-edited-after-timeout",
-        variableSetIds: ["set-high", "set-low"],
       },
       () => `restart-${++generated}`,
     );
@@ -45,7 +43,6 @@ describe("SessionRestartOperationController", () => {
     expect(retry).toMatchObject({
       idempotencyKey: "restart-1",
       rigId: "rig-a",
-      variableSetIds: ["set-low", "set-high"],
     });
     expect(generated).toBe(1);
 
@@ -57,7 +54,7 @@ describe("SessionRestartOperationController", () => {
     const controller = new SessionRestartOperationController();
     const first = controller.prepare(
       scope,
-      { visibility: "private", rigId: null, variableSetIds: [] },
+      { visibility: "private", rigId: null },
       () => "old-key",
     );
     const otherScope = { ...scope, sessionId: "session-b" };
@@ -65,7 +62,7 @@ describe("SessionRestartOperationController", () => {
     expect(controller.snapshot(otherScope)).toBeNull();
     const other = controller.prepare(
       otherScope,
-      { visibility: "workspace", rigId: "rig-b", variableSetIds: ["set-b"] },
+      { visibility: "workspace", rigId: "rig-b" },
       () => "new-key",
     );
     expect(other.idempotencyKey).toBe("new-key");
@@ -73,7 +70,7 @@ describe("SessionRestartOperationController", () => {
 
     const retry = controller.prepare(
       { ...scope },
-      { visibility: "workspace", rigId: "edited-rig", variableSetIds: ["edited-set"] },
+      { visibility: "workspace", rigId: "edited-rig" },
       () => "duplicate-key",
     );
     expect(retry).toBe(first);

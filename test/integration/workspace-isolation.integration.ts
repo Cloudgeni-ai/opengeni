@@ -208,51 +208,24 @@ describe("workspace isolation matrix", () => {
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/github/app"), 403);
     await expectStatus(app, authB, workspacePath(b.workspaceId, "/github/app"), 200);
 
-    const environmentResponse = await app.request(workspacePath(a.workspaceId, "/environments"), {
+    const vaultResponse = await app.request(workspacePath(a.workspaceId, "/vaults"), {
       method: "POST",
-      body: JSON.stringify({
-        name: "Workspace A environment",
-        variables: [{ name: "ISOLATION_TOKEN", value: "isolation-secret-a" }],
-      }),
+      body: JSON.stringify({ name: "Workspace A vault", ownerKind: "workspace" }),
       headers: { ...authA, "content-type": "application/json" },
     });
-    expect(environmentResponse.status).toBe(201);
-    const environment = (await environmentResponse.json()) as { id: string };
-    await expectStatus(
-      app,
-      authA,
-      workspacePath(b.workspaceId, `/environments/${environment.id}`),
-      403,
-    );
-    await expectStatus(
-      app,
-      authB,
-      workspacePath(b.workspaceId, `/environments/${environment.id}`),
-      404,
-    );
-    const environmentsVisibleToB = await app.request(
-      workspacePath(b.workspaceId, "/environments"),
-      { headers: authB },
-    );
-    expect(environmentsVisibleToB.status).toBe(200);
+    expect(vaultResponse.status).toBe(201);
+    const vault = (await vaultResponse.json()) as { id: string };
+    await expectStatus(app, authA, workspacePath(b.workspaceId, `/vaults/${vault.id}`), 403);
+    await expectStatus(app, authB, workspacePath(b.workspaceId, `/vaults/${vault.id}`), 404);
+    const vaultsVisibleToB = await app.request(workspacePath(b.workspaceId, "/vaults"), {
+      headers: authB,
+    });
+    expect(vaultsVisibleToB.status).toBe(200);
     expect(
-      ((await environmentsVisibleToB.json()) as Array<{ id: string }>).some(
-        (item) => item.id === environment.id,
+      ((await vaultsVisibleToB.json()) as { vaults: Array<{ id: string }> }).vaults.some(
+        (item) => item.id === vault.id,
       ),
     ).toBe(false);
-    // Cross-workspace attachment is indistinguishable from a missing variable set.
-    // Request still uses the deprecated `environmentId` alias field on purpose (alias coverage);
-    // the canonical error message names the variable set.
-    const crossAttachment = await app.request(workspacePath(b.workspaceId, "/sessions"), {
-      method: "POST",
-      body: JSON.stringify({
-        initialMessage: "cross-workspace attach",
-        environmentId: environment.id,
-      }),
-      headers: { ...authB, "content-type": "application/json" },
-    });
-    expect(crossAttachment.status).toBe(422);
-    expect(await crossAttachment.text()).toContain("unknown variableSetId");
 
     const apiKeyResponse = await app.request(workspacePath(a.workspaceId, "/api-keys"), {
       method: "POST",

@@ -9,7 +9,7 @@ import type {
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { HumanInputForm } from "@opengeni/react/session-ui";
+import { HumanInputForm, SecretRefText } from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -64,6 +64,7 @@ import { Switch } from "@/components/ui/switch";
 import { Toolbar } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { secretSaveTargets } from "@/lib/secrets-ui";
 import { hasInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
@@ -467,7 +468,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     if (item.kind === "approval") {
       return (
         <code className="my-0.5 inline-block max-w-full truncate rounded-[6px] bg-surface-2 px-1.5 py-0.5 align-top font-mono text-xs text-fg">
-          {item.body}
+          <SecretRefText text={item.body} linkable={false} />
         </code>
       );
     }
@@ -1006,6 +1007,7 @@ function AnswerDialog({
             onSubmit={submit}
             submitting={submitting}
             error={submitError}
+            allowedSaveTo={secretSaveTargets(context.accessContext, request.workspaceId)}
             decisionButtons
           />
         ) : (

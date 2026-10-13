@@ -33,6 +33,8 @@
       "@opengeni/storage",
       "@opengeni/subscriptions",
       "@opengeni/tool-gateway",
+      "@opengeni/vaults",
+      "@opengeni/vaults-onepassword",
       "@opengeni/worker-bundle",
       "@opengeni/xai-subscription"
     ]

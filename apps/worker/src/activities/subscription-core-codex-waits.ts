@@ -15,6 +15,9 @@ import {
   armSubscriptionCoreCodexCapacityWait,
   claimSubscriptionCapacityWakeDeliveries,
   evaluateSubscriptionCoreCodexPlacement,
+  evaluateSubscriptionCorePlacementWithFailover,
+  getSession,
+  getSessionTurn,
   getSubscriptionCoreCodexCapacityWaitById,
   markSubscriptionCapacityWakeDelivered,
   readSubscriptionCoreCodexTurnModel,
@@ -23,8 +26,10 @@ import {
   recoverSubscriptionCoreCodexConnectionHealth,
   retrySubscriptionCapacityWakeDelivery,
   subscriptionCoreCodexCapacityWaitRef,
+  subscriptionCoreProvider,
   wakeSubscriptionCoreCodexCapacityWaiters,
   withSubscriptionCapacityWakeOutboxScope,
+  withSubscriptionCoreAcceptedTurn,
   type Database,
   type SubscriptionCoreCodexCapacityWait,
   type SubscriptionCoreCodexWaitEvaluation,
@@ -35,6 +40,9 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import type { Settings } from "@opengeni/config";
+import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { servingCatalogForBlockedTurn } from "./agent-turn/subscription-serving-catalog";
+import { subscriptionCoreWaitBindings } from "./subscription-core-wait-bindings";
 import type { CodexCapacityWaitRef, SignalCodexCapacityWorkflow } from "./types";
 import { workflowIdForSession } from "./common";
 
@@ -51,6 +59,7 @@ export function coreCodexWakeRetryDelayMs(attemptCount: number): number {
 
 export type CoreCodexWakeServices = {
   db: Database;
+  settings?: Settings;
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null | undefined;
 };
 
@@ -232,6 +241,8 @@ export async function evaluateCoreBlockedTurn(
   const model = await binding.readTurnModel(services.db, input);
   if (!model) return { kind: "revoked" };
   await recoverCoreHealthAndWake(services, binding, identity);
+  const failover = await evaluateFailoverBlockedTurn(services, binding, identity, model);
+  if (failover) return failover;
   const evaluation = await binding.evaluatePlacement(services.db, {
     identity,
     productModelId: model.productModelId,
@@ -250,6 +261,94 @@ export async function evaluateCoreBlockedTurn(
         waitReason: evaluation.reason,
         earliestResetAt: evaluation.earliestResetAt,
         healthRetryAt: evaluation.healthRetryAt,
+      };
+  }
+}
+
+/** Fresh accepted policy + current readiness/settings decide the whole pool.
+ * Stored waiter candidates are deliberately not an input to this evaluator.
+ * A wake grants no credentials: the resumed attempt still claims and leases.
+ */
+async function evaluateFailoverBlockedTurn(
+  services: CoreCodexWakeServices,
+  home: CoreWaitBinding,
+  identity: SubscriptionCoreTurnIdentity,
+  model: { productModelId: string; reasoningLevel: string },
+): Promise<SubscriptionCoreCodexWaitEvaluation | null> {
+  const settings = services.settings;
+  if (!settings?.subscriptionCrossProviderFailoverEnabled) return null;
+  const context = await withSubscriptionCoreAcceptedTurn(services.db, identity, async (tx) => {
+    const session = await getSession(tx, identity.workspaceId, identity.sessionId);
+    const turn = await getSessionTurn(tx, identity.workspaceId, identity.turnId);
+    if (!session || !turn || turn.sessionId !== identity.sessionId) return null;
+    const accepted = readTurnExecutionPolicyV1(turn.metadata);
+    return (
+      session.codexCompactionMode === "portable" &&
+      turn.source !== "compaction" &&
+      accepted.kind === "valid" &&
+      accepted.policy.credentialRestriction === undefined &&
+      accepted.policy.productModelId === model.productModelId
+    );
+  });
+  if (context.status !== "completed" || context.value === null) return { kind: "revoked" };
+  if (!context.value) return null;
+  const bindings = subscriptionCoreWaitBindings();
+  const models = await servingCatalogForBlockedTurn(
+    services.db,
+    settings,
+    identity,
+    model.productModelId,
+    bindings.map((binding) => binding.provider),
+  );
+  if (
+    !models.some(
+      (candidate) => candidate.id === model.productModelId && candidate.provider === home.provider,
+    )
+  )
+    return null;
+  const request = { identity, ...model, models, crossProviderFailoverEnabled: true };
+  let evaluation = await evaluateSubscriptionCorePlacementWithFailover(
+    services.db,
+    subscriptionCoreProvider(home.provider),
+    request,
+  );
+  // Only candidates derived by the live authority/policy evaluator can have
+  // their health or usage refreshed. Personal billing keeps the same accepted
+  // identity, including shared-session and frozen-background restrictions.
+  const candidates = new Set(evaluation.candidateProviders ?? []);
+  for (const binding of bindings) {
+    if (binding.provider === home.provider || !candidates.has(binding.provider)) continue;
+    await recoverCoreHealthAndWake(services, binding, identity);
+    await binding
+      .refreshBeforeReconcile?.({ db: services.db, settings }, identity)
+      .catch(() => undefined);
+  }
+  if ([...candidates].some((provider) => provider !== home.provider)) {
+    evaluation = await evaluateSubscriptionCorePlacementWithFailover(
+      services.db,
+      subscriptionCoreProvider(home.provider),
+      request,
+    );
+  }
+  switch (evaluation.kind) {
+    case "not_visible":
+      return { kind: "revoked" };
+    case "cutover_not_enabled":
+      return { kind: "paused" };
+    case "run":
+      return { kind: "run", candidateProviders: evaluation.candidateProviders ?? [] };
+    case "wait":
+      // Leave the capacity wait once to surface the actionable configuration
+      // failure at claim. This is not a capacity/authority grant, and does not
+      // fabricate a provider or strand work behind an unrelated quota reset.
+      if (evaluation.reason === "failover_no_model_mapping")
+        return { kind: "run", candidateProviders: [] };
+      return {
+        kind: "wait",
+        waitReason: evaluation.reason,
+        earliestResetAt: evaluation.earliestResetAt,
+        healthRetryAt: evaluation.healthRetryAt,
+        candidateProviders: evaluation.candidateProviders ?? [],
       };
   }
 }

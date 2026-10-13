@@ -1,5 +1,11 @@
 import { z } from "zod";
 import { RetainedArtifactReferenceSchema } from "./retained-output";
+import {
+  containsSecretReference,
+  referenceKey,
+  replaceReferencesDeep,
+  tokenizeSecretText,
+} from "./secret-references";
 
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
 export const BROWSER_CONTROL_PROTOCOL_VERSION = INTERACTION_PROTOCOL_VERSION;
@@ -770,52 +776,7 @@ export const NetworkRouteMutationResponse = z
   .strict();
 export type NetworkRouteMutationResponse = z.infer<typeof NetworkRouteMutationResponse>;
 
-export const SiteAuthFieldPurpose = z.enum(["identifier", "password", "secret", "totp"]);
-export type SiteAuthFieldPurpose = z.infer<typeof SiteAuthFieldPurpose>;
-
 export const SiteAuthAuthority = z.discriminatedUnion("kind", [
-  z
-    .object({
-      id: boundedOpaqueId,
-      kind: z.literal("connection_fields"),
-      label: z.string().trim().min(1).max(200),
-      credential: InteractionCredentialAuthorityRef,
-      fields: z
-        .array(
-          z
-            .object({
-              id: boundedOpaqueId,
-              purpose: SiteAuthFieldPurpose,
-              credentialKey: z.string().trim().min(1).max(256),
-              digits: z.number().int().min(6).max(10).optional(),
-              periodSeconds: z.number().int().min(15).max(300).optional(),
-              algorithm: z.enum(["sha1", "sha256", "sha512"]).optional(),
-            })
-            .strict()
-            .superRefine((field, context) => {
-              const totp = field.purpose === "totp";
-              if (!totp && (field.digits || field.periodSeconds || field.algorithm)) {
-                context.addIssue({
-                  code: "custom",
-                  message: "TOTP parameters require purpose=totp",
-                });
-              }
-            }),
-        )
-        .min(1)
-        .max(32),
-    })
-    .strict(),
-  z
-    .object({
-      id: boundedOpaqueId,
-      kind: z.literal("human"),
-      label: z.string().trim().min(1).max(200),
-      fields: z
-        .array(z.object({ id: boundedOpaqueId, purpose: SiteAuthFieldPurpose }).strict())
-        .max(32),
-    })
-    .strict(),
   z
     .object({
       id: boundedOpaqueId,
@@ -961,17 +922,6 @@ function validateSiteAuthConfiguration(
       });
     }
   }
-  for (const [index, authority] of connection.authorities.entries()) {
-    if (authority.kind === "external_provider") continue;
-    const fieldIds = authority.fields.map((field) => field.id);
-    if (new Set(fieldIds).size !== fieldIds.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["authorities", index, "fields"],
-        message: "authority field ids repeat",
-      });
-    }
-  }
 }
 
 export const SiteAuthConnection = SiteAuthConnectionConfiguration.extend({
@@ -1033,7 +983,6 @@ export type SiteAuthConnectionMutationResponse = z.infer<typeof SiteAuthConnecti
 export const AuthRunState = z.enum([
   "discovering",
   "awaiting_choice",
-  "awaiting_secret",
   "awaiting_external_action",
   "working",
   "verified",
@@ -1050,15 +999,6 @@ export const AuthRunChoice = z
   })
   .strict();
 export type AuthRunChoice = z.infer<typeof AuthRunChoice>;
-
-export const AuthRunPendingField = z
-  .object({
-    id: boundedOpaqueId,
-    label: z.string().trim().min(1).max(200),
-    purpose: SiteAuthFieldPurpose,
-  })
-  .strict();
-export type AuthRunPendingField = z.infer<typeof AuthRunPendingField>;
 
 export const AuthRunExternalAction = z
   .object({
@@ -1085,7 +1025,6 @@ export const AuthRun = z
     authorityId: boundedOpaqueId.nullable(),
     state: AuthRunState,
     choices: z.array(AuthRunChoice).max(64),
-    pendingFields: z.array(AuthRunPendingField).max(64),
     externalAction: AuthRunExternalAction.nullable(),
     interventionId: z.string().uuid().nullable(),
     verifiedUrl: boundedUrl.nullable(),
@@ -1126,13 +1065,6 @@ export const AuthRun = z
         code: "custom",
         path: ["choices"],
         message: "choices require awaiting-choice state",
-      });
-    }
-    if ((run.state === "awaiting_secret") !== run.pendingFields.length > 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["pendingFields"],
-        message: "pending fields require awaiting-secret state",
       });
     }
     if ((run.state === "awaiting_external_action") !== (run.externalAction !== null)) {
@@ -1178,14 +1110,12 @@ export const ReportAuthRunPayload = z
     authorityId: boundedOpaqueId.optional(),
     state: z.enum([
       "awaiting_choice",
-      "awaiting_secret",
       "awaiting_external_action",
       "working",
       "failed",
       "cancelled",
     ]),
     choices: z.array(AuthRunChoice).max(64).optional(),
-    pendingFields: z.array(AuthRunPendingField).max(64).optional(),
     externalAction: AuthRunExternalAction.nullable().optional(),
     failureCode: boundedOpaqueId.nullable().optional(),
   })
@@ -1196,13 +1126,6 @@ export const ReportAuthRunPayload = z
         code: "custom",
         path: ["choices"],
         message: "choices require awaiting-choice state",
-      });
-    }
-    if ((report.state === "awaiting_secret") !== Boolean(report.pendingFields?.length)) {
-      context.addIssue({
-        code: "custom",
-        path: ["pendingFields"],
-        message: "pending fields require awaiting-secret state",
       });
     }
     if ((report.state === "awaiting_external_action") !== Boolean(report.externalAction)) {
@@ -1226,48 +1149,6 @@ export const ReportAuthRunRequest = ReportAuthRunPayload.safeExtend({
   operationId: z.string().uuid(),
 });
 export type ReportAuthRunRequest = z.infer<typeof ReportAuthRunRequest>;
-
-export const ProtectedAuthField = z
-  .object({ fieldId: boundedOpaqueId, locator: z.lazy(() => BrowserLocator) })
-  .strict();
-export type ProtectedAuthField = z.infer<typeof ProtectedAuthField>;
-
-export const ProtectedAuthSubmit = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("none") }).strict(),
-  z.object({ type: z.literal("click"), locator: z.lazy(() => BrowserLocator) }).strict(),
-  z
-    .object({
-      type: z.literal("press"),
-      key: z.string().min(1).max(256),
-      locator: z.lazy(() => BrowserLocator).optional(),
-    })
-    .strict(),
-]);
-export type ProtectedAuthSubmit = z.infer<typeof ProtectedAuthSubmit>;
-
-export const ProtectedAuthFillRequest = z
-  .object({
-    operationId: z.string().uuid(),
-    expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    expectedTargetGeneration: opaqueGeneration,
-    expectedDocumentGeneration: opaqueGeneration.nullable(),
-    expectedFrameId: opaqueGeneration.nullable(),
-    authorityId: boundedOpaqueId,
-    fields: z.array(ProtectedAuthField).min(1).max(32),
-    submit: ProtectedAuthSubmit.default({ type: "none" }),
-  })
-  .strict();
-export type ProtectedAuthFillRequest = z.infer<typeof ProtectedAuthFillRequest>;
-
-export const ProtectedAuthFillResponse = z
-  .object({
-    run: AuthRun,
-    status: z.enum(["submitted", "working", "needs_human", "stale", "failed"]),
-    operationId: z.string().uuid(),
-    replayed: z.boolean(),
-  })
-  .strict();
-export type ProtectedAuthFillResponse = z.infer<typeof ProtectedAuthFillResponse>;
 
 /** Public request for advancing a provider-managed AuthRun. Provider secrets,
  * profile names, browser ids, and hosted-login URLs stay behind browserd. */
@@ -2085,6 +1966,10 @@ const browserActionVariants = [
       type: z.literal("type"),
       locator: BrowserLocator.optional(),
       text: z.string().max(1_000_000),
+      /** `insert` (default) inserts the text in one input event. `keys`
+       * dispatches one key press per character, for split one-time-code boxes
+       * and other pages that only listen for keydown. */
+      mode: z.enum(["insert", "keys"]).optional(),
     })
     .strict(),
   z
@@ -2358,6 +2243,7 @@ export const InteractionError = z
       "outcome_unknown",
       "invalid_action",
       "timeout",
+      "tab_not_responding",
       "controller_lost",
       "driver_failed",
     ]),
@@ -2367,6 +2253,19 @@ export const InteractionError = z
   })
   .strict();
 export type InteractionError = z.infer<typeof InteractionError>;
+
+/** Upper bound on distinct secret references one interaction command may carry. */
+export const INTERACTION_MAX_SECRET_VALUES = 64;
+
+/** Controller-private plaintext for the `{{secret:…}}` references in one
+ * interaction command, keyed by `referenceKey(reference)`. TOTP references
+ * carry the code computed at dispatch, never the seed. */
+export const InteractionSecretValues = z
+  .record(z.string().min(1).max(4_096), z.string().max(1_000_000))
+  .refine((values) => Object.keys(values).length <= INTERACTION_MAX_SECRET_VALUES, {
+    message: "too many secret values",
+  });
+export type InteractionSecretValues = z.infer<typeof InteractionSecretValues>;
 
 export const BrowserActionCommand = z
   .object({
@@ -2385,6 +2284,10 @@ export const BrowserActionCommand = z
      * pointer click, and otherwise returns no observation. */
     observationMode: z.enum(["full", "none", "input"]).optional(),
     action: z.union([BrowserAction, BrowserActionBatch]),
+    /** Controller-private plaintext for `{{secret:…}}` references in the
+     * action, keyed by `referenceKey`. Never part of a public request, the
+     * command digest, the operation journal, a receipt or a log. */
+    secretValues: InteractionSecretValues.optional(),
   })
   .strict();
 export type BrowserActionCommand = z.infer<typeof BrowserActionCommand>;
@@ -2873,104 +2776,6 @@ export const BrowserActionReceipt = z
   });
 export type BrowserActionReceipt = z.infer<typeof BrowserActionReceipt>;
 
-/** Controller-private protected-fill wire contract. Secret values cross only
- * the credential broker -> exact placement controller boundary; this command
- * is never projected into model MCP, Codemode, public action history, or UI. */
-export const BrowserProtectedAuthFieldValue = ProtectedAuthField.extend({
-  purpose: SiteAuthFieldPurpose,
-  value: z.string().min(1).max(65_536),
-}).strict();
-export type BrowserProtectedAuthFieldValue = z.infer<typeof BrowserProtectedAuthFieldValue>;
-
-export const BrowserProtectedAuthFillCommand = z
-  .object({
-    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-    operationId: z.string().uuid(),
-    browserSessionId: z.string().uuid(),
-    controllerGeneration: opaqueGeneration,
-    targetId: boundedOpaqueId,
-    expectedTargetGeneration: opaqueGeneration,
-    expectedDocumentGeneration: opaqueGeneration,
-    expectedFrameId: opaqueGeneration,
-    actor: InteractionActor,
-    authorityId: boundedOpaqueId,
-    credentialVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    allowedOrigins: z.array(canonicalWebOrigin).min(1).max(64),
-    fields: z.array(BrowserProtectedAuthFieldValue).min(1).max(32),
-    submit: ProtectedAuthSubmit,
-  })
-  .strict()
-  .superRefine((command, context) => {
-    if (new Set(command.allowedOrigins).size !== command.allowedOrigins.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["allowedOrigins"],
-        message: "protected-fill origins repeat",
-      });
-    }
-    const fieldIds = command.fields.map((field) => field.fieldId);
-    if (new Set(fieldIds).size !== fieldIds.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["fields"],
-        message: "protected-fill field ids repeat",
-      });
-    }
-  });
-export type BrowserProtectedAuthFillCommand = z.infer<typeof BrowserProtectedAuthFillCommand>;
-
-export const BrowserProtectedAuthObservation = z
-  .object({
-    target: BrowserTarget,
-    status: z.enum(["submitted", "working"]),
-  })
-  .strict();
-export type BrowserProtectedAuthObservation = z.infer<typeof BrowserProtectedAuthObservation>;
-
-/** Secret-free placement receipt. It can be journaled, replayed, and returned
- * to the broker without retaining any field value or model-visible page tree. */
-export const BrowserProtectedAuthFillReceipt = z
-  .object({
-    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
-    operationId: z.string().uuid(),
-    browserSessionId: z.string().uuid(),
-    controllerGeneration: opaqueGeneration,
-    targetId: boundedOpaqueId,
-    state: InteractionOperationState,
-    dispatchedAt: z.string().datetime({ offset: true }).nullable(),
-    settledAt: z.string().datetime({ offset: true }).nullable(),
-    observation: BrowserProtectedAuthObservation.nullable(),
-    error: InteractionError.nullable(),
-  })
-  .strict()
-  .superRefine((receipt, context) => {
-    if (
-      receipt.state === "completed" &&
-      (receipt.error !== null || receipt.observation === null || receipt.settledAt === null)
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "completed protected-fill receipt requires a result and no error",
-      });
-    }
-    if (
-      (receipt.state === "failed" || receipt.state === "outcome_unknown") &&
-      (receipt.error === null || receipt.observation !== null || receipt.settledAt === null)
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "terminal protected-fill error requires error, no result, and time",
-      });
-    }
-    if (receipt.state === "dispatched" && receipt.dispatchedAt === null) {
-      context.addIssue({
-        code: "custom",
-        message: "dispatched protected-fill receipt requires dispatch time",
-      });
-    }
-  });
-export type BrowserProtectedAuthFillReceipt = z.infer<typeof BrowserProtectedAuthFillReceipt>;
-
 export const ComputerSessionCapabilities = z
   .object({
     semanticObservation: z.boolean(),
@@ -3242,6 +3047,8 @@ export const ComputerActionCommand = z
     expectedFrameId: opaqueGeneration.nullable(),
     actor: InteractionActor,
     action: ComputerAction,
+    /** Controller-private; see BrowserActionCommand.secretValues. */
+    secretValues: InteractionSecretValues.optional(),
   })
   .strict()
   .superRefine((command, context) => {
@@ -3472,6 +3279,8 @@ export const ComputerNativeCommand = ComputerNativeCallRequest.extend({
   controllerGeneration: opaqueGeneration,
   targetId: z.null(),
   actor: InteractionActor,
+  /** Controller-private; see BrowserActionCommand.secretValues. */
+  secretValues: InteractionSecretValues.optional(),
 }).strict();
 export type ComputerNativeCommand = z.infer<typeof ComputerNativeCommand>;
 export const ComputerNativeResult = z
@@ -3514,3 +3323,293 @@ export const ComputerOperationReceipt = z.union([ComputerNativeReceipt, Computer
 export type ComputerOperationReceipt = z.infer<typeof ComputerOperationReceipt>;
 export const ComputerOperationObservation = z.union([ComputerNativeResult, ComputerObservation]);
 export type ComputerOperationObservation = z.infer<typeof ComputerOperationObservation>;
+
+// ---------------------------------------------------------------------------
+// Secret references in interaction commands (design §10B.4, BR-1..3).
+//
+// The API resolves `{{secret:…}}` references for agent callers and sends the
+// plaintext beside the command in `secretValues`. The controller materializes
+// the action with these helpers immediately before driver dispatch, so the
+// digest, journal, receipts and observations only ever see references.
+// ---------------------------------------------------------------------------
+
+export class InteractionSecretValueError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InteractionSecretValueError";
+  }
+}
+
+/** Replace each reference with its value from `values` and remove escapes.
+ * Throws when a reference has no value or a candidate is malformed; the
+ * message never contains a value. */
+export function substituteSecretText(text: string, values: InteractionSecretValues): string {
+  if (!containsSecretReference(text)) return text;
+  return tokenizeSecretText(text)
+    .map((token) => {
+      if (token.type === "text") return token.value;
+      if (token.type === "invalid") {
+        throw new InteractionSecretValueError(`invalid secret reference: ${token.reason}`);
+      }
+      const value = values[referenceKey(token.reference)];
+      if (value === undefined) {
+        throw new InteractionSecretValueError(
+          `no value was supplied for secret reference ${token.reference.raw}`,
+        );
+      }
+      return value;
+    })
+    .join("");
+}
+
+/** The text fields of a browser action that may carry secret references. */
+export function browserActionSecretTexts(action: BrowserAction | BrowserActionBatch): string[] {
+  if (action.type === "batch") return action.actions.flatMap(browserActionSecretTexts);
+  switch (action.type) {
+    case "fill":
+      return [action.value];
+    case "type":
+      return [action.text];
+    case "clipboard":
+      return action.operation === "write" && action.text !== undefined ? [action.text] : [];
+    default:
+      return [];
+  }
+}
+
+function materializeBrowserAction(
+  action: BrowserAction,
+  values: InteractionSecretValues,
+): BrowserAction {
+  switch (action.type) {
+    case "fill":
+      return { ...action, value: substituteSecretText(action.value, values) };
+    case "type":
+      return { ...action, text: substituteSecretText(action.text, values) };
+    case "clipboard":
+      return action.operation === "write" && action.text !== undefined
+        ? { ...action, text: substituteSecretText(action.text, values) }
+        : action;
+    default:
+      return action;
+  }
+}
+
+/** The action to dispatch: references replaced when the command carries
+ * `secretValues`; otherwise the action exactly as written (literal text). */
+export function materializeBrowserActionSecrets(
+  command: Pick<BrowserActionCommand, "action" | "secretValues">,
+): BrowserAction | BrowserActionBatch {
+  const values = command.secretValues;
+  if (values === undefined) return command.action;
+  const action = command.action;
+  if (action.type === "batch") {
+    return {
+      ...action,
+      actions: action.actions.map((entry) => materializeBrowserAction(entry, values)),
+    };
+  }
+  return materializeBrowserAction(action, values);
+}
+
+/** The text fields of a computer action that may carry secret references. */
+export function computerActionSecretTexts(action: ComputerAction): string[] {
+  switch (action.type) {
+    case "keyboard":
+      return action.action === "type" ? [action.value] : [];
+    case "semantic":
+      return action.action === "set_value" && typeof action.value === "string"
+        ? [action.value]
+        : [];
+    case "clipboard":
+      return action.operation === "write" && action.text !== undefined ? [action.text] : [];
+    default:
+      return [];
+  }
+}
+
+export function materializeComputerActionSecrets(
+  command: Pick<ComputerActionCommand, "action" | "secretValues">,
+): ComputerAction {
+  const values = command.secretValues;
+  const action = command.action;
+  if (values === undefined) return action;
+  switch (action.type) {
+    case "keyboard":
+      return action.action === "type"
+        ? { ...action, value: substituteSecretText(action.value, values) }
+        : action;
+    case "semantic":
+      return action.action === "set_value" && typeof action.value === "string"
+        ? { ...action, value: substituteSecretText(action.value, values) }
+        : action;
+    case "clipboard":
+      return action.operation === "write" && action.text !== undefined
+        ? { ...action, text: substituteSecretText(action.text, values) }
+        : action;
+    default:
+      return action;
+  }
+}
+
+/** Native desktop call arguments with every reference in every string replaced. */
+export function materializeComputerNativeSecrets(
+  command: Pick<ComputerNativeCommand, "arguments" | "secretValues">,
+): Record<string, unknown> {
+  const values = command.secretValues;
+  if (values === undefined) return command.arguments;
+  return replaceReferencesDeep(command.arguments, (reference) => {
+    const value = values[referenceKey(reference)];
+    if (value === undefined) {
+      throw new InteractionSecretValueError(
+        `no value was supplied for secret reference ${reference.raw}`,
+      );
+    }
+    return value;
+  });
+}
+
+/** The command without its private side map: what digests and journals bind. */
+export function withoutInteractionSecretValues<T extends { secretValues?: unknown }>(
+  command: T,
+): Omit<T, "secretValues"> {
+  if (!("secretValues" in command)) return command;
+  const { secretValues: _omitted, ...rest } = command;
+  return rest;
+}
+
+export const INTERACTION_REDACTED_SECRET = "[secret]";
+/** Values shorter than this are not searched for: they would redact noise. */
+export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
+
+/** Identifier-like keys keep their strings untouched (generations, refs,
+ * digests, image payloads, timestamps): redacting inside them would corrupt
+ * the result rather than protect anything. */
+const NON_TEXT_KEY = /^(id|ref|data|url|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
+
+/** Deep copy with every occurrence of a supplied secret value in a text
+ * string replaced by `[secret]`. Used on results a driver returns after
+ * dispatching materialized values (CUA tools echo typed text; desktop
+ * accessibility trees expose field values). */
+export function redactInteractionSecretValues<T>(
+  value: T,
+  secretValues: InteractionSecretValues | undefined,
+): T {
+  if (secretValues === undefined) return value;
+  const needles = [...new Set(Object.values(secretValues))]
+    .filter((needle) => needle.length >= INTERACTION_MIN_REDACTED_SECRET_CHARS)
+    .sort((left, right) => right.length - left.length);
+  if (needles.length === 0) return value;
+  const redactText = (text: string): string => {
+    let out = text;
+    for (const needle of needles) {
+      if (out.includes(needle)) out = out.split(needle).join(INTERACTION_REDACTED_SECRET);
+    }
+    return out;
+  };
+  const visit = (entry: unknown, key: string | null): unknown => {
+    if (typeof entry === "string") {
+      return key !== null && NON_TEXT_KEY.test(key) ? entry : redactText(entry);
+    }
+    if (Array.isArray(entry)) return entry.map((item) => visit(item, key));
+    if (entry !== null && typeof entry === "object") {
+      return Object.fromEntries(
+        Object.entries(entry as Record<string, unknown>).map(([childKey, child]) => [
+          childKey,
+          visit(child, childKey),
+        ]),
+      );
+    }
+    return entry;
+  };
+  return visit(value, null) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Agent-owned passkeys (design §10B.4, BR-5). browserd hosts a CDP WebAuthn
+// virtual authenticator on every page target. The API loads the principal's
+// passkey items into it and pulls registration and assertion events back with
+// one control call around every agent browser action.
+// ---------------------------------------------------------------------------
+
+const passkeyBinary = z
+  .string()
+  .min(1)
+  .max(16_384)
+  .regex(/^[A-Za-z0-9+/_-]+={0,2}$/u, "expected base64 or base64url");
+
+/** A WebAuthn credential as the virtual authenticator holds it. Binary fields
+ * use the CDP encoding (base64). `privateKey` is PKCS#8. */
+export const BrowserPasskeyCredentialMaterial = z
+  .object({
+    rpId: z.string().min(1).max(253),
+    credentialId: passkeyBinary,
+    userHandle: passkeyBinary.nullable(),
+    userName: z.string().max(512).nullable(),
+    userDisplayName: z.string().max(512).nullable(),
+    privateKey: passkeyBinary,
+    signCount: z.number().int().nonnegative().max(0xffff_ffff),
+  })
+  .strict();
+export type BrowserPasskeyCredentialMaterial = z.infer<typeof BrowserPasskeyCredentialMaterial>;
+
+/** A vault passkey item loaded into the session's authenticators. */
+export const BrowserPasskeyCredential = BrowserPasskeyCredentialMaterial.extend({
+  itemId: z.string().uuid(),
+}).strict();
+export type BrowserPasskeyCredential = z.infer<typeof BrowserPasskeyCredential>;
+
+export const BrowserPasskeyEvent = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("registered"),
+      eventId: z.string().uuid(),
+      occurredAt: z.string().datetime({ offset: true }),
+      targetId: boundedOpaqueId,
+      /** Top-level origin of the page that registered it, when known. */
+      origin: z.string().max(2_048).nullable(),
+      credential: BrowserPasskeyCredentialMaterial,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("asserted"),
+      eventId: z.string().uuid(),
+      occurredAt: z.string().datetime({ offset: true }),
+      targetId: boundedOpaqueId,
+      rpId: z.string().min(1).max(253),
+      credentialId: passkeyBinary,
+      /** Vault item the credential was loaded from; null for one registered in this session and not yet synced. */
+      itemId: z.string().uuid().nullable(),
+      signCount: z.number().int().nonnegative().max(0xffff_ffff),
+    })
+    .strict(),
+]);
+export type BrowserPasskeyEvent = z.infer<typeof BrowserPasskeyEvent>;
+
+export const BROWSER_MAX_PASSKEY_CREDENTIALS = 256;
+export const BROWSER_MAX_PASSKEY_EVENTS = 256;
+
+/** Controller-private. `credentials` replaces the loaded set (null keeps it).
+ * Events stay pending in browserd until a later sync acknowledges them. */
+export const BrowserPasskeySyncRequest = z
+  .object({
+    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    credentials: z.array(BrowserPasskeyCredential).max(BROWSER_MAX_PASSKEY_CREDENTIALS).nullable(),
+    acknowledgeEventIds: z.array(z.string().uuid()).max(BROWSER_MAX_PASSKEY_EVENTS),
+  })
+  .strict();
+export type BrowserPasskeySyncRequest = z.infer<typeof BrowserPasskeySyncRequest>;
+
+export const BrowserPasskeySyncResponse = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    /** Page targets that currently host a virtual authenticator. */
+    authenticators: z.number().int().nonnegative(),
+    events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
+  })
+  .strict();
+export type BrowserPasskeySyncResponse = z.infer<typeof BrowserPasskeySyncResponse>;

@@ -19,11 +19,17 @@ const tokensPath = join(stylesRoot, "tokens.css");
 const effectiveTokensPath = join(stylesRoot, "effective-tokens.css");
 const checkOnly = process.argv.includes("--check");
 
+// The visualization assets are raw CSS/HTML for a sandboxed iframe, not class
+// names, and the inline exclusions are prose words from comments and
+// identifiers that Tailwind would otherwise compile into unused utilities.
 const input = `@import "tailwindcss/theme.css" layer(theme);
 @import "./index.css";
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "./responsive.css";
 @source "../src";
+@source not "../src/components/artifacts/visualization-assets";
+@source not "../src/components/artifacts/visualization-assets.gen.ts";
+@source not inline("blur collapse filter lowercase ring");
 `;
 
 const scope = selectorParser().astSync(":where(.og-root)").nodes[0]!.nodes[0]!;

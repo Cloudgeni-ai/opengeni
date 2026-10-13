@@ -17,6 +17,9 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
   SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
   withSubscriptionCoreAcceptedTurn,
@@ -32,6 +35,16 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appConnectionUrl = "";
+/**
+ * This binary requires the SuperGrok and Claude receipts, which the rolling
+ * state lacks, and the absence of everything the drained retirement drops
+ * (held back with the cutovers, whose receipts it requires).
+ */
+const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+  "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+];
 /** Runtime posture violations right after applying 0707 to a provisioned database, before provisioning again. */
 let unprovisionedPostureViolations: string[] | null = null;
 // A deployment's own application role (not named opengeni_app), configured
@@ -71,11 +84,29 @@ beforeAll(async () => {
     "0728_subscription_core_personal_connect_format.sql",
     // 0730 derives the personal version reader from 0707's owner reader.
     "0730_subscription_core_personal_connection_versions.sql",
+    // 0735's owner-only usage routines run on 0707's owner internals.
+    "0735_subscription_core_owned_connection_usage.sql",
+    // Reads the registry/receipt and rewrites the admission guard withheld above.
+    "0746_subscription_failover_readiness_and_request_fence.sql",
+    "0752_subscription_personal_sharing.sql",
   ];
+  // The drained SuperGrok and Claude cutovers and the retirement after them
+  // are maintenance-only: a rolling deployment of 0707 never applies them, so
+  // they stay recorded and unapplied here.
+  const xaiCutover = "0747_subscription_core_xai_cutover.sql";
+  const claudeCutover = "0748_subscription_core_claude_cutover.sql";
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    for (const name of withheld) await owner`insert into schema_migrations(name) values (${name})`;
+    for (const name of [
+      ...withheld,
+      xaiCutover,
+      claudeCutover,
+      "0749_subscription_shared_personal_choice.sql",
+      "0750_subscription_waiter_candidates.sql",
+      SUBSCRIPTION_RETIREMENT_MIGRATION,
+    ])
+      await owner`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     await owner`delete from schema_migrations where name in ${owner(withheld)}`;
@@ -393,7 +424,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         targetSchema: "public",
       };
       const posture = await inspectRuntimeDatabasePosture(client!.db, options);
-      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(BEFORE_XAI_CUTOVER);
       for (const name of SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES) {
         const found = posture.privateRoutines.filter((entry) => entry.name === name);
         expect(found).toHaveLength(1);
@@ -427,10 +458,11 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
       expect(rows.length).toBe(
         SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES.length +
           SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length +
-          // 0715: the registered connection-kind lookup the routines call.
-          1,
+          // Registered kind lookup and B1's narrow kind/receipt reader.
+          2,
       );
       expect(rows.some((row) => row.name === "subscription_core_connection_kind")).toBe(true);
+      expect(rows.some((row) => row.name === "subscription_core_failover_readiness")).toBe(true);
       for (const row of rows) {
         expect({
           name: row.name,
@@ -1020,7 +1052,7 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
   test.skipIf(!realDb)(
     "applied to a provisioned database, 0707 keeps the runtime posture clean before provisioning again",
     () => {
-      expect(unprovisionedPostureViolations).toEqual([]);
+      expect(unprovisionedPostureViolations).toEqual(BEFORE_XAI_CUTOVER);
       // 0715 grants its two routines to every configured application role,
       // not only the default name, before provision-roles.
       expect(customRoleKindRoutinesBeforeProvision).toEqual({

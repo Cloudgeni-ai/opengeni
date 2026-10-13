@@ -18,9 +18,8 @@ const PORTABLE_WORKSPACE_DESTINATIONS: Readonly<
   sessions: { anyWorkspacePermissions: ["sessions:read"] },
   agents: { anyWorkspacePermissions: ["sessions:read"] },
   priority: { anyWorkspacePermissions: ["sessions:read"] },
-  "variable-sets": {
-    allWorkspacePermissions: ["variable-sets:list", "secrets:list"],
-  },
+  secrets: { anyWorkspacePermissions: ["secrets:list", "variable-sets:list"] },
+  "variable-sets": { anyWorkspacePermissions: ["secrets:list", "variable-sets:list"] },
   rigs: { anyWorkspacePermissions: ["rigs:use"] },
   machines: { anyWorkspacePermissions: ["enrollments:read"] },
   capabilities: { anyWorkspacePermissions: ["connections:read"] },

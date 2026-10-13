@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Agent, RunContext, RunState } from "@openai/agents";
-import { OPEN_SUFFIX_RUN_STATE_BLOB } from "@opengeni/contracts";
+import {
+  OPEN_SUFFIX_RUN_STATE_BLOB,
+  SecretReferenceError,
+  buildMissingSecretAskCard,
+} from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   AttemptToolApprovalRequiredError,
@@ -75,6 +79,7 @@ async function fixture(
   execute: (signal: AbortSignal | undefined) => Promise<string>,
   inputSchema: AttemptToolDefinition["inputSchema"] = { type: "object" },
   lifecycle?: AttemptToolDefinition["lifecycle"],
+  resolveArguments?: Parameters<typeof createAttemptToolEnvironment>[0]["resolveArguments"],
 ) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
@@ -140,6 +145,7 @@ async function fixture(
         }),
       },
     ],
+    ...(resolveArguments ? { resolveArguments } : {}),
   });
   await persistAttemptToolCatalog(client.db, environment.catalog);
   return { scope, environment, turn: claimed.turn };
@@ -841,6 +847,66 @@ describe("CodemodeAttemptDispatcher", () => {
         "agent.toolCall.created",
         "agent.toolCall.output",
       ]);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("a secret reference failure settles as failed with the ready ask card (GW-3)", async () => {
+    if (!available) return;
+    let executions = 0;
+    const failures = [
+      { raw: "{{secret:Stripe/api_key}}", code: "not_found" as const, message: "missing" },
+    ];
+    const { scope, environment } = await fixture(
+      async () => {
+        executions += 1;
+        return "unreachable";
+      },
+      { type: "object" },
+      undefined,
+      () => {
+        throw new SecretReferenceError(
+          failures,
+          buildMissingSecretAskCard(failures, { hasActingHuman: true }),
+        );
+      },
+    );
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: { query: "{{secret:Stripe/api_key}}" },
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      await bus.request(
+        codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+        encodeCodemodeDispatchRequest({
+          version: 1,
+          operationId,
+          catalogDigest: environment.catalog.digest,
+        }),
+        { timeoutMs: 1_000 },
+      );
+      const operation = await waitForTerminal(scope, operationId);
+      expect(operation).toMatchObject({
+        state: "failed",
+        errorCode: "secret_reference_error",
+        arguments: { query: "{{secret:Stripe/api_key}}" },
+      });
+      const output = JSON.parse(operation!.errorMessage!) as {
+        askCard: { questions: Array<{ kind: string }> };
+      };
+      expect(output.askCard.questions[0]?.kind).toBe("secret");
+      expect(executions).toBe(0);
     } finally {
       await dispatcher.close();
     }

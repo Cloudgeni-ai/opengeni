@@ -29,6 +29,22 @@ needed; Opengeni never manufactures an automatic reprompt.
 No outcome creates a synthetic `user.message`, no response starts a new logical
 turn, and a host must not translate Skip or expiry into approval rejection.
 
+## Secret questions
+
+A question with `kind: "secret"` collects a password, key or one-time-code seed
+without it ever reaching the model. The card shows a masked input, an optional
+username, an optional password generator (`allowGenerate`) and where the value
+is saved (`saveTo`: `user` for Only me, `workspace`, or `task`). The client
+submits values in the write-only `secretAnswers` array next to the normal
+answers; the API strips it before building any event, and the database writes
+the vault item in the same transaction as the answer. The agent's answer is
+`{secret: {reference, username, vaultName, itemName, saveTo}}`, never a value.
+
+Saving to Only me requires a signed-in human submitter. Only hosted vaults can
+be targets. Slack, push and email surfaces link to the card instead of
+collecting values, and voice asks the person to answer in the app. The full
+model is in [`secrets.md`](secrets.md#asking-a-person).
+
 ## Durable lifecycle
 
 One `request_human_input` interruption maps to one row in

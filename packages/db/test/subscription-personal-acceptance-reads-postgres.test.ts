@@ -32,6 +32,8 @@ import {
   MAINTENANCE_WORK_PROBE_ROUTINES,
   readSubscriptionCoreTurnIdentity,
   recoverSubscriptionCoreCodexConnectionHealth,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -40,11 +42,15 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
+import { stageVaultPolicyColumns, withoutAbsentVaultPosture } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0726_subscription_personal_acceptance_reads.sql";
+const PENDING_RETIREMENT = retiredSubscriptionObjectDescriptions().map(
+  retiredSubscriptionObjectViolation,
+);
 const EMPTY = { version: 2, personal: [] };
 const key = Buffer.alloc(32, 61);
 const ROUTINES = [
@@ -477,6 +483,7 @@ beforeAll(async () => {
     for (const name of heldBack)
       await staging`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
+    await stageVaultPolicyColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -532,10 +539,13 @@ beforeAll(async () => {
     targetSchema: "public",
     requiredRuntimeRoutines: [],
   };
+  // Stopped before 0739: the absent vault objects are expected.
   const evaluate = async () =>
-    evaluateRuntimeDatabasePosture(
-      await inspectRuntimeDatabasePosture(client!.db, options),
-      options,
+    withoutAbsentVaultPosture(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      ),
     );
   const unprovisioned = await evaluate();
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
@@ -565,21 +575,35 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     // published 0730 migrations (personal row versions and maintenance probes)
     // and every later migration (including more maintenance probes) are held
     // back here, so this binary's posture reports exactly the routines they
-    // add, and nothing else.
+    // add, plus the pending retirement of the legacy objects.
     const heldBack = [
       // 0728
       "connect_subscription_core_personal(text, uuid, uuid, text, text, text, text, text, jsonb, timestamp with time zone, timestamp with time zone, text, text, text, text)",
       // 0730
       "subscription_core_personal_connection_versions(text, uuid, uuid, text)",
+      // 0735
+      "read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid)",
+      "begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)",
+      "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",
       // 0728
       "subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint)",
+      // 0752
+      "subscription_core_personal_sharing(text, uuid, text, uuid, integer)",
     ].map((routine) => `subscription M3 precursor private routine ${routine} is missing or unsafe`);
     heldBack.push(
       ...MAINTENANCE_WORK_PROBE_ROUTINES.map(
         ([routine]) => `maintenance work check ${routine} is missing or has unsafe posture`,
       ),
     );
-    expect(posture).toEqual({ unprovisioned: heldBack, provisioned: heldBack });
+    const expected = [
+      ...heldBack,
+      ...PENDING_RETIREMENT,
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+    ].sort();
+    if (!posture) throw new Error("Expected the staged database posture");
+    expect([...posture.unprovisioned].sort()).toEqual(expected);
+    expect([...posture.provisioned].sort()).toEqual(expected);
   });
 
   test("before 0726 every writer froze the empty value for a serviceable personal account", () => {

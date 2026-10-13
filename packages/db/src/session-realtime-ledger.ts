@@ -7,7 +7,10 @@ import {
   ReasoningEffort,
   type SessionRealtimeMode,
 } from "@opengeni/contracts";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -1226,6 +1229,7 @@ async function admitRealtimeDelegationInTransaction(
       mode.personalConnectionDelegations,
     ),
     mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
+    connectionAccountIntent: parseConnectionAccountIntent(mode.connectionAccountIntent),
   });
   return {
     turnId: admitted.turnId,

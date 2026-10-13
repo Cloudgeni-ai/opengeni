@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
+import { SecretRefText } from "../components/secret-ref-chip";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
 import type { ToolCallTruncation } from "./types";
@@ -392,7 +393,7 @@ export function TermBlock({
           <span className="select-none text-og-status-idle">$</span>
           {command != null ? (
             <span className="min-w-0 flex-1 truncate font-og-mono text-og-sm text-og-fg-muted">
-              {command}
+              <SecretRefText text={command} />
             </span>
           ) : (
             <span className="flex-1" />
@@ -459,7 +460,7 @@ export function PayloadBlock({
           failed ? "text-og-status-failed" : "text-og-fg-muted",
         )}
       >
-        {text}
+        <SecretRefText text={text} />
       </pre>
     </div>
   );

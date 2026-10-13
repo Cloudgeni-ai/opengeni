@@ -478,6 +478,10 @@ const SettingsSchema = z.object({
     .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   environmentsEncryptionKey: z.string().optional(),
+  // Dev/seed only: accept the `ops_fake_healthy` / `ops_fake_sync_error`
+  // 1Password tokens, backed by the in-memory fake provider. The managed
+  // product posture refuses to start with it set (OP-7).
+  onePasswordFakeTokens: EnvBoolean.default(false),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsOauthShortStateEnabled: EnvBoolean.default(false),
@@ -854,6 +858,13 @@ const SettingsSchema = z.object({
   // Cache the session-independent system-prompt prefix (on by default after an A/B
   // comparison; set false to disable) separately on Anthropic Messages requests.
   experimentSystemPromptCacheSplit: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT
+  // Honor a model-requested foreground shell wait up to 4 minutes instead of 30
+  // seconds, returning early for quiet servers and input prompts (on by default
+  // after an A/B halved command polls; set false to disable).
+  experimentCutPolling: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_CUT_POLLING
+  // Lean non-strict `exec_command` schema: only `cmd` and `max_output_tokens`
+  // are required (on by default after an A/B; set false to disable).
+  experimentOutputCost: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_OUTPUT_COST
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -4482,6 +4493,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
+    onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsOauthShortStateEnabled: optional("OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED"),
@@ -4629,6 +4641,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
+    experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
+    experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(
@@ -8817,6 +8831,36 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
 
 const DEFAULT_SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/** Platform-owned manifest env names that are not `OPENGENI_*` pointers. */
+const PLATFORM_SANDBOX_ENVIRONMENT_NAMES = new Set([
+  "HOME",
+  "PATH",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+]);
+
+/**
+ * The manifest-env constants predicate (W1 secrets delivery, RM-3). A sandbox
+ * manifest may carry only deployment constants: HOME, PATH, git identity and
+ * askpass pointers, `OPENGENI_*` pointers, and the deployment allowlist
+ * (`sandboxEnvironmentVariableNames`). User secrets never qualify: they are
+ * resolved per command from `{{secret:…}}` references. Used by `buildManifest`
+ * and the persisted-envelope strip as a defensive filter.
+ */
+export function sandboxManifestEnvironmentNamePredicate(
+  settings: Settings,
+): (name: string) => boolean {
+  const deployment = new Set(sandboxEnvironmentVariableNames(settings));
+  return (name) =>
+    PLATFORM_SANDBOX_ENVIRONMENT_NAMES.has(name) ||
+    name.startsWith("OPENGENI_") ||
+    deployment.has(name);
+}
+
 function prependPathEntry(pathValue: string | undefined, entry: string): string {
   const parts = (pathValue ?? DEFAULT_SANDBOX_PATH).split(":").filter(Boolean);
   return [entry, ...parts.filter((part) => part !== entry)].join(":");
@@ -8833,9 +8877,9 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * manifest lacks or carries a different value for).
  *
  * Precedence (lowest → highest): deployment allowlist (`collectSandboxEnvironment`)
- * < git identity (`collectGitIdentityEnvironment`) < the session's attached
- * workspace environment < the backend-aware HOME default. Reserved-name validation
- * at write time keeps workspace values from colliding with platform entries.
+ * < git identity (`collectGitIdentityEnvironment`) < the backend-aware HOME default.
+ * The manifest holds deployment constants only: user secrets never ride it.
+ * They are resolved per command from `{{secret:…}}` references (W1 delivery).
  *
  * DELIBERATELY EXCLUDES the per-run, ROTATING git provider token VALUES that
  * `sandboxEnvironmentForRun` mints when a repository resource is
@@ -8851,18 +8895,15 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * the platform never mints or seeds git provider tokens there. The attach
  * surfaces have only the `Session` (no repo resources) and so never seed a token,
  * but unwritten files simply yield no auth; the BLOCKING attach-vs-turn error
- * this helper fixes is for the common (no-repo) and workspace-environment-attached
- * provisioned-box cases.
+ * this helper fixes is for the common (no-repo) provisioned-box case.
  */
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
-  workspaceEnvironment: Record<string, string> = {},
   options: { workspaceId?: string } = {},
 ): Record<string, string> {
   const environment: Record<string, string> = {
     ...collectSandboxEnvironment(settings),
     ...collectGitIdentityEnvironment(settings),
-    ...workspaceEnvironment,
   };
   // Backend-aware HOME: a provisioned box (docker + every cloud provider) runs the
   // agent under the descriptor's workspaceRoot. `local` runs in-process as the host
@@ -9683,6 +9724,11 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   if (settings.productAccessMode === "managed") {
+    if (settings.onePasswordFakeTokens && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_ONEPASSWORD_FAKE_TOKENS is a local development switch and is refused by the managed runtime",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",

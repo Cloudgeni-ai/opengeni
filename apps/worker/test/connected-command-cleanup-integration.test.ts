@@ -5,6 +5,7 @@ import {
   createDb,
   createEnrollment,
   createSession,
+  sandboxMaintenanceDue,
   settleConnectedMachineSessionBackgroundCommand,
 } from "@opengeni/db";
 import { ErrorCode, ExecRequest, OpAck } from "@opengeni/agent-proto";
@@ -625,7 +626,7 @@ test("output whose runner was retired settles once instead of retrying forever",
     expect(row.output_release_observed_at).toBeNull();
     if (change === "offline" || change === "crashed") {
       expect(row.output_unavailable_at).toBeNull();
-      expect(row.last_reconcile_outcome).toBe("output_retry");
+      expect(row.reconcile_attempts).toBe(0);
     } else {
       expect(row.output_unavailable_at).toBeInstanceOf(Date);
       expect(row.last_reconcile_outcome).toBe("output_unavailable");
@@ -660,4 +661,54 @@ test("output whose runner was retired settles once instead of retrying forever",
   expect(released.last_reconcile_outcome).toBe("output_released");
   expect(released.output_consumed_at.getTime()).toBe(captured.output_consumed_at.getTime());
   await parkSession(fixture.identity.sessionId);
+});
+
+test("offline output is neither due nor claimed until reconnect, without changing custody", async () => {
+  for (const captured of [false, true]) {
+    const fixture = await terminalOutputFixture();
+    if (captured) {
+      const publish = fixture.connection.publish;
+      fixture.connection.publish = (subject, payload) => {
+        if (OpAck.decode(payload).final) throw new Error("synthetic publisher failure");
+        publish(subject, payload);
+      };
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+      fixture.connection.publish = publish;
+      await fixture.due();
+    }
+    const before = await fixture.stored();
+    const due = () => sandboxMaintenanceDue(client.db, { checkpointArtifactClaimTtlMs: 900000 });
+    // Output is independent of completion notifications. Drain their outbox
+    // so this probe measures only the remaining output obligation.
+    await shared.admin`update session_system_update_outbox set status='delivered',delivered_at=now() where status='pending'`;
+    for (const connection of ["expired", "null", "goodbye"] as const) {
+      await shared.admin`update enrollments set
+        connection_instance_id=${connection === "null" ? null : "launch"},
+        connection_lease_expires_at=${connection === "null" ? null : connection === "expired" ? new Date(0) : new Date(Date.now() + 3600000)},
+        went_offline_at=${connection === "goodbye" ? new Date() : null},
+        went_offline_reason=null where id=${fixture.identity.enrollmentId}`;
+      expect(await due()).toBe(false);
+      const rpc = noRunnerRpc();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
+      expect(rpc.requests()).toBe(0);
+      const after = await fixture.stored();
+      expect(after.reconcile_attempts).toBe(before.reconcile_attempts);
+      expect(after.output_consumed_at).toEqual(before.output_consumed_at);
+      expect(after.output_exit_seq).toBe(before.output_exit_seq);
+      expect(after.output_release_observed_at).toBeNull();
+      expect(after.output_unavailable_at).toBeNull();
+    }
+    await shared.admin`update enrollments set connection_instance_id='launch',
+      connection_lease_expires_at=now()+interval '1 hour',went_offline_at=null, went_offline_reason=null
+      where id=${fixture.identity.enrollmentId}`;
+    expect(await due()).toBe(true);
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    expect((await fixture.stored()).output_consumed_at).toBeInstanceOf(Date);
+    await fixture.due();
+    fixture.runner.lostOps.add(fixture.identity.opId);
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    expect((await fixture.stored()).output_release_observed_at).toBeInstanceOf(Date);
+    expect(await due()).toBe(false);
+    await parkSession(fixture.identity.sessionId);
+  }
 });

@@ -513,6 +513,11 @@ export async function runTurnStreamAttempt(
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         providerApi,
+        ...(settings.subscriptionCrossProviderFailoverEnabled &&
+        compactionModeOptions.codexCompactionMode === "portable" &&
+        turnExecutionPolicy.credentialRestriction === undefined
+          ? { servingProviderId: turnExecutionPolicy.providerId }
+          : {}),
         projectCanonicalHistory: generatedImageHistoryProjector,
         materializeModelHistory: media.materializeScreenshotHistory,
         projectModelHistory: modelHistoryProjector,
@@ -1199,7 +1204,7 @@ export async function runTurnStreamAttempt(
           turnAttemptId: input.attemptId,
           provider: resolvedModel?.provider.id ?? settings.openaiProvider,
           providerApi: resolvedModel?.provider.api ?? "responses",
-          model: turn.model,
+          model: turnExecutionPolicy.productModelId,
           latencyMode: turnExecutionPolicy.latencyMode,
           metricProvider: streamProvider,
           externallyBilled: billingState.isExternallyBilledTurn,
@@ -1218,7 +1223,7 @@ export async function runTurnStreamAttempt(
         assertModelResponseLatencyMode({
           event: next.value,
           requested: turnExecutionPolicy.latencyMode,
-          model: turn.model,
+          model: turnExecutionPolicy.productModelId,
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
@@ -1736,7 +1741,7 @@ export async function runTurnStreamAttempt(
               sessionId: input.sessionId,
               turnId: activeTurnId,
               turnAttemptId: input.attemptId,
-              model: turn.model,
+              model: turnExecutionPolicy.productModelId,
               externallyBilled: billingState.isExternallyBilledTurn,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               countsTowardTokenCap: billingState.countsTowardTokenCap,
@@ -1758,7 +1763,7 @@ export async function runTurnStreamAttempt(
               turnId: activeTurnId,
               provider: aggregateProvider,
               providerApi: aggregateProviderApi,
-              model: turn.model,
+              model: turnExecutionPolicy.productModelId,
               sourceKey: aggregateSourceKey,
               usage: { usage: aggregateUsage },
               normalizedUsage: normalizedAggregateUsage,
@@ -1780,7 +1785,7 @@ export async function runTurnStreamAttempt(
                 sourceKey: aggregateSourceKey,
                 provider: aggregateProvider,
                 providerApi: aggregateProviderApi,
-                model: turn.model,
+                model: turnExecutionPolicy.productModelId,
                 billing,
                 subscriptionConnectionId:
                   subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -1790,7 +1795,7 @@ export async function runTurnStreamAttempt(
                 observability,
                 settings,
                 provider: aggregateProvider,
-                model: turn.model,
+                model: turnExecutionPolicy.productModelId,
                 externallyBilled: billingState.isExternallyBilledTurn,
                 billing,
               });

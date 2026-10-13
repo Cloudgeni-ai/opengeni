@@ -1308,3 +1308,250 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
     expect(noAuth.status).toBe(401);
   }, 60_000);
 });
+
+// Personal connect commands: `scope: "user"` signs the authenticated person as
+// the machine's owner. The exchange creates a user-owned machine only while that
+// person can still own one here; the owner never comes from the request body.
+describe("personal connect commands: mint scope user -> exchange -> machine owned by the caller", () => {
+  const OWNER = "user-m5";
+
+  async function personalWorkspace(): Promise<{
+    accountId: string;
+    workspaceId: string;
+    membershipId: string;
+  }> {
+    const { accountId, workspaceId } = await freshWorkspace();
+    const [personal] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${accountId}, 'personal') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${personal!.id}, ${accountId})`;
+    const [membership] = await admin<{ id: string }[]>`
+      insert into organization_memberships (account_id, subject_id, status, role, personal_workspace_id, authorization_revision)
+      values (${accountId}, ${OWNER}, 'active', 'member', ${personal!.id}, 1) returning id`;
+    await admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+      values (${accountId}, ${workspaceId}, ${OWNER}, '["enrollments:manage"]'::jsonb)`;
+    await admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'test')`;
+    return { accountId, workspaceId, membershipId: membership!.id };
+  }
+
+  async function principalBearer(
+    accountId: string,
+    workspaceId: string,
+    principalKind: "human_session" | "service",
+  ): Promise<string> {
+    return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId,
+      workspaceId,
+      subjectId: OWNER,
+      subjectLabel: "M5 User",
+      permissions: ["enrollments:manage", "enrollments:read"],
+      principalKind,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })}`;
+  }
+
+  const exchangeBody = (token: string, publicKey: string) =>
+    JSON.stringify({
+      token,
+      publicKey,
+      os: "macos",
+      arch: "aarch64",
+      machineName: "my-mac",
+      canOfferDisplay: true,
+      requestsScreenControl: false,
+    });
+
+  test("a person's command connects a machine only they own", async () => {
+    if (!available) throw new Error("personal connect commands require PostgreSQL");
+    const { accountId, workspaceId } = await personalWorkspace();
+    const app = appFor();
+    const auth = await principalBearer(accountId, workspaceId, "human_session");
+    const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: auth },
+      // An owner field in the body is ignored: the owner is the caller.
+      body: JSON.stringify({ scope: "user", ownerSubjectId: "someone-else" }),
+    });
+    expect(mintRes.status).toBe(201);
+    const mint = (await mintRes.json()) as {
+      token: string;
+      scope: string;
+      allowScreenControl: boolean;
+    };
+    expect(mint.scope).toBe("user");
+    expect(mint.allowScreenControl).toBe(false);
+
+    const exchangeRes = await app.request("/v1/enrollments/token/exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: exchangeBody(mint.token, "ed25519:PERSONAL"),
+    });
+    expect(exchangeRes.status).toBe(201);
+    const { credentials } = (await exchangeRes.json()) as { credentials: { agentId: string } };
+    const [row] = await admin<{ scope: string; subject_id: string }[]>`
+      select e.authority_scope as scope, m.subject_id from enrollments e
+      join organization_memberships m on m.id = e.owner_organization_membership_id
+      where e.id = ${credentials.agentId}`;
+    expect(row).toEqual({ scope: "user", subject_id: OWNER });
+  }, 120_000);
+
+  test("a workspace command stays workspace-shared and says so", async () => {
+    if (!available) throw new Error("workspace connect commands require PostgreSQL");
+    const { accountId, workspaceId } = await personalWorkspace();
+    const app = appFor();
+    const auth = await principalBearer(accountId, workspaceId, "human_session");
+    const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: auth },
+      body: JSON.stringify({ scope: "workspace", allowScreenControl: true }),
+    });
+    expect(mintRes.status).toBe(201);
+    const mint = (await mintRes.json()) as { token: string; scope: string };
+    expect(mint.scope).toBe("workspace");
+    const exchangeRes = await app.request("/v1/enrollments/token/exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: exchangeBody(mint.token, "ed25519:SHARED"),
+    });
+    expect(exchangeRes.status).toBe(201);
+    const { credentials } = (await exchangeRes.json()) as { credentials: { agentId: string } };
+    const [row] = await admin<{ scope: string; owner: string | null }[]>`
+      select authority_scope as scope, owner_organization_membership_id as owner
+      from enrollments where id = ${credentials.agentId}`;
+    expect(row).toEqual({ scope: "workspace", owner: null });
+  }, 120_000);
+
+  test("a service cannot mint a personal command", async () => {
+    if (!available) throw new Error("personal connect commands require PostgreSQL");
+    const { accountId, workspaceId } = await personalWorkspace();
+    const app = appFor();
+    const auth = await principalBearer(accountId, workspaceId, "service");
+    const personal = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: auth },
+      body: JSON.stringify({ scope: "user" }),
+    });
+    expect(personal.status).toBe(422);
+    const workspaceToken = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: auth },
+      body: JSON.stringify({}),
+    });
+    expect(workspaceToken.status).toBe(201);
+    expect(((await workspaceToken.json()) as { scope: string }).scope).toBe("workspace");
+  }, 120_000);
+
+  test("a command whose creator lost membership connects nothing", async () => {
+    if (!available) throw new Error("personal connect commands require PostgreSQL");
+    const { accountId, workspaceId, membershipId } = await personalWorkspace();
+    const app = appFor();
+    const auth = await principalBearer(accountId, workspaceId, "human_session");
+    const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: auth },
+      body: JSON.stringify({ scope: "user" }),
+    });
+    expect(mintRes.status).toBe(201);
+    const { token } = (await mintRes.json()) as { token: string };
+    await admin`update organization_memberships set status = 'suspended' where id = ${membershipId}`;
+    const exchangeRes = await app.request("/v1/enrollments/token/exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: exchangeBody(token, "ed25519:ORPHAN"),
+    });
+    expect(exchangeRes.status).toBe(403);
+    const [counts] = await admin<{ enrollments: number }[]>`
+      select count(*)::int as enrollments from enrollments where workspace_id = ${workspaceId}`;
+    expect(counts!.enrollments).toBe(0);
+  }, 120_000);
+
+  test("a personal machine first connected from another workspace is refused there with 409", async () => {
+    if (!available) throw new Error("personal connect commands require PostgreSQL");
+    const { accountId, workspaceId } = await personalWorkspace();
+    // The same person can also open a second workspace in the organization.
+    const [second] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${accountId}, 'second') returning id`;
+    const otherWorkspaceId = second!.id;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${otherWorkspaceId}, ${accountId})`;
+    await admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+      values (${accountId}, ${otherWorkspaceId}, ${OWNER}, '["enrollments:manage"]'::jsonb)`;
+    const app = appFor();
+    const mint = async (inWorkspace: string) => {
+      const res = await app.request(`/v1/workspaces/${inWorkspace}/enrollments/token`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: await principalBearer(accountId, inWorkspace, "human_session"),
+        },
+        body: JSON.stringify({ scope: "user" }),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { token: string }).token;
+    };
+    const exchange = async (token: string, publicKey: string) =>
+      await app.request("/v1/enrollments/token/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: exchangeBody(token, publicKey),
+      });
+    const roaming = async () =>
+      await admin<{ workspace_id: string; credential_generation: number; generation: number }[]>`
+        select workspace_id, credential_generation, generation from enrollments
+        where pubkey = 'ed25519:ROAMING' order by created_at`;
+
+    expect((await exchange(await mint(workspaceId), "ed25519:ROAMING")).status).toBe(201);
+    const before = await roaming();
+    expect(before).toHaveLength(1);
+    expect(before[0]!.workspace_id).toBe(workspaceId);
+
+    // The same machine runs a personal command created in the second workspace.
+    const elsewhere = await mint(otherWorkspaceId);
+    const refused = await exchange(elsewhere, "ed25519:ROAMING");
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain(
+      "first connected as a personal machine from another workspace",
+    );
+
+    // Pairing with a code approved for Only me in the second workspace says the same.
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: "ed25519:ROAMING",
+          os: "macos",
+          arch: "aarch64",
+          machineName: "my-mac",
+          canOfferDisplay: true,
+          requestsScreenControl: false,
+          workspaceId: otherWorkspaceId,
+        }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
+    const approve = await app.request(
+      `/v1/workspaces/${otherWorkspaceId}/enrollments/device/approve`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: await principalBearer(accountId, otherWorkspaceId, "human_session"),
+        },
+        body: JSON.stringify({ userCode: start.userCode, scope: "user" }),
+      },
+    );
+    expect(approve.status).toBe(409);
+    const poll = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    expect(((await poll.json()) as { state: string }).state).toBe("pending");
+
+    // Nothing changed: no new row, no rotated credentials.
+    expect(await roaming()).toEqual(before);
+    // The refused command was not used up: another machine can still use it.
+    expect((await exchange(elsewhere, "ed25519:OTHER")).status).toBe(201);
+  }, 120_000);
+});

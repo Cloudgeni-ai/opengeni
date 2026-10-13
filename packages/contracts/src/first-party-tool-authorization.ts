@@ -159,6 +159,13 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
+  secret_search: { sessionRequired: true, allOf: ["secrets:list"] },
+  secret_save: { sessionRequired: true, allOf: ["secrets:write"] },
+  // Plaintext read: registered only for a literal `secrets:read` grant.
+  secret_get: { sessionRequired: true, allOf: ["secrets:read"] },
+  secret_move: { sessionRequired: true, allOf: ["secrets:write"] },
+  secret_delete: { sessionRequired: true, allOf: ["secrets:write"] },
+  // Retired (RETIRED_SECRET_TOOL_NAMES): never registered; kept for stored selections.
   variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
   environment_list: { allOf: ["variable-sets:list", "secrets:list"] },
   variable_set_get_variable: {

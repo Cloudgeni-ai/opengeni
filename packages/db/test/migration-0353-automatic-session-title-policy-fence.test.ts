@@ -1031,7 +1031,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       // 0353's rolling title ACLs remain testable, but a pre-cutover schema is
       // never a supported readiness baseline for today's binary. Do not freeze
       // the incidental list of all capabilities added since this migration.
-      expect(historicalPosture.claudeSubscriptionPoolActivationPresent).toBe(false);
+      // It still holds the legacy SuperGrok routines the retirement drops.
+      expect(historicalPosture.retiredSubscriptionObjects).not.toEqual([]);
       expect(
         evaluateRuntimeDatabasePosture(historicalPosture, postureOptions(customRole)),
       ).not.toEqual([]);
@@ -1046,7 +1047,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         deferredRole,
         deferredPassword,
       );
-      expect(deferredHistoricalPosture.claudeSubscriptionPoolActivationPresent).toBe(false);
+      expect(deferredHistoricalPosture.retiredSubscriptionObjects).not.toEqual([]);
       expect(
         evaluateRuntimeDatabasePosture(deferredHistoricalPosture, postureOptions(deferredRole)),
       ).not.toEqual([]);
@@ -1073,7 +1074,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         [deferredClient, deferredRole, deferredPassword],
       ] as const) {
         const posture = await inspectTitleAuthority(runtime, role, password);
-        expect(posture.claudeSubscriptionPoolActivationPresent).toBe(true);
+        expect(posture.retiredSubscriptionObjects).toEqual([]);
         expect(evaluateRuntimeDatabasePosture(posture, postureOptions(role))).toEqual([]);
       }
 

@@ -88,16 +88,6 @@ test("managed HTTP session retains personal authority across command and timeout
     });
     expect(workspaceResponse.status).toBe(201);
     const workspace = (await workspaceResponse.json()) as { id: string };
-    const personalSetResponse = await request(
-      `/v1/workspaces/${context.defaultWorkspaceId}/variable-sets`,
-      {
-        scope: "user",
-        name: "Personal command fixture",
-        variables: [{ name: "FIXTURE_TOKEN", value: "test-only" }],
-      },
-    );
-    expect(personalSetResponse.status).toBe(201);
-    const variableSet = (await personalSetResponse.json()) as { id: string };
     const base = `/v1/workspaces/${workspace.id}`;
     for (const kind of ["command", "timeout"] as const) {
       const created = await request(base + "/sessions", {
@@ -105,12 +95,6 @@ test("managed HTTP session retains personal authority across command and timeout
         sandboxBackend: "none",
         tools: [],
         resources: [],
-        variableSetIds: [variableSet.id],
-        personalResourceAttachment: {
-          mode: "session",
-          workspaceSharedAcknowledged: true,
-          sharedOutputWarningVersion: 1,
-        },
       });
       expect(created.status).toBe(202);
       const session = (await created.json()) as { id: string };
@@ -195,9 +179,8 @@ test("managed HTTP session retains personal authority across command and timeout
       }
       const successor = await claim();
       expect(successor.turn.initiatingHumanSubjectId).toBe(initial.turn.initiatingHumanSubjectId);
-      const [receipt] =
-        await shared.admin`select resource_count from session_attempt_personal_resource_admissions where attempt_id=${successor.attemptId}`;
-      expect(receipt?.resource_count).toBe(1);
+      // Personal-resource receipts are covered in packages/db
+      // child-read-acknowledgment; HTTP can no longer attach Variable Sets.
       const visible = await request(base + `/sessions/${session.id}`);
       expect(visible.status).toBe(200);
       expect(await visible.json()).toMatchObject({ id: session.id, status: "running" });

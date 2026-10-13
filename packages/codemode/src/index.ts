@@ -33,6 +33,7 @@ import {
   digestToolGatewayDefinition,
   prepareToolGatewayDefinitions,
   type PreparedToolGatewayCall,
+  type ToolGatewayArgumentResolver,
   type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
@@ -83,6 +84,8 @@ export type CreateAttemptToolEnvironmentInput = {
   authorize?: AttemptToolAuthorization;
   /** Host-only approval projection for one exact model invocation. */
   confirmModelApproval?: (input: { modelName: string; subjectId: string }) => boolean;
+  /** Trusted secret-reference resolution; runs after approval, before execution. */
+  resolveArguments?: ToolGatewayArgumentResolver;
 };
 
 export type ModelAttemptToolCall = {
@@ -713,6 +716,7 @@ export function createAttemptToolEnvironment(
               }),
           }
         : {}),
+      ...(input.resolveArguments ? { resolveArguments: input.resolveArguments } : {}),
     }),
   );
 }

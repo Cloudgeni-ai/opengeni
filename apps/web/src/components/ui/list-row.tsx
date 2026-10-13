@@ -631,6 +631,9 @@ export function ListRow({
     ...(singleLine && statusPart ? [statusPart] : []),
     ...(narrowStatePart ? [narrowStatePart] : []),
   ];
+  const hasLineDescription = Boolean(secondary && !(disabled && disabledReason));
+  const keptLeadParts = singleLine && hasLineDescription ? lineParts.slice(0, leadingFacts) : [];
+  const restLineParts = lineParts.slice(keptLeadParts.length);
   // Every part leads with its separator and the line is shifted left by one
   // separator and clipped, so no line of a wrapped meta line starts or ends
   // with a dot.
@@ -830,7 +833,12 @@ export function ListRow({
                 {secondary}
               </span>
             ) : null}
-            {lineParts.length > 0 ? (
+            {/* Leading facts after a description stay whole: the description
+                gives way instead ("Credentials the whole te… · 6 items"). */}
+            {keptLeadParts.length > 0 ? (
+              <span className="flex shrink-0 items-center">{keptLeadParts}</span>
+            ) : null}
+            {restLineParts.length > 0 ? (
               <span
                 className={cn(
                   "flex min-w-0 shrink-[2] items-center overflow-hidden",
@@ -838,7 +846,7 @@ export function ListRow({
                   !(secondary && !(disabled && disabledReason)) && "-ml-4",
                 )}
               >
-                {lineParts}
+                {restLineParts}
               </span>
             ) : null}
           </p>

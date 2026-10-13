@@ -27,6 +27,8 @@ import {
   inspectRuntimeDatabasePosture,
   withSessionRlsActorContext,
   type DbClient,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
 } from "../src";
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
@@ -36,6 +38,7 @@ import {
   readSubscriptionSessionBinding,
   writeSubscriptionSessionBinding,
 } from "../src/subscription-core-repository";
+import { stageVaultPolicyColumns, withoutAbsentVaultPosture } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
 
@@ -245,6 +248,7 @@ beforeAll(async () => {
     for (const name of heldBack)
       await staging`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
+    await stageVaultPolicyColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -341,10 +345,13 @@ beforeAll(async () => {
     targetSchema: "public",
     requiredRuntimeRoutines: [],
   };
+  // Stopped before 0739: the absent vault objects are expected.
   const evaluate = async () =>
-    evaluateRuntimeDatabasePosture(
-      await inspectRuntimeDatabasePosture(client!.db, options),
-      options,
+    withoutAbsentVaultPosture(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      ),
     );
   const unprovisioned = await evaluate();
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
@@ -370,7 +377,24 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       sql`select current_user::text as role`,
     );
     expect(identity!.role).toBe("opengeni_app");
-    expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
+    // This historical fixture applies only 0733, not the later 0735 owned-usage
+    // routines. Current readiness must report exactly those missing routines
+    // both before and after provisioning; no other posture failure is allowed.
+    const missing0735Routines = [
+      "subscription M3 precursor private routine read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid) is missing or unsafe",
+      "subscription M3 precursor private routine begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid) is missing or unsafe",
+      "subscription M3 precursor private routine record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone) is missing or unsafe",
+    ];
+    // Nor the later provider cutovers (0747, 0748), the drained retirement
+    // (0751) or personal sharing (0752), whose absence readiness also reports.
+    const expected = [
+      ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+      "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
+      ...missing0735Routines,
+    ];
+    expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });
 
   test("every binding the previous binary wrote keeps every value across 0733", async () => {

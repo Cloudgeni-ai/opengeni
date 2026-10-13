@@ -1776,6 +1776,24 @@ describe("contracts", () => {
     expect(scheduled.content).toContain("query that state during this occurrence");
     expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
+    expect(scheduled.content).not.toContain("Unavailable in this occurrence");
+
+    const degraded = sessionSystemUpdateBatchHistoryItem(
+      [
+        {
+          ...updates[0]!,
+          payload: { ...updates[0]!.payload, unavailableConnectors: ["mail", "tracker"] },
+        },
+      ],
+      completedGoal,
+      { promoteScheduledOccurrenceToUser: true },
+    );
+    const unavailableLine = degraded.content.indexOf(
+      "Unavailable in this occurrence: mail, tracker.",
+    );
+    expect(unavailableLine).toBeGreaterThan(-1);
+    expect(unavailableLine).toBeLessThan(degraded.content.indexOf("Instructions:"));
+    expect(degraded.content).toContain("Do not reach them another way");
   });
 
   test("formats model-visible times as minute-precision UTC with the weekday", () => {

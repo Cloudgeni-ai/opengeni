@@ -84,6 +84,42 @@ describe("resolveSessionAgentConfigForCreate", () => {
     }).config!;
     expect(config.capabilities.webSearch).toBe(false);
     expect(config.unavailable).toEqual(["webSearch"]);
+    expect(config).toHaveProperty(
+      "unavailableReasons.webSearch",
+      "web search is turned off on this server",
+    );
+  });
+
+  test("human-input deployment limits explain defaults and reject an explicit family request", () => {
+    const restricted = testSettings({ allowedFirstPartyMcpTools: ["session_create"] });
+    const config = resolveSessionAgentConfigForCreate({
+      ...base,
+      settings: restricted,
+      creator: "api",
+      request: { capabilities: "all" },
+    }).config!;
+    expect(config).toHaveProperty(
+      "unavailableReasons.humanInput",
+      expect.stringContaining("its tools are not allowed on this server: notify_user"),
+    );
+    const unrestricted = resolveSessionAgentConfigForCreate({
+      ...base,
+      settings,
+      creator: "api",
+      request: { capabilities: "all" },
+    }).config!;
+    expect(unrestricted.unavailable).toEqual([]);
+    expect(unrestricted).not.toHaveProperty("unavailableReasons");
+    expect(
+      failure(() =>
+        resolveSessionAgentConfigForCreate({
+          ...base,
+          settings: restricted,
+          creator: "api",
+          request: { capabilities: { from: "none", humanInput: true } },
+        }),
+      ),
+    ).toEqual({ status: 422, code: "agent_capability_unavailable" });
   });
 
   test("workspace legacy human-input switch and stored defaults", () => {

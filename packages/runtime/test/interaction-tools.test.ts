@@ -37,6 +37,60 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test.each(["browser_read", "browser_act"] as const)(
+    "%s preserves the definite tab diagnosis at the model boundary",
+    async (tool) => {
+      const message = "This tab is not responding. Reload or close it.";
+      const failure = new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            code: "tab_not_responding",
+            message,
+            retryable: false,
+            outcomeUnknown: false,
+          },
+        }),
+      );
+      const definitions = createInteractionAttemptToolDefinitions({
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+        transport: partialTransport({
+          observeBrowserTarget: async () => {
+            throw failure;
+          },
+          getBrowserTargetState: async () => {
+            throw failure;
+          },
+        }),
+      });
+      const result = await definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: "hung-tab",
+          ...(tool === "browser_act"
+            ? { action: { type: "click", locator: { kind: "css", selector: "button" } } }
+            : {}),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: "tab_not_responding",
+            message: expect.stringContaining(message),
+            retryable: false,
+          },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain("network_error");
+      expect(JSON.stringify(result)).not.toContain("outcome_unknown");
+    },
+  );
+
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,
@@ -50,6 +104,30 @@ describe("interaction attempt tools", () => {
     )!;
     expect(act.description).toContain("An upload action takes workspace File IDs");
     expect(act.description).toContain("artifact.artifactId returned by sandbox_file_publish");
+  });
+
+  test("login tools tell the model to sign in itself and hand off only physical steps", () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_auth", "interaction_request_human"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({}),
+    });
+    const description = (name: string) =>
+      definitions.find((definition) => definition.modelName === `interaction__${name}`)!
+        .description;
+    const auth = description("browser_auth");
+    expect(auth).toContain("Reuse a saved sign-in, the first rung of the login ladder");
+    expect(auth).toContain("sign in yourself");
+    expect(auth).toContain("solve CAPTCHAs yourself");
+    expect(auth).not.toContain(
+      "If an operation returns needs_human, call interaction_request_human",
+    );
+    const human = description("interaction_request_human");
+    expect(human).toContain("a push approval on their phone, a hardware security key");
+    expect(human).toContain("never hand over a CAPTCHA or a step you can do");
+    expect(human).not.toContain("login/MFA handoffs");
   });
 
   test("native platform alternatives admit Linux arguments and retain the session boundary", async () => {
@@ -2379,7 +2457,6 @@ function externalAuthRun(): AuthRun {
     authorityId: "kernel-managed",
     state: "awaiting_external_action",
     choices: [],
-    pendingFields: [],
     externalAction: { kind: "human", label: "Finish sign-in", expiresAt: null },
     interventionId: randomUUID(),
     verifiedUrl: null,

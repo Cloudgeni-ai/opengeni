@@ -15,8 +15,8 @@
  *   provider is the chosen connection's, found through the registry; the
  *   binding guard in the database decides whether this session may use it
  *   (an active connection; a personal one only for its owner, in their
- *   private session or Personal workspace, while personal connections are
- *   allowed there).
+ *   private session or Personal workspace, or explicitly for their own
+ *   sends in a shared session, while personal connections are allowed).
  * - `readSubscriptionPersonPreferences` / `writeSubscriptionPersonPreferences`:
  *   the caller's own personal-fallback opt-in, through the owner policies
  *   of migration 0729. Placement reads the opt-in only for the session
@@ -26,8 +26,12 @@
  * Nothing here returns credential material, and no provider is named: the
  * registry supplies every provider binding as data.
  */
-import { and, eq, sql } from "drizzle-orm";
-import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
+import { and, desc, eq, sql } from "drizzle-orm";
+import {
+  SessionModelAccountServing,
+  type SessionEvent,
+  type SessionEventType,
+} from "@opengeni/contracts";
 import * as schema from "../schema";
 import {
   rawRows,
@@ -72,7 +76,7 @@ export type SubscriptionCoreAccountChoiceRefusal =
   | "inactive"
   /** Personal connections are not allowed in this workspace. */
   | "personal_not_allowed"
-  /** A personal connection serves only its owner's private sessions and Personal workspace. */
+  /** The caller cannot authorize this personal connection for this session. */
   | "personal_not_owner_work"
   /**
    * The session has no owner (for example a run of a schedule created with an
@@ -99,6 +103,7 @@ export type SubscriptionCoreChoosableConnection = {
 };
 
 export type SubscriptionCoreSessionAccountChoice = {
+  serving: SessionModelAccountServing | null;
   /**
    * The session's binding when it has exactly one: `explicit` after a
    * person's choice, else the account automatic placement last used. Null
@@ -148,8 +153,11 @@ function choiceRefusal(
   if (!personal) return null;
   if (!connectionsAllowed) return "personal_not_allowed";
   const ownersWork =
-    session.ownerSubjectId === subjectId &&
-    (session.visibility === "user_private" || session.workspaceKind === "personal");
+    (session.ownerSubjectId === subjectId &&
+      (session.visibility === "user_private" || session.workspaceKind === "personal")) ||
+    (subjectId.startsWith("user:") &&
+      session.visibility === "workspace_shared" &&
+      session.workspaceKind === "shared");
   return ownersWork ? null : "personal_not_owner_work";
 }
 
@@ -337,6 +345,42 @@ export async function readSubscriptionCoreSessionAccountChoice(
           order by provider`,
       );
       const optIn = await readOwnOptIn(tx, input);
+      const [selection] = await tx
+        .select({
+          payload: schema.sessionEvents.payload,
+          payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+          turnId: schema.sessionEvents.turnId,
+        })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.type, "subscription.account.selected"),
+          ),
+        )
+        .orderBy(desc(schema.sessionEvents.sequence))
+        .limit(1);
+      const payload = selection
+        ? fromPostgresLosslessJson(selection.payload, selection.payloadCodecVersion)
+        : null;
+      const selected =
+        typeof payload === "object" && payload !== null && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>)
+          : null;
+      const serving = selected
+        ? SessionModelAccountServing.safeParse({
+            ...selected,
+            turnId: selection!.turnId,
+            connectionId: connections.some(
+              (connection) =>
+                connection.provider === selected.provider &&
+                connection.connectionId === selected.connectionId,
+            )
+              ? selected.connectionId
+              : null,
+          })
+        : null;
       const bindings = stored.map(
         (binding): SubscriptionCoreSessionChoiceBinding => ({
           provider: binding.provider,
@@ -351,6 +395,7 @@ export async function readSubscriptionCoreSessionAccountChoice(
         }),
       );
       return {
+        serving: serving?.success ? serving.data : null,
         binding: bindings.length === 1 ? bindings[0]! : null,
         bindings,
         connections,
@@ -391,6 +436,23 @@ export type SubscriptionCoreSessionChoiceResult = {
   connectionId: string | null;
   events: SessionEvent[];
   wakes: SubscriptionCoreProviderWake[];
+};
+
+/** Presentation-only compatibility for an existing provider-qualified endpoint.
+ * It shares the same choice, authorization, locking and event transaction.
+ * The mapper cannot change the chosen account or accepted turn authority.
+ */
+export type SubscriptionCoreChoiceReceipt = {
+  recordUnchanged: boolean;
+  project: (choice: {
+    provider: string | null;
+    providers: string[];
+    connectionId: string | null;
+    choice: "explicit" | "automatic";
+    appliedTo: "waiting_turn" | "next_turn";
+    turnId: string | null;
+    subjectId: string;
+  }) => { type: SessionEventType; payload: Record<string, unknown> };
 };
 
 function mapSessionEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
@@ -445,7 +507,10 @@ export async function chooseSubscriptionCoreSessionAccount(
     provider?: string | null;
   },
   providers: SubscriptionCoreChoiceProviders = registeredProviders(),
+  receipt?: SubscriptionCoreChoiceReceipt,
 ): Promise<SubscriptionCoreSessionChoiceResult> {
+  if (receipt && !input.provider)
+    throw new Error("A compatibility choice receipt requires an explicit provider");
   // A choice locks the session row, then the binding, then (through the
   // binding's disconnect-admission trigger) the chosen connection's refresh
   // lock. A session's first placement takes that refresh lock before it
@@ -460,7 +525,7 @@ export async function chooseSubscriptionCoreSessionAccount(
       : input.connectionId;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await chooseOnce(db, { ...input, connectionId: requested }, providers);
+      return await chooseOnce(db, { ...input, connectionId: requested }, providers, receipt);
     } catch (error) {
       if (postgresErrorCode(error) !== "40P01") throw error;
       if (attempt >= maxAttempts) {
@@ -494,6 +559,7 @@ async function chooseOnce(
     provider?: string | null;
   },
   providers: SubscriptionCoreChoiceProviders,
+  receipt?: SubscriptionCoreChoiceReceipt,
 ): Promise<SubscriptionCoreSessionChoiceResult> {
   const none = (
     outcome: SubscriptionCoreSessionChoiceOutcome,
@@ -516,7 +582,7 @@ async function chooseOnce(
 
       // Resolve the named connection to its provider and canonical id among
       // the connections this caller may name, before any lock is taken.
-      let target: { provider: string; connectionId: string } | null = null;
+      let target: { provider: string; connectionId: string; personal: boolean } | null = null;
       if (input.connectionId !== null) {
         const effective = await readSubscriptionEffectiveSettings(
           tx,
@@ -544,9 +610,30 @@ async function chooseOnce(
               candidate.provider === providerId && candidate.connectionId === canonical,
           );
           if (match) {
-            target = { provider: providerId, connectionId: match.connectionId };
+            target = {
+              provider: providerId,
+              connectionId: match.connectionId,
+              personal: match.personal,
+            };
             break;
           }
+        }
+        if (!target && receipt && input.provider != null) {
+          // The legacy provider-qualified endpoint keeps its contract: a
+          // connection the choice listing does not offer (a shared account
+          // scoped to chosen people, whose designations this caller cannot
+          // read) goes to the binding guard, which alone judges whether this
+          // session may use it and refuses with 42501 otherwise.
+          target = {
+            provider: input.provider,
+            connectionId:
+              (await resolveSubscriptionConnectionId(tx, {
+                accountId: input.accountId,
+                provider: input.provider,
+                connectionId: input.connectionId,
+              })) ?? input.connectionId,
+            personal: false,
+          };
         }
         if (!target) return none("not_found");
         if (input.provider != null && input.provider !== target.provider) return none("not_found");
@@ -581,6 +668,7 @@ async function chooseOnce(
       const resetProvider = target === null ? (input.provider ?? null) : null;
       let touched: string[] = [];
       let written = false;
+      let bindingChanged = true;
       // An absent binding can be inserted by a concurrent placement between
       // our read and our insert; the retry then finds and locks that row.
       for (let attempt = 0; attempt < 3 && !written; attempt += 1) {
@@ -608,16 +696,29 @@ async function chooseOnce(
             for update`,
         );
         if (target === null) {
-          if (locked.length === 0) return none("unchanged");
+          if (locked.length === 0) {
+            if (!receipt?.recordUnchanged) return none("unchanged");
+            // Legacy endpoints acknowledge even an already-automatic choice.
+            // Record the receipt, without creating or mutating a binding.
+            touched = [input.provider!];
+            bindingChanged = false;
+            written = true;
+            break;
+          }
           touched = locked.map((row) => row.provider);
         } else {
           const own = locked[0];
           if (own && own.choice === "explicit" && own.connection_id === target.connectionId) {
-            return {
-              ...none("unchanged"),
-              provider: target.provider,
-              connectionId: target.connectionId,
-            };
+            if (!receipt?.recordUnchanged)
+              return {
+                ...none("unchanged"),
+                provider: target.provider,
+                connectionId: target.connectionId,
+              };
+            touched = [target.provider];
+            bindingChanged = false;
+            written = true;
+            break;
           }
           touched = [target.provider];
         }
@@ -688,10 +789,41 @@ async function chooseOnce(
       if (!written) return none("conflict");
       const changedProvider = target?.provider ?? (touched.length === 1 ? touched[0]! : null);
 
+      // Choosing an account never grants new authority to already accepted
+      // work. A personal choice applies to waiting work only when its frozen
+      // authority already admits the connection under the live owner checks.
+      // In a shared session the accepted authority is exact to that session
+      // and connection; neither the new binding nor the current sender can
+      // enlarge it. The same check preserves legacy private frozen pools.
+      let waitingHasAuthority = true;
+      if (target?.personal && session.status === "waiting_capacity" && session.activeTurnId) {
+        const [waiting] = await rawRows<{ authorized: boolean }>(
+          tx,
+          sql`select opengeni_private.authorize_subscription_personal_access(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.sessionId}::uuid, ${session.activeTurnId}::uuid,
+            ${target.connectionId}::uuid, ${target.provider},
+            ${session.ownerSubjectId}, ${input.subjectId}) as authorized`,
+        );
+        waitingHasAuthority = waiting?.authorized === true;
+      }
       const appliedTo: "waiting_turn" | "next_turn" =
-        session.status === "waiting_capacity" && session.activeTurnId
+        session.status === "waiting_capacity" && session.activeTurnId && waitingHasAuthority
           ? "waiting_turn"
           : "next_turn";
+      const choice = {
+        provider: changedProvider,
+        providers: touched,
+        connectionId: target?.connectionId ?? null,
+        choice: target ? ("explicit" as const) : ("automatic" as const),
+        appliedTo,
+        turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
+        subjectId: input.subjectId,
+      };
+      const event = receipt?.project(choice) ?? {
+        type: SUBSCRIPTION_CORE_ACCOUNT_CHOICE_EVENT,
+        payload: choice,
+      };
       const inserted = await tx
         .insert(schema.sessionEvents)
         .values(
@@ -702,16 +834,8 @@ async function chooseOnce(
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 sequence: session.lastSequence + 1,
-                type: SUBSCRIPTION_CORE_ACCOUNT_CHOICE_EVENT,
-                payload: {
-                  provider: changedProvider,
-                  providers: touched,
-                  connectionId: target?.connectionId ?? null,
-                  choice: target ? "explicit" : "automatic",
-                  appliedTo,
-                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
-                  subjectId: input.subjectId,
-                },
+                type: event.type,
+                payload: event.payload,
                 occurredAt: new Date(),
               },
             ],
@@ -732,7 +856,7 @@ async function chooseOnce(
       // Wake this session's waiters of the providers the choice touched: a
       // choice changes nothing another session can place on.
       return {
-        outcome: "changed",
+        outcome: bindingChanged ? "changed" : "unchanged",
         appliedTo,
         provider: changedProvider,
         connectionId: target?.connectionId ?? null,

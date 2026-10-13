@@ -337,7 +337,7 @@ function CompactionRow({
                 <button
                   type="button"
                   onClick={() => onEdit(null)}
-                  className="rounded-sm font-medium text-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring/55"
+                  className="rounded-sm font-medium og-link focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring/55"
                 >
                   {inherited.fromOrganization ? `Use ${organizationLabel}’s` : "Use default"}
                   <span className="sr-only"> for {model.label}</span>

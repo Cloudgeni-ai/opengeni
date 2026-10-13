@@ -64,10 +64,7 @@ export function HelpLink({
   onClick?: () => void;
   className?: string;
 }) {
-  const classes = cn(
-    "rounded-sm font-medium text-brand underline-offset-2 hover:underline",
-    className,
-  );
+  const classes = cn("rounded-sm font-medium og-link", className);
   if (href) {
     // With both, a plain click runs `onClick` (the router) and modified clicks
     // open the link normally; an in-app href without it loads the whole page.

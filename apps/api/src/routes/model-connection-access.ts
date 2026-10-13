@@ -28,8 +28,6 @@ import {
   updateModelConnectionAccess,
   updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
-  getXaiSubscriptionAccountAuthoritySnapshot,
-  getClaudeSubscriptionAccountAuthoritySnapshot,
   listOrganizationModelProviderCustomModels,
   getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
@@ -37,18 +35,9 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import {
-  managedHumanOrAgent,
-  requireOrganizationCodexHuman,
-  requireSameOriginBrowserMutation,
-} from "./codex";
+import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
 import { codexRouteDisposition } from "./codex-core";
-import { requireScopeMutation } from "./supergrok";
-import { subscriptionCoreRoute } from "./subscription-pool-core";
-import {
-  requirePrivateSubscriptionHuman,
-  requireSubscriptionScopeMutation,
-} from "./subscription-pool-access";
+import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 
 const Kind = z.enum([
   "codex",
@@ -83,10 +72,11 @@ async function coreAccessDisposition(
   accountId: string,
 ): Promise<"legacy" | "core"> {
   if (kind === "codex") return await codexRouteDisposition(deps, accountId);
+  // SuperGrok runs only on the core: any other route fails closed.
   if (kind === "supergrok")
-    return await subscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
+    return await requireSubscriptionCoreRoute(deps, "xai", "SuperGrok", async () => accountId);
   if (kind === "claude_subscription")
-    return await subscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
+    return await requireSubscriptionCoreRoute(deps, "claude", "Claude", async () => accountId);
   return "legacy";
 }
 
@@ -124,38 +114,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       const sharedCore =
         (kind === "supergrok" || kind === "claude_subscription") &&
         (await coreAccessDisposition(deps, kind, grant.accountId)) === "core";
-      if (kind === "supergrok" && !sharedCore) {
-        const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
-          workspaceId: scopeId,
-          subjectId: grant.subjectId,
-          credentialId: connectionId,
-        });
-        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
-        if (snapshot.scope === "user") {
-          const human = await managedHumanOrAgent(c, deps);
-          if (!human || human.subjectId !== grant.subjectId)
-            throw new HTTPException(403, {
-              message: "Subscription owner browser session required",
-            });
-        }
-        if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
-      } else if (kind === "claude_subscription" && !sharedCore) {
-        const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
-          workspaceId: scopeId,
-          subjectId: grant.subjectId,
-          credentialId: connectionId,
-        });
-        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
-        if (snapshot.scope === "user") {
-          const human = await requirePrivateSubscriptionHuman(c, deps, scopeId, "Claude");
-          if (human.subjectId !== grant.subjectId)
-            throw new HTTPException(403, { message: "Subscription owner required" });
-        }
-        if (mutate) {
-          if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
-          await requireSubscriptionScopeMutation(c, deps, scopeId, snapshot.scope, "Claude");
-        }
-      } else if (mutate) {
+      if (mutate) {
         // A core Claude change keeps the legacy same-origin browser check.
         if (kind === "claude_subscription" && !c.req.header("authorization"))
           requireSameOriginBrowserMutation(c, deps);
@@ -291,6 +250,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 ...(people ? { peopleSupported: true, people } : { peopleSupported: false }),
                 localWorkspaceIds: coreAccess.localWorkspaceIds,
                 managedByWorkspaceId: coreAccess.managedByWorkspaceId,
+                ...(coreAccess.personalSharingSupported ? { personalSharingSupported: true } : {}),
               }
             : {}),
         }),
@@ -303,6 +263,10 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       if (!parsed.success)
         throw new HTTPException(422, { message: "Invalid connection access policy" });
       const policy = parsed.data;
+      if (policy.sharePersonal && (!core || connection.workspaceId !== null))
+        throw new HTTPException(422, {
+          message: "Personal sharing requires the organization subscription route",
+        });
       if (policy.allowedModels?.some((id) => !id.startsWith(modelPrefix(connection))))
         throw new HTTPException(422, {
           message: "Model belongs to a different connection provider",

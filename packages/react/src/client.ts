@@ -49,20 +49,6 @@ type SessionClientMethods = Pick<
   | "uploadFile"
   | "getFile"
   | "createFileDownloadUrl"
-  // VariableSets
-  | "listVariableSets"
-  | "getVariableSetVariable"
-  | "createVariableSet"
-  | "updateVariableSet"
-  | "deleteVariableSet"
-  | "setVariableSetVariable"
-  | "deleteVariableSetVariable"
-  | "listEnvironments"
-  | "createEnvironment"
-  | "updateEnvironment"
-  | "deleteEnvironment"
-  | "setEnvironmentVariable"
-  | "deleteEnvironmentVariable"
   // Channels (rail organization)
   | "listChannels"
   | "createChannel"
@@ -115,7 +101,6 @@ type SessionClientMethods = Pick<
   | "getAuthRun"
   | "startBrowserAuthRun"
   | "reportBrowserAuthRun"
-  | "protectedBrowserAuthFill"
   | "verifyBrowserAuthRun"
   | "listInteractionInterventions"
   | "getInteractionIntervention"
@@ -188,6 +173,7 @@ type SessionClientMethods = Pick<
       | "listSessionBackgroundCommands"
       | "cancelSessionBackgroundCommand"
       | "getComputerInputPosture"
+      | "getSessionModelAccount"
     >
   >;
 
@@ -299,7 +285,6 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
   | "getAuthRun"
   | "startBrowserAuthRun"
   | "reportBrowserAuthRun"
-  | "protectedBrowserAuthFill"
   | "verifyBrowserAuthRun"
   | "listInteractionInterventions"
   | "getInteractionIntervention"

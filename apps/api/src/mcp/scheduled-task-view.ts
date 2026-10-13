@@ -362,6 +362,13 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
       promptBytes: Buffer.byteLength(task.agentConfig.prompt, "utf8"),
       resourceCount: task.agentConfig.resources.length,
       toolCount: task.agentConfig.tools.length,
+      // Where a run's connectors come from: the chat it posts into, the
+      // workspace defaults at run time (plus `tools`), or exactly `tools`.
+      connectors: inheritsSessionSettings
+        ? "target_session"
+        : task.agentConfig.toolPolicy
+          ? "workspace_default"
+          : "listed",
       metadataKeyCount: Object.keys(task.agentConfig.metadata).length,
       taskMetadataKeyCount: Object.keys(task.metadata).length,
     },
@@ -459,6 +466,9 @@ function buildScheduledTaskDetailMcp(
         prompt: prompt.value,
         resources,
         tools,
+        ...(task.agentConfig.toolPolicy
+          ? { excludedDefaultConnectors: task.agentConfig.toolPolicy.excludedMcpServerIds }
+          : {}),
         metadataKeys,
         model: task.agentConfig.model
           ? projectScheduledTaskUtf8(task.agentConfig.model, SCHEDULED_TASK_MODEL_MAX_BYTES).value

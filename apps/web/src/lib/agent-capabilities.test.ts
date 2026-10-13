@@ -73,7 +73,7 @@ describe("drafts and requests", () => {
     const draft = withCapability(draftFromRequest("none"), "webSearch", true);
     expect(requestFromDraft(draft, availability)).toBe("none");
     expect(capabilitySummary(draftFromRequest("all").values, availability)).toBe(
-      "All 12 available capabilities",
+      "All 13 available capabilities",
     );
   });
 
@@ -86,14 +86,14 @@ describe("drafts and requests", () => {
         .humanInput,
     ).toBe(true);
     expect(workspaceAgentDefaultsSummary({ agentHumanInputEnabled: false }, null)).toBe(
-      "12 of 13 capabilities",
+      "13 of 14 capabilities",
     );
   });
 
   test("summaries count what is on", () => {
     expect(capabilitySummary(draftFromRequest("all").values, everything)).toBe("All capabilities");
     expect(capabilitySummary(draftFromRequest("none").values, everything)).toBe(
-      "2 of 13 capabilities",
+      "2 of 14 capabilities",
     );
   });
 });

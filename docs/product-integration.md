@@ -207,7 +207,8 @@ and switches single capabilities: `{ from: "none", webSearch: true }`.
 | `knowledge` | search and save workspace Knowledge, task notes and instructions |
 | `workspaceFiles` | read files uploaded to the workspace |
 | `workspaceConnectors` | use the workspace's connected apps and integrations |
-| `workspaceAdmin` | manage variable sets, projects, rigs, machines and connector setup |
+| `secrets` | use saved secrets by `{{secret:…}}` reference, save new ones and ask for them with a secure card |
+| `workspaceAdmin` | manage projects, rigs, machines and connector setup |
 
 Tools the session attaches itself (its `mcpServers` and named `tools`), sandbox
 tools and runtime mechanics are not capabilities and are never toggled. A
@@ -594,7 +595,7 @@ type OrganizationAccessPolicy = {
 
 | Preset | Permission selection |
 | --- | --- |
-| `read_only` | Every canonical permission ending in `:read`, `:list`, `:view`, or `:search`, except the secret-value reads `secrets:read` and `variable-sets:read` |
+| `read_only` | Every canonical permission ending in `:read`, `:list`, `:view`, or `:search`, except the secret-value read `secrets:read` |
 | `full` | Every canonical, non-deprecated `Permission`, including explicit administration and plaintext-secret permissions |
 | `custom` | Exactly the permissions chosen, including an empty list; no implicit permissions or workspace scopes |
 
@@ -793,7 +794,7 @@ on the backend and use `client.asService(name, context?)`. It returns a new
 client of the same class without changing the original. Attribution is not
 permission: the API still checks the key's authority, and service work cannot
 impersonate a human or borrow their Personal workspace, personal Connections,
-Knowledge, or Variable Sets. Do not use a synthetic `asUser` identity for a job.
+Knowledge, or Only me vaults. Do not use a synthetic `asUser` identity for a job.
 
 The helper sends `x-opengeni-service-initiator` (a name matching
 `^[a-z0-9][a-z0-9:._-]{0,63}$`) and, when supplied,

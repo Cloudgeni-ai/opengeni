@@ -27,6 +27,7 @@ import type {
   CreateScheduledTaskRequest,
   McpConnectionAccountSelection,
   UpdateScheduledTaskRequest,
+  VaultPolicy,
 } from "@opengeni/sdk";
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
@@ -67,7 +68,10 @@ export function viewerTimeZone(): string {
 
 /** "Every weekday at 09:00, your time": the default for a new schedule. */
 export function defaultCadence(timeZone: string = viewerTimeZone()): CadenceValue {
-  return { timeZone, rule: { frequency: "weekdays", time: DEFAULT_CADENCE_TIME } };
+  return {
+    timeZone,
+    rule: { frequency: "weekdays", time: DEFAULT_CADENCE_TIME },
+  };
 }
 
 /** The stored spec as an editable cadence, or null for on-demand schedules. */
@@ -103,13 +107,19 @@ export interface ScheduleWords {
 export function scheduleWords(schedule: ScheduledTaskScheduleSpec, now: Date): ScheduleWords {
   const cadence = cadenceOfSchedule(schedule);
   if (!cadence) {
-    return { short: "Only when you run it", sentence: "Runs only when someone presses Run now" };
+    return {
+      short: "Only when you run it",
+      sentence: "Runs only when someone presses Run now",
+    };
   }
   return cadenceWords(cadence, now);
 }
 
 export function cadenceWords(cadence: CadenceValue, now: Date): ScheduleWords {
-  const words = describeCadence(cadence.rule, { timeZone: cadence.timeZone, now });
+  const words = describeCadence(cadence.rule, {
+    timeZone: cadence.timeZone,
+    now,
+  });
   return { short: words.short, sentence: words.sentence };
 }
 
@@ -136,7 +146,10 @@ export function cadenceIssue(cadence: CadenceValue | null, now: Date): string | 
  * fire (paused, sync off, on demand, no runs left) by name.
  */
 export function sortSchedulesForList(tasks: readonly ScheduledTask[], now: Date): ScheduledTask[] {
-  const keyed = tasks.map((task) => ({ task, next: nextRunOf(task, now)?.getTime() ?? null }));
+  const keyed = tasks.map((task) => ({
+    task,
+    next: nextRunOf(task, now)?.getTime() ?? null,
+  }));
   keyed.sort((left, right) => {
     const leftLive = left.next !== null;
     const rightLive = right.next !== null;
@@ -222,10 +235,16 @@ export const NAME_MAX_LENGTH = 80;
 export interface ScheduleDraft extends ScheduledTaskFormState {
   /** Null for a schedule that only runs with Run now. */
   cadence: CadenceValue | null;
-  variableSetId: string | null;
   rigId: string | null;
   /** Who can see the schedule and the chats it creates. */
   visibility: "private" | "workspace";
+  /** Vaults every run may use. Undefined: all the owner can reach. */
+  vaultPolicy?: VaultPolicy;
+}
+
+/** A selected policy, or undefined for "all" (the server default). */
+export function narrowedVaultPolicy(policy: VaultPolicy | undefined): VaultPolicy | undefined {
+  return policy?.mode === "selected" ? policy : undefined;
 }
 
 export interface DraftDefaults {
@@ -235,6 +254,7 @@ export interface DraftDefaults {
   modelFollowsDefault?: boolean;
   defaultSandboxBackend?: ScheduledTaskFormState["sandboxBackend"] | undefined;
   defaultMachineSandboxId?: string;
+  workspaceDefaultToolIds?: readonly string[];
 }
 
 function formDefaults(defaults: DraftDefaults) {
@@ -244,6 +264,7 @@ function formDefaults(defaults: DraftDefaults) {
     modelFollowsDefault: defaults.modelFollowsDefault,
     defaultSandboxBackend: defaults.defaultSandboxBackend || undefined,
     defaultMachineSandboxId: defaults.defaultMachineSandboxId,
+    workspaceDefaultToolIds: defaults.workspaceDefaultToolIds,
   };
 }
 
@@ -251,7 +272,6 @@ export function newScheduleDraft(defaults: DraftDefaults, timeZone?: string): Sc
   return {
     ...newScheduledTaskFormState(defaults.includeOpenGeniTool, [], formDefaults(defaults)),
     cadence: defaultCadence(timeZone),
-    variableSetId: null,
     rigId: null,
     visibility: "workspace",
   };
@@ -312,10 +332,10 @@ export function draftFromTemplate(
 
 /** "Every weekday at 08:00: …" templates show their cadence as a tile meta. */
 export function templateCadenceLabel(template: ScheduleTemplate, now: Date): string {
-  return describeCadence(template.cadence, { timeZone: viewerTimeZone(), now }).short.replace(
-    / · .*$/,
-    "",
-  );
+  return describeCadence(template.cadence, {
+    timeZone: viewerTimeZone(),
+    now,
+  }).short.replace(/ · .*$/, "");
 }
 
 /* ----------------------------------------------------------------------------
@@ -346,39 +366,38 @@ export function scheduleInheritsChatSettings(
   );
 }
 
-/** Newly enabled connectors can use their displayed defaults; other groups keep their saved set. */
+/**
+ * Which account groups a person pinned in this edit. Only groups they changed
+ * become pins; a newly enabled connector stays unpinned. A move, a tool change
+ * or clearing the pins re-checks the retained pins against the destination.
+ */
 export function scheduleConnectionAccountIntent(input: {
+  /** The schedule's pins; every other connector shows its current accounts. */
   saved: McpConnectionAccountSelection[];
-  frozen: boolean;
-  initialServerIds: string[];
-  selectedServerIds: string[];
   editedServerIds: string[];
   destinationChanged: boolean;
   toolsChanged: boolean;
+  pinsCleared?: boolean;
 }) {
-  const prior = new Set(input.initialServerIds);
-  const newlySelected = new Set(
-    input.destinationChanged || input.toolsChanged
-      ? input.selectedServerIds.filter((id) => !prior.has(id))
-      : [],
-  );
-  const changedServerIds = [...new Set([...input.editedServerIds, ...newlySelected])];
-  const choices = connectionAccountChoices(input.saved);
-  if (input.frozen) {
-    for (const id of input.selectedServerIds) {
-      if (!newlySelected.has(id) && choices[id] === undefined) choices[id] = [];
-    }
-  }
+  const changedServerIds = [...new Set(input.editedServerIds)];
   return {
-    choices,
+    choices: connectionAccountChoices(input.saved),
     changedServerIds,
-    // A move must also discard selections the destination cannot use.
-    changed: input.destinationChanged || changedServerIds.length > 0,
+    // A move must also discard pins the destination cannot use.
+    changed:
+      input.destinationChanged ||
+      input.toolsChanged ||
+      input.pinsCleared === true ||
+      changedServerIds.length > 0,
   };
 }
 
-/** Retain unshown choices only where the destination can still use them. */
-export function mergeScheduleConnectionAccounts(
+/**
+ * The pins to save: retained pins the destination can still use, minus the
+ * connectors a person re-picked, plus those new picks. Untouched connectors
+ * stay unpinned and follow the owner's current accounts.
+ */
+export function mergeSchedulePinnedAccounts(
   saved: McpConnectionAccountSelection[],
   selections: McpConnectionAccountSelection[],
   editableServerIds: string[],
@@ -438,11 +457,15 @@ export function createRequestFromDraft(
       ...(draft.visibility === "private" ? { visibility: "private" as const } : {}),
       overlapPolicy: overlapPolicyForCreate(draft),
       metadata: taskMetadataFromFormState(draft),
-      connectionAccounts: draft.connectionAccounts ?? [],
     };
   return {
     ...(draft.agentLearning && Object.keys(draft.agentLearning).length
-      ? { agentLearning: { scope: options.learningScope, settings: draft.agentLearning } }
+      ? {
+          agentLearning: {
+            scope: options.learningScope,
+            settings: draft.agentLearning,
+          },
+        }
       : {}),
     name: scheduleName(draft),
     schedule,
@@ -450,10 +473,10 @@ export function createRequestFromDraft(
     runMode: draft.runMode,
     overlapPolicy: overlapPolicyForCreate(draft),
     metadata: taskMetadataFromFormState(draft),
-    connectionAccounts: draft.connectionAccounts ?? [],
+    ...(draft.pinnedAccounts?.length ? { pinnedAccounts: draft.pinnedAccounts } : {}),
     agentConfig: agentConfigFromFormState(draft),
-    ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
+    ...(narrowedVaultPolicy(draft.vaultPolicy) ? { vaultPolicy: draft.vaultPolicy } : {}),
   };
 }
 
@@ -462,9 +485,9 @@ function sameCadence(left: CadenceValue | null, right: CadenceValue | null): boo
 }
 
 /**
- * The PATCH for an edited schedule. The schedule spec, variable set and
+ * The PATCH for an edited schedule. The schedule spec, vault policy and
  * Sandbox Environment are sent only when they changed, so an untouched field
- * the editor can't fully express (an interval end, a set this viewer can't
+ * the editor can't fully express (an interval end, a vault this viewer can't
  * list) is never rewritten.
  */
 export function updateRequestFromDraft(
@@ -486,12 +509,16 @@ export function updateRequestFromDraft(
   const editableConfig = (form: ScheduleDraft) => {
     if (!materializedReusable) return agentConfigFromFormState(form, task, initial);
     const {
-      connectionAccounts: _accounts,
-      connectionAccountsFrozen: _frozen,
+      pinnedAccounts: _pins,
+      pinnedAccountsRequired: _pinsRequired,
       slackBotConnectionId: _bot,
       slackBotChannelId: _channel,
       ...retained
-    } = { connectionAccountsFrozen: undefined, ...task.agentConfig };
+    } = {
+      pinnedAccounts: undefined,
+      pinnedAccountsRequired: undefined,
+      ...task.agentConfig,
+    };
     return {
       ...retained,
       prompt: form.prompt,
@@ -531,9 +558,11 @@ export function updateRequestFromDraft(
       : { overlapPolicy: draft.overlapPolicy }),
     ...(initial.visibility === draft.visibility ? {} : { visibility: draft.visibility }),
     ...(same(oldMetadata, nextMetadata) ? {} : { metadata: nextMetadata }),
-    ...(same(initial.connectionAccounts ?? [], draft.connectionAccounts ?? [])
+    // An existing-chat schedule has no pins; moving into a chat drops them.
+    ...(draft.runMode === "existing_session" ||
+    same(initial.pinnedAccounts ?? [], draft.pinnedAccounts ?? [])
       ? {}
-      : { connectionAccounts: draft.connectionAccounts ?? [] }),
+      : { pinnedAccounts: draft.pinnedAccounts ?? [] }),
     ...(draft.runMode === "existing_session" || onlyPromptChanged
       ? initial.prompt === draft.prompt
         ? {}
@@ -541,10 +570,11 @@ export function updateRequestFromDraft(
       : same(oldConfig, nextConfig)
         ? {}
         : { agentConfig: nextConfig }),
-    ...(inheritsChatSettings || initial.variableSetId === draft.variableSetId
-      ? {}
-      : { variableSetId: draft.variableSetId }),
     ...(inheritsChatSettings || initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
+    ...(inheritsChatSettings ||
+    same(narrowedVaultPolicy(initial.vaultPolicy), narrowedVaultPolicy(draft.vaultPolicy))
+      ? {}
+      : { vaultPolicy: narrowedVaultPolicy(draft.vaultPolicy) ?? { mode: "all" } }),
   };
 }
 

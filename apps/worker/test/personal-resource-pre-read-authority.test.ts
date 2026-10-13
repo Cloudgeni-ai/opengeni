@@ -18,7 +18,7 @@ describe("personal-resource direct-read authority", () => {
     ).toHaveLength(2);
     expect(admission).not.toContain("?.length");
   });
-  test("revalidates Rig reads early and threads exact attempt authority into every Variable Set materialization", async () => {
+  test("revalidates Rig reads early and never materializes Variable Sets into the turn", async () => {
     const governance = await readFile(
       new URL("../src/activities/agent-turn/governance-model.ts", import.meta.url),
       "utf8",
@@ -33,22 +33,12 @@ describe("personal-resource direct-read authority", () => {
     );
     const authorize = governance.indexOf("await resolveSessionAttemptPersonalResources(db");
     const rigRead = governance.indexOf("await materializeRigVersionForAttempt(db", authorize);
-    const variableRead = toolEnvironment.indexOf("loadWorkspaceEnvironmentForRunWithCredentials(");
     expect(authorize).toBeGreaterThan(0);
     expect(authorize).toBeLessThan(rigRead);
-    expect(variableRead).toBeGreaterThan(0);
     expect(governance.slice(authorize - 240, authorize)).toContain("zero-row no-op");
-    expect(toolEnvironment).toContain("const variableSetAuthority = {");
-    expect(toolEnvironment).toContain("attemptId: input.attemptId");
-    expect(toolEnvironment).toContain("executionGeneration: turn.executionGeneration");
-    expect(toolEnvironment).toContain("initiator: turn.initiator");
-    expect(toolEnvironment).toContain("initiatingHumanSubjectId: fileAuthoritySubjectId");
-    expect(toolEnvironment.match(/variableSetAuthority,/gu)?.length).toBe(2);
-    const selectionGuard = toolEnvironment.indexOf(
-      "sessionVariableSetIds.length > 0 || rigDefaultVariableSetIds.length > 0",
-    );
-    expect(selectionGuard).toBeGreaterThan(0);
-    expect(selectionGuard).toBeLessThan(variableRead);
+    // W1 (secrets delivery): the turn no longer materializes Variable Sets at all.
+    expect(toolEnvironment).not.toContain("loadWorkspaceEnvironmentForRunWithCredentials(");
+    expect(toolEnvironment).not.toContain("variableSetAuthority");
     expect(orchestrator.indexOf("prepareGovernanceAndModel(")).toBeGreaterThan(0);
     expect(orchestrator.indexOf("prepareGovernanceAndModel(")).toBeLessThan(
       orchestrator.indexOf("prepareTurnToolPolicy("),

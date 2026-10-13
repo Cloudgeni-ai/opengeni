@@ -165,23 +165,37 @@ function SharedRow<T extends Account>({
   const scopeLabel = organizationReachLabel(places.scope, access.data);
   if (inUse) return renderRow(account, () => organization.openAccount(account.id), scopeLabel);
   const reaches = reachesWorkspace(access.data, organization.workspace);
+  // Unread, its reach and use here are unknown: no guessed tag or usage, and a
+  // failed read says so in the tag's place, with the way to read it again.
+  const failed = Boolean(access.error) && !access.data;
   return (
     <SubscriptionAccountRow
       provider={provider}
       title={subscriptionAccountName(account)}
       email={account.email}
-      meta={[
-        scopeLabel,
-        plan(account),
-        access.error
-          ? "Couldn't check availability"
-          : reaches === false
-            ? `Not available in ${places.scopeName}`
-            : ownInUse
-              ? "Set aside while this workspace has its own"
-              : null,
-      ]}
-      cells={{ usage: NOT_IN_USE }}
+      meta={
+        failed
+          ? ["Couldn't check who can use it", plan(account)]
+          : !access.data
+            ? [plan(account)]
+            : [
+                scopeLabel,
+                // Before the plan, so it stays readable on a phone.
+                reaches === false ? "Not available here" : ownInUse ? "Set aside" : null,
+                plan(account),
+              ]
+      }
+      cells={access.data ? { usage: NOT_IN_USE } : undefined}
+      control={
+        failed ? (
+          <RowButton
+            aria-label={`Try again for ${subscriptionAccountName(account)}`}
+            onClick={() => void access.reload()}
+          >
+            Try again
+          </RowButton>
+        ) : undefined
+      }
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }

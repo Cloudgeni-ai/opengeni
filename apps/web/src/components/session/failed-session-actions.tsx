@@ -63,11 +63,13 @@ function FailureActionsAttempt({
       } else setError("Could not retry this session.");
     } catch (failure) {
       // Pause and unsettled execution are transient; each explicit retry still
-      // passes backend admission. Only a definitively unsafe failure is latched.
+      // passes backend admission. A definitively unsafe failure, including a
+      // tool call whose outcome is permanently unknown, is latched.
       if (
         failure instanceof OpenGeniApiError &&
         !failure.outcomeUnknown &&
-        failure.code === "RETRY_UNSUPPORTED_FAILURE"
+        (failure.code === "RETRY_UNSUPPORTED_FAILURE" ||
+          failure.code === "RETRY_TOOL_OUTCOME_UNKNOWN")
       ) {
         setRejected(true);
       }
@@ -75,13 +77,15 @@ function FailureActionsAttempt({
         failure instanceof OpenGeniApiError && !failure.outcomeUnknown && failure.status < 500
           ? failure.code === "RETRY_UNSUPPORTED_FAILURE"
             ? "This failure cannot be retried safely."
-            : failure.code === "RETRY_EXECUTION_UNRESOLVED"
-              ? "Earlier work is still settling."
-              : failure.code === "RETRY_PAUSED"
-                ? "This session is paused."
-                : failure.status === 409
-                  ? "The session changed."
-                  : "Could not retry this session. Check your access and model."
+            : failure.code === "RETRY_TOOL_OUTCOME_UNKNOWN"
+              ? "A tool may already have run, so Retry could repeat it. Check its result, then send a message to continue."
+              : failure.code === "RETRY_EXECUTION_UNRESOLVED"
+                ? "Earlier work is still settling. Try again in a moment."
+                : failure.code === "RETRY_PAUSED"
+                  ? "This session is paused."
+                  : failure.status === 409
+                    ? "The session changed."
+                    : "Could not retry this session. Check your access and model."
           : "Retry not confirmed.",
       );
     } finally {

@@ -34,7 +34,6 @@ const legacyBrowserUnusedMethods = [
   "getCompanyProfileRevision",
   "getDocumentBase",
   "getDocumentOriginalFile",
-  "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
   // Shared Insights methods are adopted by the separately owned Insights UI.
@@ -95,9 +94,14 @@ const agentInteractionMethods = [
   "openBrowserTargetWithInventory",
 ];
 
-// Server-side integrations replace the Skills a session carries; the web
-// console does not call this method.
-const integrationMethods = ["updateSessionSkills"];
+// Server-side integrations replace the Skills a session carries, and hosts that
+// attach their own session MCP servers manage those tools' Allow/Ask/Block
+// choices; the web console calls none of these methods.
+const integrationMethods = [
+  "getSessionMcpToolPermissions",
+  "updateSessionMcpToolPermissions",
+  "updateSessionSkills",
+];
 
 // The native app exchanges its sign-in code, signs out and manages its push
 // device through the public client. The web app only starts the authorization.
@@ -128,17 +132,7 @@ const retiredSettingsMethods = [
 // These browser-facing account APIs landed before their separately reviewed
 // settings (#4123) and picker (#4169) UI. Keep the pending surface explicit;
 // remove each entry when its browser consumer lands (the equality below enforces it).
-const pendingModelAccountMethods = [
-  "getModelAccountPreferences",
-  "getModelAccountSettingsOverview",
-  "getOrganizationModelAccountSettings",
-  "getSessionModelAccount",
-  "getWorkspaceModelAccountSettings",
-  "setSessionModelAccount",
-  "updateModelAccountPreferences",
-  "updateOrganizationModelAccountSettings",
-  "updateWorkspaceModelAccountSettings",
-];
+const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

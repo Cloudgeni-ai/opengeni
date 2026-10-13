@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import {
   assertToolRefsSubset,
   isAuthoritativeGitHubRepositorySelectionError,
+  scheduledTaskRunTools,
   validateToolRefsForSessionPolicy,
   withWorkspaceDefaultMcpTools,
 } from "../src/domain/resources";
@@ -91,6 +92,53 @@ describe("session resource tool policy fences", () => {
         firstPartyMcpTools: [],
       }),
     ).toEqual([mcp("cap-docs", true)]);
+  });
+
+  test("a schedule that follows the defaults gets them as they are at run time", () => {
+    const followDefaults = (excluded: string[] = []) => ({
+      tools: [mcp("static-configured")],
+      toolPolicy: { mode: "workspace_default" as const, excludedMcpServerIds: excluded },
+    });
+    const runtime = {
+      mcpServers: [
+        ...settings.mcpServers,
+        { id: "new-connector", url: "https://new.example/mcp", cacheToolsList: false },
+      ],
+    };
+    // A default the workspace adds after the schedule was saved reaches its next run.
+    expect(
+      scheduledTaskRunTools({
+        agentConfig: followDefaults(),
+        settings,
+        runtimeSettings: runtime,
+        workspaceDefaults: { mcpServerIds: ["cap-docs", "new-connector"] },
+      }).map((tool) => tool.id),
+    ).toEqual(["static-configured", "cap-docs", "new-connector"]);
+    // A default a person turned off stays off, and so does an excluded addition;
+    // the Opengeni carrier is never excluded.
+    expect(
+      scheduledTaskRunTools({
+        agentConfig: {
+          tools: [mcp("opengeni"), mcp("static-configured")],
+          toolPolicy: {
+            mode: "workspace_default",
+            excludedMcpServerIds: ["cap-docs", "static-configured", "opengeni"],
+          },
+        },
+        settings,
+        runtimeSettings: runtime,
+        workspaceDefaults: { mcpServerIds: ["cap-docs", "new-connector"] },
+      }).map((tool) => tool.id),
+    ).toEqual(["opengeni", "new-connector"]);
+    // Without a policy a run gets exactly the schedule's tools.
+    expect(
+      scheduledTaskRunTools({
+        agentConfig: { tools: [mcp("static-configured")] },
+        settings,
+        runtimeSettings: runtime,
+        workspaceDefaults: { mcpServerIds: ["cap-docs", "new-connector"] },
+      }),
+    ).toEqual([mcp("static-configured")]);
   });
 
   test("builtin-only defaults include future connectors without reenabling disabled builtins", () => {

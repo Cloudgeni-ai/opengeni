@@ -39,10 +39,12 @@ test.each(["github:personal", "google-drive-publishing"])(
         name: "test",
         schedule: { type: "manual" },
         agentConfig: { prompt: "test" },
-        connectionAccounts,
+        pinnedAccounts: connectionAccounts,
       }).success,
     ).toBe(false);
-    expect(UpdateScheduledTaskRequest.safeParse({ connectionAccounts }).success).toBe(false);
+    expect(
+      UpdateScheduledTaskRequest.safeParse({ pinnedAccounts: connectionAccounts }).success,
+    ).toBe(false);
     expect(SessionUserMessagePayload.safeParse({ text: "test", connectionAccounts }).success).toBe(
       false,
     );
@@ -52,12 +54,70 @@ test.each(["github:personal", "google-drive-publishing"])(
   },
 );
 
-test("stored frozen-empty account choices retain their marker without upgrading historical rows", () => {
-  const config = { prompt: "test", resources: [], tools: [], metadata: {}, connectionAccounts: [] };
-  expect(ScheduledTaskAgentConfig.parse(config).connectionAccountsFrozen).toBeUndefined();
+test("a schedule stores only person pins, never a resolved account snapshot", () => {
+  const config = { prompt: "test", resources: [], tools: [], metadata: {} };
+  const pin = { serverId: "slack", connectionId: crypto.randomUUID() };
+  const stored = ScheduledTaskAgentConfig.parse({
+    ...config,
+    pinnedAccounts: [pin],
+    pinnedAccountsRequired: true,
+    connectionAccounts: [pin],
+    connectionAccountsFrozen: true,
+  });
+  expect(stored.pinnedAccounts).toEqual([pin]);
+  expect(stored.pinnedAccountsRequired).toBe(true);
+  expect(stored).not.toHaveProperty("connectionAccounts");
+  expect(stored).not.toHaveProperty("connectionAccountsFrozen");
+});
+
+test("schedule requests reject the retired account snapshot field", () => {
+  const connectionAccounts = [{ serverId: "slack", connectionId: crypto.randomUUID() }];
   expect(
-    ScheduledTaskAgentConfig.parse({ ...config, connectionAccountsFrozen: true })
-      .connectionAccountsFrozen,
+    CreateScheduledTaskRequest.safeParse({
+      name: "test",
+      schedule: { type: "manual" },
+      agentConfig: { prompt: "test" },
+      connectionAccounts,
+    }).success,
+  ).toBe(false);
+  expect(
+    CreateScheduledTaskRequest.safeParse({
+      name: "test",
+      schedule: { type: "manual" },
+      prompt: "test",
+      targetSessionId: crypto.randomUUID(),
+      connectionAccounts,
+    }).success,
+  ).toBe(false);
+  expect(UpdateScheduledTaskRequest.safeParse({ connectionAccounts }).success).toBe(false);
+});
+
+test("an existing-chat schedule cannot pin accounts", () => {
+  const pinnedAccounts = [{ serverId: "slack", connectionId: crypto.randomUUID() }];
+  expect(
+    CreateScheduledTaskRequest.safeParse({
+      name: "test",
+      schedule: { type: "manual" },
+      runMode: "existing_session",
+      targetSessionId: crypto.randomUUID(),
+      agentConfig: { prompt: "test" },
+      pinnedAccounts,
+    }).success,
+  ).toBe(false);
+  expect(
+    UpdateScheduledTaskRequest.safeParse({
+      runMode: "existing_session",
+      targetSessionId: crypto.randomUUID(),
+      pinnedAccounts,
+    }).success,
+  ).toBe(false);
+  expect(
+    CreateScheduledTaskRequest.safeParse({
+      name: "test",
+      schedule: { type: "manual" },
+      agentConfig: { prompt: "test" },
+      pinnedAccounts,
+    }).success,
   ).toBe(true);
 });
 

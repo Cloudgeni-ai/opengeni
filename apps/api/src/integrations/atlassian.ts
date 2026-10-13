@@ -1248,7 +1248,6 @@ async function materializeSchedules(
           action: { kind: "agent_turn" },
           runMode: "new_session_per_run",
           targetSessionId: null,
-          connectionAccounts: [],
           agentConfig: knowledgeSourceAgentConfig(action),
           variableSetId: null,
           environmentId: null,

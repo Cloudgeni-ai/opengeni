@@ -30,6 +30,9 @@ export type WorkspaceArtifactVersion = {
   createdAt: string;
 };
 
+/** Who can see a Site: everyone in the workspace, or only its owner ("Only me"). */
+export type WorkspaceArtifactVisibility = "private" | "workspace";
+
 export type WorkspaceArtifact = {
   id: string;
   accountId: string;
@@ -38,6 +41,10 @@ export type WorkspaceArtifact = {
   title: string;
   description: string | null;
   status: "active" | "archived";
+  /** Absent from older servers, where every Site is visible to the workspace. */
+  visibility?: WorkspaceArtifactVisibility;
+  /** The person the Site belongs to; only they can change its audience. */
+  ownerSubjectId?: string | null;
   currentVersion: WorkspaceArtifactVersion | null;
   createdBySubjectId: string;
   createdAt: string;
@@ -102,6 +109,8 @@ export type CreateWorkspaceArtifactRequest = {
   uploadId?: string;
   source?: WorkspaceArtifactSourceBundle;
   requestedTools?: ToolGatewayIdentity[];
+  /** Who can see the new Site. Omitted: the whole workspace. */
+  visibility?: WorkspaceArtifactVisibility;
   idempotencyKey: string;
 };
 export type PublishWorkspaceArtifactVersionRequest = {
@@ -125,4 +134,10 @@ export type SetWorkspaceArtifactStatusRequest = {
   expectedCurrentVersionId: string;
   reason: string;
   idempotencyKey: string;
+};
+export type UpdateWorkspaceArtifactVisibilityRequest = {
+  visibility: WorkspaceArtifactVisibility;
+};
+export type UpdateWorkspaceArtifactVisibilityResponse = {
+  artifact: WorkspaceArtifact;
 };

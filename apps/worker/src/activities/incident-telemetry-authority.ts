@@ -11,9 +11,10 @@ import {
   getRig,
   getScheduledScopedRigVersionMetadata,
   getScheduledTaskRunAcceptedExecution,
-  getVariableSet,
   listEnabledMcpCapabilityServerIds,
   listInstalledApiIntegrationServerIdsForDelegations,
+  listVaultItems,
+  listVaultsForSubject,
   markScheduledTaskRunAuthorityRejectedInTransaction,
   requireSession,
   requireWorkspace,
@@ -30,8 +31,63 @@ import {
   incidentTelemetryAuthorityFence,
   parseIncidentTelemetryAuthorityFence,
   evaluateIncidentTelemetryPreflight,
+  incidentTelemetryPreflightDeclaration,
   type IncidentTelemetryResponderMetadata,
+  type IncidentTelemetryVaultMetadata,
 } from "./incident-telemetry-preflight";
+
+/**
+ * Vaults (with item names) the responder reaches under the task's vault
+ * policy, read only when the preflight names vaults or items. Metadata only:
+ * connected vaults answer from their mirror, values are never read. Returns
+ * null when the lookup failed, so the run blocks as metadata-incomplete.
+ */
+async function resolveIncidentTelemetryVaults(input: {
+  db: Database;
+  task: ScheduledTask;
+  subjectId: string;
+}): Promise<IncidentTelemetryVaultMetadata[] | null> {
+  const declaration = incidentTelemetryPreflightDeclaration(input.task.agentConfig, true);
+  if (declaration.action !== "required") return [];
+  const preflight = declaration.preflight;
+  if (
+    preflight.requiredVariableSetNames.length === 0 &&
+    preflight.requiredVariableNames.length === 0 &&
+    preflight.dataSource.route.kind !== "variable_set"
+  ) {
+    return [];
+  }
+  const context = {
+    kind: "subject" as const,
+    accountId: input.task.accountId,
+    workspaceId: input.task.workspaceId,
+    subjectId: input.subjectId,
+  };
+  const policy = input.task.vaultPolicy ?? { mode: "all" as const };
+  try {
+    const reachable = (
+      await listVaultsForSubject(input.db, context, { workspaceId: input.task.workspaceId })
+    ).filter((vault) => policy.mode === "all" || policy.vaultIds.includes(vault.id));
+    const vaults: IncidentTelemetryVaultMetadata[] = [];
+    for (const vault of reachable) {
+      const items: { name: string }[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await listVaultItems(input.db, context, {
+          vaultId: vault.id,
+          limit: 200,
+          ...(cursor ? { cursor } : {}),
+        });
+        items.push(...page.items.map((item) => ({ name: item.name })));
+        cursor = page.nextCursor ?? undefined;
+      } while (cursor);
+      vaults.push({ name: vault.name, items });
+    }
+    return vaults;
+  } catch {
+    return null;
+  }
+}
 
 /** Resolve only exact selected responder metadata; never read/decrypt values or call providers. */
 export async function resolveIncidentTelemetryResponderMetadata(input: {
@@ -41,14 +97,17 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
   session: Session | null;
   personalConnectionDelegations: readonly McpPersonalConnectionDelegation[];
   personalResourceAuthoritySubjectId?: string | null;
+  /**
+   * The tools a run that has no session yet will start with; a schedule that
+   * follows the workspace defaults resolves them per run.
+   */
+  plannedTools?: Session["tools"];
   executionPolicy?: {
     tools: ScheduledTaskRunAcceptedExecution["resolvedTools"];
     firstPartyMcpTools: ScheduledTaskRunAcceptedExecution["resolvedFirstPartyMcpTools"];
     firstPartyMcpPermissions:
       | ScheduledTaskRunAcceptedExecution["resolvedFirstPartyMcpPermissions"]
       | null;
-    variableSetIds?: readonly string[];
-    variableSetId: string | null;
     rigId: string | null;
     rigVersionId: string | null;
     toolPolicy: Session["toolPolicy"];
@@ -68,7 +127,7 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
     ? input.executionPolicy.tools
     : input.session
       ? input.session.tools
-      : withFirstPartyTools(input.settings, input.task.agentConfig.tools);
+      : (input.plannedTools ?? withFirstPartyTools(input.settings, input.task.agentConfig.tools));
   const resolvedToolPolicy = resolveIncidentTelemetryResponderToolPolicy({
     settingsMcpServerIds: input.settings.mcpServers.map((server) => server.id),
     capabilityServerIds,
@@ -88,15 +147,9 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
 
   let metadataComplete = true;
   let rig: IncidentTelemetryResponderMetadata["rig"] = null;
-  const variableSetIds = new Set<string>();
   if (input.executionPolicy ?? input.session) {
-    for (const id of input.executionPolicy?.variableSetIds ?? input.session?.variableSetIds ?? []) {
-      variableSetIds.add(id);
-    }
-    const variableSetId = input.executionPolicy?.variableSetId ?? input.session?.variableSetId;
     const rigId = input.executionPolicy?.rigId ?? input.session?.rigId ?? null;
     const rigVersionId = input.executionPolicy?.rigVersionId ?? input.session?.rigVersionId ?? null;
-    if (variableSetId) variableSetIds.add(variableSetId);
     if ((rigId === null) !== (rigVersionId === null)) {
       metadataComplete = false;
     } else if (rigId && rigVersionId) {
@@ -118,11 +171,9 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
           credentialHooks: selected.version.credentialHooks,
           checkHealth: selected.health.checkHealth,
         };
-        for (const id of selected.version.defaultVariableSetIds) variableSetIds.add(id);
       }
     }
   } else {
-    if (input.task.variableSetId) variableSetIds.add(input.task.variableSetId);
     if (input.task.rigId) {
       const selectedRig = await getRig(
         input.db,
@@ -141,28 +192,16 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
           credentialHooks: selectedRig.activeVersion.credentialHooks,
           checkHealth: selectedRig.activeVersionHealth.checkHealth,
         };
-        for (const id of selectedRig.activeVersion.defaultVariableSetIds) variableSetIds.add(id);
       }
     }
   }
 
-  const variableSets = await Promise.all(
-    [...variableSetIds].map(
-      async (id) =>
-        await getVariableSet(
-          input.db,
-          {
-            accountId: input.task.accountId,
-            workspaceId: input.task.workspaceId,
-            subjectId: input.personalResourceAuthoritySubjectId ?? input.task.createdBy.subjectId,
-          },
-          id,
-        ),
-    ),
-  );
-  if (variableSets.some((variableSet) => variableSet === null)) {
-    metadataComplete = false;
-  }
+  const vaults = await resolveIncidentTelemetryVaults({
+    db: input.db,
+    task: input.task,
+    subjectId: input.personalResourceAuthoritySubjectId ?? input.task.createdBy.subjectId,
+  });
+  if (vaults === null) metadataComplete = false;
 
   return {
     metadataComplete,
@@ -183,18 +222,7 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
       ? (input.executionPolicy.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)
       : (input.session?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS),
     rig,
-    variableSets: variableSets.flatMap((variableSet) =>
-      variableSet
-        ? [
-            {
-              name: variableSet.name,
-              variables: variableSet.variables.map((variable) => ({
-                name: variable.name,
-              })),
-            },
-          ]
-        : [],
-    ),
+    vaults: vaults ?? [],
     toolPolicyVersion:
       input.executionPolicy?.toolPolicyVersion ?? input.session?.toolPolicyVersion ?? null,
   };
@@ -297,10 +325,6 @@ export async function validateIncidentTelemetrySystemUpdateAuthority(input: {
             acceptedExecution.targetSessionExecution.firstPartyMcpTools,
           firstPartyMcpPermissions:
             acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
-          variableSetIds: acceptedExecution.targetSessionExecution.variableSets.map(
-            (variableSet) => variableSet.id,
-          ),
-          variableSetId: acceptedExecution.targetSessionExecution.variableSetId,
           rigId: acceptedExecution.targetSessionExecution.rigId,
           rigVersionId: acceptedExecution.targetSessionExecution.rigVersionId,
           toolPolicy: acceptedExecution.targetSessionExecution.toolPolicy,
@@ -311,7 +335,6 @@ export async function validateIncidentTelemetrySystemUpdateAuthority(input: {
           tools: acceptedExecution.resolvedTools,
           firstPartyMcpTools: acceptedExecution.resolvedFirstPartyMcpTools,
           firstPartyMcpPermissions: acceptedExecution.resolvedFirstPartyMcpPermissions,
-          variableSetId: acceptedExecution.resolvedVariableSet?.id ?? null,
           rigId: acceptedExecution.resolvedRig?.id ?? null,
           rigVersionId: acceptedExecution.resolvedRig?.versionId ?? null,
           toolPolicy: session.toolPolicy,

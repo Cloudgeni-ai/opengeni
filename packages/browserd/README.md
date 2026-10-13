@@ -11,6 +11,16 @@ screenshots, and live frames. Mutations serialize per target; different targets
 remain concurrent. Live-frame subscribers share one target screencast, receive a
 latest-frame-wins stream, and every upstream frame is acknowledged immediately.
 
+Page-inspection and input CDP command deadlines report `tab_not_responding` with
+close-and-reopen (or manual reload) guidance, not browser loss or a generic network failure. This is a
+definite diagnosis that the tab did not answer in time; it does not prove why
+(a hung renderer and an excessively slow page can both cause it). Reads and
+pre-input failures are non-retryable until explicit recovery. Browserd does not
+reload, close, replace the browser, or replay input automatically. Healthy peer
+tabs remain available. If input was already sent, the receipt retains
+`outcome_unknown` with the same `tab_not_responding` diagnosis and warns not to
+repeat the action. Actual socket loss remains a separate transport failure.
+
 Managed Chromium launches request a 64 MiB HTTP disk-cache budget instead of
 Chromium's host-disk-derived default. This bounds disposable response caching,
 not cookies, IndexedDB, service-worker storage, downloads, or total profile size.
