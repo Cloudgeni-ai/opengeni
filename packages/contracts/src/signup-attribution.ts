@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /**
@@ -25,22 +26,26 @@ export const SIGNUP_ATTRIBUTION_VALUE_MAX_LENGTH = 100;
  */
 export const SIGNUP_ATTRIBUTION_VALUE_PATTERN = /^[A-Za-z0-9._~+-]+$/;
 
-const SignupAttributionValue = z
-  .string()
-  .trim()
-  .min(1)
-  .max(SIGNUP_ATTRIBUTION_VALUE_MAX_LENGTH)
-  .regex(SIGNUP_ATTRIBUTION_VALUE_PATTERN);
+const SignupAttributionValue = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(SIGNUP_ATTRIBUTION_VALUE_MAX_LENGTH)
+    .regex(SIGNUP_ATTRIBUTION_VALUE_PATTERN),
+);
 
-export const SignupAttribution = z
-  .object({
-    utmSource: SignupAttributionValue.optional(),
-    utmMedium: SignupAttributionValue.optional(),
-    utmCampaign: SignupAttributionValue.optional(),
-    utmContent: SignupAttributionValue.optional(),
-    ref: SignupAttributionValue.optional(),
-  })
-  .strict();
+export const SignupAttribution = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      utmSource: SignupAttributionValue.optional(),
+      utmMedium: SignupAttributionValue.optional(),
+      utmCampaign: SignupAttributionValue.optional(),
+      utmContent: SignupAttributionValue.optional(),
+      ref: SignupAttributionValue.optional(),
+    })
+    .strict(),
+);
 export type SignupAttribution = z.infer<typeof SignupAttribution>;
 
 /** Closed acquisition channels reported by server-side sign-up metrics. */

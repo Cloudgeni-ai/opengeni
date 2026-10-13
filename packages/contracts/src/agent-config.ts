@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 /**
  * Agent configuration: one `agent` object that describes what an Opengeni
  * agent is (identity), how it answers (renderer, instructions alias) and what
@@ -39,7 +40,7 @@ export const AGENT_CAPABILITY_IDS = [
   "workspaceConnectors",
   "workspaceAdmin",
 ] as const;
-export const AgentCapabilityId = z.enum(AGENT_CAPABILITY_IDS);
+export const AgentCapabilityId = /* @__PURE__ */ defineSchema(() => z.enum(AGENT_CAPABILITY_IDS));
 export type AgentCapabilityId = z.infer<typeof AgentCapabilityId>;
 
 /** Boolean capabilities: every capability except the three-state `skills`. */
@@ -49,34 +50,36 @@ export const AGENT_BOOLEAN_CAPABILITY_IDS = AGENT_CAPABILITY_IDS.filter(
 );
 
 /** `read` reads installed Skills; `manage` also saves/installs/publishes/removes. */
-export const AgentSkillsCapability = z.union([
-  z.literal("read"),
-  z.literal("manage"),
-  z.literal(false),
-]);
+export const AgentSkillsCapability = /* @__PURE__ */ defineSchema(() =>
+  z.union([z.literal("read"), z.literal("manage"), z.literal(false)]),
+);
 export type AgentSkillsCapability = z.infer<typeof AgentSkillsCapability>;
 
-export const AgentCapabilityStartingPoint = z.enum(["all", "none"]);
+export const AgentCapabilityStartingPoint = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["all", "none"]),
+);
 export type AgentCapabilityStartingPoint = z.infer<typeof AgentCapabilityStartingPoint>;
 
-export const AgentCapabilityToggles = z
-  .object({
-    webSearch: z.boolean().optional(),
-    humanInput: z.boolean().optional(),
-    skills: AgentSkillsCapability.optional(),
-    goals: z.boolean().optional(),
-    subagents: z.boolean().optional(),
-    knowledge: z.boolean().optional(),
-    schedules: z.boolean().optional(),
-    artifacts: z.boolean().optional(),
-    browser: z.boolean().optional(),
-    secrets: z.boolean().optional(),
-    media: z.boolean().optional(),
-    workspaceFiles: z.boolean().optional(),
-    workspaceConnectors: z.boolean().optional(),
-    workspaceAdmin: z.boolean().optional(),
-  })
-  .strict();
+export const AgentCapabilityToggles = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      webSearch: z.boolean().optional(),
+      humanInput: z.boolean().optional(),
+      skills: AgentSkillsCapability.optional(),
+      goals: z.boolean().optional(),
+      subagents: z.boolean().optional(),
+      knowledge: z.boolean().optional(),
+      schedules: z.boolean().optional(),
+      artifacts: z.boolean().optional(),
+      browser: z.boolean().optional(),
+      secrets: z.boolean().optional(),
+      media: z.boolean().optional(),
+      workspaceFiles: z.boolean().optional(),
+      workspaceConnectors: z.boolean().optional(),
+      workspaceAdmin: z.boolean().optional(),
+    })
+    .strict(),
+);
 export type AgentCapabilityToggles = z.infer<typeof AgentCapabilityToggles>;
 
 /**
@@ -84,78 +87,84 @@ export type AgentCapabilityToggles = z.infer<typeof AgentCapabilityToggles>;
  * session's own tools plus essentials (human input and reading Skills). An
  * object starts from one of them and switches individual capabilities.
  */
-export const AgentCapabilities = z.union([
-  z.literal("all"),
-  z.literal("none"),
-  AgentCapabilityToggles.extend({ from: AgentCapabilityStartingPoint }).strict(),
-]);
+export const AgentCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    z.literal("all"),
+    z.literal("none"),
+    AgentCapabilityToggles.extend({ from: AgentCapabilityStartingPoint }).strict(),
+  ]),
+);
 export type AgentCapabilities = z.infer<typeof AgentCapabilities>;
 
 /** `opengeni` emits `sandbox:`/`artifact:` links and inline visuals; `markdown` does not. */
-export const AgentRenderer = z.enum(["opengeni", "markdown"]);
+export const AgentRenderer = /* @__PURE__ */ defineSchema(() => z.enum(["opengeni", "markdown"]));
 export type AgentRenderer = z.infer<typeof AgentRenderer>;
 
 export const AGENT_IDENTITY_MAX_CHARACTERS = 8_000;
 /** Same bound as `SESSION_INSTRUCTIONS_MAX_CHARACTERS` (asserted by test). */
 export const AGENT_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
-export const AgentIdentity = z.string().trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS);
+export const AgentIdentity = /* @__PURE__ */ defineSchema(() =>
+  z.string().trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS),
+);
 
 /** The request-side agent object. Every field is optional. */
-export const AgentConfigRequest = z
-  .object({
-    capabilities: AgentCapabilities.optional(),
-    /** Replaces only Opengeni's identity lines; null selects the default identity. */
-    identity: AgentIdentity.nullable().optional(),
-    /** Alias of the session `instructions` field (same column, same bound). */
-    instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-    renderer: AgentRenderer.optional(),
-    /**
-     * Vaults this session may use (input only, Q-08). Intersected with the
-     * parent's policy and any session-level `vaultPolicy`.
-     */
-    vaultPolicy: VaultPolicy.optional(),
-  })
-  .strict();
+export const AgentConfigRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilities: AgentCapabilities.optional(),
+      /** Replaces only Opengeni's identity lines; null selects the default identity. */
+      identity: AgentIdentity.nullable().optional(),
+      /** Alias of the session `instructions` field (same column, same bound). */
+      instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      renderer: AgentRenderer.optional(),
+      /**
+       * Vaults this session may use (input only, Q-08). Intersected with the
+       * parent's policy and any session-level `vaultPolicy`.
+       */
+      vaultPolicy: VaultPolicy.optional(),
+    })
+    .strict(),
+);
 export type AgentConfigRequest = z.infer<typeof AgentConfigRequest>;
 
 /** Workspace "Defaults for new sessions" agent part (no instructions alias). */
-export const WorkspaceAgentDefaults = z
-  .object({
-    capabilities: AgentCapabilities.optional(),
-    identity: AgentIdentity.nullable().optional(),
-    renderer: AgentRenderer.optional(),
-  })
-  .strict();
+export const WorkspaceAgentDefaults = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilities: AgentCapabilities.optional(),
+      identity: AgentIdentity.nullable().optional(),
+      renderer: AgentRenderer.optional(),
+    })
+    .strict(),
+);
 export type WorkspaceAgentDefaults = z.infer<typeof WorkspaceAgentDefaults>;
 
-export const ResolvedAgentCapabilities = z
-  .object({
-    webSearch: z.boolean(),
-    humanInput: z.boolean(),
-    skills: AgentSkillsCapability,
-    goals: z.boolean(),
-    subagents: z.boolean(),
-    knowledge: z.boolean(),
-    schedules: z.boolean(),
-    artifacts: z.boolean(),
-    browser: z.boolean(),
-    secrets: z.boolean(),
-    media: z.boolean(),
-    workspaceFiles: z.boolean(),
-    workspaceConnectors: z.boolean(),
-    workspaceAdmin: z.boolean(),
-  })
-  .strict();
+export const ResolvedAgentCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      webSearch: z.boolean(),
+      humanInput: z.boolean(),
+      skills: AgentSkillsCapability,
+      goals: z.boolean(),
+      subagents: z.boolean(),
+      knowledge: z.boolean(),
+      schedules: z.boolean(),
+      artifacts: z.boolean(),
+      browser: z.boolean(),
+      secrets: z.boolean(),
+      media: z.boolean(),
+      workspaceFiles: z.boolean(),
+      workspaceConnectors: z.boolean(),
+      workspaceAdmin: z.boolean(),
+    })
+    .strict(),
+);
 export type ResolvedAgentCapabilities = z.infer<typeof ResolvedAgentCapabilities>;
 
-export const ResolvedAgentConfigSource = z.enum([
-  "request",
-  "workspace_default",
-  "deployment_default",
-  "inherited",
-  "legacy_conversion",
-]);
+export const ResolvedAgentConfigSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["request", "workspace_default", "deployment_default", "inherited", "legacy_conversion"]),
+);
 export type ResolvedAgentConfigSource = z.infer<typeof ResolvedAgentConfigSource>;
 
 /**
@@ -183,54 +192,60 @@ function withStoredSecretsCapability(value: unknown): unknown {
   return { ...config, capabilities: { ...capabilities, secrets: config.from === "all" } };
 }
 
-export const ResolvedAgentConfig = z.preprocess(
-  withStoredSecretsCapability,
-  z
-    .object({
-      version: z.literal(1),
-      from: AgentCapabilityStartingPoint,
-      capabilities: ResolvedAgentCapabilities,
-      unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
-      /**
-       * Why each `unavailable` capability is off, keyed by capability. Present
-       * whenever `unavailable` is non-empty; absent on historical configurations.
-       */
-      unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
-      identity: AgentIdentity.nullable(),
-      renderer: AgentRenderer,
-      source: ResolvedAgentConfigSource,
-    })
-    .strict(),
+export const ResolvedAgentConfig = /* @__PURE__ */ defineSchema(() =>
+  z.preprocess(
+    withStoredSecretsCapability,
+    z
+      .object({
+        version: z.literal(1),
+        from: AgentCapabilityStartingPoint,
+        capabilities: ResolvedAgentCapabilities,
+        unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
+        /**
+         * Why each `unavailable` capability is off, keyed by capability. Present
+         * whenever `unavailable` is non-empty; absent on historical configurations.
+         */
+        unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
+        identity: AgentIdentity.nullable(),
+        renderer: AgentRenderer,
+        source: ResolvedAgentConfigSource,
+      })
+      .strict(),
+  ),
 );
 export type ResolvedAgentConfig = z.infer<typeof ResolvedAgentConfig>;
 
 /** `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/agent`. Omitted fields keep current values. */
-export const UpdateSessionAgentRequest = z
-  .object({
-    agent: AgentConfigRequest,
-    expectedVersion: z.number().int().positive(),
-  })
-  .strict();
+export const UpdateSessionAgentRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      agent: AgentConfigRequest,
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+);
 export type UpdateSessionAgentRequest = z.infer<typeof UpdateSessionAgentRequest>;
 
 /** Client-safe agent-configuration projection. */
-export const ClientAgentConfig = z
-  .object({
-    /** @deprecated Agent configuration is always on; servers always report `true`. */
-    enabled: z.boolean(),
-    /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
-    defaultForNewSessions: z.boolean(),
-    capabilities: z.array(
-      z
-        .object({
-          id: AgentCapabilityId,
-          available: z.boolean(),
-          reason: z.string().max(200).optional(),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+export const ClientAgentConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** @deprecated Agent configuration is always on; servers always report `true`. */
+      enabled: z.boolean(),
+      /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
+      defaultForNewSessions: z.boolean(),
+      capabilities: z.array(
+        z
+          .object({
+            id: AgentCapabilityId,
+            available: z.boolean(),
+            reason: z.string().max(200).optional(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+);
 export type ClientAgentConfig = z.infer<typeof ClientAgentConfig>;
 
 // ---------------------------------------------------------------------------
@@ -767,7 +782,9 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "admin",
   "attachments",
 ] as const;
-export const AgentPromptModuleId = z.enum(AGENT_PROMPT_MODULE_IDS);
+export const AgentPromptModuleId = /* @__PURE__ */ defineSchema(() =>
+  z.enum(AGENT_PROMPT_MODULE_IDS),
+);
 export type AgentPromptModuleId = z.infer<typeof AgentPromptModuleId>;
 
 export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, string>> = {
@@ -808,11 +825,9 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
 // Resolution
 // ---------------------------------------------------------------------------
 
-export const AgentConfigErrorCode = z.enum([
-  "agent_capability_unavailable",
-  "agent_config_conflict",
-  "agent_config_widening",
-]);
+export const AgentConfigErrorCode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["agent_capability_unavailable", "agent_config_conflict", "agent_config_widening"]),
+);
 export type AgentConfigErrorCode = z.infer<typeof AgentConfigErrorCode>;
 
 /** Typed resolution failure. Transports render it as 422 with `details.code`. */
@@ -1510,42 +1525,44 @@ export type AgentEffectiveMcpServerEntry = {
   toolsKnown: boolean;
 };
 
-export const AgentEffectiveTools = z
-  .object({
-    capabilities: ResolvedAgentCapabilities,
-    unavailable: z.array(AgentCapabilityId),
-    /** False means media adapters await exact turn/credential attachment; tools does not guess them. */
-    mediaToolsKnown: z.boolean().optional(),
-    tools: z
-      .array(
-        z
-          .object({
-            name: z.string().min(1).max(512),
-            capability: z.union([
-              AgentCapabilityId,
-              z.literal("runtime"),
-              z.literal("sandbox"),
-              z.literal("product"),
-            ]),
-            source: z.enum(["first_party", "runtime", "hosted", "sandbox", "mcp"]),
-            visibility: z.enum(["upfront", "search"]).optional(),
-          })
-          .strict(),
-      )
-      .max(512),
-    mcpServers: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1).max(200),
-            capability: z.union([AgentCapabilityId, z.literal("runtime"), z.literal("product")]),
-            toolsKnown: z.boolean(),
-          })
-          .strict(),
-      )
-      .max(256),
-  })
-  .strict();
+export const AgentEffectiveTools = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilities: ResolvedAgentCapabilities,
+      unavailable: z.array(AgentCapabilityId),
+      /** False means media adapters await exact turn/credential attachment; tools does not guess them. */
+      mediaToolsKnown: z.boolean().optional(),
+      tools: z
+        .array(
+          z
+            .object({
+              name: z.string().min(1).max(512),
+              capability: z.union([
+                AgentCapabilityId,
+                z.literal("runtime"),
+                z.literal("sandbox"),
+                z.literal("product"),
+              ]),
+              source: z.enum(["first_party", "runtime", "hosted", "sandbox", "mcp"]),
+              visibility: z.enum(["upfront", "search"]).optional(),
+            })
+            .strict(),
+        )
+        .max(512),
+      mcpServers: z
+        .array(
+          z
+            .object({
+              id: z.string().min(1).max(200),
+              capability: z.union([AgentCapabilityId, z.literal("runtime"), z.literal("product")]),
+              toolsKnown: z.boolean(),
+            })
+            .strict(),
+        )
+        .max(256),
+    })
+    .strict(),
+);
 export type AgentEffectiveTools = z.infer<typeof AgentEffectiveTools>;
 
 /**

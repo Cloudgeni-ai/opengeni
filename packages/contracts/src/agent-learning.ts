@@ -1,19 +1,26 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Review controls publication. It never grants content or external-action authority. */
-export const AgentLearningMode = z.enum(["automatic", "review_first", "off"]);
+export const AgentLearningMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["automatic", "review_first", "off"]),
+);
 export type AgentLearningMode = z.infer<typeof AgentLearningMode>;
 
-export const AgentLearningCategory = z.enum(["knowledge", "instructions", "skills"]);
+export const AgentLearningCategory = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["knowledge", "instructions", "skills"]),
+);
 export type AgentLearningCategory = z.infer<typeof AgentLearningCategory>;
 
-export const AgentLearningDefaults = z
-  .object({
-    knowledge: AgentLearningMode,
-    instructions: AgentLearningMode,
-    skills: AgentLearningMode,
-  })
-  .strict();
+export const AgentLearningDefaults = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      knowledge: AgentLearningMode,
+      instructions: AgentLearningMode,
+      skills: AgentLearningMode,
+    })
+    .strict(),
+);
 export type AgentLearningDefaults = z.infer<typeof AgentLearningDefaults>;
 
 export const DEFAULT_AGENT_LEARNING: Readonly<AgentLearningDefaults> = Object.freeze({
@@ -23,63 +30,79 @@ export const DEFAULT_AGENT_LEARNING: Readonly<AgentLearningDefaults> = Object.fr
 });
 
 /** An absent category inherits. `inherit` is a reset request, not persisted policy. */
-export const AgentLearningOverrides = AgentLearningDefaults.partial();
+export const AgentLearningOverrides = /* @__PURE__ */ defineSchema(() =>
+  AgentLearningDefaults.partial(),
+);
 export type AgentLearningOverrides = z.infer<typeof AgentLearningOverrides>;
 
-export const AgentLearningOverridePatch = z
-  .object({
-    knowledge: AgentLearningMode.or(z.literal("inherit")).optional(),
-    instructions: AgentLearningMode.or(z.literal("inherit")).optional(),
-    skills: AgentLearningMode.or(z.literal("inherit")).optional(),
-  })
-  .strict();
+export const AgentLearningOverridePatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      knowledge: AgentLearningMode.or(z.literal("inherit")).optional(),
+      instructions: AgentLearningMode.or(z.literal("inherit")).optional(),
+      skills: AgentLearningMode.or(z.literal("inherit")).optional(),
+    })
+    .strict(),
+);
 export type AgentLearningOverridePatch = z.infer<typeof AgentLearningOverridePatch>;
 
-export const AgentLearningContext = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("chat"), id: z.uuid() }).strict(),
-  z.object({ kind: z.literal("scheduled_task"), id: z.uuid() }).strict(),
-]);
+export const AgentLearningContext = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("chat"), id: z.uuid() }).strict(),
+    z.object({ kind: z.literal("scheduled_task"), id: z.uuid() }).strict(),
+  ]),
+);
 export type AgentLearningContext = z.infer<typeof AgentLearningContext>;
 
-export const AgentLearningOwner = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("workspace"), workspaceId: z.uuid() }).strict(),
-  z.object({ kind: z.literal("personal"), subjectId: z.string().min(1).max(1024) }).strict(),
-]);
+export const AgentLearningOwner = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("workspace"), workspaceId: z.uuid() }).strict(),
+    z.object({ kind: z.literal("personal"), subjectId: z.string().min(1).max(1024) }).strict(),
+  ]),
+);
 export type AgentLearningOwner = z.infer<typeof AgentLearningOwner>;
 
-export const AgentLearningSettings = z
-  .object({
-    owner: AgentLearningOwner,
-    version: z.number().int().nonnegative(),
-    defaults: AgentLearningDefaults,
-  })
-  .strict();
+export const AgentLearningSettings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      owner: AgentLearningOwner,
+      version: z.number().int().nonnegative(),
+      defaults: AgentLearningDefaults,
+    })
+    .strict(),
+);
 export type AgentLearningSettings = z.infer<typeof AgentLearningSettings>;
 
-export const AgentLearningContextSettings = z
-  .object({
-    context: AgentLearningContext,
-    version: z.number().int().nonnegative(),
-    overrides: AgentLearningOverrides,
-  })
-  .strict();
+export const AgentLearningContextSettings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      context: AgentLearningContext,
+      version: z.number().int().nonnegative(),
+      overrides: AgentLearningOverrides,
+    })
+    .strict(),
+);
 export type AgentLearningContextSettings = z.infer<typeof AgentLearningContextSettings>;
 
 /** Versioned settings returned by both central and contextual editors. */
-export const AgentLearningSettingsRecord = z.object({
-  ownerKey: z.string(),
-  contextKey: z.string(),
-  version: z.number().int().nonnegative(),
-  settings: AgentLearningOverrides,
-});
+export const AgentLearningSettingsRecord = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ownerKey: z.string(),
+    contextKey: z.string(),
+    version: z.number().int().nonnegative(),
+    settings: AgentLearningOverrides,
+  }),
+);
 export type AgentLearningSettingsRecord = z.infer<typeof AgentLearningSettingsRecord>;
-export const AgentLearningOverrideRecord = z.object({
-  contextKey: z.string(),
-  version: z.number().int().positive(),
-  settings: AgentLearningOverrides,
-  updatedAt: z.string(),
-  label: z.string(),
-});
+export const AgentLearningOverrideRecord = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    contextKey: z.string(),
+    version: z.number().int().positive(),
+    settings: AgentLearningOverrides,
+    updatedAt: z.string(),
+    label: z.string(),
+  }),
+);
 export type AgentLearningOverrideRecord = z.infer<typeof AgentLearningOverrideRecord>;
 export type SaveAgentLearningSettingsRequest = {
   scope: "workspace" | "personal";
@@ -89,19 +112,23 @@ export type SaveAgentLearningSettingsRequest = {
   settings: AgentLearningOverridePatch;
 };
 
-export const AgentLearningEffectiveCategory = z
-  .object({
-    mode: AgentLearningMode,
-    inherited: z.boolean(),
-  })
-  .strict();
-export const AgentLearningEffectivePolicy = z
-  .object({
-    knowledge: AgentLearningEffectiveCategory,
-    instructions: AgentLearningEffectiveCategory,
-    skills: AgentLearningEffectiveCategory,
-  })
-  .strict();
+export const AgentLearningEffectiveCategory = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      mode: AgentLearningMode,
+      inherited: z.boolean(),
+    })
+    .strict(),
+);
+export const AgentLearningEffectivePolicy = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      knowledge: AgentLearningEffectiveCategory,
+      instructions: AgentLearningEffectiveCategory,
+      skills: AgentLearningEffectiveCategory,
+    })
+    .strict(),
+);
 export type AgentLearningEffectivePolicy = z.infer<typeof AgentLearningEffectivePolicy>;
 
 /** Apply only at an authorized settings boundary; this function confers no authority. */

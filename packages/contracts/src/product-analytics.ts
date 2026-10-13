@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 // Content-free product-analytics dimensions carried on durable facts and the
@@ -41,7 +42,7 @@ export const SESSION_TURN_SURFACES = [
   "mcp",
   "system",
 ] as const;
-export const SessionTurnSurface = z.enum(SESSION_TURN_SURFACES);
+export const SessionTurnSurface = /* @__PURE__ */ defineSchema(() => z.enum(SESSION_TURN_SURFACES));
 export type SessionTurnSurface = z.infer<typeof SessionTurnSurface>;
 
 /**
@@ -85,7 +86,9 @@ export const ANALYTICS_MODEL_PROVIDERS = [
   "organization-opper",
   "registry",
 ] as const;
-export const AnalyticsModelProvider = z.enum(ANALYTICS_MODEL_PROVIDERS);
+export const AnalyticsModelProvider = /* @__PURE__ */ defineSchema(() =>
+  z.enum(ANALYTICS_MODEL_PROVIDERS),
+);
 export type AnalyticsModelProvider = z.infer<typeof AnalyticsModelProvider>;
 
 const RESERVED_ANALYTICS_MODEL_PROVIDERS: ReadonlySet<string> = new Set(
@@ -112,10 +115,12 @@ export function analyticsModelProvider(
  * {@link TOOL_FAMILY_INTEGRATION_DOMAINS}, so a tenant's own host name is
  * never exported.
  */
-export const ToolFamily = z
-  .string()
-  .max(160)
-  .regex(/^(?:custom|integration:[a-z0-9](?:[a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$/u);
+export const ToolFamily = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .max(160)
+    .regex(/^(?:custom|integration:[a-z0-9](?:[a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$/u),
+);
 export type ToolFamily = z.infer<typeof ToolFamily>;
 
 /**
