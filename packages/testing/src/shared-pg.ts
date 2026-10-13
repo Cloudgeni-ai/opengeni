@@ -623,21 +623,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
       // visible) rather than a clean error. Give the throwaway test server a
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
-      generation = await startSharedContainer([
-        "run",
-        "-d",
-        "-e",
-        `POSTGRES_PASSWORD=${PASSWORD}`,
-        "-p",
-        `${PORT}:5432`,
-        "--name",
-        CONTAINER,
-        IMAGE,
-        "-c",
-        "max_connections=1000",
-        "-c",
-        "shared_buffers=256MB",
-      ]);
+      generation = await startSharedContainer(sharedTestContainerRunArgs());
       if (!generation) {
         return null; // Docker unavailable or unable to start the fixture.
       }
@@ -958,3 +944,30 @@ export async function acquireOwnerMigratedTestDatabase(
 
 // Re-export so callers don't need to import the constant from elsewhere.
 export const SHARED_TEST_PG_IMAGE = IMAGE;
+
+/**
+ * `docker run` arguments for the shared test server. Parallel queries allocate
+ * dynamic shared memory in /dev/shm, and Docker's 64 MB default is too small
+ * for hundreds of concurrent test connections: a single parallel hash can ask
+ * for 32 MB, the allocation fails with "No space left on device", and a FORCE
+ * drop issued right after such a failure has crashed the whole server into
+ * recovery. 1 GB is a tmpfs ceiling, not a reservation; only used pages count.
+ */
+export function sharedTestContainerRunArgs(): string[] {
+  return [
+    "run",
+    "-d",
+    "--shm-size=1g",
+    "-e",
+    `POSTGRES_PASSWORD=${PASSWORD}`,
+    "-p",
+    `${PORT}:5432`,
+    "--name",
+    CONTAINER,
+    IMAGE,
+    "-c",
+    "max_connections=1000",
+    "-c",
+    "shared_buffers=256MB",
+  ];
+}
