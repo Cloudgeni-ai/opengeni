@@ -603,6 +603,8 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean)",
   "list_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
   "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
+  "preview_connected_machine_audience_change(uuid, uuid, uuid, text, text, boolean)",
+  "change_connected_machine_audience(uuid, uuid, uuid, bigint, text, text, boolean)",
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "mutate_managed_sign_in_method(text, text, jsonb)",

@@ -822,7 +822,10 @@ The command and relay transport credentials last 30 days. The agent renews them
 with seven days remaining, using its existing install key and current enrollment
 generation. A machine returning after a longer offline period uses the same
 renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
-renewal cannot change ownership, scope or screen-control consent. Updated
+renewal itself cannot change ownership, scope or screen-control consent. Who can
+use a machine changes in place through **Who can use it?** (see
+[Change who can use a machine](#change-who-can-use-a-machine)), and screen
+control through its own request below; neither needs a reconnect. Updated
 credentials load into the existing process, preserving host operations.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
@@ -966,6 +969,81 @@ report only a missing Screen Recording grant, as `desktopUnavailableReason`.
 Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
 nothing; the person switches OpenGeni on there. The chat card walks the missing
 permissions in that order, from what the Mac reports.
+
+### Change who can use a machine
+
+A connected machine switches between **This workspace** and **Only me** in
+place. The machine keeps its enrollment id, sandbox id, credentials and live
+connection, so its chats, schedules and the installed agent are not registered
+again, and the agent keeps running (with its running commands) without a
+restart or an upgrade. On the Machines page, open the machine and choose
+**Who can use it?**. Organization machines are shared with the whole
+organization and cannot be changed here.
+
+- Narrowing to **Only me** is done by the person who will own the machine, or by
+  a workspace admin who picks that owner. The owner must be an active member who
+  can use the workspace.
+- Widening to **This workspace** needs `workspace:admin`, and is done by the
+  machine's owner, so nobody exposes another person's Only me machine.
+- Both need `enrollments:manage`. An agent cannot change it.
+
+The dialog shows what one confirmation will do, as counts in plain sentences
+with the itemized chats and schedules behind **Chats and schedules affected**.
+Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
+
+- **The owner's chats** stay on the machine and keep their audience. A shared
+  chat stays shared, so the workspace keeps reading it, but only the owner's
+  turns can use the machine (who reads a chat and who uses a machine are
+  separate, as when choosing a personal machine for a shared chat). Each kept
+  chat gets a per-chat `connected_machine.use` grant, and the owner's running
+  attempts are re-authorized in place, so their running turns and commands
+  carry on.
+- **Other people's chats** move off the machine. Their history stays, their
+  files stay on the machine, and their next turn needs another machine. Another
+  member's private chat is listed without its title or owner.
+- **Running turns** that may no longer use the machine stop now and end as
+  cancelled (`authority_changed`): turns in chats that move off, and turns
+  someone other than the owner started in the owner's shared chats. The agent's
+  commands still running in chats that move off are stopped too.
+- **Schedules** that target the machine: the owner's Workspace schedules become
+  Only me schedules when the owner may have Only me schedules, and pause
+  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Notices**: each affected person other than the one switching gets one
+  inbox notification saying what moved, paused or stopped, and that they can
+  choose another machine to continue.
+- **A duplicate connection**: if the same computer is also connected separately
+  under the target audience, remove that copy first; this is the only thing
+  that blocks the switch. A removed copy is retired by the switch.
+
+Undo is switching back to **This workspace**. Moved chats and paused schedules
+are not restored automatically, and the notices say so; people choose another
+machine or resume their schedules. Widening keeps the owner's chats and
+schedules in this workspace where they are; chats and schedules in other
+workspaces move off or pause, since a workspace machine serves only its own
+workspace. The round trip Workspace → Only me → Workspace keeps the same
+machine throughout.
+
+The switch is one transaction. It recomputes the plan under the machine's row
+lock and the session fences of every workspace it touches, applies it,
+advances the machine's generation, moves the owner authority and
+re-authorizes the owner's live attachments. The worker reads the machine's
+current audience on every operation, so live sessions follow the new audience
+without being rebuilt and the agent needs no restart or upgrade. Each change
+records a `connected_machine.audience_changed` audit event with the counts.
+
+The API is the same flow:
+
+- `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
+  `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
+  `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
+  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
+  machine's `generation`.
+- `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
+  plus `expectedGeneration` applies it and returns the counts and the chats it
+  moved off. It answers `409` with `details.reason: "stale"` when the machine
+  changed since the preview (preview again and retry), and
+  `details.reason: "blocked"` with the preview while a duplicate connection
+  remains.
 
 ### Zero-click token (fleet / headless)
 

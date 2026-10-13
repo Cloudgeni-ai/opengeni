@@ -9,11 +9,15 @@
 import {
   AlertTriangleIcon,
   ArrowLeftIcon,
+  BuildingIcon,
+  ChevronRightIcon,
   CpuIcon,
   LaptopIcon,
   RadioIcon,
   ServerIcon,
   Trash2Icon,
+  UserIcon,
+  UsersIcon,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { formatRelativeTime } from "../../lib/format";
@@ -39,9 +43,74 @@ export type MachineDetailProps = {
     | ((machine: MachineView, request: UpdateMachineOperationPolicyRequest) => Promise<unknown>)
     | undefined;
   updatingOperationPolicy?: boolean | undefined;
+  /** Open "Who can use it?" for a connected machine. Omit when the viewer
+   * can't change it; the row then shows the current audience read-only. */
+  onChangeAudience?: ((machine: MachineView) => void) | undefined;
   now?: number | undefined;
   className?: string | undefined;
 };
+
+const AUDIENCE: Record<
+  MachineView["scope"],
+  { label: string; description: string; Icon: typeof UserIcon }
+> = {
+  user: { label: "Only me", description: "Only its owner can run chats on it.", Icon: UserIcon },
+  workspace: {
+    label: "This workspace",
+    description: "Everyone in this workspace can run chats on it.",
+    Icon: UsersIcon,
+  },
+  organization: {
+    label: "Whole organization",
+    description: "Every workspace in the organization can use it.",
+    Icon: BuildingIcon,
+  },
+};
+
+/** Who can use a connected machine. A navigational row when it can change. */
+function MachineAudienceRow({
+  machine,
+  onChange,
+}: {
+  machine: MachineView;
+  onChange?: ((machine: MachineView) => void) | undefined;
+}) {
+  const audience = AUDIENCE[machine.scope];
+  const changeable = onChange !== undefined && machine.scope !== "organization";
+  const content = (
+    <>
+      <audience.Icon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
+        <span className="text-og-sm font-medium text-og-fg">Who can use it?</span>
+        <span className="text-og-xs text-og-fg-muted">{audience.description}</span>
+      </span>
+      <span className="shrink-0 text-og-sm text-og-fg-muted">{audience.label}</span>
+      {changeable ? (
+        <ChevronRightIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+      ) : null}
+    </>
+  );
+  const frame =
+    "flex w-full min-h-14 items-center gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-4 py-3 shadow-og-sm";
+  return changeable ? (
+    <button
+      type="button"
+      data-machine-audience={machine.scope}
+      onClick={() => onChange(machine)}
+      aria-label={`Who can use ${machine.name}: ${audience.label}. Change`}
+      className={cn(
+        frame,
+        "transition-colors hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/50",
+      )}
+    >
+      {content}
+    </button>
+  ) : (
+    <div data-machine-audience={machine.scope} className={frame}>
+      {content}
+    </div>
+  );
+}
 
 function KindIcon({ kind, session }: { kind: string; session: boolean }) {
   if (kind === "local" || kind === "selfhosted")
@@ -62,6 +131,7 @@ export function MachineDetail({
   onRemove,
   onUpdateOperationPolicy,
   updatingOperationPolicy,
+  onChangeAudience,
   now = Date.now(),
   className,
 }: MachineDetailProps) {
@@ -247,6 +317,10 @@ export function MachineDetail({
           </div>
         ) : null}
       </div>
+
+      {machine.enrollmentId && !machine.isSessionGroup ? (
+        <MachineAudienceRow machine={machine} onChange={onChangeAudience} />
+      ) : null}
 
       {onUpdateOperationPolicy && machine.enrollmentId && machine.operationPolicy ? (
         <MachineOperationPolicyEditor

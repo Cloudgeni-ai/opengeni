@@ -9717,6 +9717,89 @@ export type MachinePrivacySettingsPane = "screen_recording" | "accessibility" | 
 /** POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings body. */
 export type OpenMachinePrivacySettingsRequest = { pane: MachinePrivacySettingsPane };
 
+/** Who can use a Connected Machine: everyone in its workspace, or one person. */
+export type MachineAudience = "workspace" | "only_me";
+
+/** POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview body.
+ * `ownerSubjectId` names who owns the machine as Only me (defaults to the
+ * caller; naming someone else needs workspace admin). */
+export type MachineAudiencePreviewRequest = {
+  audience: MachineAudience;
+  ownerSubjectId?: string;
+};
+
+/** PUT /v1/workspaces/:ws/machines/:enrollmentId/audience body: apply the
+ * previewed plan at the generation it was read at. */
+export type ChangeMachineAudienceRequest = MachineAudiencePreviewRequest & {
+  expectedGeneration: number;
+};
+
+/** What the change does to one thing on the machine. `move_off`: the chat
+ * leaves the machine (its history and files stay). `keep`: the owner's chat
+ * stays. `make_only_me` / `pause`: a schedule that runs on the machine.
+ * `remove_first`: the same computer is connected a second time. */
+export type MachineAudienceAction = "move_off" | "keep" | "make_only_me" | "pause" | "remove_first";
+
+/** One thing an audience change affects. Another member's private chat or
+ * schedule is listed without its title or owner. */
+export type MachineAudienceItem = {
+  kind: "chat" | "schedule" | "duplicate_connection";
+  action: MachineAudienceAction;
+  sessionId: string | null;
+  scheduledTaskId: string | null;
+  enrollmentId: string | null;
+  workspaceId: string | null;
+  relation: "other_member" | "owner_shared" | "owner_private" | "other_workspace" | null;
+  visibility: "user_private" | "workspace_shared" | null;
+  title: string | null;
+  ownerSubjectId: string | null;
+  /** A running turn in this chat stops for good. */
+  stopsTurn: boolean;
+  /** Agent commands still running in this chat that stop. */
+  stopsCommands: number;
+};
+
+/** Counts of what one change does. */
+export type MachineAudienceSummary = {
+  keptChats: number;
+  keptSharedChats: number;
+  movedOffChats: number;
+  schedulesMadeOnlyMe: number;
+  schedulesPaused: number;
+  stoppedTurns: number;
+  stoppedCommands: number;
+  notifiedPeople: number;
+};
+
+/** POST .../audience/preview response: everything one confirmation does.
+ * `ready` is false only while the same computer is also connected as a
+ * separate machine. */
+export type MachineAudiencePreview = {
+  enrollmentId: string;
+  sandboxId: string;
+  machineName: string;
+  currentAudience: MachineAudience;
+  targetAudience: MachineAudience;
+  generation: number;
+  ownerSubjectId: string | null;
+  summary: MachineAudienceSummary;
+  items: MachineAudienceItem[];
+  ready: boolean;
+};
+
+/** PUT .../audience response. The machine keeps its sandbox ID and connection. */
+export type ChangeMachineAudienceResponse = {
+  enrollmentId: string;
+  sandboxId: string;
+  previousAudience: MachineAudience;
+  audience: MachineAudience;
+  ownerSubjectId: string | null;
+  generation: number;
+  summary: MachineAudienceSummary;
+  detachedSessionIds: string[];
+  keptSessionIds: string[];
+};
+
 /** POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings response. */
 export type OpenMachinePrivacySettingsResponse = { opened: boolean; message: string | null };
 

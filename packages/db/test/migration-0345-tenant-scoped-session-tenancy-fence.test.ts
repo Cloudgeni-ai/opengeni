@@ -117,6 +117,7 @@ function expectInstalledFenceCoverage(installed: InstalledFenceTrigger[]): void 
 const directHotMutatorInventory = [
   "accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)",
   "backfill_organization_session_ownership(uuid,integer,boolean,text)",
+  "change_connected_machine_audience(uuid,uuid,uuid,bigint,text,text,boolean)",
   "detach_scoped_machine_dependent_sessions(uuid,uuid,uuid)",
   "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
   "fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)",

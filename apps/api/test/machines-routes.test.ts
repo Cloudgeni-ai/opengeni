@@ -21,6 +21,7 @@ import {
   createDb,
   createEnrollment,
   createSandbox,
+  createScheduledTask,
   createSession,
   getEnrollment,
   listSandboxes,
@@ -1644,5 +1645,289 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
     ]);
     // ...and the failure is visible in the logs, naming the failed sessionId.
     expect(warns.some((w) => w.meta?.sessionId === sessionA.id)).toBe(true);
+  }, 90_000);
+});
+
+describe("who can use a machine: Workspace or Only me, changed in place", () => {
+  async function audienceOrganization() {
+    const { accountId, workspaceId } = await freshWorkspace();
+    const owner = `user:${crypto.randomUUID()}`;
+    const member = `user:${crypto.randomUUID()}`;
+    for (const subjectId of [owner, member]) {
+      const [personal] = await admin<Array<{ id: string }>>`
+        insert into workspaces (account_id, name) values (${accountId}, 'personal') returning id`;
+      await admin`
+        insert into organization_memberships (
+          account_id, subject_id, status, personal_workspace_id, authorization_revision
+        ) values (${accountId}, ${subjectId}, 'active', ${personal!.id}, 1)`;
+      await admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${accountId}, ${workspaceId}, ${subjectId})`;
+    }
+    await admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'machine-audience-route')`;
+    await admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${owner}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${accountId}::uuid, ${workspaceId}::uuid, 'workspace',
+          ${`ed25519:${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64',
+          'Team build box', false
+        )`;
+      return row!;
+    });
+    await admin`update enrollments set last_seen_at = now() where id = ${machine.enrollmentId}`;
+    await claimConnection(workspaceId, machine.enrollmentId);
+    return { accountId, workspaceId, owner, member, ...machine };
+  }
+
+  type AudienceOrg = Awaited<ReturnType<typeof audienceOrganization>>;
+
+  async function bearerFor(org: AudienceOrg, subjectId: string, permissions: Permission[]) {
+    return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      subjectId,
+      subjectLabel: "Machine audience test",
+      permissions,
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })}`;
+  }
+
+  async function audienceRequest(
+    org: AudienceOrg,
+    auth: string,
+    method: "POST" | "PUT",
+    body: Record<string, unknown>,
+  ) {
+    const suffix = method === "POST" ? "audience/preview" : "audience";
+    const response = await appFor(new MemoryEventBus()).request(
+      `/v1/workspaces/${org.workspaceId}/machines/${org.enrollmentId}/${suffix}`,
+      {
+        method,
+        headers: { authorization: auth, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    return { status: response.status, body: (await response.json()) as Record<string, any> };
+  }
+
+  async function chatOnMachine(org: AudienceOrg, subjectId: string, title: string) {
+    const session = await createSession(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: title,
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      visibility: "workspace_shared",
+    } as never);
+    const routed = await setActiveSandbox(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      sessionId: session.id,
+      targetSandboxId: org.sandboxId,
+      expectedEpoch: session.activeEpoch,
+    });
+    expect(routed.swapped).toBe(true);
+    await admin`update sessions set title = ${title}, title_source = 'user' where id = ${session.id}`;
+    return session;
+  }
+
+  async function machineScope(enrollmentId: string) {
+    const [row] = await admin<Array<{ scope: string; generation: number }>>`
+      select authority_scope as scope, generation::int as generation
+      from enrollments where id = ${enrollmentId}`;
+    return row!;
+  }
+
+  test("only the would-be owner, or a workspace admin for them, can narrow; sharing needs admin", async () => {
+    if (!available) return;
+    const org = await audienceOrganization();
+    const memberAuth = await bearerFor(org, org.member, ["enrollments:manage"]);
+    const readerAuth = await bearerFor(org, org.member, ["enrollments:read"]);
+    const adminAuth = await bearerFor(org, org.owner, ["workspace:admin"]);
+
+    expect((await audienceRequest(org, readerAuth, "POST", { audience: "only_me" })).status).toBe(
+      403,
+    );
+    const self = await audienceRequest(org, memberAuth, "POST", { audience: "only_me" });
+    expect(self.status).toBe(200);
+    expect(self.body).toMatchObject({
+      sandboxId: org.sandboxId,
+      currentAudience: "workspace",
+      targetAudience: "only_me",
+      ownerSubjectId: org.member,
+      ready: true,
+      items: [],
+    });
+    // A member can't make the machine someone else's, or share it back.
+    expect(
+      (
+        await audienceRequest(org, memberAuth, "POST", {
+          audience: "only_me",
+          ownerSubjectId: org.owner,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (await audienceRequest(org, memberAuth, "POST", { audience: "workspace" })).body,
+    ).toMatchObject({ error: { code: "forbidden" } });
+    // A workspace admin may act for another member.
+    const forMember = await audienceRequest(org, adminAuth, "POST", {
+      audience: "only_me",
+      ownerSubjectId: org.member,
+    });
+    expect(forMember.status).toBe(200);
+    expect(forMember.body.ownerSubjectId).toBe(org.member);
+    // Unknown people can't own it.
+    const stranger = await audienceRequest(org, adminAuth, "POST", {
+      audience: "only_me",
+      ownerSubjectId: `user:${crypto.randomUUID()}`,
+    });
+    expect(stranger.status).toBe(422);
+    expect(stranger.body.error.details).toMatchObject({ refusal: "owner_not_member" });
+    // Nothing changed.
+    expect(await machineScope(org.enrollmentId)).toMatchObject({ scope: "workspace" });
+  }, 90_000);
+
+  test("one confirmation narrows, keeps the same sandbox, then shares it back", async () => {
+    if (!available) return;
+    const org = await audienceOrganization();
+    const memberChat = await chatOnMachine(org, org.member, "Member release");
+    const schedule = await createScheduledTask(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      name: "Nightly build",
+      status: "active",
+      visibility: "workspace_shared",
+      schedule: { type: "manual" },
+      temporalScheduleId: `audience-route-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Run the nightly build",
+        resources: [],
+        tools: [],
+        metadata: {},
+        sandboxBackend: "selfhosted",
+        machineTarget: { targetSandboxId: org.sandboxId },
+      },
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: org.owner },
+    } as never);
+    const ownerAuth = await bearerFor(org, org.owner, ["workspace:admin"]);
+    const before = await machineScope(org.enrollmentId);
+
+    // The preview is the whole plan; nothing needs deciding first.
+    const listed = await audienceRequest(org, ownerAuth, "POST", { audience: "only_me" });
+    expect(listed.status).toBe(200);
+    expect(listed.body).toMatchObject({
+      ready: true,
+      generation: before.generation,
+      summary: {
+        movedOffChats: 1,
+        schedulesMadeOnlyMe: 1,
+        schedulesPaused: 0,
+        notifiedPeople: 1,
+      },
+    });
+    expect(listed.body.items).toEqual([
+      expect.objectContaining({
+        kind: "chat",
+        action: "move_off",
+        sessionId: memberChat.id,
+        relation: "other_member",
+        title: "Member release",
+        stopsTurn: false,
+        stopsCommands: 0,
+      }),
+      expect.objectContaining({
+        kind: "schedule",
+        action: "make_only_me",
+        scheduledTaskId: schedule.id,
+        title: "Nightly build",
+      }),
+    ]);
+
+    // A stale generation is refused.
+    const stale = await audienceRequest(org, ownerAuth, "PUT", {
+      audience: "only_me",
+      expectedGeneration: before.generation + 5,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error.details).toMatchObject({ reason: "stale" });
+
+    const narrowed = await audienceRequest(org, ownerAuth, "PUT", {
+      audience: "only_me",
+      expectedGeneration: listed.body.generation,
+    });
+    expect(narrowed.status).toBe(200);
+    expect(narrowed.body).toMatchObject({
+      sandboxId: org.sandboxId,
+      previousAudience: "workspace",
+      audience: "only_me",
+      ownerSubjectId: org.owner,
+      generation: before.generation + 1,
+      summary: listed.body.summary,
+      detachedSessionIds: [memberChat.id],
+    });
+    const [scheduleRow] = await admin<Array<{ visibility: string; status: string }>>`
+      select visibility, status from scheduled_tasks where id = ${schedule.id}`;
+    expect(scheduleRow).toEqual({ visibility: "user_private", status: "active" });
+
+    // The Machines list shows it as the owner's, and hides it from the member.
+    const listFor = async (subjectId: string) => {
+      const response = await appFor(new MemoryEventBus()).request(
+        `/v1/workspaces/${org.workspaceId}/machines`,
+        { headers: { authorization: await bearerFor(org, subjectId, ["enrollments:read"]) } },
+      );
+      return ((await response.json()) as { machines: Array<{ sandboxId: string; scope: string }> })
+        .machines;
+    };
+    expect(await listFor(org.owner)).toEqual([
+      expect.objectContaining({ sandboxId: org.sandboxId, scope: "user" }),
+    ]);
+    expect(await listFor(org.member)).toEqual([]);
+
+    // Share it back: same sandbox again, and the member sees it.
+    const widened = await audienceRequest(org, ownerAuth, "PUT", {
+      audience: "workspace",
+      expectedGeneration: before.generation + 1,
+    });
+    expect(widened.status).toBe(200);
+    expect(widened.body).toMatchObject({
+      sandboxId: org.sandboxId,
+      previousAudience: "only_me",
+      audience: "workspace",
+      ownerSubjectId: null,
+    });
+    expect(await listFor(org.member)).toEqual([
+      expect.objectContaining({ sandboxId: org.sandboxId, scope: "workspace" }),
+    ]);
+    const sandboxes = await admin<Array<{ id: string }>>`
+      select id::text as id from sandboxes where enrollment_id = ${org.enrollmentId}`;
+    expect(sandboxes.map((row) => row.id)).toEqual([org.sandboxId]);
+    const audit = await admin<Array<{ action: string }>>`
+      select action from audit_events
+      where target_id = ${org.enrollmentId} and action = 'connected_machine.audience_changed'`;
+    expect(audit).toHaveLength(2);
   }, 90_000);
 });
