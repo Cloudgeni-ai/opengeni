@@ -18,6 +18,8 @@ const imports: Record<string, readonly string[]> = {
   "/app/route.js": ["/app/heavy.js", "/app/needed.js"],
   "/app/heavy.js": [],
   "/app/elsewhere.js": [],
+  "/app/settings-row.js": ["/app/settings-select.js"],
+  "/app/settings-select.js": [],
 };
 const staticImports = (id: string) => imports[id] ?? [];
 
@@ -57,6 +59,8 @@ describe("eager graph measurement", () => {
           fileName: "shared.js",
           unusedBytes: 900,
           unusedModules: [{ id: "/app/heavy.js", bytes: 900 }],
+          neededModules: ["/app/needed.js"],
+          importedVia: [{ from: "/app/main.js", to: "/app/needed.js" }],
         },
       ],
     });
@@ -65,6 +69,48 @@ describe("eager graph measurement", () => {
     const message = describeEagerGraphOverflow([initial!], 100, "/app");
     expect(message).toContain("- initial load: 900 unused bytes across 2 files");
     expect(message).toContain("shared.js: 900 unused, e.g. heavy.js (900)");
+    expect(message).toContain("    loaded for needed.js");
+  });
+
+  test("names the unused import that pulls in a chunk nothing uses", () => {
+    // A settings-only row merged into a chunk the page needs, importing a
+    // primitive from a large settings-only chunk.
+    const chunks: EagerGraphChunk[] = [
+      {
+        fileName: "main.js",
+        isEntry: true,
+        imports: ["shared.js"],
+        modules: { "/app/main.js": 50 },
+      },
+      {
+        fileName: "shared.js",
+        isEntry: false,
+        imports: ["settings.js"],
+        modules: { "/app/needed.js": 20, "/app/settings-row.js": 10 },
+      },
+      {
+        fileName: "settings.js",
+        isEntry: false,
+        imports: [],
+        modules: { "/app/settings-select.js": 900, "/app/heavy.js": 300 },
+      },
+    ];
+    const [initial] = measureEagerGraphs(chunks, staticImports, [
+      { name: "initial load", roots: ["/app/main.js"] },
+    ]);
+    expect(initial?.chunks.find((chunk) => chunk.fileName === "settings.js")).toEqual({
+      fileName: "settings.js",
+      unusedBytes: 1_200,
+      unusedModules: [
+        { id: "/app/settings-select.js", bytes: 900 },
+        { id: "/app/heavy.js", bytes: 300 },
+      ],
+      neededModules: [],
+      importedVia: [{ from: "/app/settings-row.js", to: "/app/settings-select.js" }],
+    });
+    expect(describeEagerGraphOverflow([initial!], 100, "/app")).toContain(
+      "    nothing in it is used; loaded through settings-row.js -> settings-select.js",
+    );
   });
 });
 
