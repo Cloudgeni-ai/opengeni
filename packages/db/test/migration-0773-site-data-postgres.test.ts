@@ -37,6 +37,7 @@ const limits: SiteDataLimits = {
   viewerWritesPerMinute: 1_000,
   siteWritesPerMinute: 1_000,
   viewerReadsPerMinute: 1_000,
+  managerWritesPerMinute: 1_000,
 };
 
 let shared: SharedTestDatabase;

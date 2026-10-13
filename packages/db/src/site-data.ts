@@ -78,6 +78,8 @@ export type SiteDataLimits = {
   viewerWritesPerMinute: number;
   siteWritesPerMinute: number;
   viewerReadsPerMinute: number;
+  /** Write operations per minute by all of a Site's managers (API and agent tools). */
+  managerWritesPerMinute: number;
 };
 
 export type SiteDataCollectionDefinition = {
@@ -1008,13 +1010,23 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async consumeRate(caller, kind, operations, limits) {
+      const manager = caller.role === "manager" && !caller.framed;
       const windows: Array<[string, number, string]> =
         kind === "read"
           ? [[`read:${caller.principal}`, limits.viewerReadsPerMinute, "Too many requests."]]
-          : [
-              [caller.principal, limits.viewerWritesPerMinute, "Too many writes."],
-              ["*", limits.siteWritesPerMinute, "This Site is receiving too many writes."],
-            ];
+          : manager
+            ? // Managers share one generous window per Site, apart from viewers'.
+              [
+                [
+                  "manager:*",
+                  limits.managerWritesPerMinute,
+                  "This Site's managers are writing too fast.",
+                ],
+              ]
+            : [
+                [caller.principal, limits.viewerWritesPerMinute, "Too many writes."],
+                ["*", limits.siteWritesPerMinute, "This Site is receiving too many writes."],
+              ];
       // Committed on its own, before any work, so failed attempts count too.
       await scoped(caller, async (tx) => {
         for (const [principal, limit, message] of windows) {
@@ -1771,7 +1783,16 @@ export type SiteDataAgentSession = {
   siteTurn: boolean;
   /** The scheduled task whose run created this exact session, if any. */
   scheduledTaskId: string | null;
+  /**
+   * False when the lineage could not be read in full: the session or an
+   * ancestor is missing, or the walk stopped at its depth cap with a parent
+   * still above. Callers must then fail closed.
+   */
+  complete: boolean;
 };
+
+/** Spawning ancestors the lineage walk reads before it reports itself incomplete. */
+export const SITE_DATA_AGENT_LINEAGE_MAX_DEPTH = 32;
 
 /**
  * Walk an agent's session up its spawning lineage (parent session and the
@@ -1784,13 +1805,20 @@ export async function getSiteDataAgentSession(
   scope: { accountId: string; workspaceId: string },
   sessionId: string,
   turnId: string | null,
-): Promise<SiteDataAgentSession | null> {
-  if (!UUID.test(sessionId)) return null;
+): Promise<SiteDataAgentSession> {
+  const unknown: SiteDataAgentSession = {
+    originSiteIds: [],
+    siteTurn: false,
+    scheduledTaskId: null,
+    complete: false,
+  };
+  if (!UUID.test(sessionId)) return unknown;
   const turn = turnId && UUID.test(turnId) ? turnId : null;
   return withRlsContext(db, scope, async (tx) => {
     const rows = await rawRows<{
       depth: number;
       found: boolean;
+      parent_session_id: string | null;
       origin_site_id: string | null;
       turn_surface: string | null;
     }>(
@@ -1801,9 +1829,10 @@ export async function getSiteDataAgentSession(
             select s.parent_session_id, s.parent_turn_id, chain.depth + 1
               from chain
               join sessions s on s.workspace_id = ${scope.workspaceId} and s.id = chain.session_id
-             where s.parent_session_id is not null and chain.depth < 32
+             where s.parent_session_id is not null
+               and chain.depth < ${SITE_DATA_AGENT_LINEAGE_MAX_DEPTH}
           )
-          select chain.depth, s.id is not null as found,
+          select chain.depth, s.id is not null as found, s.parent_session_id,
                  s.metadata->'_opengeniSiteOrigin'->>'siteId' as origin_site_id,
                  t.surface as turn_surface
             from chain
@@ -1812,7 +1841,9 @@ export async function getSiteDataAgentSession(
               and t.session_id = chain.session_id and t.id = chain.turn_id
            order by chain.depth`,
     );
-    if (!rows[0]?.found) return null;
+    if (!rows[0]?.found) return unknown;
+    const deepest = rows[rows.length - 1]!;
+    const complete = rows.every((row) => row.found) && deepest.parent_session_id === null;
     const [run] = await rawRows<{ task_id: string }>(
       tx,
       sql`select task_id from scheduled_task_runs
@@ -1825,6 +1856,7 @@ export async function getSiteDataAgentSession(
       ],
       siteTurn: rows.some((row) => row.turn_surface === "site"),
       scheduledTaskId: run?.task_id ?? null,
+      complete,
     };
   });
 }
