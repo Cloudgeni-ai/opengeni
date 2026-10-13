@@ -5,6 +5,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { AccessGrant, SiteDataDescribeResponse } from "@opengeni/contracts";
 import {
   createPostgresSiteDataStore,
+  getSiteDataAgentSession,
   getSiteDataSite,
   recordUsageEvent,
   SiteDataError,
@@ -76,114 +77,189 @@ export function publicSiteDataLimits(limits: SiteDataLimits): SiteDataDescribeRe
 }
 
 // JSON Schema validation with the tool gateway's Ajv posture: no coercion,
-// defaults or format assertions. Every schema is compiled by its own Ajv
-// instance, so `$id`s never register across tenants, and the compiled
-// validators live in a small LRU keyed by the schema's digest: evicting an
-// entry frees its Ajv. Regex keywords are refused (no RE2 here), and so are
-// identifiers and references that could reach outside the schema.
+// defaults or format assertions. Collection schemas use a strict keyword
+// allowlist (no references, regexes or conditionals), so compiling and
+// validating cost is linear in the schema and the record. Every schema is
+// compiled by its own Ajv instance, so nothing registers across tenants, and
+// the compiled validators live in a small LRU keyed by the schema's digest:
+// evicting an entry frees its Ajv.
 
 const SCHEMA_CACHE_SIZE = 128;
+/** Most schema nodes (objects or booleans) a collection schema may have. */
+export const SITE_DATA_MAX_SCHEMA_NODES = 500;
+/** Deepest schema nesting a collection schema may have. */
+export const SITE_DATA_MAX_SCHEMA_DEPTH = 16;
+/** Most values an `enum` may list. */
+export const SITE_DATA_MAX_SCHEMA_ENUM = 100;
 const compiled = new Map<string, ValidateFunction>();
+/** Per-object shortcut so a batch hashes each loaded schema once. */
+const compiledByObject = new WeakMap<object, ValidateFunction>();
 
-/** Keywords refused anywhere in a collection's JSON Schema. */
-const FORBIDDEN_SCHEMA_KEYWORDS = new Set([
-  "$id",
-  "id",
-  "$anchor",
-  "$dynamicAnchor",
-  "$dynamicRef",
-  "$recursiveRef",
-  "$recursiveAnchor",
-  "$schema",
-  "$async",
-  "pattern",
-  "patternProperties",
+const SCHEMA_TYPES = new Set(["string", "number", "integer", "boolean", "null", "object", "array"]);
+const SCALAR_TYPES = new Set(["string", "number", "integer", "boolean", "null"]);
+const NUMBER_KEYWORDS = new Set(["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]);
+const COUNT_KEYWORDS = new Set([
+  "minLength",
+  "maxLength",
+  "minItems",
+  "maxItems",
+  "minProperties",
+  "maxProperties",
 ]);
-/** Keywords whose value is a map from names to schemas. */
-const SCHEMA_MAPS = new Set([
+const TEXT_KEYWORDS = new Set(["format", "title", "description"]);
+const COMBINATORS = new Set(["allOf", "anyOf", "oneOf"]);
+/** Every keyword a collection schema may use. */
+export const SITE_DATA_SCHEMA_KEYWORDS: readonly string[] = [
+  "type",
   "properties",
-  "definitions",
-  "$defs",
-  "dependentSchemas",
-  "dependencies",
-]);
-/** Keywords whose value is data, not a schema. */
-const SCHEMA_DATA = new Set([
+  "required",
+  "additionalProperties",
+  "items",
   "enum",
   "const",
-  "default",
-  "examples",
-  "required",
-  "dependentRequired",
-]);
+  ...NUMBER_KEYWORDS,
+  "multipleOf",
+  ...COUNT_KEYWORDS,
+  ...TEXT_KEYWORDS,
+  ...COMBINATORS,
+  "uniqueItems",
+];
+const ALLOWED_KEYWORDS = new Set(SITE_DATA_SCHEMA_KEYWORDS);
 
-function schemaProblem(node: unknown, path: string, depth: number): string | null {
-  if (depth > 32) return "is nested too deeply";
-  if (Array.isArray(node)) {
-    for (const [index, item] of node.entries()) {
-      const problem = schemaProblem(item, `${path}/${index}`, depth + 1);
-      if (problem) return problem;
+function isScalar(value: unknown): boolean {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Whether an `items` schema pins every element to scalar types (uniqueItems stays linear). */
+function scalarItems(items: unknown): boolean {
+  if (!isRecordObject(items)) return false;
+  const type = items.type;
+  const types = typeof type === "string" ? [type] : Array.isArray(type) ? type : [];
+  return types.length > 0 && types.every((entry) => SCALAR_TYPES.has(entry as string));
+}
+
+/**
+ * Walk a collection schema against the keyword allowlist, counting nodes and
+ * depth. Returns the first problem, or null when the schema is supported.
+ */
+export function siteDataSchemaProblem(schema: unknown): string | null {
+  let nodes = 0;
+  const visit = (node: unknown, path: string, depth: number): string | null => {
+    const at = path || "/";
+    nodes += 1;
+    if (nodes > SITE_DATA_MAX_SCHEMA_NODES)
+      return `has more than ${SITE_DATA_MAX_SCHEMA_NODES} schemas`;
+    if (depth > SITE_DATA_MAX_SCHEMA_DEPTH)
+      return `is nested more than ${SITE_DATA_MAX_SCHEMA_DEPTH} levels deep`;
+    if (typeof node === "boolean") return null;
+    if (!isRecordObject(node)) return `has a schema at ${at} that is not an object or boolean`;
+    for (const [keyword, value] of Object.entries(node)) {
+      const where = `${path}/${keyword}`;
+      if (!ALLOWED_KEYWORDS.has(keyword))
+        return `uses ${keyword} at ${at}, which collection schemas do not support`;
+      if (keyword === "type") {
+        const types = typeof value === "string" ? [value] : value;
+        if (
+          !Array.isArray(types) ||
+          types.length === 0 ||
+          !types.every((type) => SCHEMA_TYPES.has(type as string))
+        )
+          return `has an invalid type at ${at}`;
+      } else if (keyword === "properties") {
+        if (!isRecordObject(value)) return `has properties at ${at} that are not an object`;
+        for (const [name, child] of Object.entries(value)) {
+          const problem = visit(child, `${where}/${name}`, depth + 1);
+          if (problem) return problem;
+        }
+      } else if (keyword === "required") {
+        if (!Array.isArray(value) || !value.every((name) => typeof name === "string"))
+          return `has required at ${at} that is not a list of names`;
+      } else if (keyword === "additionalProperties" || keyword === "items") {
+        // `items` is a single schema; tuple forms are not supported.
+        const problem = visit(value, where, depth + 1);
+        if (problem) return problem;
+      } else if (keyword === "enum") {
+        if (!Array.isArray(value) || value.length === 0 || !value.every(isScalar))
+          return `has an enum at ${at} that is not a list of strings, numbers, booleans or null`;
+        if (value.length > SITE_DATA_MAX_SCHEMA_ENUM)
+          return `has an enum at ${at} with more than ${SITE_DATA_MAX_SCHEMA_ENUM} values`;
+      } else if (keyword === "const") {
+        if (!isScalar(value)) return `has a const at ${at} that is not a scalar`;
+      } else if (NUMBER_KEYWORDS.has(keyword)) {
+        if (typeof value !== "number" || !Number.isFinite(value))
+          return `has ${keyword} at ${at} that is not a number`;
+      } else if (keyword === "multipleOf") {
+        if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+          return `has multipleOf at ${at} that is not a positive number`;
+      } else if (COUNT_KEYWORDS.has(keyword)) {
+        if (!Number.isSafeInteger(value) || (value as number) < 0)
+          return `has ${keyword} at ${at} that is not a non-negative integer`;
+      } else if (TEXT_KEYWORDS.has(keyword)) {
+        if (typeof value !== "string") return `has ${keyword} at ${at} that is not text`;
+      } else if (COMBINATORS.has(keyword)) {
+        if (!Array.isArray(value) || value.length === 0)
+          return `has ${keyword} at ${at} that is not a list of schemas`;
+        for (const [index, child] of value.entries()) {
+          const problem = visit(child, `${where}/${index}`, depth + 1);
+          if (problem) return problem;
+        }
+      } else if (keyword === "uniqueItems") {
+        if (typeof value !== "boolean") return `has uniqueItems at ${at} that is not a boolean`;
+        if (value && !scalarItems(node.items))
+          return `uses uniqueItems at ${at} without scalar items (give items a string, number, integer, boolean or null type)`;
+      }
     }
     return null;
-  }
-  if (node === null || typeof node !== "object") return null;
-  for (const [keyword, value] of Object.entries(node)) {
-    // `id` is only a keyword when it names a schema (a string); as a property name it is fine.
-    if (FORBIDDEN_SCHEMA_KEYWORDS.has(keyword) && (keyword !== "id" || typeof value === "string"))
-      return `uses ${keyword} at ${path || "/"}, which collection schemas do not support`;
-    if (keyword === "$ref") {
-      if (typeof value !== "string" || !(value === "#" || value.startsWith("#/")))
-        return `has a $ref at ${path || "/"} that is not local (only #/... references work)`;
-      continue;
-    }
-    if (SCHEMA_DATA.has(keyword)) continue;
-    if (SCHEMA_MAPS.has(keyword) && value && typeof value === "object" && !Array.isArray(value)) {
-      for (const [name, schema] of Object.entries(value)) {
-        const problem = schemaProblem(schema, `${path}/${keyword}/${name}`, depth + 1);
-        if (problem) return problem;
-      }
-      continue;
-    }
-    const problem = schemaProblem(value, `${path}/${keyword}`, depth + 1);
-    if (problem) return problem;
-  }
-  return null;
+  };
+  return visit(schema, "", 0);
 }
 
 function compileSiteDataSchema(schema: Record<string, unknown>): ValidateFunction {
-  const problem = schemaProblem(schema, "", 0);
+  const known = compiledByObject.get(schema);
+  if (known) return known;
+  const problem = siteDataSchemaProblem(schema);
   if (problem) throw new SiteDataError("validation", `jsonSchema ${problem}`);
   const digest = createHash("sha256").update(JSON.stringify(schema)).digest("hex");
-  const cached = compiled.get(digest);
-  if (cached) {
-    compiled.delete(digest);
-    compiled.set(digest, cached);
-    return cached;
-  }
-  let validator: ValidateFunction;
-  try {
-    validator = new Ajv({
-      allErrors: false,
-      coerceTypes: false,
-      strict: false,
-      useDefaults: false,
-      validateFormats: false,
-      addUsedSchema: false,
-    }).compile(schema);
-  } catch (error) {
-    throw new SiteDataError(
-      "validation",
-      `jsonSchema is not a valid JSON Schema: ${error instanceof Error ? error.message : "invalid"}`,
-    );
+  let validator = compiled.get(digest);
+  if (validator) compiled.delete(digest);
+  else {
+    try {
+      validator = new Ajv({
+        allErrors: false,
+        coerceTypes: false,
+        strict: false,
+        useDefaults: false,
+        validateFormats: false,
+        addUsedSchema: false,
+      }).compile(schema);
+    } catch (error) {
+      throw new SiteDataError(
+        "validation",
+        `jsonSchema is not a valid JSON Schema: ${error instanceof Error ? error.message : "invalid"}`,
+      );
+    }
   }
   compiled.set(digest, validator);
   while (compiled.size > SCHEMA_CACHE_SIZE) compiled.delete(compiled.keys().next().value!);
+  compiledByObject.set(schema, validator);
   return validator;
 }
 
 /** Compiled validators currently cached (for tests). */
 export function siteDataSchemaCacheSize(): number {
   return compiled.size;
+}
+
+function runValidator(validator: ValidateFunction, data: Record<string, unknown>): string | null {
+  if (validator(data)) return null;
+  const issue = validator.errors?.[0];
+  return issue
+    ? `${issue.instancePath || "record"} ${issue.message ?? "is invalid"}`
+    : "record is invalid";
 }
 
 export function validateSiteDataRecord(
@@ -196,11 +272,7 @@ export function validateSiteDataRecord(
   } catch {
     return "the collection's JSON Schema is invalid";
   }
-  if (validator(data)) return null;
-  const issue = validator.errors?.[0];
-  return issue
-    ? `${issue.instancePath || "record"} ${issue.message ?? "is invalid"}`
-    : "record is invalid";
+  return runValidator(validator, data);
 }
 
 /** Check a collection's JSON Schema is supported and compiles before it is stored. */
@@ -210,24 +282,66 @@ export function assertSiteDataSchema(schema: Record<string, unknown> | null | un
 }
 
 /**
- * Compile the schemas of the collections a write touches before the store
- * takes the Site's lock, so the lock is never held while compiling.
+ * Validate a write's insert and put records against their collections'
+ * schemas before the store takes the Site's lock, and return write options
+ * that skip re-validating those exact records against the same schema.
+ * Patches and increments merge with the stored record, so their result can
+ * only be checked inside the transaction; the allowlist keeps that cheap.
  */
-export async function warmSiteDataSchemas(
-  access: Pick<SiteDataAccess, "store" | "caller">,
-  collections: Iterable<string>,
-): Promise<void> {
-  for (const name of new Set(collections)) {
-    if (typeof name !== "string") continue;
-    const collection = await access.store.getCollection(access.caller, name);
-    if (collection?.jsonSchema) {
-      try {
-        compileSiteDataSchema(collection.jsonSchema);
-      } catch {
-        // The write reports the invalid schema itself.
-      }
+export async function prevalidateSiteDataWrite(
+  access: Pick<SiteDataAccess, "store" | "caller" | "limits" | "writeOptions">,
+  operations: readonly unknown[],
+): Promise<SiteDataWriteOptions> {
+  const schemas = new Map<string, Record<string, unknown> | null>();
+  const validated = new WeakMap<object, ValidateFunction>();
+  for (const [index, op] of operations.entries()) {
+    if (!isRecordObject(op) || typeof op.collection !== "string") continue;
+    if (!schemas.has(op.collection)) {
+      const collection = await access.store.getCollection(access.caller, op.collection);
+      schemas.set(op.collection, collection?.jsonSchema ?? null);
     }
+    const schema = schemas.get(op.collection);
+    if (!schema || (op.op !== "insert" && op.op !== "put") || !isRecordObject(op.data)) continue;
+    // Oversized records are refused by the store's size check instead.
+    if (Buffer.byteLength(JSON.stringify(op.data)) > access.limits.maxRecordBytes) continue;
+    let validator: ValidateFunction;
+    try {
+      validator = compileSiteDataSchema(schema);
+    } catch {
+      continue; // The store reports the invalid schema.
+    }
+    const problem = runValidator(validator, op.data);
+    if (problem)
+      throw new SiteDataError(
+        "validation",
+        `Record does not match the collection schema: ${problem}`,
+        { index },
+      );
+    validated.set(op.data, validator);
   }
+  return {
+    ...access.writeOptions,
+    validate: (schema, data) => {
+      const validator = validated.get(data);
+      if (validator) {
+        try {
+          if (compileSiteDataSchema(schema) === validator) return null;
+        } catch {
+          // Fall through to report the invalid schema.
+        }
+      }
+      return validateSiteDataRecord(schema, data);
+    },
+  };
+}
+
+/** The worker-signed session an agent grant acts in, if any. */
+function agentSessionIds(grant: AccessGrant): { sessionId: string; turnId: string | null } | null {
+  if (grant.principalKind !== "agent_attempt" && grant.metadata?.delegated !== true) return null;
+  const sessionId = grant.metadata?.sessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0) return null;
+  const turnId = grant.metadata?.turnId;
+  return { sessionId, turnId: typeof turnId === "string" && turnId.length > 0 ? turnId : null };
 }
 
 /** A stable principal for an agent session: its own, distinct from any person. */
@@ -240,11 +354,19 @@ function agentPrincipal(grant: AccessGrant): string {
 
 /**
  * The record owner: the person, or the person an agent or schedule acts for.
- * An agent without a person owns records as its own session.
+ * A person-less agent owns records as its scheduled task when a schedule's
+ * run created its session (`schedule:<taskId>`, stable across runs), and as
+ * its own session otherwise (`agent:session:<sessionId>`).
  */
-export function siteDataPrincipal(grant: AccessGrant, subjectId: string | null): string {
+export function siteDataPrincipal(
+  grant: AccessGrant,
+  subjectId: string | null,
+  scheduledTaskId: string | null = null,
+): string {
   if (subjectId) return `user:${subjectId}`;
-  if (grant.principalKind === "agent_attempt") return agentPrincipal(grant);
+  if (grant.principalKind === "agent_attempt" || agentSessionIds(grant)) {
+    return scheduledTaskId ? `schedule:${scheduledTaskId}` : agentPrincipal(grant);
+  }
   return `service:${grant.subjectId}`;
 }
 
@@ -258,11 +380,13 @@ export function siteDataActor(grant: AccessGrant, subjectId: string | null): str
 const PERSONLESS_MANAGER_KINDS = new Set(["api_key", "configured_key", "service"]);
 
 /**
- * Managers may manage the Site's data: its owner, a workspace admin, a
- * workspace API key, configured key or service without a person, or an agent
- * acting for one of them, each with `artifacts:publish`. A Site without an
- * owner is managed by its creator. Any other grant without a resolved person
- * (for example an agent whose session has no person) is a viewer.
+ * Managers may manage the Site's data, each with `artifacts:publish`: its
+ * owner, a workspace admin, an agent acting for one of those people, or a
+ * person-less workspace API key, configured key or service credential. A Site
+ * without an owner is managed by its creator. An agent without a person (for
+ * example a person-less scheduled task) is a viewer, whatever credential
+ * started it. Agents whose session came from a Site page are clamped to that
+ * Site's viewer rules in resolveSiteDataAccess.
  */
 export function siteDataRole(
   grant: AccessGrant,
@@ -297,16 +421,34 @@ export async function resolveSiteDataAccess(
   siteId: string,
   surface: SiteDataSurface = {},
 ): Promise<SiteDataAccess> {
-  const framed = surface.frameSiteId !== undefined && surface.frameSiteId !== null;
-  if (framed && surface.frameSiteId !== siteId)
+  const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  // An agent whose session (or spawning lineage, or current turn) came from a
+  // Site page acts for that page: it gets the same frame clamp as the page.
+  const agentIds = agentSessionIds(grant);
+  const agentSession = agentIds
+    ? await getSiteDataAgentSession(deps.db, scope, agentIds.sessionId, agentIds.turnId)
+    : null;
+  const siteAgent =
+    agentSession !== null && (agentSession.originSiteIds.length > 0 || agentSession.siteTurn);
+  if (siteAgent) {
+    const [origin, ...others] = agentSession.originSiteIds;
+    // A Site turn sent into a session without one known Site origin reaches no Site Data.
+    if (origin === undefined || others.length > 0 || origin !== siteId)
+      throw new SiteDataError(
+        "forbidden",
+        "An agent started from a Site page can only use that Site's data",
+      );
+    if (surface.management)
+      throw new SiteDataError(
+        "forbidden",
+        "An agent started from a Site page cannot manage Site Data",
+      );
+  }
+  const framed = siteAgent || (surface.frameSiteId !== undefined && surface.frameSiteId !== null);
+  if (surface.frameSiteId != null && surface.frameSiteId !== siteId)
     throw new SiteDataError("forbidden", "A Site can only use its own data");
   const viewer = await siteViewerForGrant(deps.db, grant);
-  const site = await getSiteDataSite(
-    deps.db,
-    { accountId: grant.accountId, workspaceId: grant.workspaceId },
-    viewer,
-    siteId,
-  );
+  const site = await getSiteDataSite(deps.db, scope, viewer, siteId);
   if (!site) throw new SiteDataError("not_found", "Site not found");
   // Site HTML is untrusted: whoever views it, a Site frame gets viewer reach.
   // Managers keep full reach only through the Data view, the API and agent tools.
@@ -321,7 +463,7 @@ export async function resolveSiteDataAccess(
     workspaceId: grant.workspaceId,
     siteId,
     role,
-    principal: siteDataPrincipal(grant, viewer.subjectId),
+    principal: siteDataPrincipal(grant, viewer.subjectId, agentSession?.scheduledTaskId ?? null),
     actor: siteDataActor(grant, viewer.subjectId),
     framed,
   };

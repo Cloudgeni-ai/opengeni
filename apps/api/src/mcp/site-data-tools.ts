@@ -274,7 +274,7 @@ export function registerSiteDataTools(
         return uploadSiteDataFile(deps, grant, args.siteId, {
           name: args.name,
           contentType: args.contentType,
-          bytes,
+          body: bytes,
           ...(args.scope ? { scope: args.scope } : {}),
         });
       },

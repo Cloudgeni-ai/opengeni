@@ -101,17 +101,21 @@ function framed(context: Context): boolean {
   return surface(context).frameSiteId !== undefined;
 }
 
+/** The request's declared Content-Length, when it is a plain number. */
+function declaredLength(context: Context): number | undefined {
+  const declared = context.req.header("content-length");
+  return declared !== undefined && /^\d{1,15}$/u.test(declared) ? Number(declared) : undefined;
+}
+
 /** Read an upload body, refusing it as soon as it passes the size cap. */
 async function boundedBody(context: Context, maxBytes: number): Promise<Uint8Array> {
   const tooLarge = () =>
-    siteDataHttpError(
-      new SiteDataError("quota_exceeded", "This file is too large", {
-        quota: "file_bytes",
-        limit: maxBytes,
-      }),
-    );
-  const declared = context.req.header("content-length");
-  if (declared !== undefined && Number(declared) > maxBytes) throw tooLarge();
+    new SiteDataError("quota_exceeded", "This file is too large", {
+      quota: "file_bytes",
+      limit: maxBytes,
+    });
+  const declared = declaredLength(context);
+  if (declared !== undefined && declared > maxBytes) throw tooLarge();
   const stream = context.req.raw.body;
   if (!stream) return new Uint8Array();
   const reader = stream.getReader();
@@ -145,6 +149,18 @@ async function boundedBody(context: Context, maxBytes: number): Promise<Uint8Arr
  * audience and `artifacts:read`); the collection's access mode decides the
  * rest. Management (describe, define, reset, import, export) needs a manager.
  */
+/**
+ * A Site Data file upload. It streams its body under its own per-file cap,
+ * read only after access, the rate window and the quota pass, so the generic
+ * request ceiling (which buffers bodies without a Content-Length) skips it.
+ */
+export function isSiteDataFileUploadRequest(method: string, pathname: string): boolean {
+  return (
+    method === "POST" &&
+    /^\/v1\/workspaces\/[^/]+\/published-artifacts\/[^/]+\/files$/u.test(pathname)
+  );
+}
+
 export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/published-artifacts/:artifactId";
   const grantFor = (context: Context, permission: "artifacts:read" | "artifacts:publish") =>
@@ -270,7 +286,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:read");
     const scope = SiteDataFileScope.safeParse(context.req.query("scope") ?? "shared");
     if (!scope.success) throw invalid("scope must be shared or private");
-    const bytes = await boundedBody(context, deps.settings.siteDataMaxFileBytes);
+    // The body is read only after access, the rate window and the quota pass.
     const file = await run(() =>
       uploadSiteDataFile(
         deps,
@@ -279,7 +295,10 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
         {
           name: context.req.query("name"),
           contentType: context.req.header("content-type"),
-          bytes,
+          body: {
+            declaredBytes: declaredLength(context),
+            read: () => boundedBody(context, deps.settings.siteDataMaxFileBytes),
+          },
           scope: scope.data,
         },
         surface(context),

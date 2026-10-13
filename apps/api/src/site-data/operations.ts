@@ -11,7 +11,6 @@ import type {
 import {
   parseSiteDataPath,
   readSiteDataPath,
-  writeSiteDataPath,
   SiteDataError,
   SITE_DATA_MAX_BATCH,
   type SiteDataFile,
@@ -25,7 +24,7 @@ import {
   publicSiteDataLimits,
   resolveSiteDataAccess,
   sha256Hex,
-  warmSiteDataSchemas,
+  prevalidateSiteDataWrite,
   siteDataFileContentType,
   siteDataFileName,
   siteDataObjectKey,
@@ -38,6 +37,8 @@ import {
 
 export const SITE_DATA_EXPORT_MAX_RECORDS = 10_000;
 export const SITE_DATA_IMPORT_MAX_RECORDS = 1_000;
+/** CSV imports accept at most this many columns. */
+export const SITE_DATA_IMPORT_MAX_COLUMNS = 1_000;
 /** CSV exports name at most this many data columns; wider data goes in one JSON column. */
 export const SITE_DATA_EXPORT_MAX_COLUMNS = 200;
 /** Exports stop adding records past this many bytes and report truncation. */
@@ -56,16 +57,13 @@ async function consume(access: SiteDataAccess, kind: "write" | "read", operation
   await access.store.consumeRate(access.caller, kind, Math.max(1, operations), access.limits);
 }
 
-/** Compile touched collections' schemas before the write takes the Site's lock. */
-async function prepareWrite(
-  access: SiteDataAccess,
-  operations: readonly { collection?: unknown }[],
-) {
+/**
+ * Count the attempt, then compile touched schemas and validate new records
+ * before the write takes the Site's lock.
+ */
+async function prepareWrite(access: SiteDataAccess, operations: readonly unknown[]) {
   await consume(access, "write", operations.length);
-  await warmSiteDataSchemas(
-    access,
-    operations.flatMap((op) => (typeof op?.collection === "string" ? [op.collection] : [])),
-  );
+  return prevalidateSiteDataWrite(access, operations);
 }
 
 function logCleanupFailure(what: string, objectKey: string, error: unknown): void {
@@ -174,18 +172,41 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
-  await prepareWrite(access, operations);
-  return access.store.write(access.caller, operations as SiteDataWriteOp[], access.writeOptions);
+  const options = await prepareWrite(access, operations);
+  return access.store.write(access.caller, operations as SiteDataWriteOp[], options);
 }
 
 // --- import and export -------------------------------------------------------
 
 /** RFC 4180 CSV: quoted fields, doubled quotes, CRLF or LF rows. */
-export function parseSiteDataCsv(text: string): string[][] {
+/**
+ * Parse CSV text into rows (the first is the header). Optional limits stop
+ * parsing as soon as a row has too many cells or there are too many records,
+ * before any record is built.
+ */
+export function parseSiteDataCsv(
+  text: string,
+  limits: { maxColumns?: number; maxRecords?: number } = {},
+): string[][] {
+  const maxColumns = limits.maxColumns ?? Number.POSITIVE_INFINITY;
+  // One header row plus the records.
+  const maxRows = (limits.maxRecords ?? Number.POSITIVE_INFINITY) + 1;
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
   let quoted = false;
+  const pushField = () => {
+    if (row.length >= maxColumns)
+      throw new SiteDataError("validation", `The CSV has more than ${maxColumns} columns in a row`);
+    row.push(field);
+    field = "";
+  };
+  const pushRow = () => {
+    if (!row.some((value) => value !== "")) return;
+    if (rows.length >= maxRows)
+      throw new SiteDataError("validation", `Import at most ${maxRows - 1} records at a time`);
+    rows.push(row);
+  };
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index]!;
     if (quoted) {
@@ -198,21 +219,50 @@ export function parseSiteDataCsv(text: string): string[][] {
       continue;
     }
     if (char === '"' && field === "") quoted = true;
-    else if (char === ",") {
-      row.push(field);
-      field = "";
-    } else if (char === "\n" || char === "\r") {
+    else if (char === ",") pushField();
+    else if (char === "\n" || char === "\r") {
       if (char === "\r" && text[index + 1] === "\n") index += 1;
-      row.push(field);
-      field = "";
-      if (row.some((value) => value !== "")) rows.push(row);
+      pushField();
+      pushRow();
       row = [];
     } else field += char;
   }
   if (quoted) throw new SiteDataError("validation", "The CSV has an unterminated quoted field");
-  row.push(field);
-  if (row.some((value) => value !== "")) rows.push(row);
+  pushField();
+  pushRow();
   return rows;
+}
+
+/**
+ * Build one record from CSV cells in a single mutable null-prototype object:
+ * linear in the number of cells, never copying the row per cell. Paths are
+ * validated field names, so no segment can reach a prototype.
+ */
+function siteDataCsvRecord(paths: readonly string[][], cells: readonly string[]) {
+  const define = (target: Record<string, unknown>, key: string, value: unknown) =>
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  const record = Object.create(null) as Record<string, unknown>;
+  paths.forEach((segments, column) => {
+    let current = record;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index]!;
+      const next = Object.hasOwn(current, segment) ? current[segment] : undefined;
+      if (typeof next === "object" && next !== null && !Array.isArray(next))
+        current = next as Record<string, unknown>;
+      else {
+        const child = Object.create(null) as Record<string, unknown>;
+        define(current, segment, child);
+        current = child;
+      }
+    }
+    define(current, segments[segments.length - 1]!, cells[column] ?? "");
+  });
+  return record;
 }
 
 export function siteDataCsvCell(value: unknown): string {
@@ -222,6 +272,28 @@ export function siteDataCsvCell(value: unknown): string {
   // (including negative ones) and other JSON values are left as they are.
   if (typeof value === "string" && /^[=+\-@\t\r]/u.test(text)) text = `'${text}`;
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+/**
+ * Turn import CSV into records: the header names dotted data paths. Column
+ * and row caps apply while parsing, before any record is built, and each
+ * record is built in one pass.
+ */
+export function siteDataCsvRecords(csv: string): Record<string, unknown>[] {
+  const rows = parseSiteDataCsv(csv, {
+    maxColumns: SITE_DATA_IMPORT_MAX_COLUMNS,
+    maxRecords: SITE_DATA_IMPORT_MAX_RECORDS,
+  });
+  const [header, ...body] = rows;
+  if (!header || header.length === 0)
+    throw new SiteDataError("validation", "The CSV needs a header row");
+  // parseSiteDataPath refuses __proto__, prototype and constructor.
+  const paths = header.map((name) => {
+    const segments = parseSiteDataPath(name);
+    if (!segments) throw new SiteDataError("validation", `Invalid CSV column name: ${name}`);
+    return segments;
+  });
+  return body.map((cells) => siteDataCsvRecord(paths, cells));
 }
 
 export async function importSiteData(
@@ -234,22 +306,7 @@ export async function importSiteData(
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   let records: Record<string, unknown>[];
   if (request.format === "csv") {
-    const rows = parseSiteDataCsv(request.csv ?? "");
-    const [header, ...body] = rows;
-    if (!header || header.length === 0)
-      throw new SiteDataError("validation", "The CSV needs a header row");
-    for (const name of header)
-      if (!parseSiteDataPath(name))
-        throw new SiteDataError("validation", `Invalid CSV column name: ${name}`);
-    // parseSiteDataPath refuses __proto__, prototype and constructor, and
-    // writeSiteDataPath only ever defines own properties.
-    records = body.map((cells) =>
-      header.reduce<Record<string, unknown>>(
-        (record, name, column) =>
-          writeSiteDataPath(record, parseSiteDataPath(name)!, cells[column] ?? ""),
-        {},
-      ),
-    );
+    records = siteDataCsvRecords(request.csv ?? "");
   } else records = request.records ?? [];
   if (records.length > SITE_DATA_IMPORT_MAX_RECORDS)
     throw new SiteDataError(
@@ -268,7 +325,12 @@ export async function importSiteData(
       });
     return { op: "put", collection, key: String(key), data };
   });
-  await warmSiteDataSchemas(access, [collection]);
+  // Every record is checked against the schema before anything is written.
+  const options = await prevalidateSiteDataWrite(access, operations).catch((error: unknown) => {
+    if (error instanceof SiteDataError)
+      throw new SiteDataError(error.code, error.message, { ...error.details, imported: 0 });
+    throw error;
+  });
   let imported = 0;
   // Each batch is atomic; a failure reports how many records were imported.
   for (let start = 0; start < operations.length; start += SITE_DATA_MAX_BATCH) {
@@ -276,7 +338,7 @@ export async function importSiteData(
       await access.store.write(
         access.caller,
         operations.slice(start, start + SITE_DATA_MAX_BATCH),
-        access.writeOptions,
+        options,
       );
     } catch (error) {
       if (error instanceof SiteDataError)
@@ -409,29 +471,41 @@ export async function uploadSiteDataFile(
   input: {
     name: string | null | undefined;
     contentType: string | null | undefined;
-    bytes: Uint8Array;
+    /**
+     * The file's bytes, or a reader for a request body: it is called only
+     * after access, the rate window and the quota (with the declared size,
+     * when known) have passed, so refused uploads are never read.
+     */
+    body: Uint8Array | { declaredBytes?: number | undefined; read: () => Promise<Uint8Array> };
     scope?: SiteDataFileScope | undefined;
   },
   surface: SiteDataSurface = {},
 ): Promise<SiteDataFile> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
   const objects = storage(deps);
-  // Rate, then quota, before a single byte reaches object storage.
+  // Access, rate, then quota, before the body is read or reaches object storage.
   await consume(access, "write", 1);
-  await access.store.checkFileQuota(access.caller, input.bytes.byteLength, access.limits);
-  const name = siteDataFileName(input.name);
-  const contentType = siteDataFileContentType(input.contentType, input.bytes);
   const scope = input.scope ?? "shared";
   if (scope !== "shared" && scope !== "private")
     throw new SiteDataError("validation", "scope must be shared or private");
+  let bytes: Uint8Array;
+  if (input.body instanceof Uint8Array) bytes = input.body;
+  else {
+    if (input.body.declaredBytes !== undefined)
+      await access.store.checkFileQuota(access.caller, input.body.declaredBytes, access.limits);
+    bytes = await input.body.read();
+  }
+  await access.store.checkFileQuota(access.caller, bytes.byteLength, access.limits);
+  const name = siteDataFileName(input.name);
+  const contentType = siteDataFileContentType(input.contentType, bytes);
   const id = crypto.randomUUID();
   const objectKey = siteDataObjectKey(grant.workspaceId, siteId, id);
-  const sha256 = sha256Hex(input.bytes);
-  await objects.putObject({ key: objectKey, contentType, body: input.bytes, sha256 });
+  const sha256 = sha256Hex(bytes);
+  await objects.putObject({ key: objectKey, contentType, body: bytes, sha256 });
   try {
     return await access.store.insertFile(
       access.caller,
-      { id, name, contentType, sizeBytes: input.bytes.byteLength, sha256, objectKey, scope },
+      { id, name, contentType, sizeBytes: bytes.byteLength, sha256, objectKey, scope },
       {
         limits: access.limits,
         afterWrite: (tx, summary) =>

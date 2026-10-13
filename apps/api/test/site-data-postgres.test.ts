@@ -731,16 +731,43 @@ test("files upload, list, download and delete with shared and private scope", as
   expect((await s.describe(f.owner)).json.usage).toMatchObject({ fileCount: 1 });
 });
 
-test("an agent defines and feeds a collection the way a schedule would", async () => {
-  const f = await fixture();
-  const created = await f.publish("Company research");
+const SITE_DATA_TOOLS = [
+  "site_data_describe",
+  "site_data_define_collection",
+  "site_data_query",
+  "site_data_write",
+  "site_data_import",
+  "site_data_export",
+  "site_data_reset",
+  "site_files_list",
+  "site_files_upload",
+  "site_files_delete",
+];
+
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+/**
+ * A running agent turn and an MCP client for its first-party Site Data tools.
+ * `initiatorSubjectId: null` makes a person-less agent.
+ */
+async function agentTools(
+  f: Fixture,
+  options: {
+    initiatorSubjectId?: string | null;
+    metadata?: Record<string, unknown>;
+    surface?: string | null;
+    parentSessionId?: string;
+  } = {},
+) {
+  const initiator =
+    options.initiatorSubjectId === undefined ? f.owner.subjectId : options.initiatorSubjectId;
   const session = await createSession(db.db, {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
     initialMessage: "Refresh research",
     resources: [],
     tools: [],
-    metadata: {},
+    metadata: options.metadata ?? {},
     model: "gpt-5.6-sol",
     reasoningEffort: "medium",
     latencyMode: "standard",
@@ -750,11 +777,12 @@ test("an agent defines and feeds a collection the way a schedule would", async (
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context, surface
     ) VALUES (
       ${f.accountId}, ${f.workspace.id}, ${session.id}, gen_random_uuid(),
       ${`site-data-wf-${crypto.randomUUID()}`}, 'running', 0, 'Refresh research',
-      'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${f.owner.subjectId}, '{"accepted":true}'::jsonb
+      'gpt-5.6-sol', 'medium', 'none', 1, ${initiator === null ? "service" : "subject"},
+      ${initiator ?? "service:site-data-test"}, '{"accepted":true}'::jsonb, ${options.surface ?? null}
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (tx) => {
@@ -770,18 +798,13 @@ test("an agent defines and feeds a collection the way a schedule would", async (
         'running', 'site-data-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
       )`;
   });
-  const tools = [
-    "site_data_describe",
-    "site_data_define_collection",
-    "site_data_query",
-    "site_data_write",
-    "site_data_import",
-    "site_data_export",
-    "site_data_reset",
-    "site_files_list",
-    "site_files_upload",
-    "site_files_delete",
-  ];
+  if (options.parentSessionId) {
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`UPDATE sessions SET parent_session_id = ${options.parentSessionId!}
+        WHERE id = ${session.id}`;
+    });
+  }
   const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
@@ -793,7 +816,7 @@ test("an agent defines and feeds a collection the way a schedule would", async (
       turnId: turn!.id,
       attemptId,
       executionGeneration: 1,
-      firstPartyMcpTools: tools,
+      firstPartyMcpTools: SITE_DATA_TOOLS,
     },
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -813,6 +836,14 @@ test("an agent defines and feeds a collection the way a schedule would", async (
     }
     return { isError: result.isError === true, value };
   };
+  return { session, turnId: turn!.id, mcp, callTool };
+}
+
+test("an agent defines and feeds a collection the way a schedule would", async () => {
+  const f = await fixture();
+  const created = await f.publish("Company research");
+  const { session, mcp, callTool } = await agentTools(f);
+  const tools = SITE_DATA_TOOLS;
   try {
     expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
       [...tools].sort(),
@@ -1006,45 +1037,109 @@ test("paths that name a prototype are refused everywhere", async () => {
   expect((await s.query(f.owner, { collection: "rows" })).status).toBe(200);
 });
 
-test("collection schemas are isolated, local and regex-free", async () => {
+test("collection schemas use a strict keyword allowlist and stay isolated", async () => {
   const f = await fixture();
   const a = f.site((await f.publish("Schema A")).id);
   const b = f.site((await f.publish("Schema B")).id);
+  const evil = { type: "string", pattern: "^(a+)+$" };
+  // A diamond chain: each level refers to the next twice (exponential with $ref).
+  const diamond: Record<string, unknown> = { level3: { type: "string" } };
+  for (let level = 0; level < 3; level += 1)
+    diamond[`level${level}`] = {
+      allOf: [{ $ref: `#/$defs/level${level + 1}` }, { $ref: `#/$defs/level${level + 1}` }],
+    };
+  const deep = (depth: number): Record<string, unknown> =>
+    depth === 0 ? { type: "string" } : { type: "object", properties: { a: deep(depth - 1) } };
+  const wide = {
+    type: "object",
+    properties: Object.fromEntries(
+      Array.from({ length: 501 }, (_, index) => [`p${index}`, { type: "string" }]),
+    ),
+  };
   for (const [schema, message] of [
+    // (a) a reference into data keywords that hides a regex
+    [{ type: "object", examples: [evil], properties: { a: { $ref: "#/examples/0" } } }, "examples"],
+    [{ type: "object", properties: { a: { $ref: "#/examples/0" } } }, "$ref"],
+    [{ type: "object", default: evil }, "default"],
+    // (b) a diamond $defs chain and a recursive reference inside anyOf
+    [{ type: "object", $defs: diamond, allOf: [{ $ref: "#/$defs/level0" }] }, "$defs"],
+    [{ type: "object", anyOf: [{ $ref: "#" }, { type: "string" }] }, "$ref"],
+    // (c) uniqueItems without scalar items compares every pair of elements
+    [{ type: "array", uniqueItems: true }, "uniqueItems"],
+    [{ type: "array", uniqueItems: true, items: { type: "object" } }, "uniqueItems"],
+    [{ type: "array", uniqueItems: true, items: { type: ["string", "array"] } }, "uniqueItems"],
+    // Everything else outside the allowlist
     [{ $id: "https://example.test/x", type: "object" }, "$id"],
-    [{ type: "object", properties: { a: { $ref: "https://example.test/other#" } } }, "$ref"],
-    [{ type: "object", properties: { a: { $ref: "other.json" } } }, "$ref"],
-    [{ type: "object", properties: { a: { type: "string", pattern: "^(a+)+$" } } }, "pattern"],
-    [{ type: "object", patternProperties: { "^x": { type: "string" } } }, "patternProperties"],
     [{ $schema: "https://json-schema.org/draft/2020-12/schema" }, "$schema"],
-    [{ $anchor: "here" }, "$anchor"],
-    [{ $dynamicRef: "#here" }, "$dynamicRef"],
+    [{ type: "object", definitions: { a: { type: "string" } } }, "definitions"],
+    [{ type: "object", properties: { a: evil } }, "pattern"],
+    [{ type: "object", patternProperties: { "^x": { type: "string" } } }, "patternProperties"],
+    [{ type: "object", propertyNames: { maxLength: 3 } }, "propertyNames"],
+    [{ type: "object", if: { required: ["a"] }, then: { required: ["b"] } }, "if"],
+    [{ type: "object", not: { required: ["a"] } }, "not"],
+    [{ type: "array", contains: { type: "string" } }, "contains"],
+    [{ type: "object", dependentSchemas: { a: { required: ["b"] } } }, "dependentSchemas"],
+    [{ type: "object", dependentRequired: { a: ["b"] } }, "dependentRequired"],
+    [{ type: "object", unevaluatedProperties: false }, "unevaluatedProperties"],
+    [{ type: "array", items: [{ type: "string" }] }, "not an object or boolean"],
+    [{ type: "array", prefixItems: [{ type: "string" }] }, "prefixItems"],
+    [{ type: "string", enum: [{ a: 1 }] }, "enum"],
+    [{ type: "string", enum: Array.from({ length: 101 }, (_, index) => `v${index}`) }, "enum"],
+    [{ type: "object", const: { a: 1 } }, "const"],
+    [{ type: "number", multipleOf: 0 }, "multipleOf"],
+    [{ type: "set" }, "type"],
+    [wide, "more than 500"],
+    [deep(17), "nested more than 16"],
   ] as const) {
     const defined = await a.define(f.owner, "rows", { accessMode: "shared", jsonSchema: schema });
-    expect(defined.status, JSON.stringify(schema)).toBe(422);
+    expect(defined.status, JSON.stringify(schema).slice(0, 200)).toBe(422);
     expect(defined.json.error.message).toContain(message);
   }
-  // Property names that look like keywords are fine, and local references work.
+  expect(
+    (
+      await a.define(f.owner, "deep", {
+        accessMode: "shared",
+        jsonSchema: { type: "object", properties: { a: deep(15) } },
+      })
+    ).status,
+  ).toBe(201);
+  // Property names that look like keywords are fine; every allowed keyword works.
   const schema = {
     type: "object",
-    $defs: { name: { type: "string", maxLength: 20 } },
+    title: "Rows",
+    description: "A row",
     properties: {
       id: { type: "string" },
-      pattern: { $ref: "#/$defs/name" },
-      name: { $ref: "#/$defs/name" },
+      pattern: { type: "string", format: "email" },
+      name: { type: "string", minLength: 1, maxLength: 20 },
+      kind: { enum: ["a", "b", null] },
+      fixed: { const: 1 },
+      score: { type: "number", minimum: 0, maximum: 10, multipleOf: 0.5 },
+      tags: { type: "array", items: { type: "string" }, uniqueItems: true, maxItems: 5 },
+      either: { anyOf: [{ type: "string" }, { type: "integer", exclusiveMinimum: 0 }] },
+      meta: { type: "object", additionalProperties: { type: "string" }, maxProperties: 3 },
     },
     required: ["name"],
+    additionalProperties: true,
+    allOf: [{ type: "object" }],
+    oneOf: [{ required: ["name"] }],
   };
   for (const site of [a, b]) {
-    expect(
-      (await site.define(f.owner, "rows", { accessMode: "shared", jsonSchema: schema })).status,
-    ).toBe(201);
+    const defined = await site.define(f.owner, "rows", {
+      accessMode: "shared",
+      jsonSchema: schema,
+    });
+    expect(defined.status, JSON.stringify(defined.json)).toBe(201);
     // Writes keep working after the first: nothing registers globally.
     for (let index = 0; index < 2; index += 1)
       expect(
         (
           await site.write(f.owner, [
-            { op: "insert", collection: "rows", data: { name: `n${index}`, pattern: "p" } },
+            {
+              op: "insert",
+              collection: "rows",
+              data: { name: `n${index}`, pattern: "not an email", tags: ["x", "y"] },
+            },
           ])
         ).status,
       ).toBe(200);
@@ -1052,12 +1147,63 @@ test("collection schemas are isolated, local and regex-free", async () => {
       { op: "insert", collection: "rows", data: { name: "x".repeat(30) } },
     ]);
     expect(invalid.status).toBe(422);
+    expect(invalid.json.error.details.index).toBe(0);
+    const duplicates = await site.write(f.owner, [
+      { op: "insert", collection: "rows", data: { name: "d", tags: ["x", "x"] } },
+    ]);
+    expect(duplicates.status).toBe(422);
   }
+  // Patches merge with the stored record, so the merged record is checked in the write.
+  const inserted = await a.write(f.owner, [
+    { op: "insert", collection: "rows", key: "p", data: { name: "patch me" } },
+  ]);
+  expect(inserted.status).toBe(200);
+  const patched = await a.write(f.owner, [
+    { op: "patch", collection: "rows", key: "p", data: { name: "y".repeat(30) } },
+  ]);
+  expect(patched.status).toBe(422);
   const { siteDataSchemaCacheSize, validateSiteDataRecord } =
     await import("../src/site-data/service");
   for (let index = 0; index < 300; index += 1)
     validateSiteDataRecord({ type: "object", maxProperties: index + 1 }, {});
   expect(siteDataSchemaCacheSize()).toBeLessThanOrEqual(128);
+});
+
+test("new records are validated before the write takes the Site's lock", async () => {
+  const { prevalidateSiteDataWrite } = await import("../src/site-data/service");
+  const schema = { type: "object", properties: { name: { type: "string", maxLength: 3 } } };
+  const store = {
+    getCollection: async () => ({ jsonSchema: schema }),
+    write: async () => {
+      throw new Error("the store must not be reached");
+    },
+  };
+  const access = {
+    store,
+    caller: {},
+    limits: { maxRecordBytes: 256 * 1024 },
+    writeOptions: { limits: {} },
+  } as never;
+  let refused: any = null;
+  try {
+    await prevalidateSiteDataWrite(access, [
+      { op: "insert", collection: "rows", data: { name: "ok" } },
+      { op: "put", collection: "rows", key: "k", data: { name: "too long" } },
+    ]);
+  } catch (error) {
+    refused = error;
+  }
+  expect(refused?.code).toBe("validation");
+  expect(refused?.details?.index).toBe(1);
+  const valid = { name: "ok" };
+  const options = await prevalidateSiteDataWrite(access, [
+    { op: "insert", collection: "rows", data: valid },
+  ]);
+  // In the write, the same record against the same schema is not checked again;
+  // anything else (a merged patch, a changed schema) still is.
+  expect(options.validate!({ ...schema }, valid)).toBeNull();
+  expect(options.validate!(schema, { name: "toolong" })).toContain("name");
+  expect(options.validate!({ type: "object", required: ["other"] }, valid)).toContain("other");
 });
 
 test("only personless keys and people who manage the Site are managers", async () => {
@@ -1262,4 +1408,246 @@ test("CSV exports neutralize formulas and cap their columns", async () => {
   const [wideHeader, ...rows] = (wide.json as string).trim().split("\r\n");
   expect(wideHeader).toBe("$id,$key,$owner,$createdAt,$updatedAt,$data");
   expect(rows).toHaveLength(2);
+});
+
+test("CSV import builds each row in one pass and caps width and rows before building", async () => {
+  const { siteDataCsvRecords } = await import("../src/site-data/operations");
+  // 1,000 columns (half of them nested) by 1,000 rows: linear, not columns squared.
+  const header = Array.from({ length: 1000 }, (_, index) =>
+    index % 2 === 0 ? `c${index}` : `g${index % 50}.f${index}`,
+  ).join(",");
+  const row = Array.from({ length: 1000 }, () => "v").join(",");
+  const csv = `${header}\n${Array.from({ length: 1000 }, () => row).join("\n")}`;
+  const started = performance.now();
+  const records = siteDataCsvRecords(csv);
+  const elapsed = performance.now() - started;
+  expect(records).toHaveLength(1000);
+  expect(elapsed).toBeLessThan(5_000);
+  expect(Object.getPrototypeOf(records[0])).toBeNull();
+  expect(records[0]!.c0).toBe("v");
+  expect((records[0]!.g1 as Record<string, unknown>).f1).toBe("v");
+  expect(Object.keys(records[0]!)).toHaveLength(525);
+
+  const f = await fixture();
+  const s = f.site((await f.publish("Import limits")).id);
+  await s.define(f.owner, "rows", { accessMode: "shared" });
+  const importCsv = (text: string) =>
+    s.request(f.owner, "POST", "/data/collections/rows/import", { format: "csv", csv: text });
+  const tooWide = await importCsv(
+    `${Array.from({ length: 1001 }, (_, index) => `c${index}`).join(",")}\n1\n`,
+  );
+  expect(tooWide.status).toBe(422);
+  expect(tooWide.json.error.message).toContain("more than 1000 columns");
+  // A wide data row is refused as well, even under a narrow header.
+  const wideRow = await importCsv(`a\n${Array.from({ length: 1001 }, () => "1").join(",")}\n`);
+  expect(wideRow.status).toBe(422);
+  const tooLong = await importCsv(`a\n${Array.from({ length: 1001 }, (_, i) => i).join("\n")}\n`);
+  expect(tooLong.status).toBe(422);
+  expect(tooLong.json.error.message).toContain("Import at most 1000 records");
+  const nested = await importCsv("name,address.city\nAda,London\n");
+  expect(nested.json).toEqual({ imported: 1 });
+  const stored = await s.query(f.owner, { collection: "rows" });
+  expect(stored.json.records[0].data).toEqual({ name: "Ada", address: { city: "London" } });
+});
+
+test("agents started from a Site page get that page's viewer reach", async () => {
+  const f = await fixture();
+  const created = await f.publish("Tracker");
+  const other = await f.publish("Other");
+  const s = f.site(created.id);
+  await s.define(f.owner, "habits", { accessMode: "per_viewer" });
+  await s.define(f.owner, "shared", { accessMode: "shared" });
+  await f.site(other.id).define(f.owner, "notes", { accessMode: "shared" });
+  await s.write(f.member, [{ op: "insert", collection: "habits", data: { who: "member" } }]);
+  await s.write(f.owner, [{ op: "insert", collection: "habits", data: { who: "owner" } }]);
+  const origin = { _opengeniSiteOrigin: { siteId: created.id, title: "Tracker" } };
+  const checkClamped = async (agent: Awaited<ReturnType<typeof agentTools>>) => {
+    for (const [tool, args] of [
+      ["site_data_describe", { siteId: created.id }],
+      ["site_data_define_collection", { siteId: created.id, name: "x", accessMode: "shared" }],
+      ["site_data_reset", { siteId: created.id, collection: "habits", confirm: true }],
+      ["site_data_export", { siteId: created.id, collection: "habits", format: "json" }],
+      [
+        "site_data_import",
+        { siteId: created.id, collection: "shared", format: "json", records: [{ a: 1 }] },
+      ],
+    ] as const) {
+      const refused = await agent.callTool(tool, args);
+      expect(refused.isError, tool).toBe(true);
+      expect(refused.value.error.code, tool).toBe("forbidden");
+    }
+    // The owner's agent sees only the owner's own per-viewer records, as the page would.
+    const own = await agent.callTool("site_data_query", {
+      siteId: created.id,
+      collection: "habits",
+    });
+    expect(own.isError, JSON.stringify(own.value)).toBe(false);
+    expect(own.value.records.map((record: any) => record.data.who)).toEqual(["owner"]);
+    const all = await agent.callTool("site_data_query", {
+      siteId: created.id,
+      collection: "habits",
+      scope: "all",
+    });
+    expect(all.isError ? "forbidden" : all.value.records.length).not.toBe(2);
+    // Viewer writes still work within the page's own Site.
+    const wrote = await agent.callTool("site_data_write", {
+      siteId: created.id,
+      operations: [{ op: "insert", collection: "shared", data: { from: "agent" } }],
+    });
+    expect(wrote.isError, JSON.stringify(wrote.value)).toBe(false);
+    // Another Site is out of reach.
+    const elsewhere = await agent.callTool("site_data_query", {
+      siteId: other.id,
+      collection: "notes",
+    });
+    expect(elsewhere.isError).toBe(true);
+    expect(elsewhere.value.error.code).toBe("forbidden");
+  };
+
+  // A session the page created.
+  const fromPage = await agentTools(f, { metadata: origin });
+  try {
+    await checkClamped(fromPage);
+  } finally {
+    await fromPage.mcp.close();
+  }
+  // A worker spawned by that session inherits the clamp through its lineage.
+  const worker = await agentTools(f, { parentSessionId: fromPage.session.id });
+  try {
+    await checkClamped(worker);
+  } finally {
+    await worker.mcp.close();
+  }
+  // A message the page sent into a session without a Site origin reaches no Site Data.
+  const sent = await agentTools(f, { surface: "site" });
+  try {
+    const refused = await sent.callTool("site_data_query", {
+      siteId: created.id,
+      collection: "habits",
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.value.error.code).toBe("forbidden");
+  } finally {
+    await sent.mcp.close();
+  }
+  // The same owner's agent outside any Site keeps manager reach.
+  const plain = await agentTools(f);
+  try {
+    const all = await plain.callTool("site_data_query", {
+      siteId: created.id,
+      collection: "habits",
+      scope: "all",
+    });
+    expect(all.isError, JSON.stringify(all.value)).toBe(false);
+    expect(all.value.records).toHaveLength(2);
+  } finally {
+    await plain.mcp.close();
+  }
+});
+
+test("a person-less scheduled task keeps one principal across runs", async () => {
+  const f = await fixture();
+  const created = await f.publish("Digest");
+  const s = f.site(created.id);
+  await s.define(f.owner, "seen", { accessMode: "per_viewer" });
+  const taskId = crypto.randomUUID();
+  const run = async () => {
+    const agent = await agentTools(f, { initiatorSubjectId: null });
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into scheduled_task_runs (task_id, trigger_type, status, account_id, workspace_id, session_id, fired_at)
+        values (${taskId}, 'schedule', 'running', ${f.accountId}, ${f.workspace.id}, ${agent.session.id}, now())`;
+    });
+    return agent;
+  };
+  const first = await run();
+  try {
+    const wrote = await first.callTool("site_data_write", {
+      siteId: created.id,
+      operations: [{ op: "put", collection: "seen", key: "item-1", data: { seen: true } }],
+    });
+    expect(wrote.isError, JSON.stringify(wrote.value)).toBe(false);
+    expect(wrote.value.results[0].record).toMatchObject({
+      owner: `schedule:${taskId}`,
+      updatedBy: `agent:session:${first.session.id}`,
+    });
+  } finally {
+    await first.mcp.close();
+  }
+  // The next run of the same schedule sees its own records.
+  const second = await run();
+  try {
+    const seen = await second.callTool("site_data_query", {
+      siteId: created.id,
+      collection: "seen",
+    });
+    expect(seen.value.records.map((record: any) => record.key)).toEqual(["item-1"]);
+  } finally {
+    await second.mcp.close();
+  }
+  // A person-less agent outside the schedule owns records as its own session.
+  const loose = await agentTools(f, { initiatorSubjectId: null });
+  try {
+    const seen = await loose.callTool("site_data_query", {
+      siteId: created.id,
+      collection: "seen",
+    });
+    expect(seen.isError, JSON.stringify(seen.value)).toBe(false);
+    expect(seen.value.records).toEqual([]);
+  } finally {
+    await loose.mcp.close();
+  }
+  const { siteDataPrincipal } = await import("../src/site-data/service");
+  const grant = {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: "worker",
+    permissions: [],
+    principalKind: "agent_attempt",
+    metadata: { sessionId: "s1" },
+  } as AccessGrant;
+  expect(siteDataPrincipal(grant, null, "t1")).toBe("schedule:t1");
+  expect(siteDataPrincipal(grant, null)).toBe("agent:session:s1");
+  expect(siteDataPrincipal(grant, "person", "t1")).toBe("user:person");
+});
+
+test("uploads are refused before their body is read", async () => {
+  const f = await fixture({ siteDataViewerWritesPerMinute: 1, siteDataFileBytesPerSite: 64 });
+  const created = await f.publish("Intake");
+  const privateSite = await f.publish("Mine", "private");
+  let pulls = 0;
+  const watched = () =>
+    new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(new Uint8Array(1024));
+          if (pulls > 1000) controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+  const upload = (siteId: string, who: Who, headers: Record<string, string> = {}) =>
+    f.app.request(
+      `/v1/workspaces/${f.workspace.id}/published-artifacts/${siteId}/files?name=a.bin`,
+      {
+        method: "POST",
+        headers: { ...who.headers, "content-type": "application/octet-stream", ...headers },
+        body: watched(),
+        duplex: "half",
+      } as RequestInit,
+    );
+  // Not visible to the viewer (Only me Site): refused unread.
+  expect((await upload(privateSite.id, f.member)).status).toBe(404);
+  expect(pulls).toBe(0);
+  // Over the declared quota: refused unread.
+  expect((await upload(created.id, f.owner, { "content-length": "1000000" })).status).toBe(413);
+  expect(pulls).toBe(0);
+  // Over the viewer's write window: refused unread.
+  const first = await f.site(created.id).request(f.member, "POST", "/files?name=a.png", PNG, {
+    "content-type": "image/png",
+  });
+  expect(first.status).toBe(201);
+  expect((await upload(created.id, f.member)).status).toBe(429);
+  expect(pulls).toBe(0);
 });
