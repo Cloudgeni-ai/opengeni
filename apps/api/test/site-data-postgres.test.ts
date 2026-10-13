@@ -268,7 +268,6 @@ test("each access mode applies to viewers and managers", async () => {
   const s = f.site((await f.publish("Team CRM")).id);
 
   // Only managers define collections; members are viewers of the owner's Site.
-  expect((await f.site(s.request.length ? "" : "").request).length).toBeGreaterThan(0);
   const denied = await s.define(f.member, "contacts", { accessMode: "shared" });
   expect(denied.status).toBe(403);
   for (const [name, definition] of [
@@ -523,7 +522,11 @@ test("batches are atomic and queries filter, sort, count and page", async () => 
   });
   expect(filtered.status, JSON.stringify(filtered.json)).toBe(200);
   const scores = filtered.json.records.map((record: any) => record.data.score);
-  expect(scores).toEqual([24, 23, 22, 21, 19, 18, 17, 16, 15, 13, 12, 11, 10].filter((n) => n % 2 && n % 3 !== 2));
+  const expected = Array.from({ length: 25 }, (_, index) => 24 - index).filter(
+    (n) => n >= 10 && n % 2 === 1 && n % 3 !== 2,
+  );
+  expect(expected).toEqual([21, 19, 15, 13]);
+  expect(scores).toEqual(expected);
   expect(filtered.json.count).toBe(scores.length);
 
   const seen: number[] = [];
@@ -547,9 +550,22 @@ test("batches are atomic and queries filter, sort, count and page", async () => 
 
   const counter = await s.write(f.member, [
     { op: "increment", collection: "items", key: "item-3", field: "score", by: 5 },
+  ]);
+  expect(counter.status, JSON.stringify(counter.json)).toBe(200);
+  expect(counter.json.results[0].record.data.score).toBe(8);
+  // Incrementing a missing key creates it, still subject to the schema.
+  const invalidCounter = await s.write(f.member, [
     { op: "increment", collection: "items", key: "votes", field: "count" },
   ]);
-  expect(counter.status, JSON.stringify(counter.json)).toBe(400 - 200 + 0 === 200 ? 200 : 422);
+  expect(invalidCounter.status).toBe(422);
+  await s.define(f.owner, "counters", { accessMode: "shared" });
+  const votes = await s.write(f.member, [
+    { op: "increment", collection: "counters", key: "votes", field: "count" },
+    { op: "increment", collection: "counters", key: "votes", field: "count", by: 2 },
+  ]);
+  expect(votes.status, JSON.stringify(votes.json)).toBe(200);
+  expect(votes.json.results[1].record.data).toEqual({ count: 3 });
+  expect(votes.json.results[1].record.version).toBe(2);
 });
 
 test("quotas and write limits are enforced", async () => {
