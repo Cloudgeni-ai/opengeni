@@ -112,11 +112,20 @@ export function describeAgentRuntime(runtime: Runtime, now: number): AgentRuntim
 
   if (update?.status === "failed" && !alreadyInstalled) {
     if (isPostponedUpdate(update.errorCode)) {
+      // Automatic updates leave an older agent alone while updating it would
+      // close its open browsers; updating by hand still closes them.
+      const browsersWouldClose = update.errorCode === "update_busy_browsers";
       return {
         title,
-        status: `Update to ${target} postponed while the machine was busy`,
+        status: browsersWouldClose
+          ? `Update to ${target} postponed: open browsers would close`
+          : `Update to ${target} postponed while the machine was busy`,
         tone: "waiting",
-        note: blocked,
+        note:
+          blocked ??
+          (browsersWouldClose
+            ? "The installed agent closes its browsers when it restarts. Updating now closes them."
+            : null),
         action: blocked ? null : { kind: "update", label: "Update now" },
       };
     }
