@@ -1,7 +1,7 @@
 import { listLegacyVariableSets } from "./helpers/legacy-variable-sets";
-// Migration 0738: vaults. Variable sets of every scope (with renamed names,
+// Migration 0739: vaults. Variable sets of every scope (with renamed names,
 // collisions, revoked sets and a version-5 token) are staged on a database
-// migrated without 0738, then 0738 is applied alone. Every active set must
+// migrated without 0739, then 0739 is applied alone. Every active set must
 // become a vault with the same ID and every variable an item with the same ID
 // whose single stored version is byte-identical to the variable's ciphertext.
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
@@ -29,7 +29,7 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0738_vaults.sql";
+const MIGRATION = "0739_vaults.sql";
 const key = randomBytes(32);
 
 let database: OwnerMigratedTestDatabase | null = null;
@@ -265,7 +265,7 @@ async function seed(admin: postgres.Sql): Promise<Seeded> {
 }
 
 test.skipIf(!realDb)(
-  "0738 copies every active variable set into a vault byte for byte",
+  "0739 copies every active variable set into a vault byte for byte",
   async () => {
     const admin = database!.admin;
     const seeded = await seed(admin);
@@ -286,7 +286,7 @@ test.skipIf(!realDb)(
       subjectId: seeded.member,
     });
 
-    // DM-1: apply 0738 alone.
+    // DM-1: apply 0739 alone.
     await admin`delete from schema_migrations where name = ${MIGRATION}`;
     await migrate(database!.ownerUrl);
     await provisionRoles(database!.adminUrl, { appPassword: database!.appPassword });
@@ -390,7 +390,7 @@ test.skipIf(!realDb)(
     // DM-3: one summary audit row (database-wide counts).
     const [audit] = await admin<{ metadata: Record<string, unknown>; subject_id: string }[]>`
     select metadata, subject_id from audit_events where action = 'vault.migrated'`;
-    expect(audit!.subject_id).toBe("system:migration:0738");
+    expect(audit!.subject_id).toBe("system:migration:0739");
     expect(audit!.metadata).toMatchObject({
       migration: MIGRATION,
       vaults: 6,

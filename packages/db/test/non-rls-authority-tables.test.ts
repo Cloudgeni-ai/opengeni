@@ -109,7 +109,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       { table: "workspace_memberships", policy: "personal_document_authority_capability_read" },
       { table: "workspace_memberships", policy: "scoped_compute_capability_read" },
       { table: "workspace_memberships", policy: "variable_set_authority_capability_read" },
-      // Vault routines (0738) read memberships and workspaces for reach. Same
+      // Vault routines (0739) read memberships and workspaces for reach. Same
       // shape as the lanes above (owner-only, capability-gated), and also
       // scoped TO the routine owner, so it is inert for every other role.
       { table: "workspace_memberships", policy: "vault_authority_capability_read" },

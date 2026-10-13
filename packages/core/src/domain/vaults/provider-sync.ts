@@ -337,7 +337,7 @@ export async function syncProviderVault(input: {
   }
 }
 
-/** Binds the mirror store to the 0738 routines for one connected vault. */
+/** Binds the mirror store to the 0739 routines for one connected vault. */
 export function databaseProviderMirrorStore(
   db: Database,
   context: VaultDbContext,

@@ -540,7 +540,7 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
 ] as const;
 const VAULT_CAPABILITY_PREDICATE_ROUTINE = "vault_authority_capability_active(text)";
 const VAULT_CAPABILITY_TABLE = "vault_authority_capabilities";
-/** Vault routines (0738): the application role's only way into the vault tables. */
+/** Vault routines (0739): the application role's only way into the vault tables. */
 export const VAULT_RUNTIME_ROUTINES = [
   "list_vaults_for_subject(uuid, jsonb)",
   "get_vault_for_subject(uuid, jsonb)",
@@ -572,7 +572,7 @@ export const VAULT_RUNTIME_ROUTINES = [
   "provider_vault_sync_target(uuid, jsonb)",
   "provider_vault_item_ref(uuid, uuid, text, jsonb)",
 ] as const;
-/** Vault tables (0738): FORCE row security, no application-role privileges. */
+/** Vault tables (0739): FORCE row security, no application-role privileges. */
 export const VAULT_TABLES = [
   "vaults",
   "vault_items",

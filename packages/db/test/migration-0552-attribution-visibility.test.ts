@@ -369,7 +369,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
             ? { ...row, qual: plannedRuns!.qual }
             : row,
     );
-    // The full replay also runs 0738, which adds exactly one owner-scoped vault
+    // The full replay also runs 0739, which adds exactly one owner-scoped vault
     // read lane on two snapshotted tables. Pin its exact shape.
     const [ownerRole] = await owned.admin<Array<{ oid: string }>>`
       select oid::text as oid from pg_roles where rolname = ${owned.ownerRole}`;

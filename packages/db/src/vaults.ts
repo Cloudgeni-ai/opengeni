@@ -1,5 +1,5 @@
 /**
- * Vault storage (migration 0738). Every vault table is reachable only through
+ * Vault storage (migration 0739). Every vault table is reachable only through
  * the SECURITY DEFINER routines of that migration; each function here calls
  * exactly one of them inside `withRlsContext` (plus the subject GUC for
  * people). Values stay encrypted at this layer: callers encrypt before writes

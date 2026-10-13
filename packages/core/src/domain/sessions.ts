@@ -1014,7 +1014,7 @@ export async function createAndStartSessionWithOutcome(input: {
   // Frozen agent configuration (migration 0559), already resolved and written
   // through to tools/firstPartyMcpTools by the caller. Omitted/null = legacy.
   agentConfig?: ResolvedAgentConfig | null;
-  // Vault narrowing for this session (0738), already intersected with the
+  // Vault narrowing for this session (0739), already intersected with the
   // agent configuration's policy. Omitted = no narrowing.
   vaultPolicy?: VaultPolicy;
   // Agent-access scope, opaque end-user label, and typed Memory selector

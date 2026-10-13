@@ -534,7 +534,7 @@ beforeAll(async () => {
     targetSchema: "public",
     requiredRuntimeRoutines: [],
   };
-  // Stopped before 0738: the absent vault objects are expected.
+  // Stopped before 0739: the absent vault objects are expected.
   const evaluate = async () =>
     withoutAbsentVaultPosture(
       evaluateRuntimeDatabasePosture(

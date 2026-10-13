@@ -233,7 +233,7 @@ Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 
 ## Migrating from Variable Sets
 
-Migration `0738_vaults.sql` (maintenance mode) runs in one transaction:
+Migration `0739_vaults.sql` (maintenance mode) runs in one transaction:
 
 1. Every active Variable Set becomes a vault with the same ID and owner, and
    every variable becomes an `api_key` item with the same ID and

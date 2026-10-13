@@ -268,7 +268,7 @@ CREATE TABLE vault_passkey_leases (
 CREATE INDEX vault_passkey_leases_holder_idx ON vault_passkey_leases (holder);
 
 -- Constant defaults: no table rewrite and no row scan under FORCE RLS. IF NOT
--- EXISTS lets fixtures stopped before 0738 stage the column for current adapters.
+-- EXISTS lets fixtures stopped before 0739 stage the column for current adapters.
 ALTER TABLE sessions
   ADD COLUMN IF NOT EXISTS vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
   ADD CONSTRAINT sessions_vault_policy_check
@@ -479,8 +479,8 @@ BEGIN
   END IF;
 
   INSERT INTO audit_events (account_id, workspace_id, subject_id, action, target_type, metadata)
-  VALUES (NULL, NULL, 'system:migration:0738', 'vault.migrated', 'migration', pg_catalog.jsonb_build_object(
-    'migration', '0738_vaults.sql',
+  VALUES (NULL, NULL, 'system:migration:0739', 'vault.migrated', 'migration', pg_catalog.jsonb_build_object(
+    'migration', '0739_vaults.sql',
     'vaults', copied_vaults,
     'items', copied_items,
     'versions', copied_versions,
@@ -3560,9 +3560,9 @@ BEGIN
   GET DIAGNOSTICS removed_values = ROW_COUNT;
 
   INSERT INTO audit_events (account_id, workspace_id, subject_id, action, target_type, metadata)
-  VALUES (NULL, NULL, 'system:migration:0738', 'variable_set.values_retired', 'migration',
+  VALUES (NULL, NULL, 'system:migration:0739', 'variable_set.values_retired', 'migration',
     pg_catalog.jsonb_build_object(
-      'migration', '0738_vaults.sql',
+      'migration', '0739_vaults.sql',
       'removedValues', removed_values,
       'scrubbedEnvelopes', scrubbed_envelopes,
       'scrubbedLeases', scrubbed_leases

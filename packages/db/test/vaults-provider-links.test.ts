@@ -1,4 +1,4 @@
-// Provider vault links (W5, 0738 W5 section): link_provider_vault and
+// Provider vault links (W5, 0739 W5 section): link_provider_vault and
 // provider_vault_sync_target as the application role, plus the mirror and
 // sync-status routines they feed.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";

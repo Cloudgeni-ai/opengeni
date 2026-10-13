@@ -6628,7 +6628,7 @@ export type ScheduledTaskCreatorPolicy = {
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
-  /** Vault narrowing for every run (0738); omission is `{ mode: "all" }`. */
+  /** Vault narrowing for every run (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   workspaceId: string;
   name: string;
@@ -18332,7 +18332,7 @@ export async function createScheduledTask(
           reusableSessionId: input.targetSessionId ?? null,
           variableSetId: input.variableSetId ?? null,
           // The column default is { mode: "all" }; omit it so rows written
-          // before 0738 (and older-migration fixtures) keep working.
+          // before 0739 (and older-migration fixtures) keep working.
           ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
           rigId: input.rigId ?? null,
           metadata: input.metadata,
@@ -30333,7 +30333,7 @@ export type SessionCreateInput = {
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
-  /** Vault narrowing for this session (0738); omission is `{ mode: "all" }`. */
+  /** Vault narrowing for this session (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   policyRole?: string | null;
   /** Agent-to-agent reach (migration 0427); omitted means the workspace default. */

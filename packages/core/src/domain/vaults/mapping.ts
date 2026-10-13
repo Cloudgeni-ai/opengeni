@@ -1,5 +1,5 @@
 /**
- * Vault rows (encrypted, as the 0738 routines return them) to the public
+ * Vault rows (encrypted, as the 0739 routines return them) to the public
  * contract shapes. Only text-kind field values are decrypted for display;
  * every other kind stays server-side until an audited reveal or a resolve.
  */

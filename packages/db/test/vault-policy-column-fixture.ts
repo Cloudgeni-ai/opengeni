@@ -2,9 +2,9 @@ import postgres from "postgres";
 import { VAULT_RUNTIME_ROUTINES, VAULT_TABLES } from "../src/runtime-posture";
 
 /**
- * Fixtures stopped before 0738 still write sessions and schedules through the
+ * Fixtures stopped before 0739 still write sessions and schedules through the
  * current adapters, which name `vault_policy`. Stage the column exactly as
- * 0738 declares it (0738 adds it with IF NOT EXISTS, so a later forward
+ * 0739 declares it (0739 adds it with IF NOT EXISTS, so a later forward
  * migrate keeps working).
  */
 export async function stageVaultPolicyColumns(ownerUrl: string): Promise<void> {
@@ -20,7 +20,7 @@ export async function stageVaultPolicyColumns(ownerUrl: string): Promise<void> {
 }
 
 /**
- * A fixture stopped before 0738 has no vault objects, so current readiness
+ * A fixture stopped before 0739 has no vault objects, so current readiness
  * reports them missing. Drop exactly those messages (and only the vault names
  * from a combined "protected tables are missing" line) so the fixture still
  * pins every other posture failure.

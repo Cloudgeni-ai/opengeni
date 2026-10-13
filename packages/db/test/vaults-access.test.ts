@@ -1,4 +1,4 @@
-// Vault access (0738): the reach matrix (AX-1), narrowing (AX-2), schedule
+// Vault access (0739): the reach matrix (AX-1), narrowing (AX-2), schedule
 // owners rechecked per run (AX-3), "available in" (AX-4), Only-me privacy
 // (AX-7), stale attempts (AX-8), integrity rules (DM-7) and limits (DM-8),
 // all through the SECURITY DEFINER routines as the application role.

@@ -1,4 +1,4 @@
-// The vault-backed interaction port against PostgreSQL (0738): agent-owned
+// The vault-backed interaction port against PostgreSQL (0739): agent-owned
 // passkeys are saved as vault items, leased to one browser at a time (Q-32),
 // sign counts only move forward (D20), and Browser references resolve through
 // the real resolver.

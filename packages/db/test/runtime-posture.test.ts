@@ -1646,7 +1646,7 @@ describe("runtime database posture evaluator", () => {
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
               organizationRecoveryProtectedTableCount +
-              // 0738 vault tables: FORCE RLS, reached only through vault routines.
+              // 0739 vault tables: FORCE RLS, reached only through vault routines.
               runtimePosture.VAULT_TABLES.length +
               2 // Protected MCP and managed sign-in operation ledgers; no runtime DML.
             : length);
@@ -1737,7 +1737,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
-          runtimePosture.VAULT_TABLES.length + // 0738 vault tables.
+          runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -1748,7 +1748,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
-          runtimePosture.VAULT_TABLES.length + // 0738 vault tables.
+          runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -

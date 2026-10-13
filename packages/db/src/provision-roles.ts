@@ -1857,7 +1857,7 @@ BEGIN
     IF to_regprocedure(
       format('%I.list_vaults_for_subject(uuid,jsonb)', ${literal(schema)})
     ) IS NOT NULL THEN
-      -- Vaults (0738): the routines are the only way in; no table privileges.
+      -- Vaults (0739): the routines are the only way in; no table privileges.
       DECLARE
         vault_routine text;
         vault_table text;

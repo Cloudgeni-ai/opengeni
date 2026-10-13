@@ -1584,9 +1584,9 @@ export const workspaceVariableSetVariables = pgTable(
   }),
 );
 
-// Vaults (migration 0738). Every table is FORCE row-security with no runtime
+// Vaults (migration 0739). Every table is FORCE row-security with no runtime
 // role privileges: the application reads and writes only through the
-// SECURITY DEFINER routines in 0738 (see `./vaults.ts`). These definitions
+// SECURITY DEFINER routines in 0739 (see `./vaults.ts`). These definitions
 // exist for typing and Drizzle introspection; the migration owns the exact
 // constraints, partial indexes, composite foreign keys and policies.
 export const vaults = pgTable(
@@ -1643,7 +1643,7 @@ export const vaults = pgTable(
       ],
     }).onDelete("restrict"),
     // The origin-workspace (column-subset SET NULL), root-session and
-    // provider-connection foreign keys are owned by migration 0738.
+    // provider-connection foreign keys are owned by migration 0739.
   }),
 );
 
@@ -4957,7 +4957,7 @@ export const sessions = pgTable(
     // Composed system-level AFTER the workspace agentInstructions; never emitted
     // as a timeline event.
     instructions: text("instructions"),
-    // Which vaults the agent may resolve secret references from (0738). The
+    // Which vaults the agent may resolve secret references from (0739). The
     // effective policy is this intersected with the parent session's and the
     // agent config's; `{ mode: "all" }` adds no narrowing.
     vaultPolicy: jsonb("vault_policy").$type<VaultPolicy>().notNull().default({ mode: "all" }),
@@ -12044,7 +12044,7 @@ export const scheduledTasks = pgTable(
     overlapPolicy: text("overlap_policy").notNull().default("allow_concurrent"),
     action: jsonb("action").$type<unknown>().notNull().default({ kind: "agent_turn" }),
     agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
-    // Vault narrowing for every run (0738), applied when the run resolves
+    // Vault narrowing for every run (0739), applied when the run resolves
     // secret references; `{ mode: "all" }` adds no narrowing.
     vaultPolicy: jsonb("vault_policy").$type<VaultPolicy>().notNull().default({ mode: "all" }),
     createdByKind: text("created_by_kind").notNull().default("service"),

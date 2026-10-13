@@ -20,10 +20,10 @@ import {
   type DbClient,
 } from "../src/index";
 
-// Migration 0738 §C removes protected-fill site authentication. Only connections
+// Migration 0739 §C removes protected-fill site authentication. Only connections
 // whose authorities are all provider-managed survive, with their runs,
 // interventions and operation journal rows.
-const MIGRATION = "0738_vaults.sql";
+const MIGRATION = "0739_vaults.sql";
 /** §C starts at this banner; everything before it is §A (vaults). */
 const SECTION_C =
   "-- ===========================================================================\n-- §C (W4): remove protected-fill site authentication\n";
@@ -39,12 +39,12 @@ async function workspaceScope(db: DbClient["db"]) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
     accountExternalSource: "test",
-    accountExternalId: `site-auth-0738-${suffix}`,
-    accountName: "Site auth 0738",
+    accountExternalId: `site-auth-0739-${suffix}`,
+    accountName: "Site auth 0739",
     workspaceExternalSource: "test",
-    workspaceExternalId: `site-auth-0738-${suffix}`,
-    workspaceName: "Site auth 0738",
-    subjectId: `user:site-auth-0738-${suffix}`,
+    workspaceExternalId: `site-auth-0739-${suffix}`,
+    workspaceName: "Site auth 0739",
+    subjectId: `user:site-auth-0739-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
   const session = await createSession(db, {
@@ -128,19 +128,19 @@ function providerConnection(name: string) {
   };
 }
 
-describe("migration 0738 §C site-auth protected-fill removal", () => {
+describe("migration 0739 §C site-auth protected-fill removal", () => {
   test("keeps only provider-managed site auth and drops the removed state and kind", async () => {
     const source = await readFile(join(import.meta.dir, "../drizzle", MIGRATION), "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: maintenance");
     const sectionC = source.indexOf(SECTION_C);
     expect(sectionC).toBeGreaterThan(0);
 
-    const owned = await acquireOwnerMigratedTestDatabase("migration-0738-site-auth");
+    const owned = await acquireOwnerMigratedTestDatabase("migration-0739-site-auth");
     if (!owned) return;
     const owner = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
     let app: DbClient | undefined;
     try {
-      // Build the schema as it was before §C (every migration, then 0738 §A),
+      // Build the schema as it was before §C (every migration, then 0739 §A),
       // then apply §C by hand as the non-superuser owner. Production applies
       // the whole file in one transaction.
       await owner.unsafe(

@@ -1,6 +1,6 @@
 /**
  * Vault REST routes (dossier §10B.1.10), all under `/v1/workspaces/:workspaceId`.
- * Each route checks the permission its operation needs; the 0738 routines
+ * Each route checks the permission its operation needs; the 0739 routines
  * decide reach (which vaults this person sees) and integrity. Vault errors
  * answer `{ error, message, details? }` with the status from
  * `VAULT_ERROR_HTTP_STATUS`.
