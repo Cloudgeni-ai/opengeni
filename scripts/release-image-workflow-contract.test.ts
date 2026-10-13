@@ -1552,12 +1552,12 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "fd47898c1119624dbafa8e62926cbbfbb950f541e41167765257f9ba01247cd6",
+        fingerprint: "c18d9d5f40f9e88be1237cfd4ab3e04a323b668f357923561eb5fe9aaef62907",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "30caf29d97ddcbc7262219ff597c0febd8d99771e8a5d76c656fc3ba3189f9ba",
+        fingerprint: "efa891e24ea2214c0690271980e1974d6e468eda4195e1f4c84ea39af4be329a",
       },
       {
         jobName: "web-image",
@@ -1585,6 +1585,13 @@ ${parser}`,
         fingerprint: "de1ae66fe410cd78f9965fe23e5d80d5506d1132c68cfec7a4c5c93e103fcd7d",
       },
     ]);
+
+    for (const jobName of ["api-image", "worker-image"]) {
+      const build = imageSteps.find((step) => step.jobName === jobName)!;
+      expect(build.step.with["build-args"].split("\n")).toContain(
+        "OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+      );
+    }
 
     const expectedCacheScopes = new Map([
       ["Build API image", "opengeni-ci-api"],

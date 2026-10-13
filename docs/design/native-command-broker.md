@@ -86,6 +86,15 @@ mounts, PTY and readiness execs are refused by this image-only recipe rather tha
 allowed to shadow or precede the selected executable. Ordinary Modal creation
 and existing warm instances remain unchanged.
 
+The stock desktop image has an empty image `ENTRYPOINT`. Its default `CMD`
+contains Tini and the idle command, so ordinary container startup still has an
+init while a provider command override starts the broker directly. Modal retains
+the image entrypoint when replacing its command: placing Tini there introduces
+an earlier process and initial stderr. Do not suppress that diagnostic or relabel
+an inherited wrapper as the admitted broker. Verify the published image's actual
+startup as part of physical qualification; this source contract alone is not a
+provider acceptance receipt.
+
 The existing `modal-create-session.ts` lifecycle has an internal broker opt-in,
 not a public/model create option. It requires a separate durable broker admission
 callback after ordinary lease admission, and a bootstrap verification/retention

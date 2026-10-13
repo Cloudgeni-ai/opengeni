@@ -60,6 +60,34 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
 }
 
 describe("browser controller image build contract", () => {
+  test("desktop command overrides launch directly while the default command retains its init", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/desktop.Dockerfile"), "utf8");
+    const instruction = (name: string): string[] => {
+      const value = [...dockerfile.matchAll(new RegExp(`^${name} (\\[.*\\])$`, "gm"))].at(-1)?.[1];
+      expect(value).toBeDefined();
+      return JSON.parse(value!);
+    };
+    const entrypoint = instruction("ENTRYPOINT");
+    const defaultCommand = instruction("CMD");
+    expect(entrypoint).toEqual([]);
+    expect(defaultCommand).toEqual(["/usr/bin/tini", "--", "sleep", "infinity"]);
+    // Modal replaces CMD but retains image ENTRYPOINT. An inherited Tini
+    // wrapper would precede the qualified broker and emit initial stderr.
+    const broker = [
+      "/usr/local/bin/opengeni-command-supervisor",
+      "broker",
+      "--broker-id",
+      "fixture",
+    ];
+    expect([...entrypoint, ...broker]).toEqual(broker);
+    expect([...entrypoint, ...defaultCommand]).toEqual([
+      "/usr/bin/tini",
+      "--",
+      "sleep",
+      "infinity",
+    ]);
+  });
+
   for (const imagePath of imagePaths) {
     test(`${imagePath} prepares shared inputs once and compiles natively for the target`, async () => {
       const dockerfile = await readFile(resolve(root, imagePath), "utf8");

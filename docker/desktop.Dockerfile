@@ -686,7 +686,8 @@ EXPOSE 7681
 EXPOSE 7682
 WORKDIR /workspace
 
-# The managed box hosts many independently ending GUI process trees. PID 1 must
-# reap their D-Bus/AT-SPI descendants after exact controller teardown.
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sleep", "infinity"]
+# Standalone default startup retains its init for GUI orphan reaping. Providers
+# replace CMD, but may preserve image ENTRYPOINT: a qualified native broker must
+# start directly, without an inherited init ahead of its authenticated channel.
+ENTRYPOINT []
+CMD ["/usr/bin/tini", "--", "sleep", "infinity"]
