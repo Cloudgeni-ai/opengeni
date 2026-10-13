@@ -2244,6 +2244,7 @@ export const InteractionError = z
       "invalid_action",
       "timeout",
       "tab_not_responding",
+      "tab_crashed",
       "controller_lost",
       "driver_failed",
     ]),

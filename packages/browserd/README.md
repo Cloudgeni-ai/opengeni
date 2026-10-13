@@ -21,6 +21,11 @@ tabs remain available. If input was already sent, the receipt retains
 `outcome_unknown` with the same `tab_not_responding` diagnosis and warns not to
 repeat the action. Actual socket loss remains a separate transport failure.
 
+A tab whose renderer has crashed (including a restored tab that crashed before
+anything attached to it) reports `tab_crashed` with open-a-new-tab guidance as
+soon as an operation touches it. It is definite and non-retryable; browserd
+does not close or replace the tab.
+
 Managed Chromium launches request a 64 MiB HTTP disk-cache budget instead of
 Chromium's host-disk-derived default. This bounds disposable response caching,
 not cookies, IndexedDB, service-worker storage, downloads, or total profile size.
