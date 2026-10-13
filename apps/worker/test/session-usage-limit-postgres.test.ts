@@ -27,6 +27,10 @@ import { DrizzleQueryError } from "drizzle-orm";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivityTestHarness } from "../src/activities";
 import { POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE } from "../src/activities/types";
+import {
+  heldSessionUsageReceiptCount,
+  resetSessionUsageReceiptCustodyForTests,
+} from "../src/activities/agent-turn/session-usage-custody";
 
 // per-task usage limits through the real worker turn path, real
 // PostgreSQL (non-bypass application role, FORCE RLS) and the real SDK call
@@ -409,7 +413,20 @@ test("AC13: a configured $0 model is known free; an unpriced call is disclosed a
   ]);
 });
 
-test("AC13: a receipt settlement database failure blocks the next dispatch and enters DB-only recovery", async () => {
+function connectionClosed() {
+  return new DrizzleQueryError(
+    "select session_usage_limit_command($1)",
+    [],
+    Object.assign(new Error("connection closed"), { code: "CONNECTION_CLOSED" }),
+  );
+}
+
+function dbFailureSourceRows(rows: Awaited<ReturnType<typeof receipts>>, sessionId: string) {
+  return rows.filter((row) => row.source_id.includes(`dbfail-${sessionId}`));
+}
+
+test("F1/AC13: a one-off receipt write failure is held and written before the next request; no provider replay, recorded once", async () => {
+  resetSessionUsageReceiptCustodyForTests();
   const ctx = await fixture();
   const session = await startSession(ctx);
   await setLimit(ctx, session.id, 1_000_000);
@@ -419,41 +436,139 @@ test("AC13: a receipt settlement database failure blocks the next dispatch and e
     async (db, input) => {
       if (input.sessionId === session.id && failures === 0) {
         failures++;
-        throw new DrizzleQueryError(
-          "select session_usage_limit_command($1)",
-          [],
-          Object.assign(new Error("connection closed"), { code: "CONNECTION_CLOSED" }),
-        );
+        throw connectionClosed();
       }
       return await original(db, input);
     },
   );
   const scripted = new ScriptedModel([
     paidToolCall(`dbfail-${session.id}`),
-    { inputTokens: 100, output: [assistantMessage("must not dispatch in this attempt")] },
+    { inputTokens: 100, output: [assistantMessage("done")] },
+    { inputTokens: 100, output: [assistantMessage("must never be requested")] },
   ]);
-  let thrown: unknown;
   try {
     await runTurn(ctx, session.id, scripted);
+  } finally {
+    settle.mockRestore();
+  }
+  expect(failures).toBe(1);
+  // The response was kept: the turn continued from it with exactly one more request.
+  expect(scripted.calls).toBe(2);
+  const rows = await receipts(session.id);
+  expect(dbFailureSourceRows(rows, session.id)).toEqual([
+    expect.objectContaining({ amount_micros: "100", pricing_source: "configured_list_price" }),
+  ]);
+  expect(rows).toHaveLength(2);
+  expect(await usage(ctx, session.id)).toMatchObject({
+    usedMicros: 200,
+    pricedCalls: 2,
+    coverage: "complete",
+  });
+  expect(heldSessionUsageReceiptCount(session.id)).toBe(0);
+  const timeline = await events(ctx, session.id);
+  expect(timeline.some((event) => event.type === "turn.failed")).toBe(false);
+});
+
+test("F1/AC13: a persistent receipt failure stops before the next request, the recovery lane writes the original receipt, and the replacement attempt does not replay the provider", async () => {
+  resetSessionUsageReceiptCustodyForTests();
+  const ctx = await fixture();
+  const session = await startSession(ctx);
+  await setLimit(ctx, session.id, 1_000_000);
+  const scripted = new ScriptedModel([
+    paidToolCall(`dbfail-${session.id}`),
+    { inputTokens: 100, output: [assistantMessage("done")] },
+    { inputTokens: 100, output: [assistantMessage("must never be requested")] },
+  ]);
+  const activities = createActivityTestHarness({
+    settings: settingsFor("priced"),
+    db: app.db,
+    bus: new MemoryEventBus(),
+    runtime: scriptedRuntime(scripted),
+  });
+  const original = opengeniDb.settleSessionUsageReceipt;
+  // The task meter's database path is down for this session (every receipt
+  // write fails); everything else keeps working.
+  const settle = spyOn(opengeniDb, "settleSessionUsageReceipt").mockImplementation(
+    async (db, input) => {
+      if (input.sessionId === session.id) throw connectionClosed();
+      return await original(db, input);
+    },
+  );
+  const attemptId = crypto.randomUUID();
+  let thrown: unknown;
+  try {
+    await activities.runAgentTurn({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
   } catch (error) {
     thrown = error;
   } finally {
     settle.mockRestore();
   }
-  expect(failures).toBe(1);
-  // The settled response's accounting failed: no further provider request.
+  // Stopped before the next request: never admitted on an undercount.
   expect(scripted.calls).toBe(1);
   expect((thrown as { type?: string } | undefined)?.type).toBe(
     POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
   );
-  // Not a terminal turn failure and not a limit stop.
-  const timeline = await events(ctx, session.id);
-  expect(timeline.some((event) => event.type === "turn.failed")).toBe(false);
-  expect(
-    timeline.some(
-      (event) =>
-        event.type === "turn.completed" &&
-        (event.payload as { segmentLimit?: string }).segmentLimit === "session_usage_limit",
-    ),
-  ).toBe(false);
+  const detail = (thrown as { details?: unknown[] }).details?.[0] as {
+    sessionUsageReceipts?: Array<Record<string, unknown>>;
+  };
+  // The typed failure detail (durable in workflow history) carries the
+  // content-free receipt under its original source identity.
+  expect(detail.sessionUsageReceipts).toEqual([
+    expect.objectContaining({
+      sessionId: session.id,
+      sourceId: expect.stringContaining(`dbfail-${session.id}`),
+      amountMicros: 100,
+      pricingSource: "configured_list_price",
+    }),
+  ]);
+  // A different worker process handles recovery: this process's custody is gone.
+  resetSessionUsageReceiptCustodyForTests();
+  const lane = spyOn(opengeniDb, "settleSessionUsageReceipt");
+  try {
+    const recovered = await activities.failSessionAttempt({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      attemptId,
+      workflowId: `session-${session.id}`,
+      retryDelayMs: 1_000,
+      postClaimDatabaseRecovery: detail as never,
+      trigger: { kind: "next" },
+      error: "post-claim database recovery",
+    });
+    expect((recovered as { action?: string }).action).not.toBe("stale");
+    expect(lane.mock.calls.map((args) => args[1].sourceId)).toEqual([
+      expect.stringContaining(`dbfail-${session.id}`),
+    ]);
+  } finally {
+    lane.mockRestore();
+  }
+  // The replacement attempt continues from the kept response.
+  await activities.runAgentTurn({
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(scripted.calls).toBe(2);
+  const rows = await receipts(session.id);
+  expect(dbFailureSourceRows(rows, session.id)).toEqual([
+    expect.objectContaining({ amount_micros: "100", pricing_source: "configured_list_price" }),
+  ]);
+  expect(await usage(ctx, session.id)).toMatchObject({
+    usedMicros: 200,
+    pricedCalls: 2,
+    coverage: "complete",
+  });
 });

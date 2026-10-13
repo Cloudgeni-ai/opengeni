@@ -291,7 +291,16 @@ export async function ensureSessionUsageLimitAllows(
   // Receipts this process holds (a settlement write failed) are made durable
   // before the next request is admitted; a still-failing write throws a
   // database error and blocks the request without replaying provider work.
-  await flushHeldSessionUsageReceipts(db, input.sessionId);
+  // It is an unreadable usage state (never a credit or limit stop); the
+  // database cause keeps it in the attempt's DB-only recovery lane.
+  try {
+    await flushHeldSessionUsageReceipts(db, input.sessionId);
+  } catch (error) {
+    throw new SessionUsageLimitUnavailableError(
+      "Recorded task usage could not be saved before the next model request",
+      { cause: error },
+    );
+  }
   const admission = await checkSessionUsageLimitAdmission(db, { ...input, runtime: true });
   if (!admission.allowed) throw new SessionUsageLimitReachedError(admission.refusal);
 }
