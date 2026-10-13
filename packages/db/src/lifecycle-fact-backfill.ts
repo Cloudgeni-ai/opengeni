@@ -75,7 +75,9 @@ export async function backfillProductLifecycleFacts(
   return results;
 }
 
-if (import.meta.main) {
+/** Command-line entry. Bundled release images call this explicitly; see
+ * scripts/assemble-server-runtime.ts. */
+export async function runLifecycleFactBackfillCli(): Promise<void> {
   const databaseUrl =
     process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_URL;
   if (!databaseUrl) {
@@ -114,3 +116,5 @@ if (import.meta.main) {
     await sql.end();
   }
 }
+
+if (import.meta.main) await runLifecycleFactBackfillCli();

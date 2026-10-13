@@ -22,6 +22,43 @@ const databaseCommands = [
   "session-content-compaction",
 ] as const;
 
+/**
+ * Commands whose module is also imported through the DB barrel. With code
+ * splitting, their body moves into a shared chunk where `import.meta.main` is
+ * false, so the bundled entry must call the exported runner explicitly.
+ */
+export const DATABASE_COMMAND_RUNNERS: Readonly<Record<string, string>> = {
+  migrate: "runMigrateCli",
+  "provision-roles": "runProvisionRolesCli",
+  "lifecycle-fact-backfill": "runLifecycleFactBackfillCli",
+  "session-content-compaction": "runSessionContentCompactionCli",
+};
+
+/**
+ * Make a bundled command entry run when executed. A source entry guarded by
+ * `import.meta.main` either keeps that guard in its own output, or has a
+ * registered runner that the entry calls; anything else would silently no-op.
+ */
+export function finalizeCommandEntry(input: {
+  command: string;
+  source: string;
+  output: string;
+  runner?: string;
+}): string {
+  const guarded = input.source.includes("import.meta.main");
+  if (!guarded || input.output.includes("import.meta.main")) return input.output;
+  if (!input.runner) {
+    throw new Error(
+      `Bundled command ${input.command} lost its import.meta.main entry; register an exported runner`,
+    );
+  }
+  const imported = new RegExp(`import\\s*\\{[^}]*\\b${input.runner}\\b[^}]*\\}`);
+  if (!imported.test(input.output)) {
+    throw new Error(`Bundled command ${input.command} does not import its runner ${input.runner}`);
+  }
+  return `${input.output.trimEnd()}\nawait ${input.runner}();\n`;
+}
+
 const operatorCommands = [
   "inventory-tenancy",
   "check-tenancy-parity",
@@ -98,6 +135,24 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     });
     if (!commands.success) {
       throw new Error(`Operator runtime build failed: ${commands.logs.join("\n")}`);
+    }
+    for (const [command, relativePath] of [
+      ...databaseCommands.map((name) => [name, `packages/db/src/${name}.ts`] as const),
+      ...operatorCommands.map((name) => [name, `scripts/${name}.ts`] as const),
+      ["import-integrations-catalog", "scripts/import-integrations-catalog.ts"] as const,
+    ]) {
+      const builtPath = join(destination, relativePath);
+      await writeFile(
+        builtPath,
+        finalizeCommandEntry({
+          command,
+          source: await readFile(join(root, relativePath), "utf8"),
+          output: await readFile(builtPath, "utf8"),
+          ...(DATABASE_COMMAND_RUNNERS[command]
+            ? { runner: DATABASE_COMMAND_RUNNERS[command] }
+            : {}),
+        }),
+      );
     }
     await cp(join(root, "packages/db/drizzle"), join(destination, "packages/db/drizzle"), {
       recursive: true,

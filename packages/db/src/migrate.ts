@@ -823,7 +823,9 @@ export async function planMigrations(
   };
 }
 
-if (import.meta.main) {
+/** Command-line entry. Bundled release images call this explicitly; see
+ * scripts/assemble-server-runtime.ts. */
+export async function runMigrateCli(): Promise<void> {
   if (process.argv.includes("--plan")) {
     console.log(JSON.stringify(await planMigrations(), null, 2));
   } else {
@@ -831,3 +833,5 @@ if (import.meta.main) {
     console.log("Applied Drizzle SQL migrations.");
   }
 }
+
+if (import.meta.main) await runMigrateCli();
