@@ -9,6 +9,7 @@ import {
   ImageIcon,
   PresentationIcon,
   Table2Icon,
+  type LucideIcon,
 } from "lucide-react";
 import type { MouseEvent } from "react";
 
@@ -17,17 +18,28 @@ import { LogoTile } from "@/components/ui/logo-tile";
 import { artifactKindLabel, type ArtifactKind } from "@/lib/artifact-catalog";
 import { artifactLibraryFilters, artifactLibrarySearch } from "@/lib/artifact-library-navigation";
 
-const icons = {
-  site: Globe2Icon,
-  image: ImageIcon,
-  document: FileTextIcon,
-  spreadsheet: Table2Icon,
-  presentation: PresentationIcon,
-  file: FileIcon,
-};
+// Resolved at render, not in a module-level table: these icons can live in a
+// chunk that loads after this one, and a table built while this module loads
+// would hold undefined (the Artifacts list then fails to render).
+function artifactTypeGlyph(kind: ArtifactKind): LucideIcon {
+  switch (kind) {
+    case "site":
+      return Globe2Icon;
+    case "image":
+      return ImageIcon;
+    case "document":
+      return FileTextIcon;
+    case "spreadsheet":
+      return Table2Icon;
+    case "presentation":
+      return PresentationIcon;
+    default:
+      return FileIcon;
+  }
+}
 
 export function ArtifactTypeIcon({ kind, className }: { kind: ArtifactKind; className?: string }) {
-  const Icon = icons[kind];
+  const Icon = artifactTypeGlyph(kind);
   return <Icon className={className ?? "size-4"} aria-hidden />;
 }
 
