@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { withRestoredSessionActivityRlsContext, type Database } from "./database";
 import { recordRetiredChildNotice, retireInterruptedSessionTurn } from "./index";
+import { repairEmptyQueuedSessionProjection } from "./empty-session-queue";
 
 export const INTERRUPTED_TURN_RETIREMENT_MARKER = "-- OPENGENI_INTERRUPTED_TURN_RETIREMENT_STAGE";
 export const INTERRUPTED_TURN_RETIREMENT_MIGRATION = "0764_interrupted_turn_recovery.sql";
@@ -22,8 +23,21 @@ const manifestSchema = z
           })
           .strict(),
       )
-      .min(1)
+      .min(0)
       .max(1000),
+    emptyQueuedSessions: z
+      .array(
+        z
+          .object({
+            accountId: z.uuid(),
+            workspaceId: z.uuid(),
+            sessionId: z.uuid(),
+            expectedLastSequence: z.number().int().nonnegative(),
+          })
+          .strict(),
+      )
+      .max(1000)
+      .optional(),
   })
   .strict();
 export type InterruptedTurnRetirementManifest = z.infer<typeof manifestSchema>;
@@ -35,10 +49,10 @@ export function parseInterruptedTurnRetirementManifest(
 ): InterruptedTurnRetirementManifest {
   const parsed = manifestSchema.safeParse(value);
   if (!parsed.success) throw new Error("Invalid interrupted-turn retirement manifest");
-  if (
-    new Set(parsed.data.targets.map((target) => target.sessionId)).size !==
-    parsed.data.targets.length
-  )
+  const allTargets = [...parsed.data.targets, ...(parsed.data.emptyQueuedSessions ?? [])];
+  if (allTargets.length < 1 || allTargets.length > 1000)
+    throw new Error("Invalid interrupted-turn retirement manifest");
+  if (new Set(allTargets.map((target) => target.sessionId)).size !== allTargets.length)
     throw new Error("Interrupted-turn retirement targets must name unique sessions");
   return parsed.data;
 }
@@ -49,7 +63,13 @@ export async function migrateInterruptedTurnRetirement(
 ): Promise<void> {
   if (value === undefined) return;
   const manifest = parseInterruptedTurnRetirementManifest(value);
-  const ordered = [...manifest.targets].sort(
+  const ordered = [
+    ...manifest.targets.map((target) => ({ ...target, kind: "turn" as const })),
+    ...(manifest.emptyQueuedSessions ?? []).map((target) => ({
+      ...target,
+      kind: "empty" as const,
+    })),
+  ].sort(
     (a, b) => a.workspaceId.localeCompare(b.workspaceId) || a.sessionId.localeCompare(b.sessionId),
   );
   const workspaces = new Map<string, typeof ordered>();
@@ -63,6 +83,13 @@ export async function migrateInterruptedTurnRetirement(
   for (const targets of workspaces.values()) {
     await withRestoredSessionActivityRlsContext(db, targets[0]!, async (scoped) => {
       for (const target of targets) {
+        if (target.kind === "empty") {
+          await repairEmptyQueuedSessionProjection(scoped, {
+            ...target,
+            operationId: manifest.operationId,
+          });
+          continue;
+        }
         const result = await retireInterruptedSessionTurn(scoped, target.workspaceId, {
           ...target,
           operationId: manifest.operationId,
@@ -74,10 +101,11 @@ export async function migrateInterruptedTurnRetirement(
       // validate and settle every target against the reviewed event cursors;
       // only then append parent receipts, in this same atomic transaction.
       for (const target of targets)
-        await recordRetiredChildNotice(scoped, target.workspaceId, {
-          ...target,
-          operationId: manifest.operationId,
-        });
+        if (target.kind === "turn")
+          await recordRetiredChildNotice(scoped, target.workspaceId, {
+            ...target,
+            operationId: manifest.operationId,
+          });
     });
   }
 }

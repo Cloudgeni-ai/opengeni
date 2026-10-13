@@ -1262,6 +1262,39 @@ before applying a manifest: replay of an older actionable retirement receipt
 fails closed rather than claiming that no parent execution occurred. Migration
 0764's frozen SQL is unchanged; this is the migration runner's operator hook.
 
+**Empty queued shells are projection repair, not turn retirement.** Session
+creation now reserves an `idle` shell. Only `initializeSessionStartAtomically`
+installs its first queued turn, events and wake. A failure before initialization
+therefore leaves no imaginary queue, and a retry of the explicit create still
+initializes exactly once. Never synthesize a turn from a shell's retained initial
+message during maintenance.
+
+For historical shells, the same manifest also accepts `emptyQueuedSessions`:
+an array of `{accountId, workspaceId, sessionId, expectedLastSequence}`. Use
+`targets: []` when repairing only shells. The combined manifest requires 1–1,000
+unique sessions. Under the canonical locks each shell must still be `queued`,
+have the reviewed canonical event sequence, and have no turn history or
+`session.created` event, active pointer, active goal, pending input/outbox,
+capacity waiter, live voice lease, admission block, input wait, compaction,
+unfinished scheduled run or live physical writer. Every target passes in the
+same all-or-nothing transaction as ordinary retirement. A stale target aborts
+the batch rather than widening the selection.
+
+Shell repair appends one `session.status.changed` audit event with
+`code: empty_queue_projection_repaired`, `retirementOperationId` and
+`repairedLastSequence`, then sets only the status projection to `idle`. It does
+not change Pause, create a turn/attempt/history item/input/wake, or notify a
+parent. An exact receipt replay never rewrites newer work. Ordinary upgrades
+without a manifest perform no shell repair.
+
+Skip-overlap schedule admission independently verifies an empty stale `queued`
+projection under the session lock rather than trusting its label forever.
+Accepted turns, pending input, active goals, live voice, waits and physical
+writers still overlap; Pause still blocks. This admits only the new occurrence,
+never replays historical work or changes the accepted account selection of a
+capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
+requires an authorized account change; time or a deploy cannot override it.
+
 Build the private manifest with a read-only query (psql variables
 `workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its
 count and scope before supplying it to the migration runner. Selection is not
