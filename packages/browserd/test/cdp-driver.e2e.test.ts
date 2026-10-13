@@ -15,6 +15,7 @@ import {
   BrowserSupervisor,
   imageDimensions,
   resolvePinnedAgentBrowserBinary,
+  restoreTabs,
 } from "../src";
 import { CdpConnection, CdpProtocolError, type CdpSendOptions } from "../src/cdp";
 
@@ -1986,62 +1987,76 @@ chromiumE2e(
   60_000,
 );
 
-chromiumE2e(
-  "startup on a browser whose only restored tab crashed selects a new live tab",
-  async () => {
-    const directory = await mkdtemp("/tmp/ogb-crashed-restore-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `crashrestore_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
-      profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
-      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
-      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
-        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
-        : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
-    });
-    const first = new AgentBrowserDriver({
-      browserSessionId: randomUUID(),
-      controllerGeneration: randomUUID(),
-      runner,
-    });
-    let restarted: AgentBrowserDriver | null = null;
-    let cdp: CdpConnection | null = null;
-    try {
-      const initial = await first.start(dataUrl("<!doctype html><h1>Restored page</h1>"));
-      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
-      cdp = await CdpConnection.connect(endpoint.cdpUrl);
-      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
-        targetId: initial.target.id,
-        flatten: true,
+for (const mode of ["start", "restore tabs"] as const) {
+  chromiumE2e(
+    `${mode} on a browser whose only restored tab crashed selects a live tab`,
+    async () => {
+      const directory = await mkdtemp("/tmp/ogb-crashed-restore-");
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: `crashrestore_${randomUUID().slice(0, 8)}`,
+        sessionName: "s",
+        socketDirectory: join(directory, "s"),
+        profileDirectory: join(directory, "profile"),
+        downloadDirectory: join(directory, "downloads"),
+        screenshotDirectory: join(directory, "screenshots"),
+        headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+        binary: await resolvePinnedAgentBrowserBinary(
+          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+            : {},
+        ),
       });
-      await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
-      await first.detach();
-
-      // A new controller generation meets the dead restored tab first, as a
-      // restored profile launch does. The browser is healthy, so startup works.
-      restarted = new AgentBrowserDriver({
+      const first = new AgentBrowserDriver({
         browserSessionId: randomUUID(),
         controllerGeneration: randomUUID(),
         runner,
       });
-      const started = await restarted.start(dataUrl("<!doctype html><h1>After restore</h1>"));
-      expect(started.target.id).not.toBe(initial.target.id);
-      expect(names(started)).toContain("After restore");
-      const tabs = await restarted.listTargets();
-      expect(tabs.map((target) => target.id)).toContain(initial.target.id);
-    } finally {
-      cdp?.close();
-      await (restarted ?? first).close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  },
-  60_000,
-);
+      let restarted: AgentBrowserDriver | null = null;
+      let cdp: CdpConnection | null = null;
+      try {
+        const restoredUrl = dataUrl("<!doctype html><h1>Restored page</h1>");
+        const initial = await first.start(restoredUrl);
+        const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+        cdp = await CdpConnection.connect(endpoint.cdpUrl);
+        const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId: initial.target.id,
+          flatten: true,
+        });
+        await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+        await first.detach();
+
+        // A new controller generation meets the dead restored tab first, as a
+        // restored profile launch does. The browser is healthy, so startup works.
+        restarted = new AgentBrowserDriver({
+          browserSessionId: randomUUID(),
+          controllerGeneration: randomUUID(),
+          runner,
+        });
+        if (mode === "start") {
+          const started = await restarted.start(dataUrl("<!doctype html><h1>After restore</h1>"));
+          expect(started.target.id).not.toBe(initial.target.id);
+          expect(names(started)).toContain("After restore");
+          const tabs = await restarted.listTargets();
+          expect(tabs.map((target) => target.id)).toContain(initial.target.id);
+        } else {
+          // The checkpoint's selected tab has the same URL as the dead tab. The
+          // restored selection must be the live tab startup navigated there.
+          await restoreTabs(restarted, [{ url: restoredUrl, selected: true }]);
+          const tabs = await restarted.listTargets();
+          const selected = tabs.find((target) => target.selected);
+          expect(selected?.id).toBeDefined();
+          expect(selected?.id).not.toBe(initial.target.id);
+          expect(names(await restarted.observe(selected!.id))).toContain("Restored page");
+        }
+      } finally {
+        cdp?.close();
+        await (restarted ?? first).close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+}
