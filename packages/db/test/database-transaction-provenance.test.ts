@@ -33,7 +33,11 @@ test("real raw transaction admission failure supplies own-client provenance with
   await new Promise<void>((resolve, reject) =>
     listener.close((error) => (error ? reject(error) : resolve())),
   );
-  const client = createDb(`postgres://fixture:fixture@127.0.0.1:${port}/fixture`, { max: 1 });
+  const client = createDb(`postgres://fixture:fixture@127.0.0.1:${port}/fixture`, {
+    max: 1,
+    // This test is about a refused admission, not a booting process.
+    bootConnectGraceMs: 0,
+  });
   let entered = false;
   try {
     const error = await withRlsContext(client.db, scope, async () => {

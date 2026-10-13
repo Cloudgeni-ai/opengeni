@@ -213,6 +213,11 @@ export type CreateDbOptions = {
   /** postgres-js pool size; defaults to today's `10`. */
   max?: number;
   /**
+   * How long a refused first connection is retried while the client has never
+   * reached the server; defaults to the boot grace. 0 fails immediately.
+   */
+  bootConnectGraceMs?: number;
+  /**
    * Connection-local default transaction isolation sent in the postgres-js
    * startup parameters. This is intentionally not a role/database default:
    * tests and embedded callers can exercise a different ambient isolation
@@ -394,7 +399,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     backoff: databaseReconnectBackoffSeconds,
     // A fresh pod can be refused for a moment while its network policy and DNS
     // settle; retry that first connection briefly instead of failing boot.
-    ...databaseBootConnectOptions(databaseUrl),
+    ...databaseBootConnectOptions(databaseUrl, options.bootConnectGraceMs),
     // `connection` carries per-session Postgres STARTUP parameters. The exact
     // `application_name` is also the PgBouncer-compatible current-image receipt
     // for migration 0352's restrictive sessions policy; arbitrary custom startup
