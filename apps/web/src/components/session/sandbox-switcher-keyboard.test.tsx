@@ -80,13 +80,16 @@ async function press(key: string) {
   });
 }
 
-async function renderMenu(value: SessionRunsOn) {
+async function renderMenu(
+  value: SessionRunsOn,
+  move?: (machine: MachineView) => Promise<string | null>,
+) {
   await act(async () =>
     root.render(
       <DropdownMenu defaultOpen>
         <DropdownMenuTrigger>More composer actions</DropdownMenuTrigger>
         <DropdownMenuContent>
-          <SessionRunsOnMenuBody runsOn={value} workspaceId="workspace" rigId={null} />
+          <SessionRunsOnMenuBody runsOn={value} workspaceId="workspace" rigId={null} move={move} />
         </DropdownMenuContent>
       </DropdownMenu>,
     ),
@@ -169,4 +172,30 @@ test("dialog presentation retains plain Tab-reachable machine choices", async ()
   await act(async () => rows[2]!.click());
   expect(value.fleet.attach).toHaveBeenCalledTimes(1);
   expect(value.fleet.attach).toHaveBeenCalledWith("build");
+});
+
+test("a move in flight keeps every machine locked until it settles, then shows why it failed", async () => {
+  let settle: (reason: string | null) => void = () => {};
+  const move = mock(
+    (_machine: MachineView) =>
+      new Promise<string | null>((resolve) => {
+        settle = resolve;
+      }),
+  );
+  const value = runsOn();
+  await renderMenu(value, move);
+  await act(async () => row("Build machine").click());
+  expect(move).toHaveBeenCalledTimes(1);
+  // The fleet's own attach has finished, but the consent message hasn't.
+  expect(row("Headless machine").hasAttribute("data-disabled")).toBe(true);
+  await act(async () => row("Headless machine").click());
+  expect(move).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    settle("It stayed where it was.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(row("Headless machine").hasAttribute("data-disabled")).toBe(false);
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+    "It stayed where it was.",
+  );
 });

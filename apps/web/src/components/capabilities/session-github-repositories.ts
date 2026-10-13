@@ -5,7 +5,7 @@ import {
   isRepositoryResourceForGitHubRepo,
   repositoryDisplayName,
 } from "@/lib/session-tools";
-import type { SendMessageInput } from "@opengeni/sdk";
+import type { PersonalResourceAttachmentIntent, SendMessageInput } from "@opengeni/sdk";
 
 import type { GitHubRepository, ResourceRef } from "@/types";
 
@@ -20,12 +20,19 @@ export type ChatSendContext = {
   blocked: string | null;
   /** The chat waits on a human answer; a Send replaces that request. */
   awaitingHuman: boolean;
+  /**
+   * The owner's consent to use their own Connected Machine in this chat, sent
+   * with the message that moves the chat onto it. Undefined when the chat's
+   * authority is unknown.
+   */
+  personalMachineIntent?: PersonalResourceAttachmentIntent | undefined;
   extras: Partial<{
     model: string;
     reasoningEffort: SendMessageInput["reasoningEffort"];
     latencyMode: SendMessageInput["latencyMode"];
     controlEtag: string;
     connectionAccounts: NonNullable<SendMessageInput["connectionAccounts"]>;
+    personalResourceAttachment: PersonalResourceAttachmentIntent;
   }>;
 };
 
