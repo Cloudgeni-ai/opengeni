@@ -1037,8 +1037,12 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain("texts: browserActionSecretTexts(request.action)");
     expect(route).toContain('surface: "browser"');
-    // Passkeys sync before and after the action, never instead of it.
-    expect(route.match(/await passkeySync\(\)/g)?.length).toBe(2);
+    // Passkeys sync before (taking over the principal's lease) and after the
+    // action, never instead of it.
+    expect(route.match(/await passkeySync\((?:true|false)\)/g)?.length).toBe(2);
+    expect(route.indexOf("await passkeySync(true)")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
     // The response is the controller receipt; the side map is never echoed.
     expect(route).not.toContain("secretValues: request");
   });

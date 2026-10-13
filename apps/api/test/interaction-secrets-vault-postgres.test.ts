@@ -162,13 +162,20 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       const first = leased.find((entry) => entry.itemId === itemId)!;
       expect(first).toEqual({ ...credential, userDisplayName: null, itemId });
 
-      // Leased elsewhere: another browser gets nothing until the lease ends.
-      expect(await store.lease(principal, "browser-b", 600)).toEqual([]);
+      // The most recent holder takes over, so a passkey registered in one
+      // browser works at once in another.
+      const takenOver = await store.lease(principal, "browser-b", 600);
+      expect(takenOver.map((entry) => entry.itemId).sort()).toEqual([itemId, second.itemId].sort());
 
       await store.updateSignCount(principal, itemId, 7);
       await store.updateSignCount(principal, itemId, 3);
       const renewed = await store.lease(principal, "browser-a", 600);
       expect(renewed.find((entry) => entry.itemId === itemId)?.signCount).toBe(7);
+
+      // Releasing a holder that no longer holds anything leaves the current lease.
+      await store.release("browser-b");
+      const kept = await getVaultItem(db, { kind: "principal", principal }, { itemId });
+      expect(kept.passkeyLeasedUntil).not.toBeNull();
 
       await store.release("browser-a");
       const taken = await store.lease(principal, "browser-b", 600);
