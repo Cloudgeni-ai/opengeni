@@ -72,7 +72,10 @@ export async function runTurn(api: StackApi, options: StartTurnOptions): Promise
     afterSequence = options.resumeAfterSequence;
   } else if (sessionId) {
     afterSequence = await latestSequence(api, base, sessionId);
-    await api.call("POST", `${base}/${sessionId}/messages`, { text: options.message });
+    await api.call("POST", `${base}/${sessionId}/events`, {
+      type: "user.message",
+      payload: { text: options.message },
+    });
   } else {
     const body: Record<string, unknown> = { initialMessage: options.message, ...options.extraBody };
     if (options.machineSandboxId) body.targetSandboxId = options.machineSandboxId;
@@ -139,9 +142,17 @@ export async function runTurn(api: StackApi, options: StartTurnOptions): Promise
 }
 
 async function latestSequence(api: StackApi, base: string, sessionId: string): Promise<number> {
-  const page = await api.call<any>("GET", `${base}/${sessionId}/events?latest=1&limit=1`);
-  const rows: any[] = Array.isArray(page) ? page : (page.events ?? page.items ?? []);
-  return rows.reduce((max, row) => Math.max(max, Number(row.sequence ?? 0)), 0);
+  let latest = 0;
+  for (;;) {
+    const page = await api.call<any>(
+      "GET",
+      `${base}/${sessionId}/events?after=${latest}&limit=500`,
+    );
+    const rows: any[] = Array.isArray(page) ? page : (page.events ?? page.items ?? []);
+    const next = rows.reduce((max, row) => Math.max(max, Number(row.sequence ?? 0)), latest);
+    if (rows.length < 500 || next === latest) return next;
+    latest = next;
+  }
 }
 
 function collectToolCall(event: SessionEvent, calls: Map<string, ToolCallRecord>): void {
