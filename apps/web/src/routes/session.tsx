@@ -2179,9 +2179,13 @@ function SessionChatPane(props: {
   const runsOnPreviousSandboxId = runsOn.activeMachine?.sandboxId ?? null;
   // While the chat runs on the person's own machine (only its owner sees it in
   // their list), each message renews their consent for this chat, so a chat
-  // whose move message never landed recovers on the next ordinary Send.
+  // whose move message never landed recovers on the next ordinary Send. The
+  // session's own pointer must agree, so a move the agent or another tab made
+  // since the last machine poll doesn't send consent for a machine it left.
   const runsOnActiveMachineConsent =
-    runsOn.activeMachine && isPersonalMachine(runsOn.activeMachine)
+    runsOn.activeMachine &&
+    isPersonalMachine(runsOn.activeMachine) &&
+    runsOn.activeMachine.sandboxId === props.session.activeSandboxId
       ? personalMachineUseIntent(props.session.tenancy)
       : undefined;
   const runsOnCanMessage =
