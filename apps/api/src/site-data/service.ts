@@ -7,6 +7,8 @@ import {
   createPostgresSiteDataStore,
   getSiteDataAgentSession,
   getSiteDataSite,
+  parseSiteDataPath,
+  readSiteDataPath,
   recordUsageEvent,
   SiteDataError,
   type Database,
@@ -16,6 +18,7 @@ import {
   type SiteDataStore,
   type SiteDataWriteOptions,
   type SiteDataWriteSummary,
+  writeSiteDataPath,
 } from "@opengeni/db";
 
 /**
@@ -33,8 +36,6 @@ export type SiteDataAccess = {
   subjectId: string | null;
   store: SiteDataStore;
   limits: SiteDataLimits;
-  /** Whether requests count against the per-minute windows. */
-  rateLimited: boolean;
   writeOptions: SiteDataWriteOptions;
 };
 
@@ -62,6 +63,7 @@ export function siteDataLimits(settings: ApiRouteDeps["settings"]): SiteDataLimi
     viewerWritesPerMinute: settings.siteDataViewerWritesPerMinute,
     siteWritesPerMinute: settings.siteDataSiteWritesPerMinute,
     viewerReadsPerMinute: settings.siteDataViewerReadsPerMinute,
+    managerWritesPerMinute: settings.siteDataManagerWritesPerMinute,
   };
 }
 
@@ -86,7 +88,11 @@ export function publicSiteDataLimits(limits: SiteDataLimits): SiteDataDescribeRe
 
 const SCHEMA_CACHE_SIZE = 128;
 /** Most schema nodes (objects or booleans) a collection schema may have. */
-export const SITE_DATA_MAX_SCHEMA_NODES = 500;
+export const SITE_DATA_MAX_SCHEMA_NODES = 100;
+/** Most branches one allOf, anyOf or oneOf may have. */
+export const SITE_DATA_MAX_SCHEMA_BRANCHES = 16;
+/** Most enum values a whole collection schema may list. */
+export const SITE_DATA_MAX_SCHEMA_ENUM_TOTAL = 500;
 /** Deepest schema nesting a collection schema may have. */
 export const SITE_DATA_MAX_SCHEMA_DEPTH = 16;
 /** Most values an `enum` may list. */
@@ -148,6 +154,7 @@ function scalarItems(items: unknown): boolean {
  */
 export function siteDataSchemaProblem(schema: unknown): string | null {
   let nodes = 0;
+  let enumValues = 0;
   const visit = (node: unknown, path: string, depth: number): string | null => {
     const at = path || "/";
     nodes += 1;
@@ -187,6 +194,9 @@ export function siteDataSchemaProblem(schema: unknown): string | null {
           return `has an enum at ${at} that is not a list of strings, numbers, booleans or null`;
         if (value.length > SITE_DATA_MAX_SCHEMA_ENUM)
           return `has an enum at ${at} with more than ${SITE_DATA_MAX_SCHEMA_ENUM} values`;
+        enumValues += value.length;
+        if (enumValues > SITE_DATA_MAX_SCHEMA_ENUM_TOTAL)
+          return `lists more than ${SITE_DATA_MAX_SCHEMA_ENUM_TOTAL} enum values in total`;
       } else if (keyword === "const") {
         if (!isScalar(value)) return `has a const at ${at} that is not a scalar`;
       } else if (NUMBER_KEYWORDS.has(keyword)) {
@@ -203,6 +213,8 @@ export function siteDataSchemaProblem(schema: unknown): string | null {
       } else if (COMBINATORS.has(keyword)) {
         if (!Array.isArray(value) || value.length === 0)
           return `has ${keyword} at ${at} that is not a list of schemas`;
+        if (value.length > SITE_DATA_MAX_SCHEMA_BRANCHES)
+          return `has ${keyword} at ${at} with more than ${SITE_DATA_MAX_SCHEMA_BRANCHES} schemas`;
         for (const [index, child] of value.entries()) {
           const problem = visit(child, `${where}/${index}`, depth + 1);
           if (problem) return problem;
@@ -281,19 +293,96 @@ export function assertSiteDataSchema(schema: Record<string, unknown> | null | un
   compileSiteDataSchema(schema);
 }
 
+/** Total record JSON one write, batch or import request may carry. */
+export const SITE_DATA_MAX_REQUEST_RECORD_BYTES = 4 * 1024 * 1024;
+/** Schema validation time one request may spend, checked between records. */
+export const SITE_DATA_VALIDATION_BUDGET_MS = 250;
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value) ?? "");
+}
+
+function recordRef(op: Record<string, unknown>): { id: string } | { key: string } | null {
+  if (typeof op.id === "string") return { id: op.id };
+  if (typeof op.key === "string") return { key: op.key };
+  return null;
+}
+
 /**
- * Validate a write's insert and put records against their collections'
- * schemas before the store takes the Site's lock, and return write options
- * that skip re-validating those exact records against the same schema.
- * Patches and increments merge with the stored record, so their result can
- * only be checked inside the transaction; the allowlist keeps that cheap.
+ * The record a patch or increment would produce from the stored record, the
+ * same way the store merges it, or null when the store decides (missing
+ * record, bad field, non-number).
+ */
+function mergedRecord(
+  op: Record<string, unknown>,
+  stored: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (op.op === "patch")
+    return stored && isRecordObject(op.data) ? { ...stored, ...op.data } : null;
+  if (op.op !== "increment" || typeof op.field !== "string") return null;
+  const segments = parseSiteDataPath(op.field);
+  const by = op.by ?? 1;
+  if (!segments || typeof by !== "number" || !Number.isFinite(by)) return null;
+  if (!stored) return typeof op.key === "string" ? writeSiteDataPath({}, segments, by) : null;
+  const current = readSiteDataPath(stored, segments);
+  if (current !== undefined && current !== null && typeof current !== "number") return null;
+  return writeSiteDataPath(stored, segments, ((current as number | null) ?? 0) + by);
+}
+
+function contentDigest(value: unknown): string {
+  return createHash("sha256")
+    .update(JSON.stringify(value) ?? "")
+    .digest("hex");
+}
+
+/**
+ * Check a write, batch or import before the store takes the Site's lock:
+ *
+ * - its records total at most 4 MB of JSON (`quota_exceeded`, `request_bytes`);
+ * - every insert and put record matches its collection's schema;
+ * - every patch and increment result, merged from the stored record, matches
+ *   too (if the record changes before the lock, the write checks it again);
+ * - schema validation spends at most 250 ms per request, measured between
+ *   records, yielding to the event loop after each one.
+ *
+ * Returns write options that skip re-validating the records already checked
+ * against the same schema, and that keep any check left for inside the write
+ * on the same time budget.
  */
 export async function prevalidateSiteDataWrite(
   access: Pick<SiteDataAccess, "store" | "caller" | "limits" | "writeOptions">,
   operations: readonly unknown[],
+  budgetMs: number = SITE_DATA_VALIDATION_BUDGET_MS,
 ): Promise<SiteDataWriteOptions> {
+  let requestBytes = 0;
+  for (const op of operations)
+    if (isRecordObject(op) && op.data !== undefined) requestBytes += jsonBytes(op.data);
+  if (requestBytes > SITE_DATA_MAX_REQUEST_RECORD_BYTES)
+    throw new SiteDataError(
+      "quota_exceeded",
+      `One request can carry at most ${SITE_DATA_MAX_REQUEST_RECORD_BYTES / 1024 / 1024} MB of records; send them in smaller requests`,
+      { quota: "request_bytes", limit: SITE_DATA_MAX_REQUEST_RECORD_BYTES },
+    );
+  let spentMs = 0;
+  const overBudget = (index?: number) =>
+    new SiteDataError(
+      "validation",
+      "Checking these records against the collection schema took too long; send fewer or smaller records per request",
+      { reason: "validation_budget", budgetMs, ...(index === undefined ? {} : { index }) },
+    );
+  const timed = (validator: ValidateFunction, data: Record<string, unknown>) => {
+    const started = performance.now();
+    try {
+      return runValidator(validator, data);
+    } finally {
+      spentMs += performance.now() - started;
+    }
+  };
   const schemas = new Map<string, Record<string, unknown> | null>();
   const validated = new WeakMap<object, ValidateFunction>();
+  const validatedMerges = new Map<string, ValidateFunction>();
   for (const [index, op] of operations.entries()) {
     if (!isRecordObject(op) || typeof op.collection !== "string") continue;
     if (!schemas.has(op.collection)) {
@@ -301,36 +390,52 @@ export async function prevalidateSiteDataWrite(
       schemas.set(op.collection, collection?.jsonSchema ?? null);
     }
     const schema = schemas.get(op.collection);
-    if (!schema || (op.op !== "insert" && op.op !== "put") || !isRecordObject(op.data)) continue;
-    // Oversized records are refused by the store's size check instead.
-    if (Buffer.byteLength(JSON.stringify(op.data)) > access.limits.maxRecordBytes) continue;
+    if (!schema) continue;
     let validator: ValidateFunction;
     try {
       validator = compileSiteDataSchema(schema);
     } catch {
       continue; // The store reports the invalid schema.
     }
-    const problem = runValidator(validator, op.data);
-    if (problem)
-      throw new SiteDataError(
-        "validation",
-        `Record does not match the collection schema: ${problem}`,
-        { index },
-      );
-    validated.set(op.data, validator);
+    if (op.op === "insert" || op.op === "put") {
+      if (!isRecordObject(op.data)) continue;
+      // Oversized records are refused by the store's size check instead.
+      if (jsonBytes(op.data) > access.limits.maxRecordBytes) continue;
+      const problem = timed(validator, op.data);
+      if (problem)
+        throw new SiteDataError(
+          "validation",
+          `Record does not match the collection schema: ${problem}`,
+          { index },
+        );
+      validated.set(op.data, validator);
+    } else if (op.op === "patch" || op.op === "increment") {
+      const ref = recordRef(op);
+      if (!ref) continue;
+      const stored = await access.store.get(access.caller, op.collection, ref).catch(() => null);
+      const merged = mergedRecord(op, stored ? stored.data : null);
+      if (!merged || jsonBytes(merged) > access.limits.maxRecordBytes) continue;
+      // An invalid result is left to the write, which sees the current record.
+      if (timed(validator, merged) === null) validatedMerges.set(contentDigest(merged), validator);
+    } else continue;
+    if (spentMs > budgetMs) throw overBudget(index);
+    await yieldToEventLoop();
   }
   return {
     ...access.writeOptions,
     validate: (schema, data) => {
-      const validator = validated.get(data);
-      if (validator) {
-        try {
-          if (compileSiteDataSchema(schema) === validator) return null;
-        } catch {
-          // Fall through to report the invalid schema.
-        }
+      let validator: ValidateFunction;
+      try {
+        validator = compileSiteDataSchema(schema);
+      } catch {
+        return "the collection's JSON Schema is invalid";
       }
-      return validateSiteDataRecord(schema, data);
+      if (validated.get(data) === validator) return null;
+      if (validatedMerges.size > 0 && validatedMerges.get(contentDigest(data)) === validator)
+        return null;
+      // Anything left for inside the write stays on the request's budget.
+      if (spentMs > budgetMs) throw overBudget();
+      return timed(validator, data);
     },
   };
 }
@@ -424,16 +529,25 @@ export async function resolveSiteDataAccess(
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   // An agent whose session (or spawning lineage, or current turn) came from a
   // Site page acts for that page: it gets the same frame clamp as the page.
+  // A lineage that cannot be read in full fails closed to viewer reach.
   const agentIds = agentSessionIds(grant);
   const agentSession = agentIds
     ? await getSiteDataAgentSession(deps.db, scope, agentIds.sessionId, agentIds.turnId)
     : null;
   const siteAgent =
-    agentSession !== null && (agentSession.originSiteIds.length > 0 || agentSession.siteTurn);
+    agentSession !== null &&
+    (agentSession.originSiteIds.length > 0 || agentSession.siteTurn || !agentSession.complete);
   if (siteAgent) {
     const [origin, ...others] = agentSession.originSiteIds;
-    // A Site turn sent into a session without one known Site origin reaches no Site Data.
-    if (origin === undefined || others.length > 0 || origin !== siteId)
+    const knownSite = origin !== undefined && others.length === 0;
+    // A known Site origin limits the agent to that Site. A Site turn without
+    // one known origin reaches no Site Data; an unreadable lineage without a
+    // known origin keeps viewer reach on the Site it names.
+    if (
+      others.length > 0 ||
+      (knownSite && origin !== siteId) ||
+      (!knownSite && agentSession.siteTurn)
+    )
       throw new SiteDataError(
         "forbidden",
         "An agent started from a Site page can only use that Site's data",
@@ -441,7 +555,9 @@ export async function resolveSiteDataAccess(
     if (surface.management)
       throw new SiteDataError(
         "forbidden",
-        "An agent started from a Site page cannot manage Site Data",
+        agentSession.complete
+          ? "An agent started from a Site page cannot manage Site Data"
+          : "This agent's session history could not be confirmed, so it cannot manage Site Data",
       );
   }
   const framed = siteAgent || (surface.frameSiteId !== undefined && surface.frameSiteId !== null);
@@ -474,8 +590,6 @@ export async function resolveSiteDataAccess(
     subjectId: viewer.subjectId,
     store: siteDataStore(deps.db),
     limits,
-    // Managers' own tools and API calls are bounded by quotas, not windows.
-    rateLimited: role !== "manager",
     writeOptions: {
       limits,
       validate: validateSiteDataRecord,

@@ -46,13 +46,12 @@ export const SITE_DATA_EXPORT_MAX_BYTES = 16 * 1024 * 1024;
 const FILE_URL_SECONDS = 300;
 
 /**
- * Count a rate-limited caller's attempt before any work, in its own
- * transaction, so failed and refused attempts count too. Managers outside a
- * Site frame are bounded by quotas, not windows.
+ * Count an attempt before any work, in its own transaction, so failed and
+ * refused attempts count too. Writes always count: viewers and Site frames
+ * per person and per Site, managers in one generous window per Site. Reads
+ * count only for Site frames.
  */
 async function consume(access: SiteDataAccess, kind: "write" | "read", operations: number) {
-  if (!access.rateLimited) return;
-  // Reads are limited only for Site frames, generously.
   if (kind === "read" && !access.caller.framed) return;
   await access.store.consumeRate(access.caller, kind, Math.max(1, operations), access.limits);
 }
@@ -91,6 +90,7 @@ export async function defineSiteDataCollection(
   definition: SiteDataCollectionDefinitionRequest,
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
+  await consume(access, "write", 1);
   assertSiteDataSchema(definition.jsonSchema);
   return access.store.defineCollection(
     access.caller,
@@ -115,6 +115,7 @@ export async function deleteSiteDataCollection(
   name: string,
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
+  await consume(access, "write", 1);
   return access.store.deleteCollection(access.caller, name);
 }
 
@@ -125,6 +126,7 @@ export async function resetSiteDataCollection(
   name: string,
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
+  await consume(access, "write", 1);
   return access.store.resetCollection(access.caller, name);
 }
 
@@ -325,8 +327,8 @@ export async function importSiteData(
       });
     return { op: "put", collection, key: String(key), data };
   });
-  // Every record is checked against the schema before anything is written.
-  const options = await prevalidateSiteDataWrite(access, operations).catch((error: unknown) => {
+  // Counted, then every record is checked against the schema, before anything is written.
+  const options = await prepareWrite(access, operations).catch((error: unknown) => {
     if (error instanceof SiteDataError)
       throw new SiteDataError(error.code, error.message, { ...error.details, imported: 0 });
     throw error;
