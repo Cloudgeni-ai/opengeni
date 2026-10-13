@@ -72,10 +72,18 @@ const qa = {
   }>,
   reads: {} as Partial<Record<ScenarioName, number>>,
   failNext: {} as Partial<Record<ScenarioName, string>>,
+  /** Fail this many upcoming reads of a task with a 503. */
+  failReads: {} as Partial<Record<ScenarioName, number>>,
+  /** Every save's operation, to prove an exact retry reuses it. */
+  saveOps: [] as Array<{ scenario: ScenarioName; operationId: string }>,
   saveDelayMs: 150,
   sends: 0,
 };
 (window as unknown as { usageQa: typeof qa }).usageQa = qa;
+
+/** Someone else changes a task's limit on the server (another tab, a teammate). */
+const servers: Partial<Record<ScenarioName, { change: (limitMicros: number | null) => void }>> = {};
+(window as unknown as { usageServers: typeof servers }).usageServers = servers;
 
 function usage(
   rootSessionId: string,
@@ -110,13 +118,28 @@ function apiError(status: number, code: string, detailsCode: string, message: st
   );
 }
 
-/** A scripted server for one task: reads, compare-and-set writes, typed failures. */
+/**
+ * A scripted server for one task: reads, compare-and-set writes, typed
+ * failures, and operations applied at most once (a re-sent operation gets the
+ * first answer back).
+ */
 function scenarioClient(name: ScenarioName, initial: SessionUsageLimit) {
   let current = initial;
+  const applied = new Map<string, SessionUsageLimit>();
+  servers[name] = {
+    change: (limitMicros) => {
+      current = { ...current, limitMicros, version: current.version + 1 };
+    },
+  };
   return {
     getSessionUsageLimit: async () => {
       qa.reads[name] = (qa.reads[name] ?? 0) + 1;
       await delay(60);
+      const failing = qa.failReads[name] ?? 0;
+      if (failing > 0) {
+        qa.failReads[name] = failing - 1;
+        throw apiError(503, "unavailable", "session_usage_limit_unavailable", "Unavailable");
+      }
       return current;
     },
     setSessionUsageLimit: async (
@@ -129,7 +152,10 @@ function scenarioClient(name: ScenarioName, initial: SessionUsageLimit) {
         limitMicros: request.limitMicros,
         expectedVersion: request.expectedVersion,
       });
+      qa.saveOps.push({ scenario: name, operationId: request.operationId });
       await delay(qa.saveDelayMs);
+      const replay = applied.get(request.operationId);
+      if (replay) return replay;
       const failure = qa.failNext[name];
       delete qa.failNext[name];
       if (failure === "conflict") {
@@ -163,6 +189,11 @@ function scenarioClient(name: ScenarioName, initial: SessionUsageLimit) {
                 ? "reached"
                 : "within",
       };
+      applied.set(request.operationId, current);
+      if (failure === "lost") {
+        // Applied, but the answer never arrives: the outcome is unknown.
+        throw new OpenGeniApiError(504, "", { mutation: true });
+      }
       return current;
     },
   };
@@ -357,6 +388,16 @@ function OpenChat() {
   const [task] = useState(() =>
     session(ids.main, "Migrate the billing service to the new queue", { usageLimit: initial }),
   );
+  // As the chat route: the one live reader (focus, reconnect, poll) that the
+  // Agent tab section shares.
+  useSessionUsageLimit({
+    client: value.client as never,
+    workspaceId,
+    sessionId: ids.main,
+    initial,
+    enabled: true,
+    live: { events: [], active: false, connectionState: "live" },
+  });
   const [focusRequest, setFocusRequest] = useState(0);
   useEffect(() => {
     const open = () => setFocusRequest((current) => current + 1);
@@ -448,6 +489,7 @@ function ReachedChat() {
     sessionId: ids.reached,
     initial: reachedUsage,
     enabled: true,
+    live: { events: reachedEvents, active: false, connectionState: "live" },
   });
   const [focusRequest, setFocusRequest] = useState(0);
   return (
@@ -469,6 +511,7 @@ function ReachedChat() {
             header={
               <SessionUsageLimitNotice
                 usage={live.usage}
+                stale={live.error !== null && live.usage !== null}
                 goalPaused
                 onChangeLimit={() => setFocusRequest((current) => current + 1)}
                 dismissStorageKey={`opengeni:${workspaceId}`}

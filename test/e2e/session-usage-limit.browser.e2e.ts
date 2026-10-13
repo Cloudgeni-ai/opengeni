@@ -21,6 +21,8 @@ type Qa = {
   saves: Array<{ scenario: string; limitMicros: number | null; expectedVersion: number }>;
   reads: Record<string, number>;
   failNext: Record<string, string>;
+  failReads: Record<string, number>;
+  saveOps: Array<{ scenario: string; operationId: string }>;
   saveDelayMs: number;
   sends: number;
 };
@@ -78,10 +80,24 @@ async function load(query = "") {
 }
 
 const qa = () => page.evaluate(() => (window as unknown as { usageQa: Qa }).usageQa);
-const steer = (patch: Partial<Pick<Qa, "failNext" | "saveDelayMs">>) =>
+const steer = (patch: Partial<Pick<Qa, "failNext" | "failReads" | "saveDelayMs">>) =>
   page.evaluate((next) => {
     Object.assign((window as unknown as { usageQa: Qa }).usageQa, next);
   }, patch);
+/** Someone else changes the server's limit for a task. */
+const changeOnServer = (name: string, limitMicros: number | null) =>
+  page.evaluate(
+    ([target, next]) => {
+      (
+        window as unknown as {
+          usageServers: Record<string, { change: (limit: number | null) => void }>;
+        }
+      ).usageServers[target as string]!.change(next as number | null);
+    },
+    [name, limitMicros] as const,
+  );
+/** The tab regains focus: the live reader reads once. */
+const refocus = () => page.evaluate(() => window.dispatchEvent(new Event("focus")));
 
 const scenario = (name: string) => page.getByTestId(`scenario-${name}`);
 const editor = (root: Locator) => root.locator("[data-usage-limit-editor]");
@@ -122,7 +138,10 @@ async function openNewChatUsageLimit() {
   const newChat = page.getByTestId("new-chat");
   await newChat.getByRole("button", { name: "More composer actions" }).click();
   await page.getByRole("menuitem", { name: /Usage limit/ }).click();
-  return page.locator("[data-usage-limit-menu]");
+  // A text field can't live in a menu: the setting opens as a dialog.
+  const dialog = page.getByRole("dialog", { name: "Usage limit" });
+  await dialog.waitFor();
+  return dialog.locator("[data-usage-limit-menu]");
 }
 
 test("the sample loads with a visible marker and no errors or axe violations", async () => {
@@ -138,7 +157,18 @@ test("a new chat sends the chosen limit, blocks an invalid amount and resets", a
   const row = page.getByRole("menuitem", { name: /Usage limit/ });
   expect(await row.innerText()).toContain("No limit");
   await row.click();
-  const menu = page.locator("[data-usage-limit-menu]");
+  const dialog = page.getByRole("dialog", { name: "Usage limit" });
+  await dialog.waitFor();
+  // No form control inside a menu: the "+" menu closes and a dialog holds a
+  // radio group and the amount field.
+  expect(await page.locator("[role='menu']").count()).toBe(0);
+  const menu = dialog.locator("[data-usage-limit-menu]");
+  expect(await menu.getByRole("radio", { name: /No limit/ }).getAttribute("aria-checked")).toBe(
+    "true",
+  );
+  await page.waitForFunction(() => document.activeElement?.getAttribute("role") === "radio");
+  expect((await focusedText()).text).toContain("No limit");
+  await expectNoAxeViolations("[role='dialog']");
   await menu.getByText("Pause at an amount").click();
   const input = menu.getByRole("textbox", { name: "Limit in US dollars" });
   await input.waitFor();
@@ -147,15 +177,38 @@ test("a new chat sends the chosen limit, blocks an invalid amount and resets", a
   await input.fill("12.345");
   expect(await input.getAttribute("aria-invalid")).toBe("true");
   await menu.getByText("Enter dollars with up to 2 decimals, at most $10,000,000.").waitFor();
+  // Every state is checked with no rule waived, including the invalid amount.
+  await expectNoAxeViolations("[role='dialog']");
   await input.fill("25");
   expect(await input.getAttribute("aria-invalid")).toBeNull();
-  // The amount field sits inside the "+" menu like the existing Custom path
-  // field; ARIA menus only list menu items, so that one structural rule is
-  // excluded for the open menu (keyboard use is asserted above and below).
-  await expectNoAxeViolations("[role='menu']", ["aria-required-children"]);
+  await expectNoAxeViolations("[role='dialog']");
   await capture("new-chat-usage-limit-menu");
+  // Ordinary Tab order: Shift+Tab back to the choice, Tab to the amount, then
+  // the help, and focus stays in the dialog.
+  await page.keyboard.press("Shift+Tab");
+  expect(await focusedText()).toMatchObject({ role: "radio", text: "Pause at an amount" });
+  await page.keyboard.press("Tab");
+  expect((await focusedText()).tag).toBe("INPUT");
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? "")).toBe(
+    "About usage limits",
+  );
+  expect(
+    await page.evaluate(() => Boolean(document.activeElement?.closest("[role='dialog']"))),
+  ).toBe(true);
+  // Back returns to the "+" menu on the Usage limit row; Escape closes to "+".
+  await dialog.getByRole("button", { name: "Back" }).click();
+  await page.getByRole("menu").waitFor();
+  await page.waitForFunction(
+    () => document.activeElement?.getAttribute("data-composer-panel") === "usage-limit",
+  );
+  await page.getByRole("menuitem", { name: /Usage limit/ }).click();
+  await dialog.waitFor();
   await page.keyboard.press("Escape");
-  await menu.waitFor({ state: "hidden" });
+  await dialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(
+    () => document.activeElement?.getAttribute("aria-label") === "More composer actions",
+  );
   await newChat.getByRole("button", { name: "More composer actions" }).click();
   expect(await page.getByRole("menuitem", { name: /Usage limit/ }).innerText()).toContain("$25.00");
   await page.keyboard.press("Escape");
@@ -168,9 +221,9 @@ test("a new chat sends the chosen limit, blocks an invalid amount and resets", a
   // Reset after create; an empty amount blocks Send and says why.
   await newChat.getByRole("textbox").first().fill("Second chat");
   const reopened = await openNewChatUsageLimit();
-  expect(
-    await reopened.getByRole("menuitemradio", { name: /No limit/ }).getAttribute("aria-checked"),
-  ).toBe("true");
+  expect(await reopened.getByRole("radio", { name: /No limit/ }).getAttribute("aria-checked")).toBe(
+    "true",
+  );
   await reopened.getByText("Pause at an amount").click();
   await page.keyboard.press("Escape");
   await newChat.getByRole("button", { name: "Send message" }).click();
@@ -179,7 +232,8 @@ test("a new chat sends the chosen limit, blocks an invalid amount and resets", a
   expect(state.creates).toHaveLength(1);
   const blocked = await openNewChatUsageLimit();
   await blocked.getByText("Enter an amount in US dollars, like 25.").waitFor();
-  await blocked.getByRole("menuitemradio", { name: /No limit/ }).click();
+  await expectNoAxeViolations("[role='dialog']");
+  await blocked.getByRole("radio", { name: /No limit/ }).click();
   await page.keyboard.press("Escape");
   await newChat.getByRole("button", { name: "Send message" }).click();
   await newChat.getByText("Sample chat created · usage limit No limit").waitFor();
@@ -233,29 +287,39 @@ test("the header menu opens the editor and keyboard-only saves return focus", as
   expect(pageErrors).toEqual([]);
 }, 60_000);
 
-test("a stale save keeps the draft, shows the newer limit and saves on retry", async () => {
+test("someone else's change while editing is a conflict: draft kept, theirs shown, retry is deliberate", async () => {
   await load();
   const main = scenario("main");
-  await steer({ failNext: { main: "conflict" } });
   await main.getByRole("button", { name: "Change" }).click();
   const input = main.getByRole("textbox", { name: "Limit in US dollars" });
   await input.fill("60");
+  // A teammate sets $40 and this tab's live reader picks it up mid-edit.
+  await changeOnServer("main", 40_000_000);
+  await refocus();
+  await main.getByText("$12.34 of $40.00").waitFor();
+  expect(await input.inputValue()).toBe("60");
   await main.getByRole("button", { name: "Save" }).click();
   await main
     .getByRole("alert")
-    .filter({ hasText: "Someone changed this limit while you were editing." })
+    .filter({
+      hasText:
+        "Someone changed this limit to $40.00 while you were editing. Save again to use your amount instead.",
+    })
     .waitFor();
   expect(await input.inputValue()).toBe("60");
-  await main.getByText("$12.34 of $40.00").waitFor();
+  await expectNoAxeViolations("[data-testid='open-chat']");
   await capture("editor-conflict", main);
   await main.getByRole("button", { name: "Save" }).click();
   await editor(main).waitFor({ state: "hidden" });
   expect(await amount(main).innerText()).toBe("$12.34 of $60.00");
   const saves = (await qa()).saves.filter((save) => save.scenario === "main");
+  // The edit snapshot (3), refused by the server; then the deliberate retry (4).
   expect(saves.slice(-2)).toEqual([
     { scenario: "main", limitMicros: 60_000_000, expectedVersion: 3 },
     { scenario: "main", limitMicros: 60_000_000, expectedVersion: 4 },
   ]);
+  const ops = (await qa()).saveOps.filter((save) => save.scenario === "main");
+  expect(ops.at(-1)!.operationId).not.toBe(ops.at(-2)!.operationId);
 
   // Unavailable: the draft stays and the reason is announced.
   await steer({ failNext: { main: "unavailable" } });
@@ -274,6 +338,53 @@ test("a stale save keeps the draft, shows the newer limit and saves on retry", a
   await page.getByText("Usage limit removed").waitFor();
   expect(await amount(main).innerText()).toBe("No limit");
   await main.getByText("$12.34 used").waitFor();
+  expect(pageErrors).toEqual([]);
+}, 60_000);
+
+test("a save whose answer is lost is re-sent as the same operation and applied once", async () => {
+  await load();
+  const main = scenario("main");
+  await steer({ failNext: { main: "lost" } });
+  await main.getByRole("button", { name: "Change" }).click();
+  await main.getByRole("textbox", { name: "Limit in US dollars" }).fill("70");
+  await main.getByRole("button", { name: "Save" }).click();
+  await editor(main).waitFor({ state: "hidden" });
+  await page.getByText("Usage limit set to $70.00").waitFor();
+  expect(await amount(main).innerText()).toBe("$12.34 of $70.00");
+  const state = await qa();
+  const ops = state.saveOps.filter((save) => save.scenario === "main");
+  expect(ops).toHaveLength(2);
+  expect(ops[1]!.operationId).toBe(ops[0]!.operationId);
+  expect(state.saves.filter((save) => save.scenario === "main")).toEqual([
+    { scenario: "main", limitMicros: 70_000_000, expectedVersion: 3 },
+    { scenario: "main", limitMicros: 70_000_000, expectedVersion: 3 },
+  ]);
+  expect(pageErrors).toEqual([]);
+}, 60_000);
+
+test("a failed refresh keeps the last amount and reached state, marked possibly out of date", async () => {
+  await load();
+  const main = scenario("main");
+  expect(await amount(main).innerText()).toBe("$12.34 of $50.00");
+  await steer({ failReads: { main: 1, reached: 1 } });
+  await refocus();
+  const staleNote = "Couldn't refresh, so this may be out of date. The limit still applies.";
+  await main.getByText(staleNote).waitFor();
+  expect(await amount(main).innerText()).toBe("$12.34 of $50.00");
+  expect(await main.innerText()).not.toContain("$0");
+  // The composer notice keeps reached, with the same note and its one action.
+  const chat = page.getByTestId("reached-chat");
+  const notice = chat.locator("[data-og-session-usage-limit='reached']");
+  await notice.getByText(staleNote, { exact: false }).waitFor();
+  expect(await notice.innerText()).toContain("$52.10 of $50.00");
+  await chat.getByRole("button", { name: "Change limit" }).waitFor();
+  await scenario("reached").getByText(staleNote).waitFor();
+  await scenario("reached").getByText("Reached", { exact: true }).waitFor();
+  await expectNoAxeViolations();
+  await capture("read-failure", main);
+  await capture("read-failure-reached", chat.locator(".."));
+  await main.getByRole("button", { name: "Try again" }).click();
+  await main.getByText(staleNote).waitFor({ state: "detached" });
   expect(pageErrors).toEqual([]);
 }, 60_000);
 
@@ -318,8 +429,18 @@ test("a task at its limit stops calmly, and raising the limit says Resume is nex
   expect(await amount(reached).innerText()).toBe("$52.10 of $50.00");
   await reached.getByText("Reached", { exact: true }).waitFor();
   const chatText = await chat.innerText();
-  expect(chatText).toContain("$52.10 of $50.00 API-equivalent model usage.");
-  expect(chatText).toContain("Raise or remove the limit, then resume the goal.");
+  // History: one compact line at the stop, no remedy.
+  expect(await chat.locator("[data-og-session-usage-limit-stop]").innerText()).toBe(
+    "Usage limit reached · $52.10 of $50.00",
+  );
+  // Now: the composer notice holds the one recovery action.
+  const notice = chat.locator("[data-og-session-usage-limit='reached']");
+  expect(await notice.innerText()).toContain("$52.10 of $50.00 API-equivalent model usage.");
+  expect(await notice.innerText()).toContain("Raise or remove the limit, then resume the goal.");
+  expect(chatText.match(/Raise or remove the limit/g)).toHaveLength(1);
+  expect(await chat.getByRole("button", { name: "Change limit" }).count()).toBe(1);
+  // The Agent tab states the amount and the one explanation, not the remedy.
+  expect(await reached.innerText()).not.toContain("Raise or remove");
   expect(chatText).not.toMatch(/credit|buy|purchase|failed|retry|error/i);
   await capture("reached-session", chat.locator(".."));
 
@@ -350,14 +471,12 @@ test("a Send refused at the limit keeps the message to restore, without Retry", 
   const box = refused.getByRole("textbox").first();
   await box.fill(text);
   await box.press("Enter");
-  await refused
-    .getByText(
-      "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.",
-    )
-    .waitFor();
+  // The failed message says what happened; the notice holds the one remedy.
+  await refused.getByText("This task's usage limit is reached. Your message is saved.").waitFor();
   await refused.getByText(text).first().waitFor();
   expect(await refused.getByRole("button", { name: /retry/i }).count()).toBe(0);
   await refused.getByText("$50.40 of $50.00 API-equivalent model usage.").waitFor();
+  expect((await refused.innerText()).match(/Raise or remove the limit/g)).toHaveLength(1);
   await capture("refused-send", refused);
   expect((await qa()).sends).toBe(1);
   await refused.getByRole("button", { name: "Edit message" }).click();
@@ -400,6 +519,37 @@ test("inherited, permission-denied and disabled limits are read-only or remove-o
   expect(pageErrors).toEqual([]);
 }, 60_000);
 
+test("on a touch phone the new-chat setting's controls are at least 44px tall", async () => {
+  const touch = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  try {
+    const phone = await touch.newPage();
+    await phone.goto(url);
+    await phone.getByTestId("sample-data").waitFor();
+    const newChat = phone.getByTestId("new-chat");
+    await newChat.getByRole("button", { name: "More composer actions" }).tap();
+    await phone.getByRole("menuitem", { name: /Usage limit/ }).tap();
+    const dialog = phone.getByRole("dialog", { name: "Usage limit" });
+    await dialog.getByText("Pause at an amount").tap();
+    await dialog.getByRole("textbox", { name: "Limit in US dollars" }).waitFor();
+    const heights = await dialog.evaluate((root) =>
+      [
+        ...root.querySelectorAll<HTMLElement>("input, [role='radio'], button[aria-label='Back']"),
+      ].map((node) => ({
+        name: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? node.tagName,
+        height: Math.round(node.getBoundingClientRect().height),
+      })),
+    );
+    expect(heights.length).toBeGreaterThanOrEqual(4);
+    expect(heights.filter((entry) => entry.height < 44)).toEqual([]);
+  } finally {
+    await touch.close();
+  }
+}, 60_000);
+
 for (const theme of ["dark", "light"] as const)
   for (const width of [1440, 390] as const)
     test(`${theme} ${width}px: no overflow or axe violations, screenshots`, async () => {
@@ -418,6 +568,7 @@ for (const theme of ["dark", "light"] as const)
       const menu = await openNewChatUsageLimit();
       await menu.getByText("Pause at an amount").click();
       await menu.getByRole("textbox", { name: "Limit in US dollars" }).fill("25");
+      await expectNoAxeViolations("[role='dialog']");
       await capture(`${variant}-new-chat-setting`);
       await page.keyboard.press("Escape");
 
