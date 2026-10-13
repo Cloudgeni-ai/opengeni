@@ -144,6 +144,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers private visibility leftover settlement as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0768_private_visibility_ignores_leftovers.sql",
+      ),
+    ).toMatchObject({
+      path: "0768_private_visibility_ignores_leftovers.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers private sessions on shared sandboxes as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2289,6 +2301,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0768_private_visibility_ignores_leftovers.sql",
       "0764_interrupted_turn_recovery.sql",
       "0763_queue_steer_admission_recheck_repair.sql",
       "0761_exhausted_scheduled_tasks.sql",

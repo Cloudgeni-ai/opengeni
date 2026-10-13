@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@opengeni/contracts";
 import {
   acceptOrganizationInvitation,
+  claimSessionWorkForAttempt,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -10,7 +11,10 @@ import {
   importArchivedSession,
   createFileUpload,
   completeFileUpload,
+  settleSessionAttemptInterruptions,
+  submitHumanPromptInTransaction,
   withSessionRlsActorContext,
+  withWorkspaceSubjectSessionActivityRls,
   SessionTenancyConflictError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
@@ -30,6 +34,7 @@ import { readSessionAttachmentFiles } from "../src/domain/session-file-access";
 import {
   forkManagedHumanSession,
   getManagedHumanSessionCreateCapabilities,
+  previewManagedHumanSessionVisibilityChange,
   requireManagedHumanPrivateSessionCreate,
   SessionTenancyManagedHumanRequiredError,
   updateManagedHumanSessionVisibility,
@@ -811,6 +816,160 @@ describe("managed-human session tenancy application service", () => {
       authorityEpoch: 1,
       ownedByCurrentUser: true,
       fork: { sourceVisibility: "private", sourceAuthorityEpoch: 2 },
+    });
+  }, 180_000);
+
+  test("make private anyway stops a response a worker is running, then changes visibility", async () => {
+    if (!shared || !client) return;
+    const db = client.db;
+    const userId = `core-private-anyway-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Make private anyway",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    await shared.admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
+    const session = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const submit = async (text: string) =>
+      await withWorkspaceSubjectSessionActivityRls(db, grant.workspaceId, subjectId, (scoped) =>
+        scoped.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof scoped, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text,
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+      );
+    const running = await submit("running right now");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed" || claimed.turn.id !== running.turnId) {
+      throw new Error("turn was not claimed");
+    }
+    await submit("queued behind it");
+
+    const authorization: AccessGrantAuthorization = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    // The fake worker: an interruption wake makes it settle the attempt the
+    // way the real worker does when it observes the interruption.
+    const wakes: Array<{ interruptionRequested?: boolean }> = [];
+    const workflowClient = {
+      wakeSessionWorkflow: async (input: { interruptionRequested?: boolean }) => {
+        wakes.push(input);
+        if (input.interruptionRequested) {
+          await settleSessionAttemptInterruptions(db, grant.workspaceId, session.id, attemptId);
+        }
+      },
+    };
+    const bus = new MemoryEventBus();
+    const deps = { db, bus, sessionAuthorization, settings: testSettings(), workflowClient };
+
+    expect(
+      await previewManagedHumanSessionVisibilityChange(
+        deps,
+        authorization,
+        grant.workspaceId,
+        session.id,
+        "private",
+      ),
+    ).toEqual({
+      visibility: "workspace",
+      targetVisibility: "private",
+      authorityEpoch: 1,
+      work: { runningTurnCount: 1, queuedTurnCount: 1, activeGoal: false },
+      blocker: null,
+    });
+    const request = {
+      visibility: "private" as const,
+      expectedAuthorityEpoch: 1,
+      idempotencyKey: `private-anyway-${crypto.randomUUID()}`,
+    };
+    await expect(
+      updateManagedHumanSessionVisibility(
+        deps,
+        authorization,
+        grant.workspaceId,
+        session.id,
+        request,
+      ),
+    ).rejects.toMatchObject({ reason: "active_work", liveAttemptCount: 1 });
+    expect(wakes).toEqual([]);
+
+    const changed = await updateManagedHumanSessionVisibility(
+      deps,
+      authorization,
+      grant.workspaceId,
+      session.id,
+      { ...request, stopActiveWork: true },
+    );
+    expect(changed).toMatchObject({ visibility: "private", authorityEpoch: 2, changed: true });
+    expect(wakes.some((wake) => wake.interruptionRequested === true)).toBe(true);
+    const turns = await shared.admin<Array<{ status: string; cancelReason: string | null }>>`
+      select status, cancel_reason as "cancelReason" from session_turns
+      where session_id = ${session.id} order by position`;
+    expect(turns).toEqual([
+      { status: "cancelled", cancelReason: "authority_changed" },
+      { status: "cancelled", cancelReason: "authority_changed" },
+    ]);
+    const published = bus.published.flat().map((event) => event.type);
+    expect(published).toContain("turn.cancelled");
+    expect(published.at(-1)).toBe("session.visibility.changed");
+    expect(
+      await previewManagedHumanSessionVisibilityChange(
+        deps,
+        authorization,
+        grant.workspaceId,
+        session.id,
+        "private",
+      ),
+    ).toMatchObject({
+      visibility: "private",
+      work: { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
+      blocker: null,
     });
   }, 180_000);
 

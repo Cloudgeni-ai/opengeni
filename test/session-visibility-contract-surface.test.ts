@@ -31,11 +31,15 @@ const SQL_ENTRY_POINTS = [
   // functions: it is granted to `opengeni_app`, so any new importer would
   // otherwise pass every guard in the tree.
   "replay_applied_session_fork",
+  // Owner-only read of what a private change would still refuse (0768).
+  "session_visibility_change_blocker",
 ] as const;
 const ADAPTER_ENTRY_POINTS = [
   "transitionSessionVisibility",
   "forkSessionContent",
   "replayAppliedSessionFork",
+  "inspectSessionVisibilityChange",
+  "stopSessionWorkForVisibilityChange",
 ] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
 const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
@@ -69,6 +73,9 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   // Lets an Only-me session keep its shared sandbox group: flips only the
   // singleton-group assertion in the visibility transition and fork bodies.
   "packages/db/drizzle/0738_private_sessions_share_sandboxes.sql",
+  // Settles leftovers inside the private transition and adds the owner-only
+  // blocker preview; same owner-only boundary and locks.
+  "packages/db/drizzle/0768_private_visibility_ignores_leftovers.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",

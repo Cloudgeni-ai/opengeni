@@ -508,6 +508,8 @@ import type {
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
+  SessionVisibility,
+  SessionVisibilityChangePreview,
   SessionScopeSubjectId,
   SessionEvent,
   SessionEventCompactResult,
@@ -1528,7 +1530,10 @@ export class OpenGeniClient {
     );
   }
 
-  /** Change an owned, fully quiescent session between private and workspace visibility. */
+  /**
+   * Change an owned session between private and workspace visibility. Leftover
+   * records never block it; work in progress needs `stopActiveWork`.
+   */
   async updateSessionVisibility(
     workspaceId: string,
     sessionId: string,
@@ -1538,6 +1543,18 @@ export class OpenGeniClient {
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/visibility`,
       request,
+    );
+  }
+
+  /** Owner-only preview: what changing the audience would stop and what would still refuse it. */
+  async previewSessionVisibilityChange(
+    workspaceId: string,
+    sessionId: string,
+    visibility: SessionVisibility,
+  ): Promise<SessionVisibilityChangePreview> {
+    return await this.requestJson<SessionVisibilityChangePreview>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/visibility/preview?visibility=${encodeURIComponent(visibility)}`,
     );
   }
 

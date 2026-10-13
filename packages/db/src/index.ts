@@ -73017,8 +73017,12 @@ export async function settleSessionAttemptInterruptions(
       }
 
       const terminalCancel = session.status === "cancelled";
+      // Revoked membership and an owner's "make private anyway" stop both end
+      // the turn: the authority it was accepted under no longer applies.
       const membershipAuthorityRevoked = interruptions.some(
-        (interruption) => interruption.kind === "organization_membership_revoked",
+        (interruption) =>
+          interruption.kind === "organization_membership_revoked" ||
+          interruption.kind === "authority_change",
       );
       const terminalTurnCancel = terminalCancel || membershipAuthorityRevoked;
       const steer =

@@ -1817,6 +1817,34 @@ The activated database contract is intentionally narrow:
   turn counts as foreign). The owner's own pending updates stay pending across
   privatization and are delivered by the next turn, because the delivering
   turn executes with authority the private session could already use.
+- Leftover records never block making a session Only me (rolling migration
+  0768). The private transition settles them in the same transaction instead
+  of refusing: turns left `queued`, `recovering` or `waiting_capacity` on a
+  session whose status shows no work are cancelled with reason
+  `authority_changed`, together with their parked questions, capacity waiters
+  and pending tool calls; RunState rows, questions and capacity waiters whose
+  turn is already terminal are ignored; a finished background command result
+  that carries someone else's authority is cancelled
+  (`system.update.cancelled`, reason `authority_changed`) because the private
+  session could never deliver it; and a schedule that can no longer run
+  (`scheduled_task_is_exhausted`, see 0761) or is deleted no longer counts.
+  Work the person can see is different: a running or parked response, queued
+  messages and an active goal refuse the change with a typed `active_work`
+  conflict unless the request carries `stopActiveWork` ("make private
+  anyway"). With that consent the change cancels parked and queued turns and
+  pauses the goal atomically. A response a worker is executing right now is
+  interrupted first with an `authority_change` interruption, which the worker
+  settles as a terminal cancellation; core waits briefly for that settlement
+  and then makes the same transition, answering a retryable
+  `stopping_active_work` with the same idempotency key if the worker is slow.
+  The owner-only `GET .../visibility/preview?visibility=private`
+  (`session_visibility_change_blocker`) reports that work and any block that
+  stopping it would not clear, so the console shows one summary and one
+  confirmation. Blocks that protect someone else's authority stay: other
+  foreign pending updates, live schedules, realtime, workspace writers,
+  retained processes and sandbox access holders. Whole-session forks share the
+  narrowed predicate (terminal-turn rows and exhausted schedules no longer
+  count) but still refuse any nonterminal work; they never cancel anything.
 - Who can read a session and who can use its sandbox are separate. Since
   rolling migration 0738, a session may become private, or be created private,
   while it shares a sandbox group or Connected Machine with other sessions.

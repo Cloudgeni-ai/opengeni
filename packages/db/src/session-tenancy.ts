@@ -12,6 +12,18 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
+import { registerSessionWorkflowWakeInTransaction } from "./session-control";
+import {
+  interruptSessionAttemptsForVisibilityChangeInTransaction,
+  lockSessionForVisibilityWork,
+  readSessionVisibilityWork,
+  sessionVisibilityWorkIsEmpty,
+  settleSessionVisibilityWorkInTransaction,
+  type SessionVisibilityWork,
+  type SessionVisibilityWorkSettlement,
+} from "./session-visibility-work";
+
+export type { SessionVisibilityWork } from "./session-visibility-work";
 
 // Frozen SQL protocol argument: every organization is activated at version 1
 // since migration 0611, but the lifecycle routines still require it explicitly.
@@ -52,6 +64,30 @@ export class SessionTenancyAccessError extends Error {
   readonly name = "SessionTenancyAccessError";
   constructor(options?: ErrorOptions) {
     super("Session tenancy target is unavailable", options);
+  }
+}
+
+/**
+ * The chat has work the person can see (a running or parked response, queued
+ * messages, an active goal). `active_work` asks for "make private anyway"
+ * consent; `stopping_active_work` means the consented stop is still settling
+ * and the same request can be retried.
+ */
+export class SessionVisibilityWorkConflictError extends Error {
+  readonly name = "SessionVisibilityWorkConflictError";
+  constructor(
+    readonly reason: "active_work" | "stopping_active_work",
+    readonly work: SessionVisibilityWork,
+    /** Attempts a worker is executing right now; stopping them is asynchronous. */
+    readonly liveAttemptCount: number,
+    options?: ErrorOptions,
+  ) {
+    super(
+      reason === "active_work"
+        ? "Session has active work; stop it to change visibility"
+        : "Session work is still stopping",
+      options,
+    );
   }
 }
 
@@ -102,6 +138,12 @@ export type TransitionSessionVisibilityInput = {
   targetVisibility: SessionTenancyVisibility;
   expectedAuthorityEpoch: number;
   operationKey: string;
+  /**
+   * The owner consented to stop visible work (cancel parked and queued turns,
+   * pause the active goal). Leftovers are always settled. Excluded from the
+   * idempotency hash: it is consent, not a different requested outcome.
+   */
+  stopActiveWork?: boolean;
   beforeCommit?: (tx: Database) => Promise<void>;
 };
 
@@ -119,6 +161,9 @@ export type TransitionSessionVisibilityResult = {
   cancelledUpdateCount: number;
   pausedGoalCount: number;
   revokedGrantCount: number;
+  /** Events written while settling leftovers and consented work, in order. */
+  settledEventIds: string[];
+  workflowWake: SessionVisibilityWorkSettlement["workflowWake"];
 };
 
 export type ForkSessionContentInput = {
@@ -407,6 +452,17 @@ export async function transitionSessionVisibility(
       input.workspaceId,
       input.actorSubjectId,
       async (scopedDb) => {
+        const settlement =
+          input.targetVisibility === "user_private"
+            ? await settleWorkBeforePrivateTransition(scopedDb, {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                actorSubjectId: input.actorSubjectId,
+                expectedAuthorityEpoch: input.expectedAuthorityEpoch,
+                operationKey: input.operationKey,
+                stopActiveWork: input.stopActiveWork === true,
+              })
+            : null;
         const rows = await rawRows<{
           operationId: string;
           eventId: string | null;
@@ -452,14 +508,312 @@ export async function transitionSessionVisibility(
         const result = rows[0];
         if (!result) throw new Error("Session visibility transition returned no result");
         await input.beforeCommit?.(scopedDb);
-        return result;
+        return {
+          ...result,
+          cancelledTurnCount: settlement?.cancelledTurnCount ?? result.cancelledTurnCount,
+          pausedGoalCount: settlement?.pausedGoal ? 1 : result.pausedGoalCount,
+          settledEventIds: settlement?.eventIds ?? [],
+          workflowWake: settlement?.workflowWake ?? null,
+        };
       },
       undefined,
       "none",
+      // Organization membership, then the exclusive tenancy fence, before any
+      // row lock: the same prefix transition_session_visibility takes itself.
+      true,
     );
   } catch (error) {
     mapSessionTenancyPersistenceError(error, { authorityEpochConflict: true });
   }
+}
+
+async function lockSessionTenancyExclusively(db: Database, workspaceId: string): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+  );
+}
+
+/**
+ * Settle what would otherwise refuse a private transition, inside its own
+ * transaction: leftover turns always, visible work only with consent. Live
+ * attempts cannot be settled synchronously; they surface as `active_work` with
+ * a live attempt count so the caller can stop them first.
+ */
+async function settleWorkBeforePrivateTransition(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    actorSubjectId: string;
+    expectedAuthorityEpoch: number;
+    operationKey: string;
+    stopActiveWork: boolean;
+  },
+): Promise<SessionVisibilityWorkSettlement | null> {
+  await lockSessionTenancyExclusively(db, input.workspaceId);
+  const lock = await lockSessionForVisibilityWork(db, input);
+  // Anything the definer refuses or replays is left to it, unchanged.
+  if (
+    !lock ||
+    lock.session.visibility === "user_private" ||
+    lock.session.ownerSubjectId !== input.actorSubjectId ||
+    lock.session.authorityEpoch !== input.expectedAuthorityEpoch ||
+    (await visibilityReceiptExists(db, input))
+  ) {
+    return null;
+  }
+  const inventory = await readSessionVisibilityWork(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    sessionStatus: lock.session.status,
+  });
+  const hasWork = !sessionVisibilityWorkIsEmpty(inventory.work);
+  if ((hasWork && !input.stopActiveWork) || inventory.liveAttempts.length > 0) {
+    throw new SessionVisibilityWorkConflictError(
+      "active_work",
+      inventory.work,
+      inventory.liveAttempts.length,
+    );
+  }
+  return await settleSessionVisibilityWorkInTransaction(db, {
+    session: lock.session,
+    actorSubjectId: input.actorSubjectId,
+    cancelTurnIds: inventory.pendingTurnIds,
+    pauseGoal: input.stopActiveWork && inventory.work.activeGoal,
+    liveTurnId: null,
+  });
+}
+
+async function visibilityReceiptExists(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; actorSubjectId: string; operationKey: string },
+): Promise<boolean> {
+  const rows = await rawRows<{ exists: boolean }>(
+    db,
+    sql`select exists (
+      select 1 from session_command_receipts receipt
+      where receipt.workspace_id = ${input.workspaceId}::uuid
+        and receipt.actor_type = 'human'
+        and receipt.actor_subject_id = ${input.actorSubjectId}
+        and receipt.actor_attempt_id is null
+        and receipt.action = 'session.visibility.change'
+        and receipt.target_session_id = ${input.sessionId}::uuid
+        and receipt.target_turn_id is null
+        and receipt.operation_key = ${input.operationKey}
+    ) as "exists"`,
+  );
+  return rows[0]?.exists === true;
+}
+
+export type SessionVisibilityChangePreview = {
+  visibility: SessionTenancyVisibility;
+  authorityEpoch: number;
+  /** What the transition would still refuse after the session's own work stops. */
+  blocker: SessionTenancyBlocker | null;
+  work: SessionVisibilityWork;
+};
+
+/** Owner-only, read-only answer to "what happens if I make this chat Only me?". */
+export async function inspectSessionVisibilityChange(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; actorSubjectId: string },
+): Promise<SessionVisibilityChangePreview> {
+  const { accountId } = await rlsContextForWorkspace(db, input.workspaceId);
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      input.workspaceId,
+      input.actorSubjectId,
+      async (scopedDb) => {
+        const [row] = await rawRows<{ blocker: string | null }>(
+          scopedDb,
+          sql`select session_visibility_change_blocker(
+            ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid
+          ) as blocker`,
+        );
+        const [session] = await rawRows<{
+          visibility: SessionTenancyVisibility;
+          authorityEpoch: number;
+          status: string;
+        }>(
+          scopedDb,
+          sql`select visibility, authority_epoch as "authorityEpoch", status
+          from sessions
+          where workspace_id = ${input.workspaceId}::uuid and id = ${input.sessionId}::uuid`,
+        );
+        if (!session) throw new SessionTenancyAccessError();
+        const inventory = await readSessionVisibilityWork(scopedDb, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sessionStatus: session.status,
+        });
+        const blocker = SessionTenancyBlockerSchema.safeParse(row?.blocker);
+        return {
+          visibility: session.visibility,
+          authorityEpoch: Number(session.authorityEpoch),
+          blocker: blocker.success ? blocker.data : null,
+          work: inventory.work,
+        };
+      },
+    );
+  } catch (error) {
+    mapSessionTenancyPersistenceError(error, { authorityEpochConflict: false });
+  }
+}
+
+export type StopSessionWorkForVisibilityChangeResult = {
+  interruptedAttemptCount: number;
+  liveAttemptCount: number;
+  eventIds: string[];
+  workflowWake: SessionVisibilityWorkSettlement["workflowWake"];
+};
+
+/**
+ * First half of a consented "make private anyway" when a worker is executing
+ * the chat: durably interrupt each live attempt (the worker cancels the turn
+ * when it settles), cancel everything queued or parked, and pause the goal.
+ * It commits on its own and refuses up front when something other than the
+ * session's own work would still block the private transition.
+ */
+export async function stopSessionWorkForVisibilityChange(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    actorSubjectId: string;
+    expectedAuthorityEpoch: number;
+    operationKey: string;
+  },
+): Promise<StopSessionWorkForVisibilityChangeResult> {
+  if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  const { accountId } = await rlsContextForWorkspace(db, input.workspaceId);
+  try {
+    return await withWorkspaceSubjectSessionActivityRls(
+      db,
+      input.workspaceId,
+      input.actorSubjectId,
+      async (scopedDb) => {
+        await lockSessionTenancyExclusively(scopedDb, input.workspaceId);
+        const lock = await lockSessionForVisibilityWork(scopedDb, input);
+        if (!lock || lock.session.ownerSubjectId !== input.actorSubjectId) {
+          throw new SessionTenancyAccessError();
+        }
+        const empty = {
+          interruptedAttemptCount: 0,
+          liveAttemptCount: 0,
+          eventIds: [],
+          workflowWake: null,
+        };
+        if (lock.session.visibility === "user_private") return empty;
+        if (lock.session.authorityEpoch !== input.expectedAuthorityEpoch) {
+          throw new SessionTenancyConflictError("authority_epoch");
+        }
+        const [standing] = await rawRows<{ blocker: string | null }>(
+          scopedDb,
+          sql`select session_visibility_change_blocker(
+            ${accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid
+          ) as blocker`,
+        );
+        if (standing?.blocker) {
+          const blocker = SessionTenancyBlockerSchema.safeParse(standing.blocker);
+          throw new SessionTenancyConflictError(
+            "not_quiescent",
+            blocker.success ? blocker.data : null,
+          );
+        }
+        const inventory = await readSessionVisibilityWork(scopedDb, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sessionStatus: lock.session.status,
+        });
+        const interruptedAttemptCount =
+          await interruptSessionAttemptsForVisibilityChangeInTransaction(scopedDb, {
+            session: lock.session,
+            actorSubjectId: input.actorSubjectId,
+            operationKey: input.operationKey,
+            attemptIds: inventory.liveAttempts.map((attempt) => attempt.id),
+          });
+        const liveTurnIds = new Set(inventory.liveAttempts.map((attempt) => attempt.turnId));
+        const liveTurnId =
+          lock.session.activeTurnId && liveTurnIds.has(lock.session.activeTurnId)
+            ? lock.session.activeTurnId
+            : (inventory.liveAttempts[0]?.turnId ?? null);
+        const settlement = await settleSessionVisibilityWorkInTransaction(scopedDb, {
+          session: lock.session,
+          actorSubjectId: input.actorSubjectId,
+          cancelTurnIds: inventory.pendingTurnIds,
+          pauseGoal: inventory.work.activeGoal,
+          liveTurnId,
+        });
+        let workflowWake = settlement.workflowWake;
+        if (!workflowWake && interruptedAttemptCount > 0) {
+          const temporalWorkflowId =
+            lock.session.temporalWorkflowId ?? `session-${lock.session.id}`;
+          workflowWake = {
+            accountId: lock.session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            temporalWorkflowId,
+            wakeRevision: await registerVisibilityStopWake(scopedDb, lock.session),
+          };
+        }
+        return {
+          interruptedAttemptCount,
+          liveAttemptCount: inventory.liveAttempts.length,
+          eventIds: settlement.eventIds,
+          workflowWake,
+        };
+      },
+      undefined,
+      "none",
+      true,
+    );
+  } catch (error) {
+    mapSessionTenancyPersistenceError(error, { authorityEpochConflict: false });
+  }
+}
+
+async function registerVisibilityStopWake(
+  db: Database,
+  session: {
+    accountId: string;
+    workspaceId: string;
+    id: string;
+    temporalWorkflowId: string | null;
+  },
+): Promise<number> {
+  return await registerSessionWorkflowWakeInTransaction(db, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+    reason: "session_visibility_stop_work",
+    controlRequested: true,
+  });
+}
+
+/** Whether a worker is still executing an attempt of this session (read-only). */
+export async function sessionHasLiveAttempts(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; actorSubjectId: string },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.actorSubjectId,
+    async (scopedDb) => {
+      const [row] = await rawRows<{ live: boolean }>(
+        scopedDb,
+        sql`select exists (
+          select 1 from session_turn_attempts attempt
+          where attempt.workspace_id = ${input.workspaceId}::uuid
+            and attempt.session_id = ${input.sessionId}::uuid
+            and attempt.state in ('claimed', 'running')
+        ) as live`,
+      );
+      return row?.live === true;
+    },
+  );
 }
 
 export async function forkSessionContent(
