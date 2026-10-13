@@ -42,13 +42,18 @@ Principals are abstract strings: `user:<subjectId>` for people and
 `service:<subjectId>` for personless keys. Agents are recorded as
 `agent:session:<sessionId>` (their own session) in `createdBy`/`updatedBy`;
 records they write belong to the person they act for (a chat's person or a
-schedule's owner). An agent session without a person owns its records as
-`agent:session:<sessionId>`, so personless agents never share one key space.
-`guest:`/`anon:` can be added later without schema changes.
+schedule's owner). An agent without a person owns its records as
+`schedule:<taskId>` when a scheduled task's run created its session (found from
+the server-written run row, so it is stable across runs and cannot be claimed
+through session metadata), and as `agent:session:<sessionId>` otherwise, so
+personless agents never share one key space. Workers a scheduled session spawns
+keep their own session principal. `guest:`/`anon:` can be added later without
+schema changes.
 
 A write first counts its attempt against the caller's one-minute window in its
 own short transaction (so refused and failed attempts count), compiles the
-touched collections' JSON Schemas, and only then takes the Site's usage row
+touched collections' JSON Schemas and validates every inserted or put record
+against them, and only then takes the Site's usage row
 `FOR UPDATE`. Inside that transaction it checks the Site is still active,
 applies the operations, maintains unique and indexed values with set-based
 statements, updates the collection counters, and checks quotas, so batches (up
@@ -65,12 +70,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
 - A caller must be able to see the Site under its audience. An Only me Site
   is `not_found` to everyone but its owner and agents acting for them.
 - **Managers** hold `artifacts:publish` and are the Site's owner (or its
-  creator when it has no owner), a workspace admin, a personless workspace
-  credential (`api_key`, `configured_key` or `service`), or an agent acting
-  for one of them. Any other grant without a resolved person, such as an
-  agent whose session has no person, is a viewer. Managers define
-  collections and read everything except `privateRecords`. Everyone else who
-  can view the Site is a **viewer**.
+  creator when it has no owner), a workspace admin, an agent acting for one of
+  those people, or a personless workspace credential (`api_key`,
+  `configured_key` or `service`) used directly. An agent without a person
+  (for example a person-less scheduled task) is a viewer, whatever credential
+  started it. Managers define collections and read everything except
+  `privateRecords`. Everyone else who can view the Site is a **viewer**.
 - Requests from Site HTML always get **viewer** reach, whoever is viewing:
   Site HTML is untrusted (any member with `artifacts:publish` can publish a
   new version of a Site), so the owner's own Site page reads only their own
@@ -80,6 +85,15 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   `x-opengeni-site-frame` and its pinned `x-opengeni-site-id` (both stripped
   from Site-supplied headers); either header makes a request framed, and a
   framed request must name its own Site and can never manage collections.
+- Agents started from a Site page get the same clamp. Site HTML can start
+  or message agent sessions through the bridge with the viewer's authority,
+  so an agent whose session carries a Site origin (or whose spawning lineage
+  does, through parent sessions and parent turns) is framed to that Site:
+  viewer reach, only that Site, and no describe, define, delete, reset,
+  import or export. A turn the page sent into a session without a Site
+  origin (`surface = 'site'`) reaches no Site Data at all. The same check runs
+  for MCP tools, Codemode and HTTP calls with an agent's delegated
+  credential, since all of them resolve access in the service.
 - The Site HTTP channel reaches only the current Site's data:
   `siteSessionPath` refuses `/published-artifacts/<id>/data|files` for every
   explicit id on every host, and hosts not bound to a published Site (inline
@@ -92,14 +106,25 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
 | `per_viewer` | own | own | read, update and delete all unless `privateRecords` (then own only) |
 | `append_only` | own | create only | read all, update, delete |
 
-Collection JSON Schemas are compiled by a separate Ajv instance per schema
-(cached by content digest in a bounded LRU) with no coercion, defaults or
-format assertions. `$id`, `$anchor`, `$dynamicAnchor`, `$dynamicRef`,
-`$recursiveRef`, `$schema`, `$async`, and non-local `$ref` (anything but
-`#/...`) are refused, so schemas cannot register globally or reach other
-tenants' schemas. `pattern` and `patternProperties` are refused because the
-regex engine can backtrack catastrophically; `format` stays allowed as an
-annotation because format validation is off and it never runs a regex.
+Collection JSON Schemas use a strict keyword allowlist, walked over the whole
+schema when a collection is defined: `type`, `properties`, `required`,
+`additionalProperties` (boolean or schema), `items` (one schema), `enum` (up
+to 100 scalar values), `const` (scalar), `minimum`, `maximum`,
+`exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minLength`,
+`maxLength`, `minItems`, `maxItems`, `minProperties`, `maxProperties`,
+`format` (annotation only; format validation is off), `title`, `description`,
+`allOf`, `anyOf`, `oneOf`, and `uniqueItems` only when `items` has a scalar
+`type` (so the check is linear). Everything else is refused, including
+`$ref`, `$defs`, `definitions`, `$id`, `$schema`, `default`, `examples`,
+`pattern`, `patternProperties`, `propertyNames`, `if`/`then`/`else`, `not`,
+`dependent*`, `contains`, `prefixItems` and `unevaluated*`. A schema has at
+most 500 schema nodes, 16 levels of nesting and 64 KB of JSON. Without
+references, regexes or pairwise comparisons, validation is linear in the
+schema and the record. Each schema is compiled by its own Ajv instance
+(cached by content digest in a bounded LRU) with no coercion or defaults, so
+nothing registers across tenants. Inserted and put records are validated
+before the Site's lock is taken; a patch or increment merges with the stored
+record, so its result is validated inside the write transaction.
 Data paths (filters, sorts, keys, increments, indexes, CSV headers) refuse
 `__proto__`, `prototype` and `constructor`.
 
@@ -114,10 +139,10 @@ HTTP (`apps/api/src/routes/site-data.ts`), under
 | `PUT /data/collections/:name` | create or change a definition | managers |
 | `DELETE /data/collections/:name?confirm=true` | delete with records | managers |
 | `POST /data/collections/:name/reset` (`{confirm: true}`) | clear records | managers |
-| `POST /data/collections/:name/import` | JSON or CSV, up to 1,000 records, batches of 100 | managers |
+| `POST /data/collections/:name/import` | JSON or CSV, up to 1,000 records and (CSV) 1,000 columns, both checked while parsing; each CSV row is built in one pass; batches of 100 | managers |
 | `GET /data/collections/:name/export?format=json\|csv` | up to 10,000 records and 16 MB; CSV names at most 200 data columns, then puts each record's data in one JSON `$data` column | managers |
 | `POST /data/query`, `/data/get`, `/data/write` | records | access mode |
-| `GET /files`, `POST /files?name=&scope=` (raw body, read with the per-file cap enforced while streaming; rate and quota are checked before anything is stored) | list, upload | access to the Site |
+| `GET /files`, `POST /files?name=&scope=` (raw body, read only after access, the rate window and the quota for a declared Content-Length pass, with the per-file cap enforced while streaming; the route skips the generic request-size middleware, which would buffer a body without Content-Length first) | list, upload | access to the Site |
 | `GET /files/:id` (signed URL, 5 minutes), `DELETE /files/:id` | download, delete | uploader or managers for private files and deletes |
 
 Errors use the public envelope; `error.details.code` is one of `validation`
@@ -135,8 +160,10 @@ rewrites `current` to its pinned Site, adds the viewer's credentials and the
 Site headers, and advertises `siteData: 1` in its READY message. Site clients
 check that flag and fail with `site_data_unsupported` against older hosts,
 inline HTML previews, tools-only hosts and local sandbox previews, without
-sending anything. Uploads cross the MessagePort as an `ArrayBuffer`. Stored
-records are untrusted; the Sites skill requires rendering them as text.
+sending anything. Uploads cross the MessagePort as an `ArrayBuffer`. The API's
+CORS policy allows `X-OpenGeni-Site-Frame`, `X-OpenGeni-Site-Id` and
+`X-OpenGeni-Site-Version`, so cross-origin hosts can send bridged requests.
+Stored records are untrusted; the Sites skill requires rendering them as text.
 
 **Agent tools** (MCP and Codemode, family `artifacts`; `site_data_describe`,
 `site_data_query`, `site_data_export` and `site_files_list` need
@@ -145,7 +172,8 @@ records are untrusted; the Sites skill requires rendering them as text.
 `site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset`
 (needs `confirm: true`), `site_files_list`, `site_files_upload` and
 `site_files_delete`. They run with the attempt's authority, so scheduled tasks
-use the schedule's.
+use the schedule's; agents started from a Site page are clamped to that page's
+viewer reach (see Access rules).
 
 **Web.** The Site page's Data tab (`apps/web/src/components/artifacts/site-data.tsx`)
 is shown to likely managers and trusts the API's answer: collections with

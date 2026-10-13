@@ -309,9 +309,14 @@ owner: it sees only that person's `per_viewer` records and cannot write
 `shared_read` collections, so feed those with agent tools. Add `uniqueFields`
 (for example `[["email"]]`) to reject duplicates, `jsonSchema` to validate
 writes, and `indexedFields` for numeric range filters you use often. Schemas
-must be self-contained: no `$id`, `$schema`, `pattern`/`patternProperties`,
-or `$ref` other than `#/...`. Field paths cannot use `__proto__`, `prototype`
-or `constructor`. An Only me Site's data is reachable only by its owner.
+use only `type`, `properties`, `required`, `additionalProperties`, `items` (one
+schema), `enum` (up to 100 scalars), `const`, numeric and length bounds
+(`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+`minLength`, `maxLength`, `minItems`, `maxItems`, `minProperties`,
+`maxProperties`), `format`, `title`, `description`, `allOf`/`anyOf`/`oneOf`,
+and `uniqueItems` when `items` has a scalar `type`; no `$ref`, `$defs`,
+`pattern`, `default` or conditionals, at most 500 nodes and 16 levels. Field
+paths cannot use `__proto__`, `prototype` or `constructor`. An Only me Site's data is reachable only by its owner.
 
 In the Site, use the same client:
 
@@ -365,7 +370,11 @@ and `site_data_export` (JSON or CSV), `site_data_reset` (needs
 `confirm: true`), and `site_files_list` / `site_files_upload` /
 `site_files_delete`. For a dashboard fed on a schedule, define a `shared_read`
 collection, then have the scheduled task upsert records with `put` keyed by a
-stable id, so reruns replace instead of duplicating. The Site page's Data tab
+stable id, so reruns replace instead of duplicating. A person-less scheduled
+task owns `per_viewer` records as the schedule, so each run sees the last
+run's. An agent session started from the Site page acts like the page: only
+that Site's data with viewer rights, and no managing collections, so do
+management from your authoring session or a schedule. The Site page's Data tab
 lets the Site's managers browse, export and delete records.
 
 ## Authoring, preview, and viewer access
