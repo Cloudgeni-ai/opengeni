@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { packagedManifest, storeManifest } from "./manifest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = resolve(root, "dist");
@@ -20,9 +21,15 @@ if (!result.success) {
   for (const log of result.logs) console.error(log);
   process.exit(1);
 }
-for (const file of ["manifest.json", "popup.html", "popup.css"]) {
+for (const file of ["popup.html", "popup.css"]) {
   await cp(resolve(root, file), resolve(output, file));
 }
+const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+const manifest = packagedManifest(
+  JSON.parse(await readFile(resolve(root, "manifest.json"), "utf8")),
+  packageJson.version,
+);
+await Bun.write(resolve(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 await cp(resolve(root, "icons"), resolve(output, "icons"), { recursive: true });
 await cp(resolve(root, "fonts"), resolve(output, "fonts"), { recursive: true });
 
@@ -53,7 +60,6 @@ await Bun.write(
   await new Bun.Archive(archiveEntries).bytes(),
 );
 
-// The Web Store assigns its own identity and rejects a development `key`.
 // Preserve the unpacked package above and prepare a distinct store ZIP.
 if (!Bun.argv.includes("--store")) process.exit(0);
 const storeOutput = resolve(output, "store");
@@ -62,11 +68,9 @@ for (const file of installFiles) {
   await mkdir(dirname(resolve(storeOutput, file)), { recursive: true });
   await cp(resolve(output, file), resolve(storeOutput, file));
 }
-const storeManifest = JSON.parse(await readFile(resolve(output, "manifest.json"), "utf8"));
-delete storeManifest.key;
 await Bun.write(
   resolve(storeOutput, "manifest.json"),
-  `${JSON.stringify(storeManifest, null, 2)}\n`,
+  `${JSON.stringify(storeManifest(manifest), null, 2)}\n`,
 );
 const zip = Bun.spawnSync(
   ["zip", "-q", "-X", resolve(output, "opengeni-browser-extension-store.zip"), ...installFiles],

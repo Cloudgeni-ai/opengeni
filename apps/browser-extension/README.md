@@ -19,8 +19,12 @@ to the configured deployment.
 
 ## Branding and listing ownership
 
-- `manifest.json` owns the extension name, summary, version and icon paths.
-  Chrome Web Store derives its title and summary from the uploaded package.
+- `manifest.json` owns the extension name, summary and icon paths. Chrome Web
+  Store derives its title and summary from the uploaded package.
+- `package.json` owns the extension version. Add a Changeset for
+  `@opengeni/browser-extension` with every user-visible extension change; the
+  Version PR bumps it, and the build stamps it into every packaged manifest.
+  The source `manifest.json` must not declare a version.
 - `popup.html`, `popup.css` and `src/popup.ts` own the popup. The service worker
   owns toolbar status titles and connection errors. Protocol method names and
   the native host identifier keep their published spelling.
@@ -42,7 +46,7 @@ Run `bun run typecheck`, `bun test`, and `bun run build:store`. Upload the ZIP
 to the existing item's Package tab. Apply the description and links from
 `store/listing.json`, upload the new icon, promo images and screenshots, then
 save the draft and submit it for review with automatic publishing enabled.
-The version in `manifest.json` must be higher than the published version.
+The version in `package.json` must be higher than the published version.
 
 Keep distribution **Public**, select all available regions, and leave mature
 content disabled for this extension. After Google approves and publishes the
