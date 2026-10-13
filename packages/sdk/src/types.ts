@@ -2379,6 +2379,8 @@ export const SESSION_EVENT_TYPES = [
   "session.agent.updated",
   "session.skills.updated",
   "session.model_settings.updated",
+  // An authorized person or host changed the task root's usage limit.
+  "session.usage_limit.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "subscription.account.selected",

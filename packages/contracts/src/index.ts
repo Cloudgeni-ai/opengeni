@@ -23,6 +23,7 @@ export * from "./session-message-search";
 export * from "./session-goal-reports";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
+import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
@@ -4113,6 +4114,7 @@ export type ListSlackUserLinkAccessRequestsResponse = z.infer<
 
 export * from "./organization-usage";
 export * from "./usage-allowances";
+export * from "./session-usage-limits";
 
 export const UsageEventType = z.enum([
   "agent_run.created",
@@ -7075,6 +7077,8 @@ export const SessionGoalPausedReason = z.enum([
   "max_auto_continuations",
   "limits",
   "allowance",
+  /** The task's root usage limit is reached; raising it never resumes automatically. */
+  "session_usage_limit",
 ]);
 export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
 
@@ -7158,7 +7162,8 @@ export type GoalAdmissionPausedReason =
   | "budget"
   | "usage_limit"
   | "usage_policy"
-  | "allowance";
+  | "allowance"
+  | "session_usage_limit";
 
 export const SessionGoal = z.object({
   id: z.string().uuid(),
@@ -14438,6 +14443,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Server-authored nested-agent lineage/policy. Root sessions are depth 0;
     // snapshots are immutable and govern only future descendant creation.
     rootSessionId: z.string().uuid(),
+    /**
+     * The task root's usage limit and recorded API-equivalent model usage.
+     * Returned by detail reads and create responses of servers that support
+     * usage limits; omission means an older server or a list read, never "no
+     * limit". A create that requested a limit must see it echoed here.
+     */
+    usageLimit: SessionUsageLimit.optional(),
     nestedAgentDepth: NestedAgentDepthValue,
     maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
     effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
@@ -14878,6 +14890,8 @@ export const SessionEventType = z.enum([
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
   "session.model_settings.updated",
+  // An authorized person or host changed the task root's usage limit.
+  "session.usage_limit.updated",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   "session.agent.updated",
@@ -15135,6 +15149,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.agent.updated",
     "session.skills.updated",
     "session.model_settings.updated",
+    "session.usage_limit.updated",
   ],
   terminal: [
     "turn.completed",
@@ -17488,6 +17503,15 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * identity or authorization from the UUID.
        */
       requestedSessionId: z.string().uuid().optional(),
+      /**
+       * Optional usage limit for a new root task, in USD micros of API-equivalent
+       * model usage; null or omission means no limit and zero stops before the
+       * first model request. Only a person or trusted host may set it: agent
+       * callers and child sessions are rejected. Servers without usage limits
+       * strip unknown fields, so confirm `usageLimit.limitMicros` in the
+       * response before relying on it.
+       */
+      usageLimitMicros: SessionUsageLimitMicros.nullable().optional(),
       /** Explicit external-owner grants for the direct initial turn only. */
 
       /** Top-level omission is workspace-visible. Agent-child omission inherits
