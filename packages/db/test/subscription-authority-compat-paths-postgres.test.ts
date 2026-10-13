@@ -29,6 +29,7 @@ import {
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   importArchivedSession,
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
   updateScheduledTask,
   withSessionRlsActorContext,
   type DbClient,
@@ -648,13 +649,12 @@ beforeAll(async () => {
     authorityGeneration: 7,
     connectionIds: [crypto.randomUUID()],
   };
-  // Claude's drained cutover committed now: every carrier below is accepted
-  // after it, so a carrier whose source holds no record carries none.
-  await database.admin`
-    insert into opengeni_private.subscription_provider_cutover_receipts (
-      provider, migration, committed_at, seed_rotation
-    ) values ('claude', '0799_subscription_core_claude_cutover.sql', clock_timestamp(),
-      '{"mode":"spread"}')`;
+  // The complete migration ledger already committed Claude's drained cutover.
+  // Every carrier below is accepted afterward; do not insert a synthetic receipt.
+  const [receipt] = await database.admin<{ migration: string }[]>`
+    select migration from opengeni_private.subscription_provider_cutover_receipts
+    where provider = 'claude'`;
+  expect(receipt?.migration).toBe(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude);
 }, 180_000);
 
 afterAll(async () => {

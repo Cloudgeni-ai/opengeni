@@ -261,7 +261,12 @@ export type SubscriptionCoreWorkspacePool = {
 export async function readSubscriptionCoreWorkspacePool(
   tx: Database,
   provider: SubscriptionCoreProvider,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Session picker only: include shared accounts assigned to the scoped caller. */
+    includeOwnPeopleScope?: boolean;
+  },
 ): Promise<SubscriptionCoreWorkspacePool> {
   const providerId = subscriptionCoreProviderId(provider);
   const [workspace] = await rawRows<{ workspace_kind: "personal" | "shared" }>(
@@ -297,7 +302,13 @@ export async function readSubscriptionCoreWorkspacePool(
             where assignment.account_id = connection.account_id
               and assignment.connection_id = connection.id
               and assignment.workspace_id = ${input.workspaceId}::uuid)
-          or (connection.allow_personal_workspaces and ${workspaceKind} = 'personal'))))
+          or (connection.allow_personal_workspaces and ${workspaceKind} = 'personal')))
+        or (${input.includeOwnPeopleScope === true} and connection.scope_kind = 'people'
+          and exists (select 1 from subscription_connection_people assignment
+            where assignment.account_id = connection.account_id
+              and assignment.connection_id = connection.id
+              and assignment.organization_membership_id =
+                opengeni_private.subscription_own_person_membership_id(connection.account_id))))
     order by connection.created_at, connection.id`,
   );
   const pools = rows.map((row) => {
