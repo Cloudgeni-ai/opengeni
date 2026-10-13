@@ -1577,7 +1577,7 @@ mod tests {
 
     #[test]
     fn workspace_root_keeps_a_chosen_directory_and_replaces_a_filesystem_root() {
-        let home = Path::new("/Users/someone");
+        let home = Path::new("/Users/me");
         assert_eq!(
             resolve_workspace_root(Some(PathBuf::from("/srv/work")), Some(home)),
             PathBuf::from("/srv/work")
