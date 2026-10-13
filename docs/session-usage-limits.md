@@ -55,15 +55,49 @@ zero is **known free**: it counts as zero and increments `freeCalls`. A
 provider that reports only an aggregate usage at the end of a turn is counted
 once, and the limit can only act at that turn's next boundary.
 
-A database failure while recording a known price is not unknown pricing. The
-worker routes it through exact-attempt PostgreSQL recovery and dispatches no
-further model request until the receipt is recorded; the provider is never
-called again for that response. For attempt-authenticated single-model calls,
-the API process retains the exact failed settlement, retries only the database
-write with bounded backoff, and refuses that session's next call (HTTP 503
-`session_usage_limit_unavailable`) until the retained receipt is recorded. That
-retention is per API process and bounded; a process crash before recovery loses
-the receipt, which is logged and counted.
+A response that reports no usage at all (no token counts and no gateway-reported
+cost) is unpriced, never known free: missing usage is not proof of zero cost.
+
+### Recording failures
+
+A database failure while recording a known price is not unknown pricing, and
+the provider is never called again to recover it. There are no monetary
+reservations: only already-reported usage is owed.
+
+- **Worker turns.** A receipt whose write fails stays in the attempt's custody
+  and is written before the next model request, before the turn completes and
+  before the turn waits on a person (`requires_action`). If it still cannot be
+  written, the attempt fails into exact-attempt PostgreSQL recovery with the
+  owed receipts in its recovery detail; recovery writes them first and only
+  then lets the turn continue. This is reported as usage state unavailable,
+  never as a budget or usage-limit stop.
+- **Attempt-authenticated single-model calls.** Admission opens a durable
+  custody marker for the call in PostgreSQL before the provider request. The
+  settled receipt fills it. If the receipt cannot be written, the marker is
+  fenced and every API replica refuses that task's next call (HTTP 503
+  `session_usage_limit_unavailable`) while the owning process retries the
+  database write. A provider error or an allowance denial releases the marker.
+  An open marker older than 15 minutes also blocks new calls; after 30 minutes
+  maintenance records it as an unpriced receipt (disclosed through
+  `unpricedCalls`) so a crashed process cannot block the task forever. When an
+  API process already holds its maximum of retained receipts, it refuses new
+  task calls with the same 503 instead of dropping one.
+- **Older workers during rollout.** A database trigger on the durable
+  `agent.model.usage` event records the receipt when the writer did not, so a
+  worker that predates usage limits cannot leave a limited task looking
+  complete at `$0`. Workers append that event before the Insights fact, so a
+  fact without its event is not a real old-writer path.
+
+Known limits of this design, stated rather than hidden:
+
+- a worker that crashes during a database outage before the event or the
+  recovery detail is durable loses that receipt (the response itself is also
+  lost, so platform recovery runs it again and that response is counted);
+- a provider error after partial streaming reports no usage and is not counted;
+- a single attempt-authenticated call running longer than 15 minutes blocks
+  that task's other single-model calls until it settles;
+- a database outage that loses response history means platform recovery runs
+  the request again, and both calls are counted.
 
 ## Scope of one limit
 
@@ -113,9 +147,15 @@ request, and before each attempt-authenticated single-model call.
   before any queue, interrupt, draft or turn write, so a composer keeps its
   draft. An exact replay of an already committed request still returns its
   committed result. Retry is not the remedy; raising or removing the limit is.
-- **Wakes.** Child results, schedules on the existing session, approvals,
-  worker recovery and repeated wakes each settle at most one stop for the
-  claimed work and never loop.
+- **Schedules.** A run of a schedule that targets an existing task at its
+  limit is refused at admission with reason `session_usage_limit`; nothing is
+  queued and the next scheduled run is unaffected.
+- **Approvals.** An approval given after the limit is reached resumes into a
+  stop: the approved call is not executed, the timeline keeps the call and the
+  decision, and model history has no orphaned call.
+- **Wakes.** Child results, approvals, worker recovery after a crash and
+  repeated wakes each settle at most one stop for the claimed work and never
+  loop.
 
 Raising, lowering or clearing a limit changes capacity only. It never resumes a
 paused goal, a stopped turn, a child or a background command: a goal needs an
@@ -185,9 +225,14 @@ await og.setSessionUsageLimit(workspaceId, session.id, {
 });
 ```
 
-The SDK verifies the server's echo: if a server that predates usage limits
-strips the field, `createSession` and `setSessionUsageLimit` throw instead of
-silently running an unlimited task. A refusal surfaces as
+The SDK verifies the server's echo and never lets an older server start
+unlimited work. A create that carries a limit also sends
+`startMode: "standard"`, which a server that predates usage limits rejects
+before creating anything, so the SDK throws
+`OpenGeniSessionUsageLimitUnsupportedError` with no session started.
+If a server accepts the create but does not echo the limit, `createSession`
+throws the same error carrying the created `sessionId`, and
+`setSessionUsageLimit` throws instead of reporting success. A refusal surfaces as
 `OpenGeniSessionUsageLimitReachedError` (never the allowance error), and
 `@opengeni/sdk/session-usage-limits` plus `@opengeni/react` provide the parser,
 neutral message and notice. Older clients that do not understand the new
