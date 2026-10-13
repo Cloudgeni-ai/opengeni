@@ -228,6 +228,7 @@ import {
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { wrongInteractionPlacementMessage } from "./interaction-placement-message";
 import {
   releaseBrowserPasskeys,
   resolveInteractionSecretValues,
@@ -2835,8 +2836,7 @@ export function registerBrowserSessionRoutes(
           ) {
             if (operation === "browser.create") {
               throw new HTTPException(422, {
-                message:
-                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+                message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
               });
             }
             return await throwBrowserSourcePlacementChanged(
