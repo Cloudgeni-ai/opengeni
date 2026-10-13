@@ -10,6 +10,10 @@ export const SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE =
  */
 export function scheduledRunErrorText(error: string): string {
   const trimmed = error.trim();
+  if (trimmed === "scheduled_session_paused")
+    return "This run was skipped because its chat was paused. Open the chat and resume it to allow future runs; skipped runs are not replayed.";
+  if (trimmed === "scheduled_session_not_idle")
+    return "This run was skipped because its chat was busy. The schedule will try again at its next scheduled time.";
   if (
     trimmed === "scheduled_model_unavailable" ||
     /^model is not available: /.test(trimmed) ||
@@ -20,4 +24,11 @@ export function scheduledRunErrorText(error: string): string {
     return SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE;
   }
   return trimmed;
+}
+
+/** A recorded skip, not a claim about the chat's live control state. */
+export function scheduledRunSkippedForPausedChat(
+  run: { status: string; error?: string | null } | null | undefined,
+): boolean {
+  return run?.status === "skipped" && run.error === "scheduled_session_paused";
 }

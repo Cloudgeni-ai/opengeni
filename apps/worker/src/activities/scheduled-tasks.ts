@@ -1876,7 +1876,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             );
             if (
               scheduledUpdate.reason === "session_cancelled" ||
-              scheduledUpdate.reason === "session_not_idle"
+              scheduledUpdate.reason === "session_not_idle" ||
+              scheduledUpdate.reason === "session_paused"
             ) {
               const error = scheduledSessionRejectionError(scheduledUpdate.reason);
               return {
@@ -2026,7 +2027,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 },
               },
             );
-            if (bundled.reason === "session_cancelled" || bundled.reason === "session_not_idle") {
+            if (
+              bundled.reason === "session_cancelled" ||
+              bundled.reason === "session_not_idle" ||
+              bundled.reason === "session_paused"
+            ) {
               const error = scheduledSessionRejectionError(bundled.reason);
               return {
                 kind: "blocked" as const,
@@ -2306,8 +2311,9 @@ function scheduledRunTerminalResult(
 }
 
 function scheduledSessionRejectionError(
-  rejectionReason: "session_cancelled" | "session_not_idle" | null,
-): "session_cancelled" | "scheduled_session_not_idle" {
+  rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
+): "session_cancelled" | "scheduled_session_not_idle" | "scheduled_session_paused" {
+  if (rejectionReason === "session_paused") return "scheduled_session_paused";
   return rejectionReason === "session_not_idle"
     ? "scheduled_session_not_idle"
     : "session_cancelled";
@@ -3029,7 +3035,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
   );
   if (
     scheduledUpdate.reason === "session_cancelled" ||
-    scheduledUpdate.reason === "session_not_idle"
+    scheduledUpdate.reason === "session_not_idle" ||
+    scheduledUpdate.reason === "session_paused"
   ) {
     return { action: "blocked", reason: "scheduled_run_terminal" };
   }

@@ -1241,6 +1241,15 @@ describe("explicit choices, personal fallback and explained waits", () => {
   });
 
   test("SUB-ACCESS-06, SUB-SEL-04: an explicit choice that can never serve says so; one that can recover waits for it (D-24)", () => {
+    const disabled = input({
+      connections: [connection("codex-1", "codex", { allocatorEnabled: false })],
+      session: { binding: explicit("codex-1") },
+    });
+    expect(decidePlacement(disabled)).toEqual({
+      kind: "wait",
+      reason: "pinned_account_disabled",
+      earliestResetAt: null,
+    });
     const outOfScope = connection("codex-elsewhere", "codex", {
       ownership: {
         kind: "shared",

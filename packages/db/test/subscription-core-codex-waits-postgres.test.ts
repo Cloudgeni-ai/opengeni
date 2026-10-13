@@ -385,6 +385,93 @@ async function waiterRows(
 }
 
 describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core", () => {
+  test("a disabled explicit pin needs action and an existing waiter publishes its changed reason once", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const pinned = await sharedConnection(org, "disabled-pin");
+    await sharedConnection(org, "available-other");
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    await withSessionRlsActorContext(subscriptionCoreTurnActor(turn.identity), () =>
+      withRlsContext(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+        (db) =>
+          writeSubscriptionSessionBinding(db, {
+            accountId: org.accountId,
+            workspaceId: org.sharedWorkspaceId,
+            sessionId: turn.identity.sessionId,
+            provider: "codex",
+            connectionId: pinned,
+            modelId: MODEL,
+            choice: "explicit",
+            onlyThisModel: false,
+            lastModelCallAt: null,
+            lastSwitchReason: "explicit_choice",
+          }),
+      ),
+    );
+    await shared!
+      .admin`update subscription_connections set allocator_enabled=false where id=${pinned}::uuid`;
+    expect(await place(turn)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_disabled",
+      explicitConnectionId: pinned,
+      earliestResetAt: null,
+    });
+    // A waiter written before the clearer classification is already parked.
+    const armed = await armSubscriptionCoreCodexCapacityWait(client!.db, {
+      ...turn.identity,
+      attemptId: turn.attemptId,
+      waitReason: "pinned_account_unavailable",
+      earliestResetAt: null,
+      failurePayload: {
+        code: "subscription_capacity_unavailable",
+        waitReason: "pinned_account_unavailable",
+      },
+    });
+    if (armed.action !== "waiting") throw new Error("Expected waiter");
+    const input = {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      waiterId: armed.waiter.waiterId,
+      generation: armed.waiter.generation,
+      evaluatedWakeRevision: armed.waiter.wakeRevision,
+      evaluation: {
+        kind: "wait" as const,
+        waitReason: "pinned_account_disabled",
+        earliestResetAt: null,
+        healthRetryAt: null,
+      },
+    };
+    const updated = await reconcileSubscriptionCoreCodexCapacityWait(client!.db, input);
+    expect(updated).toMatchObject({
+      action: "waiting",
+      waiter: { waitReason: "pinned_account_disabled" },
+    });
+    expect(updated.events).toHaveLength(1);
+    expect(updated.events[0]!.payload).toMatchObject({
+      waitReason: "pinned_account_disabled",
+      actionRequired: true,
+    });
+    expect(updated.events[0]!.payload).toHaveProperty(
+      "error",
+      expect.stringContaining("turned off"),
+    );
+    expect((await reconcileSubscriptionCoreCodexCapacityWait(client!.db, input)).events).toEqual(
+      [],
+    );
+    expect(await rowState(turn)).toMatchObject({
+      session_status: "waiting_capacity",
+      turn_status: "waiting_capacity",
+    });
+    // Time and the other healthy account cannot replace the person's pin.
+    expect(await evaluate(turn)).toMatchObject({ kind: "wait", reason: "pinned_account_disabled" });
+    await shared!
+      .admin`update subscription_connections set allocator_enabled=true where id=${pinned}::uuid`;
+    expect(await evaluate(turn)).toMatchObject({ kind: "run", connectionId: pinned });
+  });
+
   test("runs as the non-superuser, non-bypass application role", async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
       client!.db,

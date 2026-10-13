@@ -95,6 +95,7 @@ describe("reference conformance over generated worlds", () => {
         "return_to_preferred",
         "wait:no_eligible_capacity",
         "wait:pinned_account_unavailable",
+        "wait:pinned_account_disabled",
         "wait:pinned_account_ineligible",
         "wait:model_not_allowed",
       ].sort(),

@@ -137,7 +137,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "owned_suffix",
   },
   "packages/db/src/index.ts#reconcileSubscriptionCoreCapacityWait": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
