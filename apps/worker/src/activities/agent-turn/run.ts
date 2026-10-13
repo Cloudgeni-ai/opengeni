@@ -10,6 +10,7 @@ import {
   ClaudeSubscriptionReconnectRequired,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
@@ -1404,7 +1405,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             input,
             db,
             cancellationSignal,
-            connectionCredentials,
             turn,
             session,
             fileAuthoritySubjectId,
@@ -1419,8 +1419,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             mcpAvailabilityNote,
             turnTools,
             connectionScope,
-            workspaceVariableSet,
-            sandboxWorkspaceEnvironmentValues,
           } = toolPolicy;
 
           let knowledgeRecoveryNote: string | undefined;
@@ -1567,7 +1565,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             fileAuthoritySubjectId,
             runSettings,
-            workspaceVariableSet,
             turnResources,
             requiredGeneratedVideoFiles,
             machinePrimary,
@@ -1575,7 +1572,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             groupBoxBackend,
             sandboxCreationBackend,
             effectiveRunCredentialBackend,
-            sandboxWorkspaceEnvironmentValues,
             connectionScope,
             runWorkspaceMutationForSandbox,
           });
@@ -1702,7 +1698,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ]),
             ).values(),
           ];
+          // Connected vaults (1Password, host) resolve under the acting human;
+          // one provider read budget covers every resolver of this attempt.
+          const vaultAccess = createAttemptVaultAccess({
+            db,
+            settings,
+            workspaceId: input.workspaceId,
+            subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? null,
+            hostVaultProvider: connectionCredentials?.vaultProvider,
+            onePasswordVaultProvider: resolvedServices.onePasswordVaultProvider,
+          });
           const toolRuntime = await prepareTurnToolRuntime({
+            vaultAccess,
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
@@ -1755,6 +1762,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } = toolRuntime;
 
           const builtAgent = await buildTurnAgent({
+            vaultAccess,
             skillCatalog: toolRuntime.skillCatalog,
             mcpServers: toolRuntime.mcpServers,
             input,
@@ -1795,7 +1803,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             rigName,
             buildCompanyBrainContributionReceiptFor,
             promptCacheKey,
-            workspaceVariableSet,
             runtimeResources,
             sandboxEnvironment,
             sandboxArtifactRuntime,

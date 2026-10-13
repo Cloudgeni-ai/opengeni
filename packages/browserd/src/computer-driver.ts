@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { UnsettledCleanupError } from "./cleanup-error";
 import {
+  INTERACTION_MAX_CLIPBOARD_BYTES,
   ComputerNativeResult,
   type ComputerNativeCommand,
   ComputerClipboard,
   ComputerObservation,
   ComputerTarget,
+  InteractionSecretValueError,
+  materializeComputerActionSecrets,
+  materializeComputerNativeSecrets,
+  redactInteractionSecretValues,
   type ComputerActionCommand,
   type ComputerClipboard as ComputerClipboardValue,
   type ComputerObservation as ComputerObservationValue,
@@ -163,24 +168,32 @@ export class ComputerDriver implements ComputerInteractionDriver {
 
   async dispatchNative(command: ComputerNativeCommand): Promise<ComputerNativeResult> {
     this.assertOpen();
+    const secretValues = command.secretValues;
+    const materialized = materializeNativeCommandSecrets(command);
     try {
       const client = await this.activeClient();
       if (!client.callNative)
         throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
-      return ComputerNativeResult.parse({
-        target: null,
-        computerSessionId: this.computerSessionId,
-        controllerGeneration: this.controllerGeneration,
-        tool: command.tool,
-        ...(await client.callNative(command)),
-      });
+      return ComputerNativeResult.parse(
+        redactInteractionSecretValues(
+          {
+            target: null,
+            computerSessionId: this.computerSessionId,
+            controllerGeneration: this.controllerGeneration,
+            tool: command.tool,
+            ...(await client.callNative(materialized)),
+          },
+          secretValues,
+        ),
+      );
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
+        const message = redactInteractionSecretValues(error.message, secretValues);
         if (!error.dispatched) {
-          throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
+          throw new InteractionDefiniteDriverError(code, message, error.retryable);
         }
-        throw new InteractionOutcomeUnknownDriverError(code, error.message, false);
+        throw new InteractionOutcomeUnknownDriverError(code, message, false);
       }
       throw error;
     }
@@ -199,18 +212,33 @@ export class ComputerDriver implements ComputerInteractionDriver {
 
   async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue | null> {
     this.assertOpen();
+    const secretValues = command.secretValues;
+    const materialized = materializeActionCommandSecrets(command);
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
-      const observation = await client.dispatch(nativeCommand(command));
-      return observation === null ? null : this.projectObservation(observation);
+      const native = nativeCommand(materialized);
+      const observation = await client.dispatch(native).catch(async (error: unknown) => {
+        // A pasted value stays on the seat clipboard, where clipboard reads
+        // would expose it; text with resolved secrets is never pasted.
+        const text =
+          this.capabilities.clipboard && secretValues === undefined
+            ? untypeableText(materialized, error)
+            : null;
+        if (text === null) throw error;
+        return await pasteText(client, native, text);
+      });
+      return observation === null
+        ? null
+        : redactInteractionSecretValues(this.projectObservation(observation), secretValues);
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
+        const message = redactInteractionSecretValues(error.message, secretValues);
         if (!error.dispatched) {
-          throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
+          throw new InteractionDefiniteDriverError(code, message, error.retryable);
         }
-        throw new InteractionOutcomeUnknownDriverError(code, error.message, false);
+        throw new InteractionOutcomeUnknownDriverError(code, message, false);
       }
       throw error;
     }
@@ -672,6 +700,76 @@ function nativeCommand(command: ComputerActionCommand): ComputerBackendActionCom
     expectedFrameId: command.expectedFrameId,
     action: command.action,
   };
+}
+
+function secretValueDriverError(error: unknown): unknown {
+  return error instanceof InteractionSecretValueError
+    ? new InteractionDefiniteDriverError("invalid_action", error.message)
+    : error;
+}
+
+/** References replaced right before dispatch; the side map is dropped. */
+function materializeActionCommandSecrets(command: ComputerActionCommand): ComputerActionCommand {
+  if (command.secretValues === undefined) return command;
+  try {
+    const action = materializeComputerActionSecrets(command);
+    const { secretValues: _consumed, ...rest } = command;
+    return { ...rest, action };
+  } catch (error) {
+    throw secretValueDriverError(error);
+  }
+}
+
+function materializeNativeCommandSecrets(command: ComputerNativeCommand): ComputerNativeCommand {
+  if (command.secretValues === undefined) return command;
+  try {
+    const args = materializeComputerNativeSecrets(command);
+    const { secretValues: _consumed, ...rest } = command;
+    return { ...rest, arguments: args };
+  } catch (error) {
+    throw secretValueDriverError(error);
+  }
+}
+
+const UNTYPEABLE_CHARACTER = /keymap cannot type Unicode scalar U\+[0-9A-F]+; use clipboard paste/u;
+
+/** Text the native keymap refused before emitting any key, so all of it is
+ * still untyped. Line breaks and tabs are keys with their own effect (submit,
+ * focus change) and are never replaced by a paste. */
+function untypeableText(command: ComputerActionCommand, error: unknown): string | null {
+  if (
+    command.action.type !== "keyboard" ||
+    command.action.action !== "type" ||
+    !(error instanceof ComputerBackendError) ||
+    error.code !== "unsupported" ||
+    error.dispatched ||
+    !UNTYPEABLE_CHARACTER.test(error.message)
+  ) {
+    return null;
+  }
+  const text = command.action.value;
+  if (
+    /[\u0000-\u001f\u007f-\u009f]/u.test(text) ||
+    new TextEncoder().encode(text).byteLength > INTERACTION_MAX_CLIPBOARD_BYTES
+  ) {
+    return null;
+  }
+  return text;
+}
+
+/** Types `text` by writing the seat clipboard and pasting it into the same
+ * target. Both steps are validated before the clipboard changes. */
+async function pasteText(
+  client: ComputerBackend,
+  command: ComputerBackendActionCommand,
+  text: string,
+): Promise<ComputerBackendObservation | null> {
+  const write = { ...command, action: { type: "clipboard", operation: "write", text } } as const;
+  const paste = { ...command, action: { type: "clipboard", operation: "paste" } } as const;
+  await client.validate(write);
+  await client.validate(paste);
+  await client.dispatch(write);
+  return await client.dispatch(paste);
 }
 
 function predispatchError(error: unknown): Error {

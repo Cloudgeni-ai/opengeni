@@ -15,9 +15,7 @@ import {
   createSession,
   createSiteAuthConnection,
   completeExternalAuth,
-  completeProtectedAuthFill,
   dispatchBrowserSessionOperation,
-  dispatchProtectedAuthFill,
   dispatchExternalAuth,
   expireSessionInteractionIntervention,
   findBrowserSessionControlRecordByOperation,
@@ -25,7 +23,6 @@ import {
   getExternalAuthInteractiveContext,
   getInteractionIntervention,
   getInteractionInterventionResumeForEvent,
-  getProtectedAuthFillPreparation,
   getSession,
   getExternalAuthPreparation,
   initializeSessionStartAtomically,
@@ -36,7 +33,6 @@ import {
   listNetworkRoutes,
   listSiteAuthConnections,
   peekSessionWork,
-  prepareProtectedAuthFill,
   prepareExternalAuth,
   prepareBrowserSessionCreate,
   reportAuthRun,
@@ -219,7 +215,7 @@ async function claimTurn(scope: Awaited<ReturnType<typeof fixture>>) {
   return { attemptId, turn: claim.turn };
 }
 
-function humanSiteAuth(operationId = crypto.randomUUID()) {
+function siteAuth(operationId = crypto.randomUUID()) {
   return {
     operationId,
     name: `Example ${operationId.slice(0, 8)}`,
@@ -227,39 +223,6 @@ function humanSiteAuth(operationId = crypto.randomUUID()) {
     origins: ["https://example.com"],
     loginUrl: "https://example.com/login",
     verificationUrlPrefixes: ["https://example.com/app"],
-    authorities: [
-      {
-        id: "human",
-        kind: "human" as const,
-        label: "Ask the user",
-        fields: [
-          { id: "email", purpose: "identifier" as const },
-          { id: "password", purpose: "password" as const },
-        ],
-      },
-    ],
-    methods: [
-      {
-        id: "password",
-        kind: "password" as const,
-        label: "Email and password",
-        authorityIds: ["human"],
-      },
-    ],
-    preferredIdentityId: null,
-    preferredPlacement: null,
-    preferredNetworkRouteId: null,
-    healthPolicy: {
-      mode: "on_use" as const,
-      intervalSeconds: null,
-      automaticRepair: false,
-    },
-  };
-}
-
-function externalSiteAuth(operationId = crypto.randomUUID()) {
-  return {
-    ...humanSiteAuth(operationId),
     authorities: [
       {
         id: "kernel-managed",
@@ -278,6 +241,14 @@ function externalSiteAuth(operationId = crypto.randomUUID()) {
         authorityIds: ["kernel-managed"],
       },
     ],
+    preferredIdentityId: null,
+    preferredPlacement: null,
+    preferredNetworkRouteId: null,
+    healthPolicy: {
+      mode: "on_use" as const,
+      intervalSeconds: null,
+      automaticRepair: false,
+    },
   };
 }
 
@@ -490,24 +461,18 @@ describe("browser auth and network resources", () => {
       credentialEncrypted: "encrypted-never-read-here",
     });
     const operationId = crypto.randomUUID();
-    const base = humanSiteAuth(operationId);
+    const base = siteAuth(operationId);
     const credentialAuthority = {
       id: "connection",
-      kind: "connection_fields" as const,
+      kind: "external_provider" as const,
       label: "Saved connection",
+      adapterId: "kernel",
+      connectionId: "kernel-connection-1",
       credential: {
         connectionId,
         connectionSubjectId: scope.actorSubjectId,
         providerDomain: "example.com",
       },
-      fields: [
-        { id: "email", purpose: "identifier" as const, credentialKey: "email" },
-        {
-          id: "password",
-          purpose: "password" as const,
-          credentialKey: "password",
-        },
-      ],
     };
     const created = await createSiteAuthConnection(client.db, {
       ...scope,
@@ -543,7 +508,7 @@ describe("browser auth and network resources", () => {
       createSiteAuthConnection(client.db, {
         ...scope,
         actorSubjectId: "agent:workspace",
-        ...humanSiteAuth(),
+        ...siteAuth(),
         authorities: [credentialAuthority],
         methods: [{ ...base.methods[0]!, authorityIds: ["connection"] }],
       }),
@@ -580,13 +545,13 @@ describe("browser auth and network resources", () => {
     await expect(
       createSiteAuthConnection(client.db, {
         ...scope,
-        ...humanSiteAuth(),
+        ...siteAuth(),
         preferredNetworkRouteId: route.route.id,
       }),
     ).rejects.toThrow("external browser provider placement");
     const configured = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       preferredPlacement: {
         kind: "external_provider",
         providerId: "kernel",
@@ -660,7 +625,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
     });
     const browser = await activeBrowser(scope);
     const startOperationId = crypto.randomUUID();
@@ -672,8 +637,8 @@ describe("browser auth and network resources", () => {
       targetId: "target-1",
       expectedTargetGeneration: "target-generation-1",
       expectedDocumentGeneration: "document-generation-1",
-      methodId: "password",
-      authorityId: "human",
+      methodId: "kernel-managed",
+      authorityId: "kernel-managed",
     });
     expect(started.run).toMatchObject({ state: "discovering", version: 1 });
     expect(
@@ -685,8 +650,8 @@ describe("browser auth and network resources", () => {
         targetId: "target-1",
         expectedTargetGeneration: "target-generation-1",
         expectedDocumentGeneration: "document-generation-1",
-        methodId: "password",
-        authorityId: "human",
+        methodId: "kernel-managed",
+        authorityId: "kernel-managed",
       }),
     ).toMatchObject({ replayed: true });
 
@@ -696,13 +661,10 @@ describe("browser auth and network resources", () => {
       controllerGeneration: browser.controllerGeneration,
       operationId: crypto.randomUUID(),
       expectedVersion: 1,
-      state: "awaiting_secret",
-      pendingFields: [
-        { id: "email", label: "Email", purpose: "identifier" },
-        { id: "password", label: "Password", purpose: "password" },
-      ],
+      state: "awaiting_external_action",
+      externalAction: { kind: "push", label: "Approve the sign-in on your phone", expiresAt: null },
     });
-    expect(waiting.run).toMatchObject({ state: "awaiting_secret", version: 2 });
+    expect(waiting.run).toMatchObject({ state: "awaiting_external_action", version: 2 });
 
     const interventionOperationId = crypto.randomUUID();
     const intervention = await createInteractionIntervention(client.db, {
@@ -767,111 +729,12 @@ describe("browser auth and network resources", () => {
     ).toMatchObject({ status: "completed" });
   });
 
-  test("atomically turns a human protected fill into one replay-safe intervention", async () => {
-    if (!available) return;
-    const scope = await fixture();
-    const auth = await createSiteAuthConnection(client.db, {
-      ...scope,
-      ...humanSiteAuth(),
-    });
-    const browser = await activeBrowser(scope);
-    const started = await startAuthRun(client.db, {
-      ...scope,
-      ...browser,
-      operationId: crypto.randomUUID(),
-      siteAuthConnectionId: auth.connection.id,
-      targetId: "target-human",
-      expectedTargetGeneration: "target-generation-human",
-      expectedDocumentGeneration: "document-generation-human",
-      methodId: "password",
-      authorityId: "human",
-    });
-    const operationId = crypto.randomUUID();
-    const request = {
-      operationId,
-      expectedVersion: started.run.version,
-      expectedTargetGeneration: "target-generation-human",
-      expectedDocumentGeneration: "document-generation-human",
-      expectedFrameId: "frame-human",
-      authorityId: "human",
-      fields: [
-        {
-          fieldId: "email",
-          locator: { kind: "css" as const, selector: "#email" },
-        },
-        {
-          fieldId: "password",
-          locator: { kind: "css" as const, selector: "#password" },
-        },
-      ],
-      submit: { type: "none" as const },
-    };
-    await prepareProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      credentialVersion: null,
-      ...request,
-    });
-    const waiting = await completeProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      operationId,
-      status: "needs_human",
-      intervention: {
-        originatingSessionId: scope.sessionId,
-        kind: "manual_login",
-        reason: "Sign in in this browser tab.",
-        expiresInSeconds: 900,
-      },
-    });
-    expect(waiting).toMatchObject({
-      status: "needs_human",
-      replayed: false,
-      run: { state: "awaiting_secret", version: 2 },
-    });
-    expect(waiting.run.interventionId).toBeString();
-    expect((await listInteractionInterventions(client.db, scope)).interventions).toEqual([
-      expect.objectContaining({
-        id: waiting.run.interventionId,
-        operationId,
-        status: "open",
-        authRunId: started.run.id,
-      }),
-    ]);
-    expect(
-      await prepareProtectedAuthFill(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        credentialVersion: null,
-        ...request,
-      }),
-    ).toMatchObject({
-      replayed: true,
-      response: {
-        replayed: true,
-        run: { interventionId: waiting.run.interventionId },
-      },
-    });
-    await resolveInteractionIntervention(client.db, {
-      ...scope,
-      interventionId: waiting.run.interventionId!,
-      operationId: crypto.randomUUID(),
-      expectedVersion: 1,
-      outcome: "completed",
-    });
-    expect(await getAuthRun(client.db, { ...scope, authRunId: started.run.id })).toMatchObject({
-      state: "working",
-      interventionId: null,
-      version: 3,
-    });
-  });
-
   test("advances external auth durably and rebinds the run after provider profile load", async () => {
     if (!available) return;
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...externalSiteAuth(),
+      ...siteAuth(),
     });
     const browser = await activeBrowser(scope);
     const started = await startAuthRun(client.db, {
@@ -1302,39 +1165,10 @@ describe("browser auth and network resources", () => {
     ).toMatchObject({ status: "cancelled", version: 2 });
   });
 
-  test("fences protected credential fill and verifies only the observed exact target", async () => {
+  test("verifies only the observed exact target", async () => {
     if (!available) return;
     const scope = await fixture();
-    const credentialId = crypto.randomUUID();
-    await insertPersonalConnectionFixture({
-      scope,
-      connectionId: credentialId,
-      providerDomain: "example.com",
-      credentialEncrypted: "encrypted-outside-auth-run",
-      version: 7,
-    });
-    const base = humanSiteAuth();
-    const auth = await createSiteAuthConnection(client.db, {
-      ...scope,
-      ...base,
-      authorities: [
-        {
-          id: "saved",
-          kind: "connection_fields",
-          label: "Saved login",
-          credential: {
-            connectionId: credentialId,
-            connectionSubjectId: scope.actorSubjectId,
-            providerDomain: "example.com",
-          },
-          fields: [
-            { id: "email", purpose: "identifier", credentialKey: "email" },
-            { id: "password", purpose: "password", credentialKey: "password" },
-          ],
-        },
-      ],
-      methods: [{ ...base.methods[0]!, authorityIds: ["saved"] }],
-    });
+    const auth = await createSiteAuthConnection(client.db, { ...scope, ...siteAuth() });
     const browser = await activeBrowser(scope);
     const started = await startAuthRun(client.db, {
       ...scope,
@@ -1344,100 +1178,19 @@ describe("browser auth and network resources", () => {
       targetId: "target-1",
       expectedTargetGeneration: "target-generation-1",
       expectedDocumentGeneration: "document-generation-1",
-      methodId: "password",
-      authorityId: "saved",
+      methodId: "kernel-managed",
+      authorityId: "kernel-managed",
     });
-    const operationId = crypto.randomUUID();
-    const request = {
-      operationId,
+    const working = await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
       expectedVersion: started.run.version,
-      expectedTargetGeneration: "target-generation-1",
-      expectedDocumentGeneration: "document-generation-1",
-      expectedFrameId: "frame-1",
-      authorityId: "saved",
-      fields: [
-        {
-          fieldId: "email",
-          locator: { kind: "css" as const, selector: "#email" },
-        },
-        {
-          fieldId: "password",
-          locator: { kind: "css" as const, selector: "#password" },
-        },
-      ],
-      submit: {
-        type: "click" as const,
-        locator: { kind: "css" as const, selector: "#login" },
-      },
-    };
-    expect(
-      await getProtectedAuthFillPreparation(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        ...request,
-      }),
-    ).toBeNull();
-    const prepared = await prepareProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      credentialVersion: 7,
-      ...request,
+      state: "working",
     });
-    expect(prepared).toMatchObject({
-      operationState: "prepared",
-      credentialVersion: 7,
-      response: null,
-    });
-    expect(
-      await getProtectedAuthFillPreparation(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        ...request,
-      }),
-    ).toMatchObject({ operationState: "prepared", credentialVersion: 7 });
-    expect(
-      await dispatchProtectedAuthFill(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        operationId,
-      }),
-    ).toBe("dispatched");
-    const completed = await completeProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      operationId,
-      status: "submitted",
-      targetGeneration: "target-generation-1",
-      documentGeneration: "document-generation-2",
-    });
-    expect(completed).toMatchObject({
-      status: "submitted",
-      replayed: false,
-      run: {
-        state: "working",
-        version: 2,
-        documentGeneration: "document-generation-2",
-      },
-    });
-    expect(
-      await prepareProtectedAuthFill(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        credentialVersion: 99,
-        ...request,
-      }),
-    ).toMatchObject({
-      operationState: "completed",
-      credentialVersion: 7,
-      replayed: true,
-      response: { replayed: true },
-    });
-    const [operation] = await shared!.admin<
-      Array<{ metadata: unknown; result: unknown }>
-    >`select metadata, result from interaction_resource_operations where operation_id = ${operationId}`;
-    expect(JSON.stringify(operation)).not.toContain("encrypted-outside-auth-run");
-
-    const verified = await verifyAuthRun(client.db, {
+    expect(working.run).toMatchObject({ state: "working", version: 2 });
+    const verification = {
       ...scope,
       authRunId: started.run.id,
       controllerGeneration: browser.controllerGeneration,
@@ -1445,8 +1198,18 @@ describe("browser auth and network resources", () => {
       targetGeneration: "target-generation-1",
       documentGeneration: "document-generation-2",
       url: "https://example.com/app/home",
+      expectedVersion: working.run.version,
+    };
+    await expect(
+      verifyAuthRun(client.db, {
+        ...verification,
+        targetId: "target-2",
+        operationId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("Verification targets another browser tab");
+    const verified = await verifyAuthRun(client.db, {
+      ...verification,
       operationId: crypto.randomUUID(),
-      expectedVersion: completed.run.version,
     });
     expect(verified.run).toMatchObject({
       state: "verified",
@@ -1463,7 +1226,7 @@ describe("browser auth and network resources", () => {
   test("projects only causally newest auth health evidence and schedules maintained repair", async () => {
     if (!available) return;
     const scope = await fixture();
-    const request = humanSiteAuth();
+    const request = siteAuth();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
       ...request,
@@ -1571,7 +1334,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: {
         mode: "maintained",
         intervalSeconds: 120,
@@ -1794,7 +1557,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: { mode: "maintained", intervalSeconds: 120, automaticRepair: true },
     });
     const [claim] = await claimSiteAuthMaintenance(client.db, {
@@ -1851,7 +1614,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: { mode: "maintained", intervalSeconds: 3_600, automaticRepair: true },
     });
     const claims = await claimSiteAuthMaintenance(client.db, {
@@ -1948,7 +1711,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: { mode: "maintained", intervalSeconds: 3_600, automaticRepair: true },
     });
     const claim = (

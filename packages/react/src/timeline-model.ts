@@ -92,8 +92,27 @@ export {
   formatDeadline,
   humanInputHeading,
   initialDrafts,
+  resolveSecretSaveTo,
+  SECRET_SAVE_TO_ORDER,
+  secretAnswerFromReading,
+  secretAnswerLabel,
+  secretAutocomplete,
+  secretCanGenerate,
+  secretConcealed,
+  secretFieldLabel,
+  secretInputMode,
+  secretPatternMismatch,
+  secretVaultForTarget,
 } from "./human-input-model";
-export type { HumanInputAnswerDraft, HumanInputFormMessages } from "./human-input-model";
+export type {
+  HumanInputAnswerDraft,
+  HumanInputFormMessages,
+  SecretAutocomplete,
+  SecretFieldReading,
+  SecretSaveToChoice,
+} from "./human-input-model";
+export { secretReferenceLabel, secretReferenceLabelText } from "./secret-reference-label";
+export type { SecretReferenceLabel } from "./secret-reference-label";
 export { isActionableHumanInputRequest } from "./human-input";
 export {
   SESSION_STATUS_BADGE,

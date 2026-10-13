@@ -3,6 +3,7 @@ import { connect, type ClientHttp2Session } from "node:http2";
 import type { Settings } from "@opengeni/config";
 import {
   claimNativePushDeliveries,
+  listSessionHumanInputRequests,
   pruneNativePushDeliveries,
   settleNativePushDelivery,
   type ClaimedNativePushDelivery,
@@ -26,6 +27,47 @@ export type NativePushSender = (
   delivery: ClaimedNativePushDelivery,
 ) => Promise<NativePushSendResult>;
 
+/** A claimed payload, marked when its question asks for a secret. */
+export type NativePushPayload = ClaimedNativePushDelivery["payload"] & { secretQuestion?: boolean };
+
+const SECRET_QUESTION_PUSH_BODY = "Open Opengeni to answer. The answer is saved to a vault.";
+
+/**
+ * Mark question pushes whose pending request asks for a secret, so they carry
+ * no inline answer action and point to the app instead.
+ */
+async function markSecretQuestionDeliveries(
+  db: Database,
+  deliveries: ClaimedNativePushDelivery[],
+): Promise<ClaimedNativePushDelivery[]> {
+  const secretSessions = new Map<string, Promise<boolean>>();
+  return await Promise.all(
+    deliveries.map(async (delivery) => {
+      if (delivery.payload.eventType !== "session.humanInput.requested") return delivery;
+      const key = `${delivery.payload.workspaceId}:${delivery.payload.sessionId}`;
+      let lookup = secretSessions.get(key);
+      if (!lookup) {
+        lookup = listSessionHumanInputRequests(
+          db,
+          delivery.payload.workspaceId,
+          delivery.payload.sessionId,
+          { status: "pending", limit: 20 },
+        )
+          .then((requests) =>
+            requests.some((request) =>
+              request.questions.some((question) => question.kind === "secret"),
+            ),
+          )
+          .catch(() => false);
+        secretSessions.set(key, lookup);
+      }
+      if (!(await lookup)) return delivery;
+      const payload: NativePushPayload = { ...delivery.payload, secretQuestion: true };
+      return { ...delivery, payload };
+    }),
+  );
+}
+
 export type NativePushDispatchDeps = {
   db: Database;
   settings: Settings;
@@ -48,11 +90,15 @@ export function plainNotificationText(markdown: string): string {
 }
 
 /** The visible text of a push: title, optional subtitle, and the message with its facts. */
-export function nativePushAlert(payload: ClaimedNativePushDelivery["payload"]): {
+export function nativePushAlert(payload: NativePushPayload): {
   title: string;
   subtitle?: string;
   body?: string;
 } {
+  if (payload.secretQuestion) {
+    // A secret is answered only in the app's secure card (AC-5): no inline reply.
+    return { title: payload.title ?? "The agent needs a secret", body: SECRET_QUESTION_PUSH_BODY };
+  }
   const fallback =
     payload.rule === "needs_input"
       ? "The agent needs you"
@@ -113,8 +159,9 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
  * approved (behind device unlock) or denied, a question answered inline.
  */
 export function nativePushCategory(
-  payload: ClaimedNativePushDelivery["payload"],
+  payload: NativePushPayload,
 ): "og.approval" | "og.question" | undefined {
+  if (payload.secretQuestion) return undefined;
   if (payload.eventType === "session.requiresAction") return "og.approval";
   if (payload.eventType === "session.humanInput.requested") return "og.question";
   return undefined;
@@ -342,11 +389,14 @@ export async function drainNativePushDeliveries(
 ): Promise<{ claimed: number; delivered: number }> {
   const senders = deps.senders ?? configuredNativePushSenders(deps.settings);
   const claimId = randomUUID();
-  const claimed = await claimNativePushDeliveries(deps.db, {
-    claimId,
-    limit: 32,
-    claimSeconds: CLAIM_SECONDS,
-  });
+  const claimed = await markSecretQuestionDeliveries(
+    deps.db,
+    await claimNativePushDeliveries(deps.db, {
+      claimId,
+      limit: 32,
+      claimSeconds: CLAIM_SECONDS,
+    }),
+  );
   let delivered = 0;
   await Promise.all(
     claimed.map(async (delivery) => {

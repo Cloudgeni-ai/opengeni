@@ -777,7 +777,6 @@ describe("SDK / contracts parity", () => {
       setupScript: "apt-get install -y ripgrep",
       checks: [{ name: "rg", command: "rg --version" }],
       credentialHooks: ["azure-cli-login"],
-      defaultVariableSetIds: [],
     };
     const update: UpdateRigRequest = {
       name: "dev-machine-2",

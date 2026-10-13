@@ -73,7 +73,7 @@ newer edit or pause. Compensation commits before releasing the synchronization
 lock, so queued writers observe the restored state. Remote timeouts remain errors with potentially unknown
 outcomes, not confirmation that Temporal accepted the change.
 
-If a move removes Variable Sets or changes the environment, it returns a
+If a move changes the environment, it returns a
 409 with `details.code = scheduled_target_access_change` and the affected
 identifiers. Review the destination's attachments, then retry with
 `adoptSessionSettings: true` and the reviewed `expectedExecutionDigest` to accept
@@ -96,7 +96,7 @@ The server merges against the complete stored configuration. Never reconstruct
 `agentConfig` from `scheduled_tasks_get`: that tool returns bounded text and
 previews, not a lossless replacement document.
 
-The ordinary owner, model-policy, Variable Set and connection-authority checks
+The ordinary owner, model-policy and connection-authority checks
 still apply. A model-only patch does not refresh tool/account selections, rewrite
 prompts or metadata, unpause the task, or change its schedule. A concurrent
 execution-config edit returns 409 instead of overwriting it; read the task again
@@ -230,8 +230,7 @@ the read. `canRefresh` is true only for a signed-in person holding
 - A task whose execution digest no longer matches returns 409, checked again
   under the row lock, so a person never re-freezes something they did not
   review.
-- The refresh goes through the ordinary owner update path: Variable Set
-  permission, model policy, target validation, the owner's current accounts,
+- The refresh goes through the ordinary owner update path: model policy, target validation, the owner's current accounts,
   personal-resource re-authorization under that person, and a new authority
   revision and execution digest. It therefore never grants more than the same
   person could by editing the task.

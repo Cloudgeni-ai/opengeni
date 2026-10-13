@@ -7,6 +7,7 @@ import {
   CalendarClockIcon,
   GaugeIcon,
   LaptopIcon,
+  LockKeyholeIcon,
   PanelsTopLeftIcon,
   PlugIcon,
   ServerCogIcon,
@@ -23,6 +24,7 @@ import { cn } from "@/lib/utils";
 const WORKSPACE_CONFIG_ICONS = {
   gauge: GaugeIcon,
   box: BoxIcon,
+  "lock-keyhole": LockKeyholeIcon,
   "server-cog": ServerCogIcon,
   laptop: LaptopIcon,
   "brain-circuit": BrainCircuitIcon,

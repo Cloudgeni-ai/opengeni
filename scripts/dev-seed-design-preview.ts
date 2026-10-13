@@ -47,16 +47,17 @@ import {
   CAPABILITIES,
   DISPLAY_ACTIVE_SCHEDULES,
   EXTRA_SCHEDULES,
-  EXTRA_VARIABLE_SETS,
+  EXTRA_VAULTS,
   INTEGRATIONS,
   PENDING_KNOWLEDGE,
   PERSONAL_KNOWLEDGE,
   RIGS,
   SCHEDULE_RUNS,
-  SESSION_VARIABLE_SETS,
+  SESSION_VAULT_POLICIES,
   USAGE_MODELS,
   scheduledRunSessions,
   type ScheduleSeed,
+  type VaultSeed,
 } from "./dev-seed-design-preview/surfaces";
 import { LIVE_CONTENT, applyLiveBatch } from "./dev-seed-design-preview/live-edit";
 import { seedMachines } from "./dev-seed-design-preview/machines";
@@ -310,18 +311,15 @@ type Grant = "viewer" | "member" | "admin";
 type WorkspaceSeed = {
   name: string;
   grants: Record<string, Grant>;
-  variableSets: {
-    name: string;
-    description: string;
-    vars: Record<string, string>;
-    updates?: Record<string, string[]>;
-  }[];
+  /** Workspace vaults, shaped like migrated Variable Sets (see VaultSeed). */
+  vaults: Omit<VaultSeed, "scope">[];
   schedules: {
     name: string;
     prompt: string;
     schedule: Record<string, unknown>;
     overlapPolicy?: string;
-    variableSet?: string;
+    /** Narrows every run to this vault. */
+    vault?: string;
   }[];
   apiKeys: {
     name: string;
@@ -420,8 +418,8 @@ const CONVERSATIONS: Record<string, SessionSeed[]> = {
       hoursAgo: 50,
       exchanges: [
         [
-          "Rotate the staging database password and update the variable set.",
-          "The password was rotated and the Staging database variable set now holds the new value. The old password stops working in 24 hours.",
+          "Rotate the staging database password and update the saved login.",
+          "The password was rotated and the Staging database login in the Shared vault now holds the new value. The old password stops working in 24 hours.",
         ],
       ],
     },
@@ -580,8 +578,8 @@ const CONVERSATIONS: Record<string, SessionSeed[]> = {
       hoursAgo: 28,
       exchanges: [
         [
-          "Write empty state copy for Schedules, Variable sets and API keys.",
-          "**Schedules:** Nothing scheduled yet. Schedules run agent work on a timer.\n\n**Variable sets:** No variable sets. Store credentials once and use them in any session.\n\n**API keys:** No API keys. Create one to start work from your own tools.",
+          "Write empty state copy for Schedules, Secrets and API keys.",
+          "**Schedules:** Nothing scheduled yet. Schedules run agent work on a timer.\n\n**Secrets:** No secrets yet. Save a login or key once and agents can use it in any session.\n\n**API keys:** No API keys. Create one to start work from your own tools.",
         ],
       ],
     },
@@ -634,7 +632,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Platform engineering",
     grants: { maria: "admin", jonas: "member", aiko: "viewer", tom: "member" },
-    variableSets: [
+    vaults: [
       {
         name: "AWS production",
         description: "Read-only role for cost and inventory checks.",
@@ -695,7 +693,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           hour: 8,
           minute: 0,
         },
-        variableSet: "AWS production",
+        vault: "AWS production",
       },
       {
         name: "Weekly dependency update PR",
@@ -708,13 +706,13 @@ const WORKSPACES: WorkspaceSeed[] = [
           daysOfWeek: ["MONDAY"],
         },
         overlapPolicy: "buffer_one",
-        variableSet: "GitHub automation",
+        vault: "GitHub automation",
       },
       {
         name: "Monthly access review",
         prompt: "List users and API keys with production access and highlight inactive ones.",
         schedule: { type: "interval", everySeconds: 2_592_000 },
-        variableSet: "Datadog",
+        vault: "Datadog",
       },
     ],
     apiKeys: [
@@ -725,8 +723,8 @@ const WORKSPACES: WorkspaceSeed[] = [
       },
       {
         name: "Terraform runner",
-        description: "Reads variable sets during plan.",
-        permissions: ["workspace:read", "variable-sets:list", "variable-sets:read"],
+        description: "Lists secrets and uses them by reference during plan.",
+        permissions: ["workspace:read", "secrets:list", "secrets:use"],
         expires: "future",
       },
       {
@@ -877,7 +875,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Customer success",
     grants: { maria: "member", aiko: "admin", jonas: "viewer" },
-    variableSets: [
+    vaults: [
       {
         name: "Zendesk",
         description: "Ticket export access.",
@@ -916,7 +914,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 45,
           daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
         },
-        variableSet: "Zendesk",
+        vault: "Zendesk",
       },
       {
         name: "Churn risk report",
@@ -928,7 +926,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 0,
           daysOfWeek: ["FRIDAY"],
         },
-        variableSet: "HubSpot",
+        vault: "HubSpot",
       },
       {
         name: "Hourly SLA watch",
@@ -985,7 +983,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Finance ops",
     grants: { maria: "viewer", tom: "viewer" },
-    variableSets: [
+    vaults: [
       {
         name: "Accounting system",
         description: "Bookkeeping API access.",
@@ -1021,7 +1019,7 @@ const WORKSPACES: WorkspaceSeed[] = [
         name: "Month-end close checklist",
         prompt: "Prepare the month-end close checklist and list missing receipts.",
         schedule: { type: "interval", everySeconds: 2_592_000 },
-        variableSet: "Accounting system",
+        vault: "Accounting system",
       },
       {
         name: "Weekly cash position",
@@ -1033,7 +1031,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 30,
           daysOfWeek: ["MONDAY"],
         },
-        variableSet: "Bank feed",
+        vault: "Bank feed",
       },
       {
         name: "Invoice reminders",
@@ -1088,7 +1086,7 @@ const WORKSPACES: WorkspaceSeed[] = [
   {
     name: "Design preview",
     grants: { maria: "admin", jonas: "member", aiko: "member", tom: "viewer" },
-    variableSets: [
+    vaults: [
       {
         name: "Figma",
         description: "Read design files for handoff notes.",
@@ -1139,14 +1137,14 @@ const WORKSPACES: WorkspaceSeed[] = [
           minute: 15,
           daysOfWeek: ["WEDNESDAY"],
         },
-        variableSet: "Preview deploys",
+        vault: "Preview deploys",
       },
       {
         name: "Design token drift check",
         prompt: "Compare design tokens in code with the Figma library.",
         schedule: { type: "interval", everySeconds: 21_600 },
         overlapPolicy: "skip",
-        variableSet: "Figma",
+        vault: "Figma",
       },
       {
         name: "Launch day check",
@@ -1484,44 +1482,151 @@ const conversationPlan: ConversationPlan[] = [];
 /** Scheduled task ids by workspace name ("Personal" for the owner's workspace). */
 const taskIdsByWorkspace: Record<string, Record<string, string>> = {};
 
-/** Variable sets by name, created through the API with their edit history. */
-async function seedVariableSets(
+/** Organization vaults whose availability names workspaces seeded later. */
+const pendingVaultAvailability: {
+  base: string;
+  vaultId: string;
+  names: string[];
+  allowPersonal: boolean;
+}[] = [];
+
+function itemFieldInputs(fields: NonNullable<VaultSeed["items"]>[number]["fields"]) {
+  return fields.map((field) =>
+    field.kind === "file"
+      ? {
+          name: field.name,
+          kind: "file" as const,
+          fileBase64: Buffer.from(field.value, "utf8").toString("base64"),
+          fileName: `${field.name}.json`,
+        }
+      : { name: field.name, ...(field.kind ? { kind: field.kind } : {}), value: field.value },
+  );
+}
+
+/**
+ * Vaults by name, created through the API with their items and edit history.
+ * `vars` become `api_key` items with a `value` field, exactly as the Variable
+ * Set migration copies them. Existing vaults and items are left alone.
+ */
+async function seedVaults(
   base: string,
-  sets: (WorkspaceSeed["variableSets"][number] & {
-    scope?: "workspace" | "user" | "organization";
-  })[],
+  vaults: (Omit<VaultSeed, "scope"> & { scope?: VaultSeed["scope"] })[],
 ): Promise<Record<string, string>> {
-  const existingSets = await owner.get<any>(`${base}/variable-sets`);
-  const setList: any[] = Array.isArray(existingSets)
-    ? existingSets
-    : (existingSets.variableSets ?? []);
-  const setIds: Record<string, string> = {};
-  for (const set of setList) setIds[set.name] = set.id;
-  for (const set of sets) {
-    const scope = set.scope ?? "workspace";
-    let found = setList.find((s) => s.name === set.name && s.scope === scope);
+  const existing = (await owner.get<{ vaults: any[] }>(`${base}/vaults`)).vaults;
+  const ids: Record<string, string> = {};
+  for (const vault of existing) ids[vault.name] ??= vault.id;
+  const sharedWorkspaces = (await owner.get<any[]>("/v1/workspaces")).filter(
+    (w) => w.kind === "shared",
+  );
+  for (const seed of vaults) {
+    const ownerKind = seed.scope ?? "workspace";
+    let found = existing.find((v) => v.name === seed.name && v.ownerKind === ownerKind);
+    const names =
+      seed.availableIn === undefined || seed.availableIn === "all" ? null : seed.availableIn;
     if (!found) {
-      found = await owner.post(`${base}/variable-sets`, {
-        scope,
-        name: set.name,
-        description: set.description,
-        variables: Object.entries(set.vars).map(([name, value]) => ({
-          name,
-          value,
-        })),
+      const resolved = names?.map((name) => sharedWorkspaces.find((w) => w.name === name)?.id);
+      const complete = resolved?.every((id): id is string => Boolean(id)) ?? true;
+      found = await owner.post(`${base}/vaults`, {
+        name: seed.name,
+        description: seed.description,
+        ownerKind,
+        ...(ownerKind === "organization"
+          ? {
+              availability: {
+                allowedWorkspaceIds:
+                  names === null ? null : complete ? resolved : [base.split("/").at(-1)],
+                allowPersonalWorkspaces: seed.allowPersonalWorkspaces ?? true,
+              },
+            }
+          : {}),
       });
-      for (const [name, values] of Object.entries(set.updates ?? {})) {
+    }
+    // Settle every narrowed organization vault after all workspaces exist, so a
+    // rerun repairs a vault that an earlier, interrupted run created narrowed to
+    // the only workspace that existed then.
+    if (ownerKind === "organization" && names !== null) {
+      pendingVaultAvailability.push({
+        base,
+        vaultId: found.id,
+        names,
+        allowPersonal: seed.allowPersonalWorkspaces ?? true,
+      });
+    }
+    ids[seed.name] = found.id;
+    const items = [
+      ...Object.entries(seed.vars ?? {}).map(([name, value]) => ({
+        type: "api_key" as const,
+        name,
+        fields: [{ name: "value", value }],
+        updates: seed.updates?.[name] ? { value: seed.updates[name] } : undefined,
+      })),
+      ...(seed.items ?? []),
+    ];
+    if (!items.length) continue;
+    const present = new Set<string>();
+    for (let cursor: string | null = null; ;) {
+      const page: any = await owner.get(
+        `${base}/vaults/${found.id}/items?limit=200&includeArchived=true${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      );
+      for (const item of page.items) present.add(item.name);
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+    for (const item of items) {
+      const finalName = ("renameTo" in item && item.renameTo) || item.name;
+      if (present.has(finalName) || present.has(item.name)) continue;
+      const expiresInDays = "expiresInDays" in item ? item.expiresInDays : undefined;
+      let created: any = await owner.post(`${base}/vaults/${found.id}/items`, {
+        type: item.type,
+        name: item.name,
+        ...("websites" in item && item.websites?.length ? { websites: item.websites } : {}),
+        ...(expiresInDays !== undefined
+          ? { expiresAt: new Date(Date.now() + expiresInDays * 86_400_000).toISOString() }
+          : {}),
+        fields: itemFieldInputs(item.fields),
+      });
+      for (const [fieldName, values] of Object.entries(item.updates ?? {})) {
         for (const value of values) {
-          await owner.put(`${base}/variable-sets/${found.id}/variables/${name}`, { value });
+          const field = created.fields.find((f: any) => f.name === fieldName);
+          created = await owner.patch(`${base}/vaults/${found.id}/items/${created.id}`, {
+            expectedGeneration: created.generation,
+            fields: [{ fieldId: field?.id, name: fieldName, value }],
+          });
         }
       }
+      if ("renameTo" in item && item.renameTo) {
+        await owner.patch(`${base}/vaults/${found.id}/items/${created.id}`, {
+          expectedGeneration: created.generation,
+          name: item.renameTo,
+        });
+      }
     }
-    setIds[set.name] = found.id;
   }
-  return setIds;
+  return ids;
 }
-/** Variable set ids by workspace name, then set name. */
-const variableSetIdsByWorkspace: Record<string, Record<string, string>> = {};
+
+/** Point organization vaults at workspaces that did not exist when they were created. */
+async function settleVaultAvailability() {
+  const shared = (await owner.get<any[]>("/v1/workspaces")).filter((w) => w.kind === "shared");
+  for (const pending of pendingVaultAvailability) {
+    const ids = pending.names
+      .map((name) => shared.find((w) => w.name === name)?.id)
+      .filter((id): id is string => Boolean(id));
+    const vault = await owner.get<any>(`${pending.base}/vaults/${pending.vaultId}`);
+    const current = vault.availability ?? {};
+    const same =
+      current.allowPersonalWorkspaces === pending.allowPersonal &&
+      Array.isArray(current.allowedWorkspaceIds) &&
+      [...current.allowedWorkspaceIds].sort().join() === [...ids].sort().join();
+    if (same) continue;
+    await owner.patch(`${pending.base}/vaults/${pending.vaultId}`, {
+      expectedGeneration: vault.generation,
+      availability: { allowedWorkspaceIds: ids, allowPersonalWorkspaces: pending.allowPersonal },
+    });
+  }
+}
+/** Vault ids by workspace name, then vault name. */
+const vaultIdsByWorkspace: Record<string, Record<string, string>> = {};
 
 // Schedules. Every task is created paused through the API except `manual`
 // ones (no Temporal schedule exists; only Run now fires them). "Display
@@ -1531,7 +1636,7 @@ async function seedSchedules(
   base: string,
   workspaceName: string,
   schedules: (WorkspaceSeed["schedules"][number] & Pick<ScheduleSeed, "active">)[],
-  setIds: Record<string, string>,
+  vaultIds: Record<string, string>,
 ): Promise<Record<string, string>> {
   const tasks = await owner.get<any[]>(`${base}/scheduled-tasks`);
   const displayActive = new Set(DISPLAY_ACTIVE_SCHEDULES[workspaceName] ?? []);
@@ -1553,7 +1658,9 @@ async function seedSchedules(
       schedule: task.schedule,
       runMode: "new_session_per_run",
       ...(task.overlapPolicy ? { overlapPolicy: task.overlapPolicy } : {}),
-      ...(task.variableSet ? { variableSetId: setIds[task.variableSet] } : {}),
+      ...(task.vault && vaultIds[task.vault]
+        ? { vaultPolicy: { mode: "selected", vaultIds: [vaultIds[task.vault]] } }
+        : {}),
       agentConfig: { prompt: task.prompt },
     });
     ids[task.name] = created.id;
@@ -1677,19 +1784,16 @@ for (const seed of WORKSPACES) {
     });
   }
 
-  // Variable sets
-  const setIds = await seedVariableSets(base, [
-    ...seed.variableSets,
-    ...(EXTRA_VARIABLE_SETS[seed.name] ?? []),
-  ]);
-  variableSetIdsByWorkspace[seed.name] = setIds;
+  // Vaults
+  const vaultIds = await seedVaults(base, [...seed.vaults, ...(EXTRA_VAULTS[seed.name] ?? [])]);
+  vaultIdsByWorkspace[seed.name] = vaultIds;
 
   // Schedules
   taskIdsByWorkspace[seed.name] = await seedSchedules(
     base,
     seed.name,
     [...seed.schedules, ...(EXTRA_SCHEDULES[seed.name] ?? [])],
-    setIds,
+    vaultIds,
   );
 
   // Workspace API keys
@@ -1777,15 +1881,12 @@ for (const seed of WORKSPACES) {
 const personalWs = ownerMembership.personalWorkspaceId;
 {
   const base = `/v1/workspaces/${personalWs}`;
-  variableSetIdsByWorkspace.Personal = await seedVariableSets(
-    base,
-    EXTRA_VARIABLE_SETS.Personal ?? [],
-  );
+  vaultIdsByWorkspace.Personal = await seedVaults(base, EXTRA_VAULTS.Personal ?? []);
   taskIdsByWorkspace.Personal = await seedSchedules(
     base,
     "Personal",
     EXTRA_SCHEDULES.Personal ?? [],
-    variableSetIdsByWorkspace.Personal,
+    vaultIdsByWorkspace.Personal,
   );
   await seedKnowledgeGroups(base, "Bendik's notes", PERSONAL_KNOWLEDGE, "personal");
   conversationPlan.push({
@@ -1799,6 +1900,26 @@ const personalWs = ownerMembership.personalWorkspaceId;
     ]),
   });
   log("Seeded Personal workspace");
+}
+
+// Organization vaults available in workspaces seeded after them; Design
+// preview's agents start with secrets off (the "Secrets are off" states).
+await settleVaultAvailability();
+{
+  const designPreview = (await owner.get<any[]>("/v1/workspaces")).find(
+    (w) => w.kind === "shared" && w.name === "Design preview",
+  );
+  if (
+    designPreview &&
+    designPreview.settings?.sessionAgentDefaults?.capabilities?.secrets !== false
+  ) {
+    await owner.patch(`/v1/workspaces/${designPreview.id}/settings`, {
+      sessionAgentDefaults: {
+        ...(designPreview.settings?.sessionAgentDefaults ?? {}),
+        capabilities: { from: "all", secrets: false },
+      },
+    });
+  }
 }
 const workspaceIdByName: Record<string, string> = Object.fromEntries(
   conversationPlan.map((plan) => [plan.name, plan.workspaceId]),
@@ -2118,15 +2239,15 @@ async function seedConversations(
       await writeSession(id, seed, new Date(Date.now() - seed.hoursAgo * 3_600_000));
     }
 
-    // Variable sets the conversation used, as the session composer shows them.
+    // Sessions narrowed to the vaults their conversation used (vault policy).
     for (const { id, seed } of all) {
-      const attach = (SESSION_VARIABLE_SETS[plan.name]?.[seed.title] ?? [])
-        .map((name) => variableSetIdsByWorkspace[plan.name]?.[name])
-        .filter((setId): setId is string => Boolean(setId));
-      if (!attach.length) continue;
-      await tx`update sessions set variable_set_ids = ${JSON.stringify(attach)}::text::jsonb,
-          variable_set_id = ${attach.at(-1)!}
-        where workspace_id = ${ws} and id = ${id} and variable_set_ids = '[]'::jsonb`;
+      const vaultIds = (SESSION_VAULT_POLICIES[plan.name]?.[seed.title] ?? [])
+        .map((name) => vaultIdsByWorkspace[plan.name]?.[name])
+        .filter((vaultId): vaultId is string => Boolean(vaultId));
+      if (!vaultIds.length) continue;
+      const policy = JSON.stringify({ mode: "selected", vaultIds });
+      await tx`update sessions set vault_policy = ${policy}::text::jsonb
+        where workspace_id = ${ws} and id = ${id} and vault_policy = '{"mode":"all"}'::jsonb`;
     }
 
     // Finalize the session-activity gate exactly as the API does.
@@ -2788,9 +2909,6 @@ async function seedRigs() {
       : (existing.rigs ?? existing.items ?? []);
     for (const rig of rigs) {
       if (list.some((candidate) => candidate.name === rig.name)) continue;
-      const setIds = (rig.variableSets ?? [])
-        .map((set) => variableSetIdsByWorkspace[name]?.[set])
-        .filter((id): id is string => Boolean(id));
       try {
         const createdRig = await owner.post<any>(`${base}/rigs`, {
           ...(rig.scope ? { scope: rig.scope } : {}),
@@ -2799,7 +2917,6 @@ async function seedRigs() {
           setupScript: rig.setupScript,
           checks: rig.checks,
           credentialHooks: rig.credentialHooks ?? [],
-          defaultVariableSetIds: setIds,
         });
         if (rig.nextVersion) {
           await owner.post(`${base}/rigs/${createdRig.id}/versions`, {

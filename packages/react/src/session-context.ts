@@ -193,7 +193,6 @@ const BROWSER_INTERACTION_METHODS = [
   "getAuthRun",
   "startBrowserAuthRun",
   "reportBrowserAuthRun",
-  "protectedBrowserAuthFill",
   "verifyBrowserAuthRun",
   "listInteractionInterventions",
   "getInteractionIntervention",

@@ -1646,6 +1646,8 @@ describe("runtime database posture evaluator", () => {
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
               organizationRecoveryProtectedTableCount +
+              // 0739 vault tables: FORCE RLS, reached only through vault routines.
+              runtimePosture.VAULT_TABLES.length +
               2 // Protected MCP and managed sign-in operation ledgers; no runtime DML.
             : length);
         expect(tables).toHaveLength(expectedLength);
@@ -1735,6 +1737,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
+          runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -1745,6 +1748,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
+          runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -2330,7 +2334,8 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("personal_machine") ||
         routine.name.includes("subscription_codex_refresh") ||
         routine.name.includes("authorize_subscription_ownerless_session_access") ||
-        routine.name.includes("authorize_subscription_personal_placement_access")
+        routine.name.includes("authorize_subscription_personal_placement_access") ||
+        (runtimePosture.VAULT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)
       ) {
         routine.owner = "pg_database_owner";
       }

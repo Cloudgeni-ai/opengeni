@@ -68,7 +68,6 @@ for (const status of ["connect", "reconnect", "unavailable"] as const) {
         uploadPending: false,
         repositoryError: null,
         policyValid: true,
-        variableSetBlocked: false,
         personalDecision: accountState.requiresAccountChoice,
         personalLoading: accountState.loading || accountState.error !== null,
       });
@@ -363,7 +362,6 @@ test("live grant removal hides open account labels and choices; Send remains ava
       uploadPending: false,
       repositoryError: null,
       policyValid: true,
-      variableSetBlocked: false,
       personalDecision: accountState.requiresAccountChoice,
       personalLoading: accountState.loading || accountState.error !== null,
     });

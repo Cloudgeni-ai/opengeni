@@ -92,6 +92,9 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // ...and the M3 PR 3b slots on internal updates and their outbox rows.
     await owner`alter table session_system_updates add column subscription_authority jsonb`;
     await owner`alter table session_system_update_outbox add column subscription_authority jsonb`;
+    // ...and the 0739 vault policy on sessions and schedules.
+    await owner`alter table sessions add column vault_policy jsonb not null default '{"mode":"all"}'::jsonb`;
+    await owner`alter table scheduled_tasks add column vault_policy jsonb not null default '{"mode":"all"}'::jsonb`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -218,6 +221,8 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     await owner`alter table session_turns drop column subscription_authority`;
     await owner`alter table session_system_updates drop column subscription_authority`;
     await owner`alter table session_system_update_outbox drop column subscription_authority`;
+    await owner`alter table sessions drop column vault_policy`;
+    await owner`alter table scheduled_tasks drop column vault_policy`;
     // The real runner commits one file at a time: the rolling default may
     // succeed, but activation must refuse a still-connected runtime login.
     await expect(

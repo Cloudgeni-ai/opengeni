@@ -356,7 +356,7 @@ Cancel and the action as the primary.
   "3 days ago" with the exact time on hover; never seconds, never ISO.
 - No ellipsis in button labels: "Delete", "Pause", "Rename", not "Delete...". A button that opens
   a dialog is still named for what it does. Progress labels ("Saving…") and loading text keep it.
-- Back links name the list they return to: "Variable sets", "Models", "Your skills". The arrow is
+- Back links name the list they return to: "Secrets", "Models", "Your skills". The arrow is
   the icon, not a character in the label.
 
 ## 7. Lists and settings on one page
@@ -530,7 +530,7 @@ account**. Each section starts with a plain text header in 14/500 naming only th
 organization, so headers don't repeat them (only where there is no picker, as for a workspace an
 admin manages without access, does the header add the name as quiet 12px meta). These are the only
 headings. Inside a section, pages fall into at most two groups set apart by space, never by a
-second level of labels: Workspace = its settings and dashboards, then its runtime (Variable sets,
+second level of labels: Workspace = its settings and dashboards, then its runtime (Secrets,
 Sandbox environments, Machines); Organization = the organization and its people (General, People,
 Workspaces, Organization identity), then what it provides, pays for and protects (Models,
 Integrations, Billing & usage, Developer, Security & data). Models is an Organization page only:
@@ -598,7 +598,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | Usage meter | A 4px bar with "22% left" and the reset time on the account page. In an account row, `UsageReadout`: "78% left this week" and a 64px bar, right-aligned against the chevron (words only where the row folds on a phone). |
 | Form | **Form page** (section 8) for every create and edit flow; a centered dialog only for one-field prompts. |
 | Destructive confirm | Consequence list by default; type-to-confirm for permanent, wide-impact actions; Undo toast instead of a dialog when reversible; a blocked variant with no destructive button. |
-| Secret values | Write-only: values are never shown after saving; Replace value only. |
+| Secret values | Use = reveal: whoever may use an item may reveal it, one field at a time, on request (Reveal, Copy; hidden again on leave); never shown by default or in lists. Agents get references, not values. |
 | Cadence picker | Sentence builder: [Every weekday] at [08:00] [Oslo time], with a live next-run line. |
 | Access list | Inline role select that saves immediately and a ⋯ menu with Remove, the same rows in every place access is edited. |
 | Foundations | One `LogoTile` (40/32/24px): brand logos on a light tile in both themes, fallback icons on `surface-2`. `RelativeTime` ("3 days ago", exact time on hover), `CopyField` for IDs, `DiffView` with revision history. |

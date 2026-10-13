@@ -1,11 +1,11 @@
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,
-  BoxIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   EyeIcon,
   GitBranchIcon,
+  LockKeyholeIcon,
   PaperclipIcon,
   PlugIcon,
   ServerIcon,
@@ -59,7 +59,7 @@ export type Panel =
   | "tools"
   | "repos"
   | "voice"
-  | "variables"
+  | "secrets"
   | "settings"
   | "runs-on"
   | "visibility";
@@ -128,10 +128,8 @@ export type ComposerPlusProps = {
     /** Panel element; receives `leading` (back control) via clone. */
     panel: ReactElement<{ leading?: ReactNode }>;
   };
-  variableSets?: {
-    selectedCount: number;
-    panel: ReactElement<{ leading?: ReactNode; onClose?: () => void }>;
-  };
+  /** Which vaults agents in this chat may use, and the task's own items. */
+  secrets?: ComposerSettingPanel;
   /** Where the chat runs: managed sandbox and environment, or a connected machine. */
   runsOn?: ComposerSettingPanel;
   /** Who can see the chat, when the organization offers a choice. */
@@ -301,21 +299,15 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
-          {props.variableSets ? (
-            <DropdownMenuItem
-              data-composer-panel="variables"
-              className="cursor-pointer"
+          {props.secrets ? (
+            <SettingRowItem
+              panel="secrets"
+              icon={<LockKeyholeIcon className="size-4" />}
+              label="Secrets"
+              setting={props.secrets}
               disabled={props.disabled}
-              onSelect={(event) => {
-                event.preventDefault();
-                setPanel("variables");
-              }}
-            >
-              <BoxIcon className="size-4" />
-              Variable sets
-              <DropdownMenuMeta>{props.variableSets.selectedCount || ""}</DropdownMenuMeta>
-              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
-            </DropdownMenuItem>
+              onOpen={() => setPanel("secrets")}
+            />
           ) : null}
           {props.runsOn || props.visibility ? <DropdownMenuSeparator /> : null}
           {props.runsOn ? (
@@ -406,13 +398,10 @@ export function ComposerMobilePlusPanel(
         />
       ) : panel === "repos" && repositories ? (
         withLeading(repositories.panel, backButton)
-      ) : panel === "variables" && props.variableSets ? (
-        cloneElement(props.variableSets.panel, {
+      ) : panel === "secrets" && props.secrets ? (
+        cloneElement(props.secrets.panel, {
           leading: backButton,
-          onClose: () => {
-            setOpen(false);
-            setPanel("root");
-          },
+          presentation: dialogOpen ? "dialog" : "menu",
         })
       ) : panel === "runs-on" && props.runsOn ? (
         cloneElement(props.runsOn.panel, {
@@ -457,7 +446,7 @@ export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
   tools: "Connectors",
   repos: "Repositories",
   voice: "Voice model",
-  variables: "Variable sets",
+  secrets: "Secrets",
   settings: "Chat settings",
   "runs-on": "Runs on",
   visibility: "Who can see this chat",
@@ -513,6 +502,8 @@ function ComposerPanelContent(props: {
 }
 
 function SettingRowItem(props: {
+  /** Focus returns to this row when its drill-in goes back. */
+  panel?: Panel;
   icon: ReactNode;
   label: string;
   setting: ComposerSettingPanel;
@@ -521,6 +512,7 @@ function SettingRowItem(props: {
 }) {
   return (
     <DropdownMenuItem
+      data-composer-panel={props.panel}
       className="cursor-pointer"
       disabled={props.disabled || props.setting.disabled}
       onSelect={(event) => {

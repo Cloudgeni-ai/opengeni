@@ -17,7 +17,6 @@ import {
   type BrowserSupervisorDriver,
   type BrowserSupervisorDriverContext,
   type BrowserDownloadStore,
-  type SqliteBrowserProtectedAuthJournal,
   type SqliteBrowserStateTransferJournal,
 } from "../src";
 import {
@@ -1562,10 +1561,6 @@ function fakeDriver(
       await hooks.dispatch?.(instance);
       return observation();
     },
-    async protectedFill() {
-      requireOpen();
-      return { target: { ...target }, status: "submitted" };
-    },
     async externalAuth(authCommand) {
       requireOpen();
       if (hooks.externalAuth) return await hooks.externalAuth(instance, authCommand);
@@ -2221,7 +2216,6 @@ describe("same-working-directory controller restart", () => {
                 workingJournal: SqliteBrowserWorkingRuntimeJournal;
                 workingReceipt: BrowserWorkingRuntimeReceipt;
                 journal: SqliteBrowserOperationJournal;
-                protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
                 stateJournal: SqliteBrowserStateTransferJournal;
                 downloadStore: BrowserDownloadStore;
               }
@@ -2246,7 +2240,6 @@ describe("same-working-directory controller restart", () => {
         });
         const workingClose = spyOn(runtime.workingJournal, "close");
         const actionClose = spyOn(runtime.journal, "close");
-        const authClose = spyOn(runtime.protectedAuthJournal, "close");
         const stateClose = spyOn(runtime.stateJournal, "close");
         const downloadClose = spyOn(runtime.downloadStore, "close");
         const interrupt = spyOn(runtime.downloadStore, "interruptInProgress");
@@ -2258,10 +2251,10 @@ describe("same-working-directory controller restart", () => {
           expect(rejected).toBe(failure);
           expect(closes).toBe(0);
           expect(
-            [workingClose, actionClose, authClose, stateClose, downloadClose, interrupt].map(
+            [workingClose, actionClose, stateClose, downloadClose, interrupt].map(
               (spy) => spy.mock.calls.length,
             ),
-          ).toEqual([0, 0, 0, 0, 0, 0]);
+          ).toEqual([0, 0, 0, 0, 0]);
           expect(sessions.get(options.browserSessionId)).toBe(runtime);
           expect(runtime.lifecycle).toBe("ending");
           expect(runtime.workingReceipt).toBe(originalReceipt);
@@ -2287,7 +2280,6 @@ describe("same-working-directory controller restart", () => {
             write,
             workingClose,
             actionClose,
-            authClose,
             stateClose,
             downloadClose,
             interrupt,
@@ -2325,7 +2317,6 @@ describe("same-working-directory controller restart", () => {
               workingJournal: SqliteBrowserWorkingRuntimeJournal;
               workingReceipt: BrowserWorkingRuntimeReceipt | null;
               journal: SqliteBrowserOperationJournal;
-              protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
               stateJournal: SqliteBrowserStateTransferJournal;
               downloadStore: BrowserDownloadStore | null;
             }
@@ -2341,7 +2332,6 @@ describe("same-working-directory controller restart", () => {
       });
       const workingClose = spyOn(runtime.workingJournal, "close");
       const actionClose = spyOn(runtime.journal, "close");
-      const authClose = spyOn(runtime.protectedAuthJournal, "close");
       const stateClose = spyOn(runtime.stateJournal, "close");
       const downloadClose = spyOn(runtime.downloadStore!, "close");
       try {
@@ -2350,10 +2340,9 @@ describe("same-working-directory controller restart", () => {
           .catch((error) => error);
         expect({
           action: actionClose.mock.calls.length,
-          auth: authClose.mock.calls.length,
           state: stateClose.mock.calls.length,
           download: downloadClose.mock.calls.length,
-        }).toEqual({ action: 1, auth: 1, state: 1, download: 1 });
+        }).toEqual({ action: 1, state: 1, download: 1 });
         expect(rejected).toBeInstanceOf(AggregateError);
         expect((rejected as AggregateError).errors).toEqual([failure]);
         expect(workingClose).not.toHaveBeenCalled();
@@ -2380,14 +2369,7 @@ describe("same-working-directory controller restart", () => {
         expect(supervisor.isIdle()).toBe(true);
         expect(await exists(runtime.sessionDirectory)).toBe(false);
       } finally {
-        for (const spy of [
-          complete,
-          workingClose,
-          actionClose,
-          authClose,
-          stateClose,
-          downloadClose,
-        ])
+        for (const spy of [complete, workingClose, actionClose, stateClose, downloadClose])
           spy.mockRestore();
         await supervisor.close();
       }

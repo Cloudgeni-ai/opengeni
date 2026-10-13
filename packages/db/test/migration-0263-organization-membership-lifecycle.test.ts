@@ -1,3 +1,4 @@
+import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
@@ -14,7 +15,6 @@ import {
   completeOrganizationRetentionDeletion,
   createConnection,
   createSession,
-  createVariableSet,
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUser,
@@ -39,8 +39,6 @@ import {
   updateOrganizationPrivateSessionSettings,
   updateOrganizationRetentionPolicy,
   runMigrations,
-  deleteVariableSet,
-  VariableSetAttachedError,
   type DbClient,
 } from "../src";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
@@ -1850,19 +1848,19 @@ describe("migration 0263 organization membership lifecycle", () => {
       fixture,
       "Retention Variable Set shared workspace",
     );
-    const survivor = await createVariableSet(client.db, {
+    const survivor = await createLegacyVariableSet(client.db, {
       accountId: fixture.owner.organizationId,
       workspaceId: sharedWorkspaceId,
       name: `survivor-${crypto.randomUUID()}`,
     });
-    const firstOwned = await createVariableSet(client.db, {
+    const firstOwned = await createLegacyVariableSet(client.db, {
       accountId: fixture.owner.organizationId,
       workspaceId: fixture.member.personalWorkspaceId!,
       scope: "user",
       subjectId: fixture.targetSubject,
       name: `owned-first-${crypto.randomUUID()}`,
     });
-    const secondOwned = await createVariableSet(client.db, {
+    const secondOwned = await createLegacyVariableSet(client.db, {
       accountId: fixture.owner.organizationId,
       workspaceId: fixture.member.personalWorkspaceId!,
       scope: "user",
@@ -1906,18 +1904,6 @@ describe("migration 0263 organization membership lifecycle", () => {
         ${fixture.owner.organizationId}, ${sharedWorkspaceId}, ${sharedSession.sandboxGroupId},
         'warm', 'none', now() + interval '1 hour'
       )`;
-
-    await expect(
-      deleteVariableSet(
-        client.db,
-        {
-          accountId: fixture.owner.organizationId,
-          workspaceId: sharedWorkspaceId,
-          subjectId: fixture.targetSubject,
-        },
-        firstOwned.id,
-      ),
-    ).rejects.toBeInstanceOf(VariableSetAttachedError);
 
     const member = await expireOrganizationMember(fixture);
     const operationId = crypto.randomUUID();
@@ -1996,7 +1982,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       fixture,
       "Retention Variable Set rollback workspace",
     );
-    const owned = await createVariableSet(client.db, {
+    const owned = await createLegacyVariableSet(client.db, {
       accountId: fixture.owner.organizationId,
       workspaceId: fixture.member.personalWorkspaceId!,
       scope: "user",
@@ -2122,14 +2108,14 @@ describe("migration 0263 organization membership lifecycle", () => {
     const second = await provisionOrganizationMember("retention-variable-set-tenant-second");
     const firstWorkspaceId = await createSharedWorkspaceForMember(first, "First tenant shared");
     const secondWorkspaceId = await createSharedWorkspaceForMember(second, "Second tenant shared");
-    const firstOwned = await createVariableSet(client.db, {
+    const firstOwned = await createLegacyVariableSet(client.db, {
       accountId: first.owner.organizationId,
       workspaceId: first.member.personalWorkspaceId!,
       scope: "user",
       subjectId: first.targetSubject,
       name: `first-owned-${crypto.randomUUID()}`,
     });
-    const secondOwned = await createVariableSet(client.db, {
+    const secondOwned = await createLegacyVariableSet(client.db, {
       accountId: second.owner.organizationId,
       workspaceId: second.member.personalWorkspaceId!,
       scope: "user",

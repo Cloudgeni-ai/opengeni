@@ -14,28 +14,13 @@ import {
   type GitCredentialTransport,
   type GitCredentials,
   type ResourceRef,
-  type SandboxSecrets,
   type SessionTurn,
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { personalGitHubRepositoryResources } from "@opengeni/core";
 import { mintSandboxCodemodeToken, type SandboxCodemodeAuthority } from "@opengeni/runtime/sandbox";
-import {
-  loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
-  type Database,
-  type VariableSetForRun as WorkspaceEnvironmentForRun,
-} from "@opengeni/db";
 import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
-
-// Re-exported from the shared @opengeni/db leaf (moved there so the API-direct
-// attach paths can load the SAME decrypted workspace environment the turn
-// declares — keeping the box-manifest env and agent-manifest env identical).
-// Existing worker import sites (agent-turn) continue importing from here.
-export {
-  loadWorkspaceEnvironmentForRunFromDb as loadWorkspaceEnvironmentForRun,
-  type WorkspaceEnvironmentForRun,
-};
 
 // §7.6 connection-credential provider — the run's workspace identity, threaded so the connection-credential
 // provider can be called with the run's tenant context AND so the workspace-scope cross-check
@@ -43,15 +28,6 @@ export {
 export type ConnectionScope = {
   accountId: string;
   workspaceId: string;
-};
-
-export type VariableSetCredentialAuthority = {
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  initiator: TurnInitiator;
-  initiatingHumanSubjectId: string | null;
 };
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
@@ -122,80 +98,10 @@ type RunGitCredentialOptions = {
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
 
-// §7.6 connection-credential provider — load the run's workspace environment, delegating the DECRYPT to a
-// host `sandboxSecrets` provider when one is bound (the host owns the secret
-// vault + encryption key in embedded/separate topologies) and otherwise running
-// today's local `environmentsEncryptionKeyBytes`-keyed decrypt byte-for-byte.
-//
-// Unattached runs (environmentId === null) short-circuit identically in BOTH
-// modes: zero DB/provider work, returns null. When a provider IS bound it owns
-// the decrypt end-to-end (it reads the host's own store), so the local DB read
-// is skipped — the provider is the sole source of truth for that leg.
-export async function loadWorkspaceEnvironmentForRunWithCredentials(
-  db: Database,
-  settings: Settings,
-  scope: ConnectionScope,
-  environmentId: string | null,
-  authority: VariableSetCredentialAuthority,
-  sandboxSecrets?: ConnectionCredentialsPort["sandboxSecrets"],
-  options: {
-    /**
-     * Exact accepted scheduled-occurrence generation for this Variable Set,
-     * resolved by the caller from the immutable run snapshot; null/omitted for
-     * ordinary live turns.
-     */
-    expectedGeneration?: number | null;
-  } = {},
-): Promise<WorkspaceEnvironmentForRun | null> {
-  if (!sandboxSecrets) {
-    return loadWorkspaceEnvironmentForRunFromDb(db, settings, {
-      ...scope,
-      variableSetId: environmentId,
-      authority: {
-        kind: "agent_attempt",
-        subjectId: authority.initiatingHumanSubjectId ?? authority.initiator.subjectId,
-        ...authority,
-      },
-    });
-  }
-  if (!environmentId) {
-    return null;
-  }
-  const expectedGeneration = options.expectedGeneration ?? null;
-  const secrets: SandboxSecrets = await sandboxSecrets({
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId,
-    ...authority,
-    variableSetId: environmentId,
-    ...(expectedGeneration === null ? {} : { expectedGeneration }),
-  });
-  // workspace-scope cross-check: the provider must echo THIS run's workspace before we apply its
-  // decrypted values into the sandbox.
-  assertWorkspaceEcho("sandboxSecrets", scope, secrets.workspaceId);
-  if (
-    secrets.accountId !== scope.accountId ||
-    secrets.sessionId !== authority.sessionId ||
-    secrets.turnId !== authority.turnId ||
-    secrets.attemptId !== authority.attemptId ||
-    secrets.executionGeneration !== authority.executionGeneration ||
-    secrets.variableSetId !== environmentId ||
-    // A scheduled attempt materializes only the exact accepted generation:
-    // the host must echo it and return that generation's values.
-    (expectedGeneration !== null &&
-      (secrets.expectedGeneration !== expectedGeneration ||
-        secrets.generation !== expectedGeneration))
-  ) {
-    throw new Error("connection-credential provider (sandboxSecrets) returned stale authority");
-  }
-  return {
-    id: secrets.id ?? environmentId,
-    name: secrets.name ?? environmentId,
-    description: secrets.description ?? null,
-    scope: secrets.scope,
-    generation: secrets.generation,
-    values: secrets.values,
-  };
-}
+// W1 (secrets delivery): the worker no longer loads or decrypts Variable Sets
+// for a turn, and the `sandboxSecrets` leg is gone. User secrets reach a
+// command only through `{{secret:…}}` references resolved at the exec
+// boundary; the manifest carries deployment constants only.
 
 // Workspace-scope cross-check. A credential provider echoes the workspace it scoped
 // the credential to; we ASSERT it equals the run's workspace BEFORE the caller
@@ -217,7 +123,6 @@ function assertWorkspaceEcho(
 export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
-  workspaceEnvironment: Record<string, string> = {},
   // §7.6 connection-credential provider - optional host git-credential provider + the run scope it needs
   // (unset, the standalone default → self-mint from `settings` byte-for-byte).
   // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
@@ -245,11 +150,10 @@ export async function sandboxEnvironmentForRun(
   codemodeToken?: string;
   codemodeTokenExpiresAt?: Date;
 }> {
-  // Precedence: deployment allowlist < git identity < workspace environment
-  // < backend-aware HOME (the STABLE base, shared with the API-direct attach
-  // paths via stableSandboxEnvironmentForRun) < platform run-scoped git auth
-  // (applied below, always last). Reserved name validation at write time prevents
-  // workspace values from colliding with the platform-managed entries.
+  // Precedence: deployment allowlist < git identity < backend-aware HOME (the
+  // STABLE base, shared with the API-direct attach paths via
+  // stableSandboxEnvironmentForRun) < platform run-scoped git auth (applied
+  // below, always last). No user values: secrets are delivered per command (W1).
   //
   // TOKEN-BROKER (B1): run-scoped git provider tokens are NO LONGER layered into
   // the box/agent MANIFEST env (no GH_TOKEN/GITHUB_TOKEN/GITLAB_TOKEN/
@@ -263,7 +167,7 @@ export async function sandboxEnvironmentForRun(
   // GitHub keeps the legacy `gitToken`/OPENGENI_GIT_TOKEN_FILE alias. The worker
   // proactively renews every selected provider behind these stable pointers.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
-  const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
+  const environment = stableSandboxEnvironmentForRun(settings, stableOptions);
   const codemodeDelivery = options.codemodeDelivery ?? "managed_file";
   // Connected Machines keep their machine-wide environment untouched. Their
   // URL, package hint, and direct bearer are projected only onto an exact child

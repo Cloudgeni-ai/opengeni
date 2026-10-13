@@ -11,12 +11,11 @@ import {
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserExternalAuthCommand,
+  BrowserPasskeySyncRequest,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
-  BrowserProtectedAuthFillCommand,
   BrowserTargetListResponse,
-  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
   COMPUTER_RFB_WEBSOCKET_PROTOCOL,
@@ -562,20 +561,6 @@ export class BrowserControlServer {
       }
       return success(await this.supervisor.stageWorkspaceFiles(reference, staged.data));
     }
-    if (segments.length === 4 && segments[3] === "protected-auth-fills") {
-      if (request.method !== "POST") {
-        throw new ProtocolError("invalid_action", "method not allowed", 405);
-      }
-      const command = parseProtectedAuthFillCommand(await readJson(request));
-      if (command.browserSessionId !== browserSessionId) {
-        throw new ProtocolError(
-          "operation_conflict",
-          "protected fill targets another browser session",
-          409,
-        );
-      }
-      return success(await this.supervisor.protectedAuthFill(command));
-    }
     if (segments.length === 4 && segments[3] === "external-auth") {
       if (request.method !== "POST") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
@@ -606,6 +591,23 @@ export class BrowserControlServer {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       return success(this.supervisor.readClipboard(reference));
+    }
+    if (segments.length === 5 && segments[3] === "passkeys" && segments[4] === "sync") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const sync = BrowserPasskeySyncRequest.safeParse(await readJson(request));
+      if (!sync.success) {
+        throw new ProtocolError("invalid_action", "passkey sync request is invalid", 400);
+      }
+      if (sync.data.browserSessionId !== browserSessionId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "passkey sync targets another browser session",
+          409,
+        );
+      }
+      return success(await this.supervisor.passkeySync(sync.data));
     }
     if (segments.length === 5 && segments[3] === "downloads") {
       if (request.method !== "GET") {
@@ -642,15 +644,6 @@ export class BrowserControlServer {
       }
       const operationId = requireUuid(segments[4], "operation id");
       const receipt = this.supervisor.receipt(reference, operationId);
-      if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
-      return success(receipt);
-    }
-    if (segments.length === 5 && segments[3] === "protected-auth-operations") {
-      if (request.method !== "GET") {
-        throw new ProtocolError("invalid_action", "method not allowed", 405);
-      }
-      const operationId = requireUuid(segments[4], "operation id");
-      const receipt = this.supervisor.protectedAuthReceipt(reference, operationId);
       if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
       return success(receipt);
     }
@@ -2065,11 +2058,11 @@ function interactionStatus(code: string): number {
 }
 
 function routeNeedsControl(segments: readonly string[], request: Request): boolean {
+  // Passkey sync carries private keys both ways.
+  if (segments[3] === "passkeys") return true;
   if (
     segments[3] === "actions" ||
     segments[3] === "external-auth" ||
-    segments[3] === "protected-auth-fills" ||
-    segments[3] === "protected-auth-operations" ||
     (segments[3] === "downloads" && segments[5] === "exports") ||
     (segments[3] === "operations" && request.method === "POST")
   ) {
@@ -2123,14 +2116,6 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
 function parseActionCommand(value: unknown): BrowserActionCommandValue {
   const result = BrowserActionCommand.safeParse(value);
   if (!result.success) throw new ProtocolError("invalid_action", "browser action is invalid", 400);
-  return result.data;
-}
-
-function parseProtectedAuthFillCommand(value: unknown): BrowserProtectedAuthFillCommandValue {
-  const result = BrowserProtectedAuthFillCommand.safeParse(value);
-  if (!result.success) {
-    throw new ProtocolError("invalid_action", "protected-fill command is invalid", 400);
-  }
   return result.data;
 }
 

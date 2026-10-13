@@ -72,6 +72,11 @@ server pushes to every device that person signed in with, per their rules in
 Settings. Tapping a notification opens the session in the right account and
 workspace.
 
+A question that asks for a secret (a password, code or API key) is answered
+only in the session's secure field, which offers the system password manager
+and saves the value to a vault. Its notification shows the question's title;
+a reply typed into the notification is not used and the session opens instead.
+
 Server configuration:
 
 | Variable | Purpose |

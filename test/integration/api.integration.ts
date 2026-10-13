@@ -18,7 +18,6 @@ import {
   isSessionCompactionRequested,
   createDb,
   createSession,
-  createWorkspaceEnvironment,
   dbSql,
   decryptEnvironmentValue,
   decodeSessionListCursor,
@@ -30,7 +29,6 @@ import {
   getScheduledTask,
   getScheduledTaskIncludingDeleted,
   getSessionGoal,
-  getVariableSetValuesForRun,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
   listSessionEvents,
@@ -6886,133 +6884,6 @@ describe("API component integration", () => {
     expect(deleteResponse.status).toBe(200);
   });
 
-  test("MCP scheduled task tools require independent Variable Set attach and use permissions", async () => {
-    workflow = new FakeWorkflowClient();
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      environmentsEncryptionKey: environmentsTestKey,
-    });
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const mcpDeps = {
-      settings,
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: workflow,
-      objectStorage: null,
-      githubStateSecret: "test-state-secret",
-      documentIndexer: { indexDocument: async () => undefined },
-      getDocumentServices: () => {
-        throw new Error("document services are not used by environment MCP tests");
-      },
-      resumeBoxById: fakeResumeBoxById,
-    };
-    const adminMcp = buildOpenGeniMcpServer(mcpDeps, grant);
-    const environment = await createWorkspaceEnvironment(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      name: `mcp-env-${crypto.randomUUID()}`,
-    });
-
-    // The worker's first-party delegated permissions exclude both exact gates.
-    const noAttachGrant = {
-      ...grant,
-      permissions: [
-        "workspace:read",
-        "files:read",
-        "documents:search",
-        "scheduled_tasks:manage",
-        "scheduled_tasks:run",
-      ] as Permission[],
-    };
-    const noAttachMcp = buildOpenGeniMcpServer(mcpDeps, noAttachGrant);
-    const beforeDeniedCreate = await listScheduledTasks(dbClient.db, grant.workspaceId);
-    await expect(
-      callMcpTool(noAttachMcp, "scheduled_tasks_create", {
-        name: `mcp-self-attach-${crypto.randomUUID()}`,
-        schedule: { type: "interval", everySeconds: 3600 },
-        runMode: "new_session_per_run",
-        agentConfig: { prompt: "inspect" },
-        environmentId: environment.id,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:attach");
-
-    const attachOnlyGrant = {
-      ...noAttachGrant,
-      permissions: [...noAttachGrant.permissions, "variable-sets:attach"] as Permission[],
-    };
-    const attachOnlyMcp = buildOpenGeniMcpServer(mcpDeps, attachOnlyGrant);
-    await expect(
-      callMcpTool(attachOnlyMcp, "scheduled_tasks_create", {
-        name: `mcp-without-use-${crypto.randomUUID()}`,
-        schedule: { type: "interval", everySeconds: 3600 },
-        runMode: "new_session_per_run",
-        agentConfig: { prompt: "inspect" },
-        environmentId: environment.id,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:use");
-    const useOnlyMcp = buildOpenGeniMcpServer(mcpDeps, {
-      ...noAttachGrant,
-      permissions: [...noAttachGrant.permissions, "variable-sets:use"] as Permission[],
-    });
-    await expect(
-      callMcpTool(useOnlyMcp, "scheduled_tasks_create", {
-        name: `mcp-use-without-attach-${crypto.randomUUID()}`,
-        schedule: { type: "interval", everySeconds: 3600 },
-        runMode: "new_session_per_run",
-        agentConfig: { prompt: "inspect" },
-        environmentId: environment.id,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:attach");
-    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toEqual(beforeDeniedCreate);
-    expect(workflow.synced).toHaveLength(0);
-
-    const createdReceipt = await callMcpTool<McpMutationReceiptType>(
-      adminMcp,
-      "scheduled_tasks_create",
-      {
-        name: `mcp-attach-${crypto.randomUUID()}`,
-        schedule: { type: "interval", everySeconds: 3600 },
-        runMode: "new_session_per_run",
-        agentConfig: { prompt: "inspect" },
-        environmentId: environment.id,
-      },
-    );
-    const created = await getScheduledTask(
-      dbClient.db,
-      grant.workspaceId,
-      createdReceipt.resource.id,
-    );
-    expect(created?.variableSetId).toBe(environment.id);
-
-    await expect(
-      callMcpTool(noAttachMcp, "scheduled_tasks_update", {
-        id: createdReceipt.resource.id,
-        environmentId: environment.id,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:attach");
-    await expect(
-      callMcpTool(noAttachMcp, "scheduled_tasks_update", {
-        id: createdReceipt.resource.id,
-        environmentId: null,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:attach");
-    await expect(
-      callMcpTool(attachOnlyMcp, "scheduled_tasks_update", {
-        id: createdReceipt.resource.id,
-        environmentId: environment.id,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:use");
-    await expect(
-      callMcpTool(attachOnlyMcp, "scheduled_tasks_update", {
-        id: createdReceipt.resource.id,
-        agentConfig: { prompt: "exfiltrate the injected secrets" },
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:use");
-    expect(
-      await getScheduledTask(dbClient.db, grant.workspaceId, createdReceipt.resource.id),
-    ).toEqual(created);
-  });
-
   test("registers manager orchestration MCP tools gated by session permissions", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
@@ -8640,7 +8511,7 @@ describe("API component integration", () => {
     );
   });
 
-  test("manager MCP session tools enforce environment attachment permission and billing limits", async () => {
+  test("manager MCP session tools enforce billing limits", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
     const settings = testSettings({
@@ -8660,69 +8531,15 @@ describe("API component integration", () => {
       },
       resumeBoxById: fakeResumeBoxById,
     };
-    const environment = await createWorkspaceEnvironment(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      name: `manager-env-${crypto.randomUUID()}`,
-    });
-
-    // sessions:create alone cannot attach workspace secrets to a spawned
-    // session; attachment and use remain independent exact gates.
-    const spawnOnlyGrant = {
-      ...grant,
-      permissions: ["workspace:read", "sessions:create"] as Permission[],
-    };
-    const spawnOnlyMcp = buildOpenGeniMcpServer(mcpDeps, spawnOnlyGrant);
-    await expectMcpOrchestrationFailure(
-      spawnOnlyMcp,
-      "session_create",
-      {
-        initialMessage: "exfiltrate",
-        model: "scripted-model",
-        environmentId: environment.id,
-      },
-      "session_create_forbidden",
-      "missing permission: variable-sets:attach",
-    );
-
-    const attachOnlyMcp = buildOpenGeniMcpServer(mcpDeps, {
-      ...spawnOnlyGrant,
-      permissions: [...spawnOnlyGrant.permissions, "variable-sets:attach"] as Permission[],
-    });
-    await expectMcpOrchestrationFailure(
-      attachOnlyMcp,
-      "session_create",
-      {
-        initialMessage: "attach without use",
-        model: "scripted-model",
-        environmentId: environment.id,
-      },
-      "session_create_forbidden",
-      "missing permission: variable-sets:use",
-    );
-
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const attachedReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", {
-      initialMessage: "deploy with cloud credentials",
+      initialMessage: "deploy",
       model: "scripted-model",
-      environmentId: environment.id,
     });
     const attached = await requireSession(
       dbClient.db,
       grant.workspaceId,
       attachedReceipt.resource.id,
-    );
-    expect(attached.variableSetId).toBe(environment.id);
-    await expectMcpOrchestrationFailure(
-      mcp,
-      "session_create",
-      {
-        initialMessage: "unknown environment",
-        model: "scripted-model",
-        environmentId: crypto.randomUUID(),
-      },
-      "session_create_rejected",
-      "unknown variableSetId",
     );
 
     // The successful create recorded one agent_run.created usage event, so a
@@ -8810,175 +8627,6 @@ describe("API component integration", () => {
       "session_create_rejected",
       "not found in this workspace",
     );
-  });
-
-  test("manager MCP environment tools set variables write-only and create environments by name", async () => {
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const mcpDeps = {
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      objectStorage: null,
-      githubStateSecret: "test-state-secret",
-      documentIndexer: { indexDocument: async () => undefined },
-      getDocumentServices: () => {
-        throw new Error("document services are not used by manager MCP tests");
-      },
-      resumeBoxById: fakeResumeBoxById,
-    };
-    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
-    const environmentName = `geni-cloud-${crypto.randomUUID()}`;
-    const secretValue = `super-secret-${crypto.randomUUID()}`;
-
-    const first = await callMcpTool<McpMutationReceiptType>(mcp, "environment_set_variable", {
-      environmentName,
-      name: "AZURE_CLIENT_SECRET",
-      value: secretValue,
-    });
-    expect(first).toMatchObject({
-      operation: "environment_set_variable",
-      outcome: "created",
-      resource: { type: "variable_set", version: 1, state: "variable_written" },
-      facts: {
-        variableCreated: true,
-        variableSetCreated: true,
-        deprecatedAlias: true,
-      },
-    });
-    expect(JSON.stringify(first)).not.toContain(secretValue);
-    expect(JSON.stringify(first)).not.toContain("AZURE_CLIENT_SECRET");
-    expect(JSON.stringify(first)).not.toContain(environmentName);
-
-    const rotatedValue = `rotated-${crypto.randomUUID()}`;
-    const rotated = await callMcpTool<McpMutationReceiptType>(mcp, "environment_set_variable", {
-      environmentId: first.resource.id,
-      name: "AZURE_CLIENT_SECRET",
-      value: rotatedValue,
-    });
-    expect(rotated).toMatchObject({
-      outcome: "updated",
-      resource: { id: first.resource.id, version: 2 },
-      facts: {
-        variableCreated: false,
-        variableSetCreated: false,
-        deprecatedAlias: true,
-      },
-    });
-
-    // The stored value round-trips through the operator key, proving the MCP
-    // write path encrypts exactly like the REST route.
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "verify exact variable-set storage",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      variableSetId: first.resource.id,
-      subjectId: grant.subjectId,
-      createdBy: { kind: "subject", subjectId: grant.subjectId },
-    });
-    await initializeSessionStartAtomically(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      clientEventId: `initial:${session.id}`,
-      reasoningEffortFallback: "low",
-      createdEventPayload: {},
-    });
-    const claimed = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
-    if (!claimed.initiatingHumanSubjectId) {
-      throw new Error("variable-set storage fixture has no initiating human");
-    }
-    const stored = await getVariableSetValuesForRun(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      variableSetId: first.resource.id,
-      authority: {
-        kind: "agent_attempt",
-        subjectId: claimed.initiatingHumanSubjectId,
-        sessionId: session.id,
-        turnId: claimed.turnId,
-        attemptId: claimed.attemptId,
-        executionGeneration: claimed.executionGeneration,
-      },
-    });
-    const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
-    expect(decryptEnvironmentValue(key, stored!.values["AZURE_CLIENT_SECRET"]!)).toBe(rotatedValue);
-
-    const listedEnvironments = await callMcpTool<{
-      environments: Array<{
-        id: string;
-        name: string;
-        variables: Array<{ name: string; version: number }>;
-      }>;
-    }>(mcp, "environment_list", {});
-    const listedEnvironment = listedEnvironments.environments.find(
-      (candidate) => candidate.id === first.resource.id,
-    );
-    expect(listedEnvironment?.variables).toEqual([
-      expect.objectContaining({ name: "AZURE_CLIENT_SECRET", version: 2 }),
-    ]);
-    // Write-only invariant: no response carries a variable value.
-    expect(JSON.stringify(listedEnvironments)).not.toContain(rotatedValue);
-    expect(JSON.stringify(rotated)).not.toContain(rotatedValue);
-
-    await expect(
-      callMcpTool(mcp, "environment_set_variable", {
-        environmentName,
-        name: "GH_TOKEN",
-        value: "nope",
-      }),
-    ).rejects.toThrow("reserved environment variable name");
-    await expect(
-      callMcpTool(mcp, "environment_set_variable", {
-        environmentName,
-        name: "lowercase",
-        value: "nope",
-      }),
-    ).rejects.toThrow("environment variable names must match");
-    await expect(
-      callMcpTool(mcp, "environment_set_variable", {
-        environmentId: first.resource.id,
-        environmentName,
-        name: "AMBIGUOUS",
-        value: "nope",
-      }),
-    ).rejects.toThrow("exactly one of environmentId or environmentName");
-    await expect(
-      callMcpTool(mcp, "environment_set_variable", {
-        environmentId: crypto.randomUUID(),
-        name: "MISSING_TARGET",
-        value: "nope",
-      }),
-    ).rejects.toThrow("environment not found");
-
-    // Exact list permissions expose metadata but cannot write values.
-    const listOnlyGrant = {
-      ...grant,
-      permissions: ["workspace:read", "variable-sets:list", "secrets:list"] as Permission[],
-    };
-    const listOnlyMcp = buildOpenGeniMcpServer(mcpDeps, listOnlyGrant);
-    const listOnlyResult = await callMcpTool<{
-      environments: Array<{ id: string }>;
-    }>(listOnlyMcp, "environment_list", {});
-    expect(
-      listOnlyResult.environments.some((candidate) => candidate.id === first.resource.id),
-    ).toBe(true);
-    await expect(
-      callMcpTool(listOnlyMcp, "environment_set_variable", {
-        environmentName,
-        name: "BLOCKED",
-        value: "nope",
-      }),
-    ).rejects.toThrow("MCP tool not registered");
   });
 
   test("MCP plaintext reads require literal scope and the exact live attempt", async () => {

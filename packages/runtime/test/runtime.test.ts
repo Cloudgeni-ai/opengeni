@@ -545,6 +545,35 @@ describe("structured human-input runtime boundary", () => {
   });
 
   test("serializes an ordinary question with an explicit null skill review", () => {
+    // A model filling the strict schema sends Other/options on a secret
+    // question; that must never fail the turn, and the stored card drops them.
+    const secret = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "secret-with-other",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [
+              {
+                id: "password",
+                kind: "secret",
+                prompt: "Password for the dashboard",
+                options: [],
+                allowOther: true,
+                secret: { item: "Dashboard", saveTo: "user" },
+              },
+            ],
+          }),
+        },
+      },
+    ]);
+    expect(secret[0]?.input.questions[0]).toMatchObject({
+      kind: "secret",
+      options: [],
+      allowOther: false,
+    });
+
     const serialized = serializeHumanInputRequests([
       {
         name: HUMAN_INPUT_TOOL_NAME,
@@ -6776,12 +6805,10 @@ describe("runtime event normalization", () => {
     expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
-  test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
-    // OWNED-resume refresh is a FEATURE (a workspace-env edit reaching a
-    // long-lived owned local/docker box) — owned applyManifest merges env with
-    // no guard. The drift EVENT is the durable trace; the provided-session
-    // guard fix lives in pinProvidedSessionManifestEnvironment (tested below),
-    // NOT here.
+  test("refreshes manifest environment on OWNED resumed sessions without drift reporting", async () => {
+    // OWNED-resume refresh carries constant/pointer changes to a long-lived
+    // owned box (owned applyManifest merges env with no guard). Since W1 there
+    // is no drift event: the manifest holds constants only.
     const current = new Manifest({
       root: "/workspace",
       entries: {
@@ -6827,14 +6854,7 @@ describe("runtime event normalization", () => {
     ).toMatchObject({
       GH_TOKEN: { value: "new-token" },
     });
-    // Drift rides a durable event as key names only — values are secrets.
-    expect(events).toEqual([
-      {
-        type: "sandbox.env.drift",
-        payload: { added: ["NEW_KEY"], removed: [], changed: ["GH_TOKEN"] },
-      },
-    ]);
-    expect(JSON.stringify(events)).not.toContain("token");
+    expect(events).toEqual([]);
   });
 
   test("pins provided-session agent manifests to the live box environment", async () => {
@@ -6876,12 +6896,23 @@ describe("runtime event normalization", () => {
       "NEW_KEY",
     );
     expect(Object.keys(agent.defaultManifest.entries)).toEqual(["repos/acme/one"]);
-    expect(events).toEqual([
-      {
-        type: "sandbox.env.drift",
-        payload: { added: ["NEW_KEY"], removed: [], changed: [] },
-      },
-    ]);
+    // W1/RM-3: no drift machinery, so no event.
+    expect(events).toEqual([]);
+  });
+
+  test("RM-3: buildManifest keeps deployment constants only", () => {
+    const settings = testSettings();
+    const manifest = buildManifest(settings, [], {
+      HOME: "/workspace",
+      PATH: "/usr/bin",
+      GIT_AUTHOR_NAME: "Bot",
+      OPENGENI_CODEMODE_URL: "http://example.invalid/codemode",
+      STRIPE_KEY: "sk_live_should_never_ride",
+      API_TOKEN: "user-secret",
+    });
+    const names = Object.keys(JSON.parse(JSON.stringify(manifest.environment)));
+    expect(names.sort()).toEqual(["GIT_AUTHOR_NAME", "HOME", "OPENGENI_CODEMODE_URL", "PATH"]);
+    expect(JSON.stringify(manifest)).not.toContain("user-secret");
   });
 
   test("provided-session env pin is a no-op without drift", async () => {

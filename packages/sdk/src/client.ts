@@ -83,6 +83,7 @@ import {
   OpenGeniSessionListCursorError,
 } from "./errors";
 import type { OpenGeniToolsFacade, OpenGeniToolTransport, OpenGeniWorkspaceTools } from "./tools";
+import { vaultsApi, type VaultsApi } from "./vaults-api";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -184,8 +185,6 @@ import {
   type NetworkRouteListOptions,
   type NetworkRouteListResponse,
   type NetworkRouteMutationResponse,
-  type ProtectedAuthFillRequest,
-  type ProtectedAuthFillResponse,
   type PublishBrowserRevisionRequest,
   type PublishBrowserRevisionResponse,
   type ReportAuthRunRequest,
@@ -388,9 +387,6 @@ import type {
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   CreateSessionResponse,
-  CreateVariableSetRequest,
-  ResolveVariableSetAttachmentsRequest,
-  ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
@@ -609,11 +605,9 @@ import type {
   UpdateSessionGoalRequest,
   ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
-  UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
-  UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
@@ -621,9 +615,6 @@ import type {
   UpdateWorkspaceSettingsRequest,
   SetWorkspaceDefaultRigRequest,
   UploadFileInput,
-  VariableSet,
-  VariableSetSecret,
-  VariableSetVariableMetadata,
   Channel,
   CreateChannelRequest,
   ReorderChannelsRequest,
@@ -1525,19 +1516,6 @@ export class OpenGeniClient {
     request: UpdateSessionRequest,
   ): Promise<Session> {
     return await this.requestJson<Session>("PATCH", sessionPath(workspaceId, sessionId), request);
-  }
-
-  /** Replace the complete ordered Variable Set selection at a quiescent turn boundary. */
-  async updateSessionVariableSets(
-    workspaceId: string,
-    sessionId: string,
-    request: UpdateSessionVariableSetsRequest,
-  ): Promise<Session> {
-    return await this.requestJson<Session>(
-      "PUT",
-      `${sessionPath(workspaceId, sessionId)}/variable-sets`,
-      request,
-    );
   }
 
   /** Whether this exact authenticated principal may atomically create a private session. */
@@ -4023,22 +4001,6 @@ export class OpenGeniClient {
     return await this.requestJson<AuthRunMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/report`,
-      request,
-      {},
-      options,
-    );
-  }
-
-  async protectedBrowserAuthFill(
-    workspaceId: string,
-    browserSessionId: string,
-    authRunId: string,
-    request: ProtectedAuthFillRequest,
-    options: OpenGeniRequestOptions = {},
-  ): Promise<ProtectedAuthFillResponse> {
-    return await this.requestJson<ProtectedAuthFillResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/protected-fill`,
       request,
       {},
       options,
@@ -6955,100 +6917,13 @@ export class OpenGeniClient {
     return response.tasks;
   }
 
-  // --- VariableSets --------------------------------------------------------------
-  // Generic reads return name/version metadata only. Plaintext uses one
-  // dedicated permissioned endpoint.
+  // --- Vaults ---------------------------------------------------------------
+  // Metadata reads never carry values; `revealField` is the one audited
+  // plaintext route. `{{secret:…}}` references resolve at execution time.
 
-  async listVariableSets(workspaceId: string): Promise<VariableSet[]> {
-    return await this.requestJson<VariableSet[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/variable-sets`,
-    );
-  }
-
-  /** Resolve only caller-supplied attachment ids without enumerating the catalog. */
-  async resolveVariableSetAttachments(
-    workspaceId: string,
-    request: ResolveVariableSetAttachmentsRequest,
-  ): Promise<ResolveVariableSetAttachmentsResponse> {
-    return await this.requestJson<ResolveVariableSetAttachmentsResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/variable-sets/resolve-attachments`,
-      request,
-    );
-  }
-
-  async createVariableSet(
-    workspaceId: string,
-    request: CreateVariableSetRequest,
-  ): Promise<VariableSet> {
-    return await this.requestJson<VariableSet>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/variable-sets`,
-      request,
-    );
-  }
-
-  async getVariableSet(workspaceId: string, variableSetId: string): Promise<VariableSet> {
-    return await this.requestJson<VariableSet>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`,
-    );
-  }
-
-  async getVariableSetVariable(
-    workspaceId: string,
-    variableSetId: string,
-    name: string,
-  ): Promise<VariableSetSecret> {
-    return await this.requestJson<VariableSetSecret>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
-    );
-  }
-
-  async updateVariableSet(
-    workspaceId: string,
-    variableSetId: string,
-    request: UpdateVariableSetRequest,
-  ): Promise<VariableSet> {
-    return await this.requestJson<VariableSet>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`,
-      request,
-    );
-  }
-
-  async deleteVariableSet(workspaceId: string, variableSetId: string): Promise<void> {
-    await this.requestJson<unknown>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`,
-    );
-  }
-
-  /** Create or rotate a variable. Generic reads never return its value. */
-  async setVariableSetVariable(
-    workspaceId: string,
-    variableSetId: string,
-    name: string,
-    value: string,
-  ): Promise<VariableSetVariableMetadata> {
-    return await this.requestJson<VariableSetVariableMetadata>(
-      "PUT",
-      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
-      { value },
-    );
-  }
-
-  async deleteVariableSetVariable(
-    workspaceId: string,
-    variableSetId: string,
-    name: string,
-  ): Promise<void> {
-    await this.requestJson<unknown>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
-    );
+  /** Vault, item, field-history, session-policy and 1Password routes for one workspace. */
+  vaults(workspaceId: string): VaultsApi {
+    return vaultsApi(this, workspaceId);
   }
 
   // --- Channels --------------------------------------------------------------
@@ -7220,57 +7095,6 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/rigs/${rigId}/verify`,
     );
-  }
-
-  /** @deprecated use listVariableSets */
-  async listEnvironments(workspaceId: string): Promise<VariableSet[]> {
-    return await this.listVariableSets(workspaceId);
-  }
-
-  /** @deprecated use createVariableSet */
-  async createEnvironment(
-    workspaceId: string,
-    request: CreateVariableSetRequest,
-  ): Promise<VariableSet> {
-    return await this.createVariableSet(workspaceId, request);
-  }
-
-  /** @deprecated use getVariableSet */
-  async getEnvironment(workspaceId: string, environmentId: string): Promise<VariableSet> {
-    return await this.getVariableSet(workspaceId, environmentId);
-  }
-
-  /** @deprecated use updateVariableSet */
-  async updateEnvironment(
-    workspaceId: string,
-    environmentId: string,
-    request: UpdateVariableSetRequest,
-  ): Promise<VariableSet> {
-    return await this.updateVariableSet(workspaceId, environmentId, request);
-  }
-
-  /** @deprecated use deleteVariableSet */
-  async deleteEnvironment(workspaceId: string, environmentId: string): Promise<void> {
-    await this.deleteVariableSet(workspaceId, environmentId);
-  }
-
-  /** @deprecated use setVariableSetVariable */
-  async setEnvironmentVariable(
-    workspaceId: string,
-    environmentId: string,
-    name: string,
-    value: string,
-  ): Promise<VariableSetVariableMetadata> {
-    return await this.setVariableSetVariable(workspaceId, environmentId, name, value);
-  }
-
-  /** @deprecated use deleteVariableSetVariable */
-  async deleteEnvironmentVariable(
-    workspaceId: string,
-    environmentId: string,
-    name: string,
-  ): Promise<void> {
-    await this.deleteVariableSetVariable(workspaceId, environmentId, name);
   }
 
   // --- Files -----------------------------------------------------------------------

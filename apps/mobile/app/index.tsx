@@ -250,7 +250,6 @@ function Home() {
         ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
         ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
         ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
-        ...(chosen.variableSetIds ? { variableSetIds: chosen.variableSetIds } : {}),
         ...(chosen.excludedMcpServerIds
           ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
           : {}),
@@ -286,7 +285,6 @@ function Home() {
         ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
         ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
         ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
-        ...(chosen.variableSetIds ? { variableSetIds: chosen.variableSetIds } : {}),
         ...(chosen.excludedMcpServerIds
           ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
           : {}),

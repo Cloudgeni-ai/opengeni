@@ -83,6 +83,8 @@ export const HostMcpCreateSelections = z
   });
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
+import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
 export * from "./organization-access";
@@ -135,6 +137,11 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./vaults";
+export * from "./secret-references";
+export * from "./secret-resolution";
+export * from "./secret-generator";
+export * from "./secret-totp";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -854,6 +861,7 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
+  "secrets:use",
   "secrets:write",
   "rigs:use",
   "github:use",
@@ -975,6 +983,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "secret_search",
+  "secret_save",
+  "secret_get",
+  "secret_move",
+  "secret_delete",
   "variable_set_list",
   "environment_list",
   "variable_set_get_variable",
@@ -1118,6 +1131,27 @@ export const RETIRED_AGENT_LEARNING_TOOL_NAMES = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredLearningTools = new Set<FirstPartyMcpToolName>(RETIRED_AGENT_LEARNING_TOOL_NAMES);
 
+/**
+ * Variable-set tools replaced by the `secret_*` tools (vaults). Stored tool
+ * selections naming them still parse and select their successor; the remote
+ * server never registers them.
+ */
+export const RETIRED_SECRET_TOOL_NAMES = [
+  "variable_set_list",
+  "environment_list",
+  "variable_set_get_variable",
+  "variable_set_set_variable",
+  "environment_set_variable",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredSecretTools = new Set<FirstPartyMcpToolName>(RETIRED_SECRET_TOOL_NAMES);
+const RETIRED_SECRET_TOOL_SUCCESSORS = {
+  variable_set_list: "secret_search",
+  environment_list: "secret_search",
+  variable_set_get_variable: "secret_get",
+  variable_set_set_variable: "secret_save",
+  environment_set_variable: "secret_save",
+} as const satisfies Record<(typeof RETIRED_SECRET_TOOL_NAMES)[number], FirstPartyMcpToolName>;
+
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
   names: readonly FirstPartyMcpToolName[],
@@ -1140,10 +1174,15 @@ export function currentAgentLearningToolSelection(
     selected.add("instruction_policy_save");
     selected.add("instruction_policy_get");
   }
+  for (const [retired, successor] of Object.entries(RETIRED_SECRET_TOOL_SUCCESSORS)) {
+    if (selected.has(retired as FirstPartyMcpToolName)) selected.add(successor);
+  }
   // Only already-selected legacy confirmations survive for paused turn recovery.
   // New defaults never advertise this tool and it cannot create proposals.
   return [...selected].filter(
-    (name) => name === "remember_confirm" || !retiredLearningTools.has(name),
+    (name) =>
+      name === "remember_confirm" ||
+      (!retiredLearningTools.has(name) && !retiredSecretTools.has(name)),
   );
 }
 
@@ -1154,6 +1193,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "atlassian_search",
   "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
+  ...RETIRED_SECRET_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1218,6 +1258,7 @@ export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<s
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     !retiredLearningTools.has(name) &&
+    !retiredSecretTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -4703,56 +4744,6 @@ export type GitCredentials = {
   identity?: { name: string; email: string } | null;
 };
 
-export type SandboxSecretsRequest = {
-  accountId: string;
-  workspaceId: string;
-  // Exact live attempt authority. Hosts MUST revalidate this tuple, the
-  // session's selected resource identity, and any personal-resource grant
-  // immediately before returning plaintext.
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  // Organization/workspace Variable Sets may be materialized by a pure
-  // service turn (for example, the scheduler). Personal Variable Sets still
-  // require this causal human and an exact personal-resource grant.
-  initiator: TurnInitiator;
-  initiatingHumanSubjectId: string | null;
-  variableSetId: string;
-  /**
-   * Exact accepted scheduled-occurrence generation. Present only for scheduled
-   * attempts; ordinary live turns omit it, so hosts that predate this field keep
-   * working unchanged for those.
-   */
-  expectedGeneration?: number | null;
-};
-
-export type SandboxSecrets = {
-  // The decrypted variableSet values the run injects, replacing the local
-  // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
-  // produces (plaintext name→value).
-  values: Record<string, string>;
-  // Exact scope/resource echoes are mandatory so a host routing bug cannot
-  // inject a sibling tenant, resource, or stale attempt's plaintext.
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  variableSetId: string;
-  /** Must echo the request's `expectedGeneration` when one was supplied. */
-  expectedGeneration?: number | null;
-  scope: VariableSetScope;
-  generation: number;
-  // Optional variableSet metadata; when omitted the activity uses the
-  // variableSetId as both id and name (the local decrypt carries the row's
-  // id/name/description, but only `id` is load-bearing downstream).
-  id?: string;
-  name?: string;
-  description?: string | null;
-};
-
 export type CredentialAuthNeededReason =
   | "missing_connection"
   | "expired"
@@ -5273,9 +5264,9 @@ export type ConnectionCredentialPlacement = {
 export type ConnectionCredentialsPort = {
   // Every leg is optional: a host may drive only the credential classes it
   // owns. An unset leg falls through to today's standalone implementation for
-  // that leg only.
+  // that leg only. Host-owned secret stores are supplied through the
+  // `vaultProvider` leg (`VaultConnectionCredentialsPort` in `@opengeni/vaults`).
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
-  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
   /**
    * Resolve host-owned, session-aware sandbox credentials independently of an
    * Opengeni variable set. Opengeni transports and renews the material; the host
@@ -10753,6 +10744,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   // resolved PER FIRE (at dispatch), so a task always runs the rig's current
   // version rather than one frozen at task-create time. Null ⇒ rig-less runs.
   rigId: z.string().uuid().nullable().default(null),
+  /** Vaults every run may resolve secret references from (the task vault is always included). */
+  vaultPolicy: VaultPolicy.default({ mode: "all" }),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -11260,6 +11253,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     agentConfig: ScheduledTaskAgentConfigInput,
     status: ScheduledTaskStatus.default("active"),
     variableSetId: z.string().uuid().nullable().optional(),
+    /** Vault narrowing for every run; omission adds none. */
+    vaultPolicy: VaultPolicy.optional(),
     environmentId: z.string().uuid().nullable().optional(),
     // The Sandbox Environment each run binds to; its active version is resolved
     // per fire. Omitted resolves once at create, like session create: the
@@ -11394,6 +11389,8 @@ export const UpdateScheduledTaskRequest =
       overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
       action: ScheduledTaskAction.optional(),
       targetSessionId: z.string().uuid().nullable().optional(),
+      /** Vault narrowing for every run. */
+      vaultPolicy: VaultPolicy.optional(),
       /** Change who can see it. Only the owner can, and a schedule posting into an Only me chat stays Only me. */
       visibility: SessionVisibility.optional(),
       connectionAuthorities: z.never().optional(),
@@ -17226,6 +17223,11 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // renderer. Omission keeps today's behavior (or inherits a configured
       // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
+      // Which vaults this session's agent may resolve secret references from.
+      // Intersected with `agent.vaultPolicy`; a child is further narrowed by
+      // its ancestors' policies whenever it resolves. The task vault is always
+      // included. Omission adds no narrowing.
+      vaultPolicy: VaultPolicy.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
       // policies, connection refs, and encrypted credentials. Explicit arrays,
@@ -17343,8 +17345,66 @@ export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCrea
 // request containing one or more questions; the durable response resumes that
 // exact call. This is deliberately distinct from tool approval: an answer,
 // skip, or expiry is structured tool output, never an approve/reject decision.
-export const HumanInputQuestionKind = z.enum(["text", "single_select", "multi_select"]);
+export const HumanInputQuestionKind = z.enum(["text", "single_select", "multi_select", "secret"]);
 export type HumanInputQuestionKind = z.infer<typeof HumanInputQuestionKind>;
+
+/**
+ * A secret question (`kind: "secret"`). The value is written to a hosted
+ * vault atomically with the response and never stored in events or the
+ * response; the agent receives a reference instead (D8).
+ */
+export const HumanInputSecretSpec = z
+  .object({
+    item: VaultName,
+    field: VaultFieldName.default("password"),
+    fieldKind: z.enum(["concealed", "totp", "text"]).default("concealed"),
+    itemType: z.enum(["login", "api_key", "note"]).default("login"),
+    username: z
+      .object({ prompt: z.string().max(200), value: z.string().max(512).nullable().optional() })
+      .strict()
+      .nullable()
+      .optional(),
+    website: z.string().max(2_048).nullable().optional(),
+    looksLike: z.string().max(80).nullable().optional(),
+    /** Soft client-side warning only. */
+    pattern: z.string().max(200).nullable().optional(),
+    saveTo: z.enum(["user", "task", "workspace"]).default("user"),
+    /** Hosted vault in the saveTo scope (Q-05). */
+    vault: VaultName.nullable().optional(),
+    allowGenerate: z.boolean().default(false),
+    generate: GeneratePasswordSpec.nullable().optional(),
+    autocomplete: z
+      .enum(["current-password", "new-password", "one-time-code", "off"])
+      .default("current-password"),
+  })
+  .strict();
+export type HumanInputSecretSpec = z.infer<typeof HumanInputSecretSpec>;
+
+/** Write-only: submitted with an answered response, stripped before any event is built. */
+export const HumanInputSecretAnswer = z
+  .object({
+    questionId: z.string(),
+    value: z.string().max(65_536).optional(),
+    generate: GeneratePasswordSpec.optional(),
+    username: z.string().max(512).optional(),
+    saveTo: z.enum(["user", "task", "workspace"]),
+    vaultId: z.string().uuid().optional(),
+  })
+  .strict()
+  .refine((answer) => (answer.value === undefined) !== (answer.generate === undefined), {
+    message: "value xor generate",
+  });
+export type HumanInputSecretAnswer = z.infer<typeof HumanInputSecretAnswer>;
+
+/** What the agent and the timeline see for an answered secret question. */
+export const HumanInputSecretAnswerResult = z.object({
+  reference: z.string(),
+  username: z.string().nullable(),
+  vaultName: z.string(),
+  itemName: z.string(),
+  saveTo: z.enum(["user", "task", "workspace"]),
+});
+export type HumanInputSecretAnswerResult = z.infer<typeof HumanInputSecretAnswerResult>;
 
 export const HumanInputOption = z.object({
   id: z.string().min(1).max(64),
@@ -17365,6 +17425,8 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
       // A real review reference still requires every authority-bearing field.
       skillReview: SkillReviewReference.nullable().optional(),
       options: z.array(HumanInputOption).max(20).default([]),
+      /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
+      secret: HumanInputSecretSpec.nullable().optional(),
       required: z.boolean().default(true),
       // Retained on the wire for older hosts. Opengeni's stock runtime and
       // surfaces always expose Other for choice questions, including requests
@@ -17389,7 +17451,28 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
           message: "option ids must be unique",
         });
       }
-      if (question.kind === "text") {
+      if (question.kind === "secret") {
+        if (question.secret == null) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["secret"],
+            message: "secret questions require a secret spec",
+          });
+        }
+        // Options and Other mean nothing for a secret. Strict tool schemas make
+        // models send them anyway, so they are tolerated here and dropped when
+        // the request is persisted (`normalizeSecretQuestion`), never failing
+        // the turn.
+      } else if (question.secret != null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["secret"],
+          message: "only secret questions take a secret spec",
+        });
+      }
+      if (question.kind === "secret") {
+        // Validated above.
+      } else if (question.kind === "text") {
         if (question.options.length > 0) {
           ctx.addIssue({
             code: "custom",
@@ -17486,10 +17569,19 @@ export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSch
 );
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
 
+/** Secret questions never carry options or Other; drop what a model sent. */
+export function normalizeSecretQuestion<
+  T extends { kind: string; options: unknown[]; allowOther: boolean },
+>(question: T): T {
+  return question.kind === "secret" ? { ...question, options: [], allowOther: false } : question;
+}
+
 export const HumanInputAnswer = z.object({
   questionId: z.string().min(1).max(64),
   values: z.array(z.string().max(8192)).max(20),
   other: z.string().max(8192).nullable().optional(),
+  /** Secret questions: the saved reference, never the value. */
+  secret: HumanInputSecretAnswerResult.optional(),
 });
 export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
 
@@ -17508,6 +17600,8 @@ export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
   z.object({
     outcome: z.literal("answered"),
     answers: z.array(HumanInputAnswer).max(20),
+    /** Write-only secret values; the API strips them before building any event. */
+    secretAnswers: z.array(HumanInputSecretAnswer).max(20).optional(),
   }),
   z.object({ outcome: z.literal("skipped") }),
 ]);
@@ -17649,6 +17743,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       response: SubmitHumanInputResponseRequest,
       // Write-only header rotation committed with the response before resume.
       mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      // Write-only secret values committed to vaults with the response.
+      secretAnswers: z.array(HumanInputSecretAnswer).max(20).optional(),
     }),
   }),
 ]);

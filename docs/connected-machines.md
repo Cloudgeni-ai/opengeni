@@ -118,6 +118,17 @@ redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
+Vault secrets reach a machine only per command. When an `exec_command` or
+`run_on` command contains `{{secret:…}}` references, Opengeni runs it with
+`/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
+on Windows (an explicit supported `shell` argument is honoured), splices each
+reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
+`ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
+`/tmp/opengeni-private` root and removed when the attempt ends. `cmd.exe`, fish
+and unknown shells return `unsupported_shell`. Commands without references run
+exactly as before, and nothing from a vault is copied into the machine's
+environment. See [`secrets.md`](secrets.md#where-references-resolve).
+
 This authority follows the session's **active** execution path. The fleet
 `run_on` tool is a separate API-side, one-off route to a non-active machine. An
 agent call still authorizes and snapshots the frozen initiating human's exact

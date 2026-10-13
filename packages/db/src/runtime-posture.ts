@@ -538,6 +538,50 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
 ] as const;
+const VAULT_CAPABILITY_PREDICATE_ROUTINE = "vault_authority_capability_active(text)";
+const VAULT_CAPABILITY_TABLE = "vault_authority_capabilities";
+/** Vault routines (0739): the application role's only way into the vault tables. */
+export const VAULT_RUNTIME_ROUTINES = [
+  "list_vaults_for_subject(uuid, jsonb)",
+  "get_vault_for_subject(uuid, jsonb)",
+  "create_vault(jsonb, jsonb)",
+  "update_vault(uuid, bigint, jsonb, jsonb)",
+  "delete_vault(uuid, text, boolean, jsonb)",
+  "ensure_default_vault(uuid, text, jsonb)",
+  "ensure_task_vault(uuid, uuid, jsonb)",
+  "list_vault_items(uuid, text, text, boolean, text, integer, jsonb)",
+  "get_vault_item(uuid, jsonb)",
+  "upsert_vault_item(jsonb, jsonb)",
+  "archive_vault_item(uuid, jsonb)",
+  "restore_vault_item(uuid, jsonb)",
+  "delete_vault_item_permanently(uuid, jsonb)",
+  "move_vault_item(uuid, uuid, text, text, jsonb)",
+  "read_vault_field_ciphertext(uuid, integer, text, jsonb, jsonb)",
+  "list_vault_field_versions(uuid, jsonb)",
+  "resolve_secret_reference_candidates(jsonb, jsonb)",
+  "record_vault_secret_use(jsonb, jsonb, jsonb)",
+  "set_session_vault_policy(uuid, jsonb, jsonb)",
+  "session_secrets_view(uuid, jsonb)",
+  "update_passkey_sign_count(uuid, bigint, jsonb)",
+  "lease_vault_passkeys(jsonb, text, integer)",
+  "release_vault_passkey_leases(text, jsonb)",
+  "upsert_provider_vault_items(uuid, text, jsonb, jsonb)",
+  "set_vault_sync_status(uuid, jsonb, jsonb)",
+  "apply_secret_answers(uuid, uuid, jsonb, jsonb)",
+  "link_provider_vault(jsonb, jsonb)",
+  "provider_vault_sync_target(uuid, jsonb)",
+  "provider_vault_item_ref(uuid, uuid, text, jsonb)",
+] as const;
+/** Vault tables (0739): FORCE row security, no application-role privileges. */
+export const VAULT_TABLES = [
+  "vaults",
+  "vault_items",
+  "vault_item_fields",
+  "vault_field_versions",
+  "vault_item_name_aliases",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+] as const;
 const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
 const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
 const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE = "connection_tenancy_backfill_capabilities";
@@ -1102,6 +1146,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
+  ...VAULT_RUNTIME_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES,
   ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
@@ -1571,6 +1616,13 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
   "usage_events",
+  "vault_field_versions",
+  "vault_item_fields",
+  "vault_item_name_aliases",
+  "vault_items",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+  "vaults",
   "video_generation_operations",
   "video_generation_references",
   "workspace_artifact_events",
@@ -2106,6 +2158,13 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "vault_field_versions",
+  "vault_item_fields",
+  "vault_item_name_aliases",
+  "vault_items",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+  "vaults",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
 ] as const;
@@ -2603,6 +2662,7 @@ export async function inspectRuntimeDatabasePosture(
               ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${VARIABLE_SET_CAPABILITY_TABLE},
+              ${VAULT_CAPABILITY_TABLE},
               ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
@@ -3620,6 +3680,23 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if ((VAULT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = VAULT_TABLES.map((tableName) => tableByName.get(tableName)).filter(
+        (table): table is RuntimeTablePosture => table !== undefined,
+      );
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} vault table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match vault authority owner ${authorityOwner}`,
+          );
+        }
+      }
     } else if ((SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = ["rigs", "rig_versions", "enrollments", "sandboxes"]
         .map((tableName) => tableByName.get(tableName))
@@ -4262,6 +4339,49 @@ export function evaluateRuntimeDatabasePosture(
       }
       if (routine.publicExecute) {
         violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
+      }
+      const directPrivileges = [
+        ["SELECT", table.select],
+        ["INSERT", table.insert],
+        ["UPDATE", table.update],
+        ["DELETE", table.delete],
+      ].filter(([, granted]) => granted);
+      if (directPrivileges.length > 0) {
+        violations.push(
+          `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+        );
+      }
+    }
+    const vaultCapabilityTables = posture.privateTables.filter(
+      (table) => table.name === VAULT_CAPABILITY_TABLE,
+    );
+    const vaultCapabilityRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name === VAULT_CAPABILITY_PREDICATE_ROUTINE,
+    );
+    if (vaultCapabilityTables.length !== 1) {
+      violations.push(`vault capability table ${VAULT_CAPABILITY_TABLE} is missing or ambiguous`);
+    }
+    if (vaultCapabilityRoutines.length !== 1) {
+      violations.push(
+        `vault capability predicate ${VAULT_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+      );
+    }
+    if (vaultCapabilityTables.length === 1 && vaultCapabilityRoutines.length === 1) {
+      const table = vaultCapabilityTables[0]!;
+      const routine = vaultCapabilityRoutines[0]!;
+      if (routine.owner !== table.owner) {
+        violations.push(
+          `vault capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+        );
+      }
+      if (!routine.securityDefiner) {
+        violations.push(`vault capability predicate ${routine.name} is not SECURITY DEFINER`);
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks vault capability predicate ${routine.name}`);
+      }
+      if (routine.publicExecute) {
+        violations.push(`PUBLIC has forbidden vault capability predicate ${routine.name}`);
       }
       const directPrivileges = [
         ["SELECT", table.select],
