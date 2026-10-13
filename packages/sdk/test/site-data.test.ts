@@ -95,14 +95,25 @@ describe("Site Data client", () => {
       advertise: true,
       respond: (seen) => {
         if (seen.path.endsWith("/data/query"))
-          return { status: 200, body: { records: [record({ name: "Acme" })], nextCursor: null, count: 1 } };
+          return {
+            status: 200,
+            body: { records: [record({ name: "Acme" })], nextCursor: null, count: 1 },
+          };
         if (seen.path.endsWith("/data/get"))
           return {
             status: 404,
-            body: { error: { code: "not_found", message: "Record not found", details: { code: "not_found" } } },
+            body: {
+              error: {
+                code: "not_found",
+                message: "Record not found",
+                details: { code: "not_found" },
+              },
+            },
           };
         if (seen.path.endsWith("/data/write")) {
-          const operations = (JSON.parse(String(seen.body)) as { operations: Array<{ op: string; data?: object }> }).operations;
+          const operations = (
+            JSON.parse(String(seen.body)) as { operations: Array<{ op: string; data?: object }> }
+          ).operations;
           if (operations[0]!.op === "patch")
             return {
               status: 409,
@@ -114,7 +125,10 @@ describe("Site Data client", () => {
                 },
               },
             };
-          return { status: 200, body: { results: [{ op: "insert", record: record({ ...operations[0]!.data }) }] } };
+          return {
+            status: 200,
+            body: { results: [{ op: "insert", record: record({ ...operations[0]!.data }) }] },
+          };
         }
         if (seen.path.includes("/files"))
           return { status: 201, body: { id: "f1", name: "logo.png", scope: "private" } };
@@ -123,31 +137,50 @@ describe("Site Data client", () => {
     });
     try {
       const companies = h.client.data.collection<{ name: string }>("companies");
-      const page = await companies.list({ where: [{ field: "name", op: "eq", value: "Acme" }], count: true });
+      const page = await companies.list({
+        where: [{ field: "name", op: "eq", value: "Acme" }],
+        count: true,
+      });
       expect(page.records[0]!.data.name).toBe("Acme");
       expect(page.count).toBe(1);
       expect(h.seen[0]!.path).toBe(`/v1/workspaces/ws-1/published-artifacts/${SITE_ID}/data/query`);
       expect(h.seen[0]!.headers["x-opengeni-site-id"]).toBe(SITE_ID);
       expect(h.seen[0]!.headers["x-opengeni-site-version"]).toBe(VERSION_ID);
-      expect(JSON.parse(String(h.seen[0]!.body))).toMatchObject({ collection: "companies", count: true });
+      expect(JSON.parse(String(h.seen[0]!.body))).toMatchObject({
+        collection: "companies",
+        count: true,
+      });
 
       expect(await companies.get("missing")).toBeNull();
-      expect(JSON.parse(String(h.seen[1]!.body))).toEqual({ collection: "companies", key: "missing" });
+      expect(JSON.parse(String(h.seen[1]!.body))).toEqual({
+        collection: "companies",
+        key: "missing",
+      });
 
       const inserted = await companies.insert({ name: "Globex" }, { key: "globex" });
       expect(inserted.data.name).toBe("Globex");
       expect(JSON.parse(String(h.seen[2]!.body))).toEqual({
-        operations: [{ op: "insert", collection: "companies", data: { name: "Globex" }, key: "globex" }],
+        operations: [
+          { op: "insert", collection: "companies", data: { name: "Globex" }, key: "globex" },
+        ],
       });
 
       const conflict = await companies
         .patch({ id: inserted.id }, { name: "Globex Corp" }, { expectedVersion: 1 })
         .catch((error: unknown) => error);
       expect(conflict).toBeInstanceOf(OpenGeniSiteDataError);
-      expect(conflict).toMatchObject({ code: "conflict", status: 409, details: { currentVersion: 3 } });
+      expect(conflict).toMatchObject({
+        code: "conflict",
+        status: 409,
+        details: { currentVersion: 3 },
+      });
 
       const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-      await h.client.files.upload(bytes, { name: "logo.png", contentType: "image/png", scope: "private" });
+      await h.client.files.upload(bytes, {
+        name: "logo.png",
+        contentType: "image/png",
+        scope: "private",
+      });
       const upload = h.seen.at(-1)!;
       expect(upload.path).toBe(
         `/v1/workspaces/ws-1/published-artifacts/${SITE_ID}/files?name=logo.png&scope=private`,
@@ -175,10 +208,19 @@ describe("Site Data client", () => {
 
   test("only a host bound to a published Site resolves the current Site", () => {
     expect(
-      siteSessionPath("/v1/workspaces/site-host/published-artifacts/current/data/query", "ws", "POST", SITE_ID),
+      siteSessionPath(
+        "/v1/workspaces/site-host/published-artifacts/current/data/query",
+        "ws",
+        "POST",
+        SITE_ID,
+      ),
     ).toBe(`/v1/workspaces/ws/published-artifacts/${SITE_ID}/data/query`);
     expect(() =>
-      siteSessionPath("/v1/workspaces/site-host/published-artifacts/current/data/query", "ws", "POST"),
+      siteSessionPath(
+        "/v1/workspaces/site-host/published-artifacts/current/data/query",
+        "ws",
+        "POST",
+      ),
     ).toThrow();
     // Inside the Site the alias stays unresolved.
     expect(

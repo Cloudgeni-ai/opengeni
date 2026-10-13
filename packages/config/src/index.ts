@@ -1547,12 +1547,32 @@ const SettingsSchema = z.object({
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
   // Site Data (OPE-800) quotas and write rate limits. Usage is recorded in the
   // usage ledger only; shadow and paid modes are a later rollout step.
-  siteDataRecordBytesPerSite: z.coerce.number().int().positive().default(100 * 1024 * 1024),
-  siteDataMaxRecordBytes: z.coerce.number().int().positive().default(256 * 1024),
+  siteDataRecordBytesPerSite: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(100 * 1024 * 1024),
+  siteDataMaxRecordBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(256 * 1024),
   siteDataMaxCollectionsPerSite: z.coerce.number().int().positive().default(50),
-  siteDataFileBytesPerSite: z.coerce.number().int().positive().default(1024 * 1024 * 1024),
-  siteDataMaxFileBytes: z.coerce.number().int().positive().default(10 * 1024 * 1024),
-  siteDataWorkspaceBytes: z.coerce.number().int().positive().default(1024 * 1024 * 1024),
+  siteDataFileBytesPerSite: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1024 * 1024 * 1024),
+  siteDataMaxFileBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10 * 1024 * 1024),
+  siteDataWorkspaceBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1024 * 1024 * 1024),
   siteDataViewerWritesPerMinute: z.coerce.number().int().positive().default(120),
   siteDataSiteWritesPerMinute: z.coerce.number().int().positive().default(600),
   siteDataBillingMode: z.enum(["usage_only"]).default("usage_only"),

@@ -104,7 +104,11 @@ export type OpenGeniSiteDataCollection<
   get(ref: OpenGeniSiteDataRef): Promise<OpenGeniSiteDataRecord<T> | null>;
   insert(data: T, options?: { key?: string }): Promise<OpenGeniSiteDataRecord<T>>;
   /** Create or replace the record with this key. */
-  put(key: string, data: T, options?: { expectedVersion?: number }): Promise<OpenGeniSiteDataRecord<T>>;
+  put(
+    key: string,
+    data: T,
+    options?: { expectedVersion?: number },
+  ): Promise<OpenGeniSiteDataRecord<T>>;
   /** Shallow-merge fields; expectedVersion turns concurrent edits into a conflict error. */
   patch(
     ref: OpenGeniSiteDataRef,
@@ -113,7 +117,11 @@ export type OpenGeniSiteDataCollection<
   ): Promise<OpenGeniSiteDataRecord<T>>;
   delete(ref: OpenGeniSiteDataRef, options?: { expectedVersion?: number }): Promise<void>;
   /** Atomically add to a numeric field; a missing key is created. */
-  increment(ref: OpenGeniSiteDataRef, field: string, by?: number): Promise<OpenGeniSiteDataRecord<T>>;
+  increment(
+    ref: OpenGeniSiteDataRef,
+    field: string,
+    by?: number,
+  ): Promise<OpenGeniSiteDataRecord<T>>;
   count(where?: OpenGeniSiteDataFilter[], options?: { scope?: "own" | "all" }): Promise<number>;
 };
 
@@ -206,7 +214,13 @@ export function createOpenGeniSiteData(
     (
       await send<OpenGeniSiteDataPage>(
         "/data/query",
-        json({ collection, limit: 1, count: true, ...(where ? { where } : {}), ...(scope ? { scope } : {}) }),
+        json({
+          collection,
+          limit: 1,
+          count: true,
+          ...(where ? { where } : {}),
+          ...(scope ? { scope } : {}),
+        }),
       )
     ).count ?? 0;
 
@@ -215,7 +229,10 @@ export function createOpenGeniSiteData(
       const collection: OpenGeniSiteDataCollection<T> = {
         name,
         list: async (options = {}) =>
-          await send<OpenGeniSiteDataPage<T>>("/data/query", json({ collection: name, ...options })),
+          await send<OpenGeniSiteDataPage<T>>(
+            "/data/query",
+            json({ collection: name, ...options }),
+          ),
         get: async (ref) => {
           try {
             return (
@@ -237,7 +254,13 @@ export function createOpenGeniSiteData(
             ...(options.key === undefined ? {} : { key: options.key }),
           })) as OpenGeniSiteDataRecord<T>,
         put: async (key, value, options = {}) =>
-          (await one({ op: "put", collection: name, key, data: value, ...options })) as OpenGeniSiteDataRecord<T>,
+          (await one({
+            op: "put",
+            collection: name,
+            key,
+            data: value,
+            ...options,
+          })) as OpenGeniSiteDataRecord<T>,
         patch: async (ref, value, options = {}) =>
           (await one({
             op: "patch",
@@ -274,8 +297,7 @@ export function createOpenGeniSiteData(
               type: options.contentType ?? "application/octet-stream",
             });
       const name =
-        options.name ??
-        (typeof File !== "undefined" && file instanceof File ? file.name : "file");
+        options.name ?? (typeof File !== "undefined" && file instanceof File ? file.name : "file");
       const query = new URLSearchParams({ name, scope: options.scope ?? "shared" });
       return await send<OpenGeniSiteFile>(`/files?${query}`, {
         method: "POST",
@@ -320,7 +342,8 @@ function siteDataErrorFromResponse(status: number, value: unknown): OpenGeniSite
     typeof value === "object" && value !== null && "error" in value
       ? (value as { error: unknown }).error
       : null;
-  const record = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
+  const record =
+    typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
   const details =
     typeof record.details === "object" && record.details !== null
       ? (record.details as Record<string, unknown>)

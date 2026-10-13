@@ -92,7 +92,12 @@ async function site() {
 
 test("site data tables are FORCE RLS with a workspace policy", async () => {
   const rows = await shared.admin<
-    Array<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean; policies: number }>
+    Array<{
+      relname: string;
+      relrowsecurity: boolean;
+      relforcerowsecurity: boolean;
+      policies: number;
+    }>
   >`
     select c.relname, c.relrowsecurity, c.relforcerowsecurity,
       (select count(*)::int from pg_policies p where p.tablename = c.relname) as policies

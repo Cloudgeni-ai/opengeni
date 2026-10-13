@@ -123,7 +123,11 @@ test("managers browse collections and records, read stored data as text and dele
       writes.push(request);
       return { results: [{ op: "delete" as const, deleted: { id: "r1" } }] };
     },
-    exportSiteData: async () => ({ content: "[]", contentType: "application/json", truncated: false }),
+    exportSiteData: async () => ({
+      content: "[]",
+      contentType: "application/json",
+      truncated: false,
+    }),
   };
   const host = document.createElement("div");
   document.body.append(host);

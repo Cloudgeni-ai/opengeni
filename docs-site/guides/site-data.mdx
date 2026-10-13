@@ -9,12 +9,12 @@ A published Site can keep data in Opengeni: collections of JSON records and file
 
 Agents create collections (ask Opengeni, or use the `site_data_define_collection` tool); Site code never does. Each collection has an access mode for the people who can open the Site:
 
-| Access mode | People who open the Site can | Good for |
-| --- | --- | --- |
-| `shared` | read and change every record | a team CRM or board |
-| `shared_read` | read; only managers and agents write | dashboards fed by a schedule |
-| `per_viewer` | read and change only their own records | personal trackers |
-| `append_only` | add records and see only their own | forms and feedback |
+| Access mode   | People who open the Site can           | Good for                     |
+| ------------- | -------------------------------------- | ---------------------------- |
+| `shared`      | read and change every record           | a team CRM or board          |
+| `shared_read` | read; only managers and agents write   | dashboards fed by a schedule |
+| `per_viewer`  | read and change only their own records | personal trackers            |
+| `append_only` | add records and see only their own     | forms and feedback           |
 
 The Site's managers (its owner, workspace admins, and agents acting for them) can read everything, unless a `per_viewer` collection is marked private. An **Only me** Site's data is reachable only by its owner. Collections can also require unique values (for example one record per email) and validate records with a JSON Schema.
 

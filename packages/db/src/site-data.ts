@@ -562,7 +562,10 @@ function systemFilter(caller: SiteDataCaller, filter: SiteDataFilter): SQL {
     };
     if (op === "eq") return sql`r.id = ${cast(filter.value)}`;
     if (op === "ne") return sql`r.id <> ${cast(filter.value)}`;
-    if (op === "in") return Array.isArray(filter.value) && filter.value.length === 0 ? sql`false` : sql`r.id in (${list(cast)})`;
+    if (op === "in")
+      return Array.isArray(filter.value) && filter.value.length === 0
+        ? sql`false`
+        : sql`r.id in (${list(cast)})`;
     throw validationError(`$id supports eq, ne and in`);
   }
   if (field === "$owner") {
@@ -572,7 +575,10 @@ function systemFilter(caller: SiteDataCaller, filter: SiteDataFilter): SQL {
     };
     if (op === "eq") return sql`r.owner_principal = ${cast(filter.value)}`;
     if (op === "ne") return sql`r.owner_principal <> ${cast(filter.value)}`;
-    if (op === "in") return Array.isArray(filter.value) && filter.value.length === 0 ? sql`false` : sql`r.owner_principal in (${list(cast)})`;
+    if (op === "in")
+      return Array.isArray(filter.value) && filter.value.length === 0
+        ? sql`false`
+        : sql`r.owner_principal in (${list(cast)})`;
     throw validationError(`$owner supports eq, ne and in`);
   }
   if (field === "$key") {
@@ -584,13 +590,21 @@ function systemFilter(caller: SiteDataCaller, filter: SiteDataFilter): SQL {
     };
     if (op === "eq") return sql`r.record_key = ${cast(filter.value)}`;
     if (op === "ne") return sql`r.record_key is distinct from ${cast(filter.value)}`;
-    if (op === "in") return Array.isArray(filter.value) && filter.value.length === 0 ? sql`false` : sql`r.record_key in (${list(cast)})`;
+    if (op === "in")
+      return Array.isArray(filter.value) && filter.value.length === 0
+        ? sql`false`
+        : sql`r.record_key in (${list(cast)})`;
     if (op === "contains")
       return sql`strpos(lower(coalesce(r.record_key, '')), lower(${cast(filter.value)})) > 0`;
     return sql`(r.record_key collate "C") ${compare(op)} (${cast(filter.value)} collate "C")`;
   }
   if (field === "$createdAt" || field === "$updatedAt" || field === "$version") {
-    const column = field === "$createdAt" ? sql`r.created_at` : field === "$updatedAt" ? sql`r.updated_at` : sql`r.version`;
+    const column =
+      field === "$createdAt"
+        ? sql`r.created_at`
+        : field === "$updatedAt"
+          ? sql`r.updated_at`
+          : sql`r.version`;
     const cast = (value: unknown) => {
       if (field === "$version") {
         if (typeof value !== "number" || !Number.isInteger(value))
@@ -603,7 +617,10 @@ function systemFilter(caller: SiteDataCaller, filter: SiteDataFilter): SQL {
     };
     if (op === "eq") return sql`${column} = ${cast(filter.value)}`;
     if (op === "ne") return sql`${column} <> ${cast(filter.value)}`;
-    if (op === "in") return Array.isArray(filter.value) && filter.value.length === 0 ? sql`false` : sql`${column} in (${list(cast)})`;
+    if (op === "in")
+      return Array.isArray(filter.value) && filter.value.length === 0
+        ? sql`false`
+        : sql`${column} in (${list(cast)})`;
     if (op === "gt" || op === "gte" || op === "lt" || op === "lte")
       return sql`${column} ${compare(op)} ${cast(filter.value)}`;
     throw validationError(`${field} supports eq, ne, in, gt, gte, lt and lte`);
@@ -664,7 +681,8 @@ function dataFilter(collection: SiteDataCollection, filter: SiteDataFilter): SQL
       return sql`((case when jsonb_typeof(${value}) = 'string' then ${value} #>> '{}' end) collate "C") ${compare(filter.op)} (${scalar}::text collate "C")`;
     }
     case "contains": {
-      if (filter.value === undefined) throw validationError(`contains on ${filter.field} needs a value`);
+      if (filter.value === undefined)
+        throw validationError(`contains on ${filter.field} needs a value`);
       const element = sql`${value} @> jsonb_build_array(${json(filter.value)})`;
       if (typeof filter.value === "string")
         return sql`((jsonb_typeof(${value}) = 'array' and ${element})
@@ -756,7 +774,9 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
   const applyUsage = async (
     tx: Database,
     scope: SiteDataScope,
-    delta: Partial<Record<"collections" | "records" | "recordBytes" | "files" | "fileBytes", number>>,
+    delta: Partial<
+      Record<"collections" | "records" | "recordBytes" | "files" | "fileBytes", number>
+    >,
   ) => {
     await tx.execute(
       sql`update site_data_usage set
@@ -1067,23 +1087,37 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               : dataFilter(collection, filter);
           }),
         ];
-        const sorts = (query.sort?.length ? query.sort : [{ field: "$createdAt", direction: "desc" as const }]);
+        const sorts = query.sort?.length
+          ? query.sort
+          : [{ field: "$createdAt", direction: "desc" as const }];
         if (sorts.length > SITE_DATA_MAX_SORT_KEYS)
           throw validationError(`Sort by at most ${SITE_DATA_MAX_SORT_KEYS} fields`);
         const keys = sorts.filter((sort) => sort.field !== "$id").map(sortKey);
-        const lastDirection = keys.at(-1)?.direction ?? (sorts[0]?.direction === "desc" ? "desc" : "asc");
-        const signature = JSON.stringify([...keys.map((key) => [key.field, key.direction]), lastDirection]);
+        const lastDirection =
+          keys.at(-1)?.direction ?? (sorts[0]?.direction === "desc" ? "desc" : "asc");
+        const signature = JSON.stringify([
+          ...keys.map((key) => [key.field, key.direction]),
+          lastDirection,
+        ]);
         const limit = Math.min(
-          Math.max(1, Math.trunc(Number(query.limit ?? SITE_DATA_DEFAULT_PAGE)) || SITE_DATA_DEFAULT_PAGE),
+          Math.max(
+            1,
+            Math.trunc(Number(query.limit ?? SITE_DATA_DEFAULT_PAGE)) || SITE_DATA_DEFAULT_PAGE,
+          ),
           SITE_DATA_MAX_PAGE,
         );
         const filtered = sql.join(conditions, sql` and `);
         const paging: SQL[] = [];
         if (query.cursor) {
           const cursor = decodeCursor(query.cursor, signature);
-          if (cursor.v.length !== keys.length) throw validationError("Invalid cursor for this query");
+          if (cursor.v.length !== keys.length)
+            throw validationError("Invalid cursor for this query");
           const all = [
-            ...keys.map((key, index) => ({ expr: key.expr, direction: key.direction, value: key.cursor(cursor.v[index]) })),
+            ...keys.map((key, index) => ({
+              expr: key.expr,
+              direction: key.direction,
+              value: key.cursor(cursor.v[index]),
+            })),
             { expr: sql`r.id`, direction: lastDirection, value: sql`${cursor.id}::uuid` },
           ];
           const branches = all.map((key, index) =>
@@ -1095,7 +1129,12 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               sql` and `,
             ),
           );
-          paging.push(sql`(${sql.join(branches.map((branch) => sql`(${branch})`), sql` or `)})`);
+          paging.push(
+            sql`(${sql.join(
+              branches.map((branch) => sql`(${branch})`),
+              sql` or `,
+            )})`,
+          );
         }
         const order = sql.join(
           [
@@ -1105,7 +1144,10 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           sql`, `,
         );
         const cursorValues = keys.length
-          ? sql`jsonb_build_array(${sql.join(keys.map((key) => sql`to_jsonb(${key.expr})`), sql`, `)})`
+          ? sql`jsonb_build_array(${sql.join(
+              keys.map((key) => sql`to_jsonb(${key.expr})`),
+              sql`, `,
+            )})`
           : sql`'[]'::jsonb`;
         const rows = await rawRows<RecordRow>(
           tx,
@@ -1143,7 +1185,8 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async write(caller, ops, options) {
-      if (!Array.isArray(ops) || ops.length === 0) throw validationError("Give at least one operation");
+      if (!Array.isArray(ops) || ops.length === 0)
+        throw validationError("Give at least one operation");
       if (ops.length > SITE_DATA_MAX_BATCH)
         throw validationError(`A batch has at most ${SITE_DATA_MAX_BATCH} operations`);
       return scoped(caller, async (tx) => {
@@ -1191,7 +1234,11 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           index: number,
         ) => {
           if (!siteDataMayCreate(collection, caller.role))
-            throw new SiteDataError("forbidden", `Only the Site's managers can add to ${collection.name}`, { index });
+            throw new SiteDataError(
+              "forbidden",
+              `Only the Site's managers can add to ${collection.name}`,
+              { index },
+            );
           const size = prepare(collection, data, index);
           const keyScope = siteDataScopedPerViewer(collection.accessMode) ? caller.principal : "";
           if (key !== null) {
@@ -1229,12 +1276,20 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           if (!row || !readable(caller, collection, row)) return null;
           const modify = siteDataModifyReach(collection, caller.role);
           if (modify === "none" || (modify === "own" && row.owner_principal !== caller.principal))
-            throw new SiteDataError("forbidden", `You cannot change records in ${collection.name}`, {
-              index,
-            });
+            throw new SiteDataError(
+              "forbidden",
+              `You cannot change records in ${collection.name}`,
+              {
+                index,
+              },
+            );
           return row;
         };
-        const checkVersion = (row: RecordRow | null, expected: number | undefined, index: number) => {
+        const checkVersion = (
+          row: RecordRow | null,
+          expected: number | undefined,
+          index: number,
+        ) => {
           if (expected === undefined) return;
           if (!Number.isInteger(expected) || expected < 0)
             throw validationError("expectedVersion must be a non-negative integer", { index });
@@ -1242,9 +1297,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           if (actual !== expected)
             throw new SiteDataError(
               "conflict",
-              expected === 0
-                ? "The record already exists"
-                : "The record changed since you read it",
+              expected === 0 ? "The record already exists" : "The record changed since you read it",
               { reason: "version", expectedVersion: expected, currentVersion: actual, index },
             );
         };
@@ -1307,9 +1360,15 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               checkVersion(visible, op.expectedVersion, index);
               if (visible) {
                 const target = await targetFor(collection, { id: visible.id }, index);
-                results.push({ op: "put", record: await replaceRecord(collection, target!, op.data, index) });
+                results.push({
+                  op: "put",
+                  record: await replaceRecord(collection, target!, op.data, index),
+                });
               } else {
-                results.push({ op: "put", record: await insertRecord(collection, key, op.data, index) });
+                results.push({
+                  op: "put",
+                  record: await insertRecord(collection, key, op.data, index),
+                });
               }
               break;
             }
@@ -1350,7 +1409,12 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
                   throw new SiteDataError("not_found", "Record not found", { index });
                 results.push({
                   op: "increment",
-                  record: await insertRecord(collection, ref.key, writeSiteDataPath({}, segments, by), index),
+                  record: await insertRecord(
+                    collection,
+                    ref.key,
+                    writeSiteDataPath({}, segments, by),
+                    index,
+                  ),
                 });
                 break;
               }
@@ -1381,7 +1445,10 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               "This Site's records are full. Delete records to make room.",
               { quota: "site_record_bytes", limit: options.limits.recordBytesPerSite },
             );
-          if ((await workspaceBytes(tx, caller)) + summary.byteDelta > options.limits.workspaceBytes)
+          if (
+            (await workspaceBytes(tx, caller)) + summary.byteDelta >
+            options.limits.workspaceBytes
+          )
             throw new SiteDataError(
               "quota_exceeded",
               "This workspace's Site data is full. Delete records or files to make room.",
@@ -1399,7 +1466,10 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
 
     async listFiles(caller, options = {}) {
       return scoped(caller, async (tx) => {
-        const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 100) || 100), SITE_DATA_MAX_PAGE);
+        const limit = Math.min(
+          Math.max(1, Math.trunc(options.limit ?? 100) || 100),
+          SITE_DATA_MAX_PAGE,
+        );
         let after: { createdAt: string; id: string } | null = null;
         if (options.cursor) {
           const decoded = decodeCursor(options.cursor, "files");
@@ -1433,7 +1503,11 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
             where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId} and id = ${fileId}`,
         );
         if (!row) return null;
-        if (caller.role !== "manager" && row.scope === "private" && row.owner_principal !== caller.principal)
+        if (
+          caller.role !== "manager" &&
+          row.scope === "private" &&
+          row.owner_principal !== caller.principal
+        )
           return null;
         return toFile(row);
       });
@@ -1492,10 +1566,15 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         );
         const visible =
           row &&
-          (caller.role === "manager" || row.scope === "shared" || row.owner_principal === caller.principal);
+          (caller.role === "manager" ||
+            row.scope === "shared" ||
+            row.owner_principal === caller.principal);
         if (!row || !visible) throw new SiteDataError("not_found", "File not found");
         if (caller.role !== "manager" && row.owner_principal !== caller.principal)
-          throw new SiteDataError("forbidden", "Only the uploader or the Site's managers can delete this file");
+          throw new SiteDataError(
+            "forbidden",
+            "Only the uploader or the Site's managers can delete this file",
+          );
         await tx.execute(
           sql`delete from site_data_files where workspace_id = ${caller.workspaceId} and id = ${fileId}`,
         );

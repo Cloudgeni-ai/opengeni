@@ -191,7 +191,10 @@ export function SiteDataPanel({
             <UsageMeter
               label="Records"
               measure="used"
-              percent={percentUsed(described.usage.recordBytes, described.limits.recordBytesPerSite)}
+              percent={percentUsed(
+                described.usage.recordBytes,
+                described.limits.recordBytesPerSite,
+              )}
               valueLabel={`${formatBytes(described.usage.recordBytes)} of ${formatBytes(described.limits.recordBytesPerSite)}`}
             />
             <UsageMeter

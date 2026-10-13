@@ -134,11 +134,7 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
-  return access.store.write(
-    access.caller,
-    operations as SiteDataWriteOp[],
-    access.writeOptions,
-  );
+  return access.store.write(access.caller, operations as SiteDataWriteOp[], access.writeOptions);
 }
 
 // --- import and export -------------------------------------------------------

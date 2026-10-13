@@ -4,7 +4,12 @@
  * an agent acting for them); everyone else who can see the Site is a viewer.
  */
 
-export const SITE_DATA_ACCESS_MODES = ["shared", "shared_read", "per_viewer", "append_only"] as const;
+export const SITE_DATA_ACCESS_MODES = [
+  "shared",
+  "shared_read",
+  "per_viewer",
+  "append_only",
+] as const;
 export type SiteDataAccessMode = (typeof SITE_DATA_ACCESS_MODES)[number];
 export type SiteDataRole = "manager" | "viewer";
 export type SiteDataReach = "all" | "own" | "none";

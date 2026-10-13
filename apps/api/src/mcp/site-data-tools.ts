@@ -103,7 +103,13 @@ export function registerSiteDataTools(
           .optional()
           .describe("Fields to index for numeric range filters."),
         uniqueFields: z4
-          .array(z4.array(z4.string().describe("Dotted data path.")).min(1).max(4).describe("Fields whose combined value must be unique."))
+          .array(
+            z4
+              .array(z4.string().describe("Dotted data path."))
+              .min(1)
+              .max(4)
+              .describe("Fields whose combined value must be unique."),
+          )
           .max(5)
           .optional()
           .describe("Unique field sets."),
@@ -209,7 +215,11 @@ export function registerSiteDataTools(
           .max(1000)
           .optional()
           .describe("For json."),
-        csv: z4.string().max(2 * 1024 * 1024).optional().describe("For csv."),
+        csv: z4
+          .string()
+          .max(2 * 1024 * 1024)
+          .optional()
+          .describe("For csv."),
         keyField: z4.string().optional().describe("Field to use as each record's key."),
       },
     },
@@ -274,10 +284,11 @@ export function registerSiteDataTools(
         cursor: z4.string().max(4096).optional().describe("nextCursor from the last page."),
       },
     },
-    call(async (args: { siteId: string; fileId?: string | undefined; cursor?: string | undefined }) =>
-      args.fileId
-        ? getSiteDataFileUrl(deps, grant, args.siteId, args.fileId, {}, "sandbox")
-        : listSiteDataFiles(deps, grant, args.siteId, { cursor: args.cursor ?? null }),
+    call(
+      async (args: { siteId: string; fileId?: string | undefined; cursor?: string | undefined }) =>
+        args.fileId
+          ? getSiteDataFileUrl(deps, grant, args.siteId, args.fileId, {}, "sandbox")
+          : listSiteDataFiles(deps, grant, args.siteId, { cursor: args.cursor ?? null }),
     ),
   );
 

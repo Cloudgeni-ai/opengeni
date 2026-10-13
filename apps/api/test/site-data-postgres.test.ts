@@ -3,11 +3,7 @@ import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AccessGrant } from "@opengeni/contracts";
-import type {
-  ApiRouteDeps,
-  ObjectStorageDependency,
-  SessionWorkflowClient,
-} from "@opengeni/core";
+import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import {
   createDb,
   createOrganizationApiKey,
@@ -170,7 +166,10 @@ async function fixture(overrides: Partial<Settings> = {}) {
       headers: {
         ...service,
         "x-opengeni-external-actor": encodeURIComponent(
-          JSON.stringify({ mode: "external", identity: { source, externalId: identity.externalId } }),
+          JSON.stringify({
+            mode: "external",
+            identity: { source, externalId: identity.externalId },
+          }),
         ),
       },
     };
@@ -292,7 +291,13 @@ test("each access mode applies to viewers and managers", async () => {
   const contact = created.json.results[0].record;
   expect(contact.owner).toBe(`user:${f.member.subjectId}`);
   const patched = await s.write(f.third, [
-    { op: "patch", collection: "contacts", id: contact.id, data: { stage: "lead" }, expectedVersion: 1 },
+    {
+      op: "patch",
+      collection: "contacts",
+      id: contact.id,
+      data: { stage: "lead" },
+      expectedVersion: 1,
+    },
   ]);
   expect(patched.status).toBe(200);
   expect(patched.json.results[0].record).toMatchObject({
@@ -301,7 +306,13 @@ test("each access mode applies to viewers and managers", async () => {
   });
   // A stale write is a conflict, not a lost update.
   const stale = await s.write(f.member, [
-    { op: "patch", collection: "contacts", id: contact.id, data: { stage: "won" }, expectedVersion: 1 },
+    {
+      op: "patch",
+      collection: "contacts",
+      id: contact.id,
+      data: { stage: "won" },
+      expectedVersion: 1,
+    },
   ]);
   expect(stale.status).toBe(409);
   expect(errorCode(stale)).toBe("conflict");
@@ -312,7 +323,9 @@ test("each access mode applies to viewers and managers", async () => {
   ]);
   expect(duplicate.status).toBe(409);
   expect(duplicate.json.error.details).toMatchObject({ reason: "unique", fields: ["email"] });
-  const removed = await s.write(f.third, [{ op: "delete", collection: "contacts", id: contact.id }]);
+  const removed = await s.write(f.third, [
+    { op: "delete", collection: "contacts", id: contact.id },
+  ]);
   expect(removed.json.results[0]).toEqual({ op: "delete", deleted: { id: contact.id } });
 
   // shared_read: members read; only managers write.
@@ -403,14 +416,15 @@ test("Site frames read their own records and never manage", async () => {
     (await s.query(f.owner, { collection: "tracker", scope: "all" }, frame)).json.records,
   ).toHaveLength(2);
   // A frame cannot define, describe, export, or reach another Site.
-  expect((await s.request(f.owner, "PUT", "/data/collections/x", { accessMode: "shared" }, frame)).status).toBe(403);
+  expect(
+    (await s.request(f.owner, "PUT", "/data/collections/x", { accessMode: "shared" }, frame))
+      .status,
+  ).toBe(403);
   expect((await s.request(f.owner, "GET", "/data", undefined, frame)).status).not.toBe(200);
   expect(
     (await s.request(f.owner, "GET", "/data/collections/tracker/export", undefined, frame)).status,
   ).toBe(403);
-  const crossSite = await f
-    .site(second.id)
-    .query(f.owner, { collection: "tracker" }, frame);
+  const crossSite = await f.site(second.id).query(f.owner, { collection: "tracker" }, frame);
   expect(crossSite.status).toBe(403);
 });
 
@@ -507,7 +521,12 @@ test("batches are atomic and queries filter, sort, count and page", async () => 
     op: "insert",
     collection: "items",
     key: `item-${index}`,
-    data: { title: `Item ${index}`, score: index, tags: index % 2 ? ["odd"] : ["even"], meta: { group: index % 3 } },
+    data: {
+      title: `Item ${index}`,
+      score: index,
+      tags: index % 2 ? ["odd"] : ["even"],
+      meta: { group: index % 3 },
+    },
   }));
   expect((await s.write(f.member, operations)).status).toBe(200);
   const filtered = await s.query(f.member, {
@@ -631,14 +650,11 @@ test("files upload, list, download and delete with shared and private scope", as
   const created = await f.publish("Intake");
   const s = f.site(created.id);
   const frame = { "x-opengeni-site-id": created.id };
-  const shared = await s.request(
-    f.member,
-    "POST",
-    "/files?name=photo.png",
-    PNG,
-    { "content-type": "image/png", ...frame },
-  );
-  expect(shared.status, JSON.stringify(shared.json)).toBe(201);
+  const sharedFile = await s.request(f.member, "POST", "/files?name=photo.png", PNG, {
+    "content-type": "image/png",
+    ...frame,
+  });
+  expect(sharedFile.status, JSON.stringify(sharedFile.json)).toBe(201);
   const secret = await s.request(
     f.member,
     "POST",
@@ -647,9 +663,15 @@ test("files upload, list, download and delete with shared and private scope", as
     { "content-type": "application/pdf", ...frame },
   );
   expect(secret.status).toBe(201);
-  const spoofed = await s.request(f.member, "POST", "/files?name=x.png", new Uint8Array([1, 2, 3]), {
-    "content-type": "image/png",
-  });
+  const spoofed = await s.request(
+    f.member,
+    "POST",
+    "/files?name=x.png",
+    new Uint8Array([1, 2, 3]),
+    {
+      "content-type": "image/png",
+    },
+  );
   expect(spoofed.status).toBe(422);
   const html = await s.request(f.member, "POST", "/files?name=x.html", new Uint8Array([60]), {
     "content-type": "text/html",
@@ -662,13 +684,13 @@ test("files upload, list, download and delete with shared and private scope", as
   expect(names(await s.request(f.third, "GET", "/files"))).toEqual(["photo.png"]);
   expect(names(await s.request(f.owner, "GET", "/files"))).toEqual(["id.pdf", "photo.png"]);
   expect((await s.request(f.third, "GET", `/files/${secret.json.id}`)).status).toBe(404);
-  const download = await s.request(f.third, "GET", `/files/${shared.json.id}`);
+  const download = await s.request(f.third, "GET", `/files/${sharedFile.json.id}`);
   expect(download.status).toBe(200);
-  expect(download.json.url).toContain(`/site-data/${created.id}/files/${shared.json.id}`);
+  expect(download.json.url).toContain(`/site-data/${created.id}/files/${sharedFile.json.id}`);
   // Only the uploader or a manager deletes a shared file.
-  expect((await s.request(f.third, "DELETE", `/files/${shared.json.id}`)).status).toBe(403);
-  expect((await s.request(f.member, "DELETE", `/files/${shared.json.id}`)).status).toBe(200);
-  expect([...f.objects.keys()].some((key) => key.endsWith(shared.json.id))).toBe(false);
+  expect((await s.request(f.third, "DELETE", `/files/${sharedFile.json.id}`)).status).toBe(403);
+  expect((await s.request(f.member, "DELETE", `/files/${sharedFile.json.id}`)).status).toBe(200);
+  expect([...f.objects.keys()].some((key) => key.endsWith(sharedFile.json.id))).toBe(false);
   expect((await s.describe(f.owner)).json.usage).toMatchObject({ fileCount: 1 });
 });
 
@@ -763,8 +785,18 @@ test("an agent defines and feeds a collection the way a schedule would", async (
       callTool("site_data_write", {
         siteId: created.id,
         operations: [
-          { op: "put", collection: "companies", key: "acme.com", data: { name: "Acme", domain: "acme.com" } },
-          { op: "put", collection: "companies", key: "globex.com", data: { name: "Globex", domain: "globex.com" } },
+          {
+            op: "put",
+            collection: "companies",
+            key: "acme.com",
+            data: { name: "Acme", domain: "acme.com" },
+          },
+          {
+            op: "put",
+            collection: "companies",
+            key: "globex.com",
+            data: { name: "Globex", domain: "globex.com" },
+          },
         ],
       });
     expect((await write()).isError).toBe(false);
@@ -778,11 +810,13 @@ test("an agent defines and feeds a collection the way a schedule would", async (
     expect(conflict.value.error.code).toBe("conflict");
 
     // The page reads it as any member would.
-    const page = await f
-      .site(created.id)
-      .query(f.member, { collection: "companies", sort: [{ field: "name" }] }, {
+    const page = await f.site(created.id).query(
+      f.member,
+      { collection: "companies", sort: [{ field: "name" }] },
+      {
         "x-opengeni-site-id": created.id,
-      });
+      },
+    );
     expect(page.json.records.map((record: any) => [record.data.name, record.version])).toEqual([
       ["Acme", 2],
       ["Globex", 2],
@@ -799,12 +833,14 @@ test("an agent defines and feeds a collection the way a schedule would", async (
       format: "csv",
     });
     expect(exported.value.records).toBe(2);
-    expect(exported.value.content.split("\r\n")[0]).toBe("$id,$key,$owner,$createdAt,$updatedAt,domain,name");
+    expect(exported.value.content.split("\r\n")[0]).toBe(
+      "$id,$key,$owner,$createdAt,$updatedAt,domain,name",
+    );
     const imported = await callTool("site_data_import", {
       siteId: created.id,
       collection: "companies",
       format: "csv",
-      csv: "name,domain\nInitech,initech.com\n\"Hooli, Inc\",hooli.com\n",
+      csv: 'name,domain\nInitech,initech.com\n"Hooli, Inc",hooli.com\n',
       keyField: "domain",
     });
     expect(imported.value).toEqual({ imported: 2 });
