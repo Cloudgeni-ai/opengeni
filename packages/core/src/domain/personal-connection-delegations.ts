@@ -1,6 +1,7 @@
 import type { McpServerConfig, Settings } from "@opengeni/config";
 import type {
   AccessGrant,
+  ConnectionAccountIntent,
   ConnectionMetadata,
   McpConnectionAccountBinding,
   McpConnectionAccountSelection,
@@ -26,6 +27,7 @@ import {
   getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnMcpAccountBindings,
+  getSessionTurnConnectionAccountIntent,
   getConnectionMetadata,
   getSocialConnection,
   listConnectionsMetadata,
@@ -777,6 +779,13 @@ export async function freezeConnectionAccounts(
 ): Promise<{
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  /**
+   * What the request decided, to be stored on the accepted turn: whose
+   * personal accounts it may use and which accounts were explicitly picked.
+   * Agent-created work carries its parent turn's intent (null when the parent
+   * predates intent).
+   */
+  connectionAccountIntent: ConnectionAccountIntent | null;
 }> {
   const selectedIds = new Set(input.tools.map((tool) => tool.id));
   const servers = input.settings.mcpServers.filter(
@@ -787,6 +796,7 @@ export async function freezeConnectionAccounts(
   );
   const serverIds = new Set(servers.map((server) => server.id));
   let mcpAccountBindings: McpConnectionAccountBinding[];
+  let connectionAccountIntent: ConnectionAccountIntent | null;
   if (input.source.kind === "turn") {
     if (input.authoritySelections?.length) {
       throw new ConnectionAccountSelectionError(
@@ -794,6 +804,12 @@ export async function freezeConnectionAccounts(
         { version: 1, reason: "parent_accounts_required", accounts: [] },
       );
     }
+    connectionAccountIntent = await getSessionTurnConnectionAccountIntent(
+      input.db,
+      input.workspaceId,
+      input.source.sessionId,
+      input.source.turnId,
+    );
     const inherited = await getSessionTurnMcpAccountBindings(
       input.db,
       input.workspaceId,
@@ -804,10 +820,19 @@ export async function freezeConnectionAccounts(
       return {
         mcpAccountBindings: null,
         personalConnectionDelegations: await freezePersonalConnectionDelegations(input),
+        connectionAccountIntent,
       };
     }
     mcpAccountBindings = inherited.filter((binding) => serverIds.has(binding.canonicalServerId));
   } else {
+    connectionAccountIntent = {
+      version: 1,
+      principal:
+        input.source.kind === "subject"
+          ? { kind: "subject", subjectId: input.source.subjectId }
+          : { kind: "none" },
+      selections: [...(input.authoritySelections ?? [])],
+    };
     mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -849,6 +874,7 @@ export async function freezeConnectionAccounts(
       ...personalDelegationsForAccountBindings(mcpAccountBindings),
       ...special,
     ],
+    connectionAccountIntent,
   };
 }
 

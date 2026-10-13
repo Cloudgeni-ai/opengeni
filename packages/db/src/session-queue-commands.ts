@@ -9,7 +9,10 @@ import { acceptSessionFileAttachments } from "./session-file-attachments";
 import { ArchivedSessionImportError } from "./archived-session-imports";
 import { SessionArchivedError } from "./session-archive-errors";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import {
   XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
@@ -27,6 +30,7 @@ import {
   type SessionTurnSurface,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
+  type ConnectionAccountIntent,
   type DraftTimelineAnnotation,
   type LatencyMode,
   type ReasoningEffort,
@@ -1826,6 +1830,8 @@ export async function submitHumanPromptInTransaction(
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
     mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+    /** The sender's account intent: their principal and explicit picks. */
+    connectionAccountIntent?: ConnectionAccountIntent | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     mcpCredentialUpdates?: Array<{
       id: string;
@@ -2348,6 +2354,9 @@ export async function submitHumanPromptInTransaction(
           mcpAccountBindings: editedSourceTurn
             ? editedSourceTurn.mcpAccountBindings
             : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+          connectionAccountIntent: editedSourceTurn
+            ? parseConnectionAccountIntent(editedSourceTurn.connectionAccountIntent)
+            : parseConnectionAccountIntent(input.connectionAccountIntent),
           xaiProviderAccountAuthoritySnapshot,
           claudeProviderAccountAuthoritySnapshot,
           subscriptionAuthority,

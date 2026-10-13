@@ -45,6 +45,7 @@ import {
   assertSessionAllowsProductModel,
   resolveCatalogSettings,
   resolveCodexAppsDesignationForRun,
+  resolveContinuedConnectionAccounts,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
@@ -216,6 +217,19 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       sessionId: input.sessionId,
       update,
     });
+  // Work that continues a person's turn resolves that person's current
+  // accounts again inside the claim, as their next message would.
+  const resolveContinuedAccounts: NonNullable<
+    ClaimSessionWorkForAttemptInput["resolveContinuedConnectionAccounts"]
+  > = async (tx, { sessionId, intent }) =>
+    await resolveContinuedConnectionAccounts({
+      db: tx,
+      settings: deploymentCatalogSettings,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId,
+      intent,
+    });
   const claim = await measureTurnStartupPhase(
     observability,
     {
@@ -233,6 +247,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         dispatchId,
         trigger: input.trigger,
         validatePendingSystemUpdateAuthority,
+        resolveContinuedConnectionAccounts: resolveContinuedAccounts,
       }),
   );
   if (claim.action === "unclaimed") {
@@ -504,6 +519,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       dispatchId,
       trigger: input.trigger,
       validatePendingSystemUpdateAuthority,
+      resolveContinuedConnectionAccounts: resolveContinuedAccounts,
       attachPendingUpdatesToRunningAttempt: true,
     });
     return attached.action === "claimed" && attached.turn.id === turn.id;

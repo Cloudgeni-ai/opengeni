@@ -246,9 +246,13 @@ export {
 } from "./session-file-attachments";
 import {
   parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
   sessionCreateConnectionSelectionFailure,
 } from "./mcp-account-bindings";
-export { SessionCreateConnectionSelectionUnavailableError } from "./mcp-account-bindings";
+export {
+  SessionCreateConnectionSelectionUnavailableError,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import {
   childTerminalResultFinalAnswer,
   childTerminalResultFinalAnswerSequences,
@@ -683,6 +687,7 @@ import type {
   WorkspaceMemberCandidate,
   McpPersonalConnectionDelegation,
   McpConnectionAccountBinding,
+  ConnectionAccountIntent,
   ModelContextContributionSummary,
   Permission,
   PersonalResourceAttachmentIntent,
@@ -31504,6 +31509,8 @@ export type SessionCreateInput = {
   mcpServers?: CreateSessionMcpServerInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+  /** The creating person's account intent, copied onto the first turn. */
+  connectionAccountIntent?: ConnectionAccountIntent | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   initialXaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   initialClaudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
@@ -32367,6 +32374,9 @@ async function createSessionInTransaction(
             firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
             initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
             initialMcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+            initialConnectionAccountIntent: parseConnectionAccountIntent(
+              input.connectionAccountIntent,
+            ),
             initialPersonalResourceAttachmentIntent:
               input.initialPersonalResourceAttachmentIntent ?? null,
             visibility: createRequestedVisibility,
@@ -33450,6 +33460,34 @@ export async function getSessionTurnMcpAccountBindings(
     async (scopedDb) =>
       await mcpAccountBindingsForTurnInTransaction(scopedDb, workspaceId, sessionId, turnId),
   );
+}
+
+/** The exact turn's account intent; null for a turn accepted before intent existed. */
+export async function getSessionTurnConnectionAccountIntent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<ConnectionAccountIntent | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ intent: schema.sessionTurns.connectionAccountIntent })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurns.id, turnId),
+        ),
+      )
+      .limit(1);
+    if (!row) {
+      throw new SessionControlInvariantError(
+        `Accepted connection account intent turn not found: ${sessionId}/${turnId}`,
+      );
+    }
+    return parseConnectionAccountIntent(row.intent);
+  });
 }
 
 export async function getSessionParentMcpAccountBindings(
@@ -69816,6 +69854,9 @@ export async function initializeSessionStartAtomically(
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(
                     session.initialMcpAccountBindings,
                   ),
+                  connectionAccountIntent: parseConnectionAccountIntent(
+                    session.initialConnectionAccountIntent,
+                  ),
                   xaiProviderAccountAuthoritySnapshot:
                     session.initialXaiProviderAccountAuthoritySnapshot,
                   claudeProviderAccountAuthoritySnapshot:
@@ -70695,6 +70736,22 @@ export type ClaimSessionWorkForAttemptInput = {
     tx: Database,
     update: SessionSystemUpdate,
   ) => Promise<{ action: "accept" } | { action: "reject"; reason: string }>;
+  /**
+   * Worker-owned live account resolution for an inference that continues a
+   * turn with an account intent (goal continuation, wait wake-up, command or
+   * child result, informational input). It resolves the intent exactly as the
+   * person's next message would, against the session's current connectors and
+   * accounts. Without it, the continuation copies the exact earlier accounts.
+   */
+  resolveContinuedConnectionAccounts?: (
+    tx: Database,
+    input: { sessionId: string; intent: ConnectionAccountIntent },
+  ) => Promise<{
+    mcpAccountBindings: McpConnectionAccountBinding[] | null;
+    personalConnectionDelegations: McpPersonalConnectionDelegation[];
+    /** Connectors the turn runs without because their account cannot be used. */
+    gaps?: Array<{ serverId: string; connectionId: string | null; reason: string }>;
+  }>;
   /**
    * A requires-action resume first persists its open tool-call result, then
    * re-enters this exact attempt to attach machine input that arrived while the
@@ -73730,6 +73787,7 @@ export async function claimSessionWorkForAttempt(
               : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
           let scheduledFirstPartyMcpTools: FirstPartyMcpToolName[] | null = null;
+          let scheduledConnectionAccountIntent: ConnectionAccountIntent | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
             const [scheduledRun] = await tx
@@ -73752,6 +73810,7 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            scheduledConnectionAccountIntent = accepted.connectionAccountIntent ?? null;
             // A task's accepted service provenance is immutable, just like
             // its execution policy. Never consult a mutable task or borrow
             // the session creator's human for this occurrence.
@@ -73896,6 +73955,14 @@ export async function claimSessionWorkForAttempt(
             delivered.updates
               .map((update) => systemUpdateCausalHumanTurnId(update))
               .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
+          // The account intent this inference continues: the receiving
+          // context's, or the causal turn's in this session. A scheduled
+          // occurrence was resolved at its own admission, and another agent's
+          // message or Steer acts with its sender's exact accounts.
+          let continuedConnectionAccountIntent: ConnectionAccountIntent | null =
+            receiverContext && !scheduledTaskRunId && !agentCommandUpdate
+              ? parseConnectionAccountIntent(receiverContext.connectionAccountIntent)
+              : null;
           if (causalHumanTurnId) {
             // Child lifecycle notices freeze the parent turn that spawned the
             // child. Resolve that exact row on the receiving parent session;
@@ -73907,6 +73974,7 @@ export async function claimSessionWorkForAttempt(
                 initiatorKind: schema.sessionTurns.initiatorKind,
                 initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
                 initiatorContext: schema.sessionTurns.initiatorContext,
+                connectionAccountIntent: schema.sessionTurns.connectionAccountIntent,
               })
               .from(schema.sessionTurns)
               .where(
@@ -73917,6 +73985,11 @@ export async function claimSessionWorkForAttempt(
                 ),
               )
               .limit(1);
+            if (causalTurn && !receiverContext && !scheduledTaskRunId && !agentCommandUpdate) {
+              continuedConnectionAccountIntent = parseConnectionAccountIntent(
+                causalTurn.connectionAccountIntent,
+              );
+            }
             if (causalTurn) {
               internalInitiator.context = contextForCausalTurn(
                 internalInitiator.context,
@@ -73978,12 +74051,49 @@ export async function claimSessionWorkForAttempt(
             // freezes the same visibility/owner-membership authority tuple.
             initiatingHumanSubjectId = privateOwnerSubjectId;
           }
-          if (internalPersonalConnectionDelegations.length > 0) {
+          let acceptedPersonalConnectionDelegations = internalPersonalConnectionDelegations;
+          let acceptedMcpAccountBindings = parseAcceptedMcpAccountBindings(
+            receiverContext
+              ? receiverContext.mcpAccountBindings
+              : authorityUpdate.mcpAccountBindings,
+          );
+          let connectionAccountGaps: Array<{
+            serverId: string;
+            connectionId: string | null;
+            reason: string;
+          }> = [];
+          if (continuedConnectionAccountIntent && input.resolveContinuedConnectionAccounts) {
+            // Continuing work uses the person's current accounts, resolved
+            // exactly as their next message with the same picks would be. A
+            // carried principal that is not this turn's initiating person
+            // (for example a private session's owner) never lends its personal
+            // accounts: the turn resolves shared accounts only.
+            const principal = continuedConnectionAccountIntent.principal;
+            const resolved = await input.resolveContinuedConnectionAccounts(
+              tx as unknown as Database,
+              {
+                sessionId,
+                intent:
+                  principal.kind === "subject" && principal.subjectId !== initiatingHumanSubjectId
+                    ? { ...continuedConnectionAccountIntent, principal: { kind: "none" } }
+                    : continuedConnectionAccountIntent,
+              },
+            );
+            acceptedPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+              resolved.personalConnectionDelegations,
+              `session_turns:${workspaceId}:${sessionId}:${turnId}:continued`,
+            );
+            acceptedMcpAccountBindings = parseAcceptedMcpAccountBindings(
+              resolved.mcpAccountBindings,
+            );
+            connectionAccountGaps = (resolved.gaps ?? []).slice(0, 32);
+          }
+          if (acceptedPersonalConnectionDelegations.length > 0) {
             if (!initiatingHumanSubjectId) {
               throw new Error("Personal connection acceptance requires an initiating human");
             }
             if (
-              internalPersonalConnectionDelegations.some(
+              acceptedPersonalConnectionDelegations.some(
                 (delegation) => delegation.ownerSubjectId !== initiatingHumanSubjectId,
               )
             ) {
@@ -74027,6 +74137,10 @@ export async function claimSessionWorkForAttempt(
               credentialRestriction: "developer_setup",
             };
           }
+          // Internal record of connectors this continued turn runs without
+          // (never model context): their account can no longer be used.
+          const connectionAccountGapMetadata =
+            connectionAccountGaps.length > 0 ? { connectionAccountGaps } : {};
           const baseInternalTurnMetadata = frozenTurnExecutionPolicy
             ? metadataWithTurnExecutionPolicyV1(
                 {
@@ -74034,6 +74148,7 @@ export async function claimSessionWorkForAttempt(
                   ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                   ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
                   ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
+                  ...connectionAccountGapMetadata,
                 },
                 frozenTurnExecutionPolicy,
               )
@@ -74042,6 +74157,7 @@ export async function claimSessionWorkForAttempt(
                 ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                 ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
                 ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
+                ...connectionAccountGapMetadata,
               };
           const continuationCodexPolicy = routingGoalUpdate
             ? readCodexCredentialPolicySnapshotV1(routingGoalUpdate.lineage)
@@ -74132,12 +74248,10 @@ export async function claimSessionWorkForAttempt(
                   ...initiatorColumns(internalInitiator),
                   initiatingHumanSubjectId,
                   executionContextTurnId: receiverContext?.id ?? null,
-                  personalConnectionDelegations: internalPersonalConnectionDelegations,
-                  mcpAccountBindings: parseAcceptedMcpAccountBindings(
-                    receiverContext
-                      ? receiverContext.mcpAccountBindings
-                      : authorityUpdate.mcpAccountBindings,
-                  ),
+                  personalConnectionDelegations: acceptedPersonalConnectionDelegations,
+                  mcpAccountBindings: acceptedMcpAccountBindings,
+                  connectionAccountIntent:
+                    continuedConnectionAccountIntent ?? scheduledConnectionAccountIntent,
                   scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
                   claudeProviderAccountAuthoritySnapshot: internalClaudeAuthority.snapshot,
