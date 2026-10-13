@@ -120,11 +120,9 @@ async function capture(name: string, target?: Locator) {
   else await page.screenshot({ path: `${screenshots}/${name}.png` });
 }
 
-async function expectNoAxeViolations(include = "main", disableRules: string[] = []) {
-  const results = await new AxeBuilder({ page })
-    .include(include)
-    .disableRules(disableRules)
-    .analyze();
+// Every axe rule runs on every scan; there is no rule waiver.
+async function expectNoAxeViolations(include = "main") {
+  const results = await new AxeBuilder({ page }).include(include).analyze();
   expect(
     results.violations.map((violation) => ({
       id: violation.id,
