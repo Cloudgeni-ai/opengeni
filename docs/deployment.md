@@ -14,7 +14,7 @@ gate. Upgrade every API, control worker, and turn worker before enabling
 `OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement
 of persisted policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
 
-Per-task usage limits follow the same pattern: apply migration 0759, upgrade
+Per-task usage limits follow the same pattern: apply migrations 0759–0761, upgrade
 every API, worker, web, SDK/React and embedded consumer, then enable
 `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`. Disabling it refuses new limits but
 keeps enforcing persisted ones. See [task usage limit rollout](session-usage-limits.md#rollout-and-activation).

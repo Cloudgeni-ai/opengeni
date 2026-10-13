@@ -188,6 +188,16 @@ silently running an unlimited task. A refusal surfaces as
 neutral message and notice. Older clients that do not understand the new
 marker show a generic stop, never credits or a monthly reset.
 
+A stop is also an attention boundary: the `turn.completed` carrying
+`segmentLimit: "session_usage_limit"` marks the session unread in the rail and
+session tree (like a failure), because only a person can raise or clear the
+limit. No explanatory model call is made. An active goal pauses with reason
+`session_usage_limit`, and a stopped child reports its idle result to its
+parent, whose own next turn is refused at claim before any provider work, so a
+reached limit settles once per session without a refusal loop. Other segment
+limits (`max_turns`, `budget_exhausted`) keep their existing attention
+behavior.
+
 ## Tasks created before this feature
 
 A root first touched by a read, write or settlement starts `preparing`. A
@@ -212,9 +222,14 @@ API and both workers when set. It gates producers only:
 - persisted limits are still read and enforced, and an authorized clear
   (`limitMicros: null`) is still allowed for recovery.
 
-1. Apply migration 0759 and provision the matching database roles. The tables
-   live in `opengeni_private` with FORCE RLS and execute-only entry points; the
-   runtime posture and schema-contract checks include them.
+1. Apply migrations 0759–0761 and provision the matching database roles. The
+   tables live in `opengeni_private` with FORCE RLS and execute-only entry
+   points; the runtime posture and schema-contract checks include them. 0760
+   builds a partial attention index on `session_events` concurrently (rolling;
+   its build time scales with the meaningful-event history), and 0761 replaces
+   the cursor trigger routine so the attention frontier counts usage-limit
+   stops. The pre-0760 `session_events_meaningful_attention_v2_idx` stays for
+   older API processes during the rollout; drop it in a later rolling migration.
 2. Upgrade **every consumer** first: API, control worker, turn worker, web,
    SDK/React, Slack and embedded hosts. A worker that predates this release
    would not enforce a persisted limit, and an older client would not

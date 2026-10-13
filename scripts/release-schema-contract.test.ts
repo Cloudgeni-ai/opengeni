@@ -2730,6 +2730,8 @@ describe("release schema contract", () => {
       "0736_notification_webhook_content.sql",
       "0739_vaults.sql",
       "0759_session_usage_limits.sql",
+      "0760_session_usage_limit_attention_index.sql",
+      "0761_session_usage_limit_attention_cursor.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

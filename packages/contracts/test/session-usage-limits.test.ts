@@ -44,7 +44,9 @@ describe("session usage limit amounts (AC01)", () => {
 
   test("null (no limit) and zero (stop immediately) are distinct write values", () => {
     const base = { expectedVersion: 0, operationId: "op-1" };
-    expect(SetSessionUsageLimitRequest.parse({ ...base, limitMicros: null }).limitMicros).toBeNull();
+    expect(
+      SetSessionUsageLimitRequest.parse({ ...base, limitMicros: null }).limitMicros,
+    ).toBeNull();
     expect(SetSessionUsageLimitRequest.parse({ ...base, limitMicros: 0 }).limitMicros).toBe(0);
     expect(SetSessionUsageLimitRequest.safeParse({ ...base }).success).toBe(false);
   });
@@ -65,8 +67,11 @@ describe("session usage limit amounts (AC01)", () => {
       ).toBe(false);
     }
     expect(
-      SetSessionUsageLimitRequest.safeParse({ limitMicros: 1, expectedVersion: -1, operationId: "a" })
-        .success,
+      SetSessionUsageLimitRequest.safeParse({
+        limitMicros: 1,
+        expectedVersion: -1,
+        operationId: "a",
+      }).success,
     ).toBe(false);
   });
 
@@ -114,7 +119,7 @@ describe("session usage limit projection", () => {
 
 describe("refusal parsing and wording", () => {
   const refusal = {
-    code: "session_usage_limit_reached",
+    code: "session_usage_limit_reached" as const,
     basis: SESSION_USAGE_LIMIT_BASIS,
     rootSessionId: ROOT,
     limitMicros: 1_000_000,
@@ -123,7 +128,9 @@ describe("refusal parsing and wording", () => {
   };
 
   test("zod schema and zod-free parser agree", () => {
-    expect(SessionUsageLimitReachedRefusal.safeParse({ ...refusal, message: "x" }).success).toBe(true);
+    expect(SessionUsageLimitReachedRefusal.safeParse({ ...refusal, message: "x" }).success).toBe(
+      true,
+    );
     const parsed = parseSessionUsageLimitReachedRefusal(refusal);
     expect(parsed).toEqual({ ...refusal, message: "limit reached" });
     expect(SessionUsageLimitReachedRefusal.parse(parsed)).toEqual(parsed!);
