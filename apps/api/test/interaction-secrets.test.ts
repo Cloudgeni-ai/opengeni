@@ -400,6 +400,30 @@ describe("syncBrowserPasskeys", () => {
     expect(client.requests.at(-1)!.credentials).not.toBeNull();
   });
 
+  test("a refresh before an action leases again even within the renewal minute", async () => {
+    const { store, calls } = fakeStore();
+    const client = fakeClient([]);
+    const now = 2_000_000;
+    const sync = (refresh?: boolean) =>
+      syncBrowserPasskeys({
+        port: { ...port({}), passkeys: store },
+        grant: agentGrant,
+        browserSessionId: `${BROWSER}-refresh`,
+        controllerGeneration: "controller-1",
+        client,
+        now: () => now,
+        ...(refresh === undefined ? {} : { refresh }),
+      });
+    await sync();
+    await sync(false);
+    expect(client.requests.at(-1)!.credentials).toBeNull();
+    // Another browser may have taken the lease over; this one takes it back
+    // and reloads the current credentials before acting.
+    await sync(true);
+    expect(client.requests.at(-1)!.credentials).toEqual([stored]);
+    expect(calls.filter((call) => call.startsWith("lease:"))).toHaveLength(2);
+  });
+
   test("humans never load passkeys and old controllers are skipped quietly", async () => {
     const { store, calls } = fakeStore();
     expect(

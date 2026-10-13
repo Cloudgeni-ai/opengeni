@@ -2801,7 +2801,9 @@ BEGIN
 END
 $$;
 
--- Lease every reachable passkey not held by another live holder.
+-- Lease every reachable passkey to the browser about to act. The most recent
+-- holder takes over, so a passkey registered in one browser works at once in
+-- another; that browser reloads it with the current sign count before each action.
 CREATE FUNCTION lease_vault_passkeys(p_principal jsonb, p_holder text, p_ttl_seconds integer)
 RETURNS SETOF uuid
 LANGUAGE plpgsql SECURITY DEFINER
@@ -2825,7 +2827,6 @@ BEGIN
       AND item.vault_id IN (SELECT reach.vault_id FROM opengeni_private.vault_reach(context) reach)
     ON CONFLICT (item_id) DO UPDATE
       SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
-      WHERE vault_passkey_leases.holder = EXCLUDED.holder OR vault_passkey_leases.expires_at <= pg_catalog.now()
     RETURNING vault_passkey_leases.item_id;
   PERFORM opengeni_private.vault_capability_close();
 END

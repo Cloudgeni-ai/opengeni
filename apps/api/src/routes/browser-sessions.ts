@@ -1178,16 +1178,18 @@ export function registerBrowserSessionRoutes(
               });
             }
           }
-          const passkeySync = () =>
+          const passkeySync = (refresh: boolean) =>
             syncBrowserPasskeys({
               port: interactionSecrets,
               grant,
               browserSessionId,
               controllerGeneration: binding.controllerGeneration,
               client: sessionClient,
+              refresh,
               log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
             });
-          await passkeySync();
+          // Before the action this browser takes over the principal's passkeys.
+          await passkeySync(true);
           // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
           const secretValues = await resolveInteractionSecretValues({
             port: interactionSecrets,
@@ -1207,7 +1209,7 @@ export function registerBrowserSessionRoutes(
               }),
             );
           } finally {
-            await passkeySync();
+            await passkeySync(false);
           }
         },
       );

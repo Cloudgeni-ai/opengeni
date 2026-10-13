@@ -275,6 +275,8 @@ export async function syncBrowserPasskeys(input: {
   browserSessionId: string;
   controllerGeneration: string;
   client: PasskeySyncClient;
+  /** Lease again now (right before an action), taking over from any other browser. */
+  refresh?: boolean;
   now?: () => number;
   log?: InteractionSecretsLog;
 }): Promise<{ saved: number; asserted: number } | null> {
@@ -310,7 +312,8 @@ export async function syncBrowserPasskeys(input: {
     acknowledgeEventIds,
   });
   try {
-    const due = !state || now() - state.leasedAtMs >= PASSKEY_LEASE_RENEW_MS;
+    const due =
+      input.refresh === true || !state || now() - state.leasedAtMs >= PASSKEY_LEASE_RENEW_MS;
     const credentials = due ? await lease() : null;
     let response: BrowserPasskeySyncResponse;
     try {

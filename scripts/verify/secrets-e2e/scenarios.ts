@@ -415,7 +415,7 @@ export const SCENARIOS: Scenario[] = [
         context,
         run,
         "totp-login",
-        `In a fresh browser, sign in at ${context.fakeLogin.url}/totp/login with my saved login including its one-time code.`,
+        `In a fresh browser, sign in as alice at ${context.fakeLogin.url}/totp/login with my saved login for alice, including its one-time code.`,
       );
       run.check("fake site: alice logged in via totp", loginSucceeded(context, "totp", "alice"));
       run.check(
