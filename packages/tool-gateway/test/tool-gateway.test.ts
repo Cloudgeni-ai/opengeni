@@ -574,6 +574,86 @@ describe("ToolGateway argument validation errors", () => {
     ]);
   });
 
+  test("decodes JSON text where the schema needs an object or array, including nested repairs", async () => {
+    const actionSchema = {
+      oneOf: [
+        {
+          type: "object",
+          properties: { kind: { const: "click" }, ref: { type: "string" } },
+          required: ["kind", "ref"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { kind: { const: "wait" }, ms: { type: "integer" } },
+          required: ["kind", "ms"],
+          additionalProperties: false,
+        },
+      ],
+    };
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        action: actionSchema,
+        actions: { type: "array", items: actionSchema },
+        options: {
+          type: ["object", "null"],
+          properties: { tags: { type: "array", items: { type: "string" } } },
+        },
+        note: { type: "string" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    });
+    await expect(
+      callModel({
+        action: '{"kind":"click","ref":"e12"}',
+        actions: '[{"kind":"wait","ms":"250"}, {"kind":"click","ref":"e3"}]',
+        options: ' {"tags": ["a"]} ',
+        note: '{"kind":"click"}',
+      }),
+    ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
+    expect(executed).toEqual([
+      {
+        action: { kind: "click", ref: "e12" },
+        actions: [
+          { kind: "wait", ms: 250 },
+          { kind: "click", ref: "e3" },
+        ],
+        options: { tags: ["a"] },
+        note: '{"kind":"click"}',
+      },
+    ]);
+  });
+
+  test("keeps rejecting JSON text of the wrong shape or that still breaks the schema", async () => {
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        filter: {
+          type: "object",
+          properties: { field: { type: "string" } },
+          required: ["field"],
+          additionalProperties: false,
+        },
+        ids: { type: "array", items: { type: "integer" } },
+      },
+      additionalProperties: false,
+    });
+    // Not JSON, the wrong JSON type, or JSON null never becomes an object/array.
+    for (const filter of ["{field: 'x'}", "[]", "null", '"{}"', "", "{"]) {
+      const error = await rejection(callModel({ filter }));
+      expect(error.issues.map((issue) => issue.path)).toEqual(["filter"]);
+    }
+    await rejection(callModel({ ids: '{"0":1}' }));
+    // Decoded values must still satisfy the rest of the schema.
+    const error = await rejection(callModel({ filter: '{"field":"x","extra":1}' }));
+    expect(error.issues.map((issue) => issue.message)).toEqual([
+      'property "filter.extra" is not allowed',
+    ]);
+    expect(executed).toEqual([]);
+  });
+
   test("keeps rejecting strings that are not plain numbers and every other type mismatch", async () => {
     const { callModel, executed } = gatewayFor({
       type: "object",

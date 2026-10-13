@@ -10,7 +10,7 @@ import Ajv, {
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { schemaPatternEngine } from "./schema-pattern";
-import { repairNumericStringArguments } from "./numeric-string-arguments";
+import { repairStringEncodedArguments } from "./string-encoded-arguments";
 import {
   TOOL_GATEWAY_CATALOG_VERSION,
   ToolGatewayCallRequest,
@@ -290,10 +290,10 @@ export class ToolGateway {
     let callArguments = request.arguments;
     if (!definition.validateInput(callArguments)) {
       const repaired = repairableInputSize(callArguments)
-        ? repairNumericStringArguments(callArguments, definition.diagnoseInput())
+        ? repairStringEncodedArguments(callArguments, definition.diagnoseInput())
         : undefined;
       if (!repaired) throw inputValidationError(definition, callArguments);
-      // Report what is still wrong after the numeric repair, not what it fixed.
+      // Report what is still wrong after the repair, not what it fixed.
       if (!definition.validateInput(repaired)) throw inputValidationError(definition, repaired);
       callArguments = repaired;
     }
