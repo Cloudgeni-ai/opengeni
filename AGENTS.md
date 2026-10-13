@@ -78,8 +78,9 @@ Garage is the local S3-compatible object storage default for fresh Docker Compos
 ## Architecture Notes
 
 Conversational schedules default to the signed calling session. Existing-session
-messages inherit the destination's execution settings at admission; account
-choices retain the schedule's captured authority. Keep message edits narrow and
+messages inherit the destination's execution settings at admission and use the
+owner's current accounts; schedules never save resolved accounts, only a
+person's explicit pins. Keep message edits narrow and
 retargeting server-owned, with execution-digest checks for concurrent edits.
 See `docs/scheduled-task-access.md`.
 

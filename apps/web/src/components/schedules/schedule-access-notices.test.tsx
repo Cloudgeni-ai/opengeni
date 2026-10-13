@@ -20,7 +20,6 @@ const drift: ScheduledTaskPolicyDrift = {
   unavailableConnectors: [],
   missingOpenGeniTools: ["browser_read"],
   unavailableAccounts: [],
-  attachableAccounts: [{ id: "slack", name: "Slack" }],
   canRefresh: true,
 };
 
@@ -129,8 +128,15 @@ describe("scheduled task access notices", () => {
     }
   });
 
-  test("a schedule that cannot start says so once and offers the refresh right there", async () => {
+  test("a stale pin says so once and points at the schedule, never at a refresh", async () => {
     const onRefreshAccess = mock(() => undefined);
+    const stalePin = {
+      ...attention,
+      runId: null,
+      firedAt: null,
+      failures: [],
+      unavailableAccounts: [{ id: "linear", name: "Linear" }],
+    };
     const view = await render(
       <ScheduledTaskAccessNotices
         policyDrift={{
@@ -138,16 +144,9 @@ describe("scheduled task access notices", () => {
           unavailableConnectors: [],
           missingOpenGeniTools: [],
           unavailableAccounts: [{ id: "linear", name: "Linear" }],
-          attachableAccounts: [],
           canRefresh: true,
         }}
-        attention={{
-          ...attention,
-          runId: null,
-          firedAt: null,
-          failures: [],
-          unavailableAccounts: [{ id: "linear", name: "Linear" }],
-        }}
+        attention={stalePin}
         ownsTask
         busy={false}
         onRefreshAccess={onRefreshAccess}
@@ -155,19 +154,39 @@ describe("scheduled task access notices", () => {
     );
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("New runs of this schedule cannot start");
+      expect(text).toContain("A pinned account can no longer be used");
       const sentence =
-        "The account chosen for Linear can no longer be used, so new runs cannot start.";
+        "The account pinned for Linear can no longer be used, so runs go ahead without Linear.";
       expect(text.split(sentence)).toHaveLength(2);
-      expect(text).toContain("Refreshing access uses the accounts you can use now.");
+      expect(text).toContain("edit the schedule to pin another one or use your current accounts.");
       expect(text).not.toContain("This schedule's access is out of date");
-      const button = [...view.container.querySelectorAll("button")].find(
-        (candidate) => candidate.textContent === "Refresh access",
-      );
-      await act(async () => button!.click());
-      expect(onRefreshAccess).toHaveBeenCalledTimes(1);
+      // A refresh never changes pins, so it is not offered for one.
+      expect(
+        [...view.container.querySelectorAll("button")].some(
+          (candidate) => candidate.textContent === "Refresh access",
+        ),
+      ).toBe(false);
     } finally {
       await view.cleanup();
+    }
+    const required = await render(
+      <ScheduledTaskAccessNotices
+        policyDrift={null}
+        attention={stalePin}
+        pinnedAccountsRequired
+        ownsTask
+        busy={false}
+        onRefreshAccess={onRefreshAccess}
+      />,
+    );
+    try {
+      const text = required.container.textContent ?? "";
+      expect(text).toContain("Runs of this schedule are being skipped");
+      expect(text).toContain(
+        "The account pinned for Linear can no longer be used, so runs are skipped.",
+      );
+    } finally {
+      await required.cleanup();
     }
   });
 
@@ -189,7 +208,7 @@ describe("scheduled task access notices", () => {
     );
     try {
       expect(view.container.textContent).toContain(
-        "Reconnect the account in Capabilities, or edit the schedule to choose another one.",
+        "Reconnect the account in Capabilities, or edit the schedule to pin another one or use your current accounts.",
       );
       expect(view.container.querySelector("button")).toBeNull();
     } finally {

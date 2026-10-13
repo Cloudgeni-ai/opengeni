@@ -9,6 +9,7 @@ import type {
   OrganizationAccessPolicy,
   SandboxProviderCommand,
   CommandSupervisionReceipt,
+  ConnectionAccountIntent,
   AutomationAcceptedExecution,
   AutomationSessionTemplate,
   AttemptToolCatalog,
@@ -5108,6 +5109,12 @@ export const sessions = pgTable(
     initialMcpAccountBindings: jsonb("initial_mcp_account_bindings").$type<
       McpConnectionAccountBinding[] | null
     >(),
+    // Initial-command staging only, copied onto the first turn with the
+    // bindings above: the creating person's account intent. Null is reserved
+    // for writers that predate account intent.
+    initialConnectionAccountIntent: jsonb(
+      "initial_connection_account_intent",
+    ).$type<ConnectionAccountIntent | null>(),
     // Initial accepted-work staging only. The initializer consumes this inside
     // the same transaction that inserts the first logical turn and grant
     // snapshots; runtime never authorizes from the session field.
@@ -5601,6 +5608,10 @@ export const sessionRealtimeModes = pgTable(
     mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     model: text("model").notNull(),
     state: text("state").notNull().default("active"),
+    // The voice owner's account intent, copied onto every turn this lease admits.
+    connectionAccountIntent: jsonb(
+      "connection_account_intent",
+    ).$type<ConnectionAccountIntent | null>(),
     version: integer("version").notNull().default(1),
     connectionEpoch: integer("connection_epoch").notNull().default(1),
     leaseExpiresAt: timestamp("lease_expires_at", {
@@ -7499,6 +7510,15 @@ export const sessionTurns = pgTable(
       .notNull()
       .default([]),
     mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
+    // Immutable account intent of this logical turn: whose personal accounts
+    // it may use and which accounts a person explicitly picked. Autonomous
+    // turns that continue it copy this intent and resolve it again for the
+    // same person instead of copying `mcp_account_bindings`. Null marks turns
+    // accepted before account intent existed; their continuations copy the
+    // exact bindings as before.
+    connectionAccountIntent: jsonb(
+      "connection_account_intent",
+    ).$type<ConnectionAccountIntent | null>(),
     // Credential-free public summary of a turn-bound personal Variable
     // Set/Rig attachment. Exact resource and grant identity lives only in the
     // immutable accepted-work snapshot tables.

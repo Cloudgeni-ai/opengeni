@@ -13485,14 +13485,15 @@
         "$|1.agentLearning": "object?",
         "$|1.agentLearning.scope": "ref(ConnectionOwnership)!",
         "$|1.agentLearning.settings": "ref(AgentLearningOverrides)!",
-        "$|1.connectionAccounts": "array?",
-        "$|1.connectionAccounts[]": "ref(McpConnectionAccountSelection)",
         "$|1.connectionAuthorities": "unknown?",
         "$|1.environmentId": "string? null",
         "$|1.metadata": "object?",
         "$|1.metadata{}": "unknown",
         "$|1.name": "string!",
         "$|1.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$|1.pinnedAccounts": "array?",
+        "$|1.pinnedAccounts[]": "ref(McpConnectionAccountSelection)",
+        "$|1.pinnedAccountsRequired": "boolean?",
         "$|1.rigId": "string? null",
         "$|1.runMode": "enum?=[\"\\\"existing_session\\\"\",\"\\\"new_session_per_run\\\"\",\"\\\"reusable_session\\\"\"]",
         "$|1.schedule": "ref(ScheduledTaskScheduleSpec)!",
@@ -13711,8 +13712,6 @@
       ],
       "shape": {
         "$": "object",
-        "$.connectionAccounts": "array?",
-        "$.connectionAccounts[]": "ref(McpConnectionAccountSelection)",
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
         "$.name": "string!",
@@ -21933,6 +21932,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.accountPlan": "ref(ScheduledTaskAccountPlan)?",
         "$.action": "union!=[\"kind=agent_turn\",\"kind=knowledge_source_sync\"]",
         "$.action|kind=agent_turn": "object",
         "$.action|kind=agent_turn.kind": "const!=[\"\\\"agent_turn\\\"\"]",
@@ -22003,6 +22003,43 @@
         "$.name": "string!"
       }
     },
+    "ScheduledTaskAccountPlan": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectors": "array!",
+        "$.connectors[]": "ref(ScheduledTaskAccountPlanConnector)"
+      }
+    },
+    "ScheduledTaskAccountPlanAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectionId": "string!",
+        "$.label": "string!",
+        "$.scope": "enum!=[\"\\\"personal\\\"\",\"\\\"shared\\\"\"]"
+      }
+    },
+    "ScheduledTaskAccountPlanConnector": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accounts": "array!",
+        "$.accounts[]": "ref(ScheduledTaskAccountPlanAccount)",
+        "$.id": "string!",
+        "$.mode": "enum!=[\"\\\"default\\\"\",\"\\\"pinned\\\"\"]",
+        "$.name": "string!",
+        "$.unavailablePins": "array!",
+        "$.unavailablePins[]": "object",
+        "$.unavailablePins[].connectionId": "string!"
+      }
+    },
     "ScheduledTaskAction": {
       "io": [
         "input"
@@ -22034,9 +22071,6 @@
         "$.agent": "ref(AgentConfigRequest)?",
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
-        "$.connectionAccounts": "array?",
-        "$.connectionAccounts[]": "ref(McpConnectionAccountSelection)",
-        "$.connectionAccountsFrozen": "const?=[\"true\"]",
         "$.executionClass": "const?=[\"\\\"incident_telemetry\\\"\"]",
         "$.goal": "ref(GoalSpec)?",
         "$.incidentTelemetryPreflight": "ref(IncidentTelemetryPreflight)?",
@@ -22048,6 +22082,9 @@
         "$.metadata": "object!",
         "$.metadata{}": "unknown",
         "$.model": "string?",
+        "$.pinnedAccounts": "array?",
+        "$.pinnedAccounts[]": "ref(McpConnectionAccountSelection)",
+        "$.pinnedAccountsRequired": "const?=[\"true\"]",
         "$.prompt": "string!",
         "$.reasoningEffort": "ref(ReasoningEffort)?",
         "$.resources": "array!",
@@ -22055,6 +22092,7 @@
         "$.sandboxBackend": "ref(SandboxBackend)?",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
+        "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
         "$.tools": "array!",
         "$.tools[]": "ref(ToolRef)"
       }
@@ -22087,8 +22125,20 @@
         "$.sandboxBackend": "ref(SandboxBackend)?",
         "$.slackBotChannelId": "string?",
         "$.slackBotConnectionId": "string?",
+        "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)"
+      }
+    },
+    "ScheduledTaskDegradedAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectionId": "string! null",
+        "$.reason": "enum!=[\"\\\"account_inactive\\\"\",\"\\\"account_mismatch\\\"\",\"\\\"account_not_visible\\\"\",\"\\\"connector_unavailable\\\"\",\"\\\"owner_access_unavailable\\\"\",\"\\\"selection_unavailable\\\"\"]",
+        "$.serverId": "string!"
       }
     },
     "ScheduledTaskOverlapPolicy": {
@@ -22106,8 +22156,6 @@
       ],
       "shape": {
         "$": "object",
-        "$.attachableAccounts": "array!",
-        "$.attachableAccounts[]": "ref(ScheduledTaskAccessConnector)",
         "$.canRefresh": "boolean!",
         "$.missingConnectors": "array!",
         "$.missingConnectors[]": "ref(ScheduledTaskAccessConnector)",
@@ -22134,6 +22182,8 @@
         "$.awaitingHuman": "ref(ScheduledTaskRunAwaitingHuman)? null",
         "$.completedAt": "string! null",
         "$.createdAt": "string!",
+        "$.degradedAccounts": "array?",
+        "$.degradedAccounts[]": "ref(ScheduledTaskDegradedAccount)",
         "$.error": "string! null",
         "$.firedAt": "string!",
         "$.id": "string!",
@@ -22226,6 +22276,18 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"active\\\"\",\"\\\"paused\\\"\"]"
+      }
+    },
+    "ScheduledTaskToolPolicy": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.excludedMcpServerIds": "array!",
+        "$.excludedMcpServerIds[]": "string",
+        "$.mode": "const!=[\"\\\"workspace_default\\\"\"]"
       }
     },
     "ScheduledTaskTriggerType": {
@@ -25830,8 +25892,6 @@
         "$.agentLearning.operationId": "string!",
         "$.agentLearning.scope": "ref(ConnectionOwnership)!",
         "$.agentLearning.settings": "ref(AgentLearningOverrides)!",
-        "$.connectionAccounts": "array?",
-        "$.connectionAccounts[]": "ref(McpConnectionAccountSelection)",
         "$.connectionAuthorities": "unknown?",
         "$.environmentId": "string? null",
         "$.expectedExecutionDigest": "string?",
@@ -25839,6 +25899,9 @@
         "$.metadata{}": "unknown",
         "$.name": "string?",
         "$.overlapPolicy": "ref(ScheduledTaskOverlapPolicy)?",
+        "$.pinnedAccounts": "array?",
+        "$.pinnedAccounts[]": "ref(McpConnectionAccountSelection)",
+        "$.pinnedAccountsRequired": "boolean?",
         "$.prompt": "string?",
         "$.rigId": "string? null",
         "$.runMode": "ref(ScheduledTaskRunMode)?",
@@ -29555,6 +29618,9 @@
       "ScheduledTaskAccessAttention": "type",
       "ScheduledTaskAccessConnector": "type",
       "ScheduledTaskAccessFailureReason": "type",
+      "ScheduledTaskAccountPlan": "type",
+      "ScheduledTaskAccountPlanAccount": "type",
+      "ScheduledTaskAccountPlanConnector": "type",
       "ScheduledTaskAction": "type",
       "ScheduledTaskAgentConfig": "type",
       "ScheduledTaskAgentConfigInput": "type",
@@ -29567,6 +29633,7 @@
       "ScheduledTaskRunStatus": "type",
       "ScheduledTaskScheduleSpec": "type",
       "ScheduledTaskStatus": "type",
+      "ScheduledTaskToolPolicy": "type",
       "ScheduledTaskTriggerType": "type",
       "ScopedKnowledgeScope": "type",
       "SendMessageInput": "type",

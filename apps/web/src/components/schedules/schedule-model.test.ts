@@ -12,7 +12,7 @@ import {
   cadenceOfSchedule,
   createRequestFromDraft,
   deriveScheduleName,
-  mergeScheduleConnectionAccounts,
+  mergeSchedulePinnedAccounts,
   newScheduleDraft,
   nextRunOf,
   scheduleAgentOpeningMessage,
@@ -42,7 +42,12 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     runMode: "new_session_per_run",
     overlapPolicy: "allow_concurrent",
     action: { kind: "agent_turn" },
-    agentConfig: { prompt: "Compare spend.", resources: [], tools: [], metadata: {} },
+    agentConfig: {
+      prompt: "Compare spend.",
+      resources: [],
+      tools: [],
+      metadata: {},
+    },
     createdBy: { kind: "subject", subjectId: "dev" },
     createdByContext: {},
     authorityRevision: 1,
@@ -181,7 +186,10 @@ describe("schedule requests", () => {
   });
 
   test("a new schedule is shared by default and sends Only me only when chosen", () => {
-    const shared = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });
+    const shared = createRequestFromDraft(base(), {
+      now: NOW,
+      learningScope: "workspace",
+    });
     expect("visibility" in shared).toBe(false);
 
     const privateNew = createRequestFromDraft(
@@ -191,7 +199,12 @@ describe("schedule requests", () => {
     expect("visibility" in privateNew && privateNew.visibility).toBe("private");
 
     const privateMessage = createRequestFromDraft(
-      { ...base(), runMode: "existing_session", targetSessionId: "chat", visibility: "private" },
+      {
+        ...base(),
+        runMode: "existing_session",
+        targetSessionId: "chat",
+        visibility: "private",
+      },
       { now: NOW, learningScope: "workspace" },
     );
     expect("visibility" in privateMessage && privateMessage.visibility).toBe("private");
@@ -296,11 +309,17 @@ describe("schedule requests", () => {
   });
 
   test("an edit keeps a stored description it no longer shows", () => {
-    const stored = task({ metadata: { scheduleDescription: "Old summary", other: 1 } });
+    const stored = task({
+      metadata: { scheduleDescription: "Old summary", other: 1 },
+    });
     const initial: ScheduleDraft = { ...base(), description: "Old summary" };
-    const request = updateRequestFromDraft(stored, initial, initial, { now: NOW });
+    const request = updateRequestFromDraft(stored, initial, initial, {
+      now: NOW,
+    });
     expect(request.metadata).toBeUndefined();
-    expect(request).toEqual({ expectedExecutionDigest: stored.executionDigest });
+    expect(request).toEqual({
+      expectedExecutionDigest: stored.executionDigest,
+    });
   });
 
   test("separate-agent message edits preserve hidden settings through a narrow patch", () => {
@@ -330,7 +349,7 @@ describe("schedule requests", () => {
       maxNestedAgentDepth: 0,
       bundledSkillIds: [],
     });
-    expect(changedTools.agentConfig).not.toHaveProperty("connectionAccountsFrozen");
+    expect(changedTools.agentConfig).not.toHaveProperty("pinnedAccounts");
   });
 
   test("a model edit retains the existing tools' startup and failure policy", () => {
@@ -396,7 +415,10 @@ describe("schedule requests", () => {
   });
 
   test("a materialized reusable chat ignores hidden settings while keeping message edits", () => {
-    const stored = task({ runMode: "reusable_session", reusableSessionId: "existing-chat" });
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "existing-chat",
+    });
     const initial = { ...base(), ...formStateFromScheduledTask(stored) };
     const draft = {
       ...initial,
@@ -413,7 +435,12 @@ describe("schedule requests", () => {
       settings: {},
     };
     expect(scheduleInheritsChatSettings(stored)).toBe(true);
-    expect(updateRequestFromDraft(stored, initial, draft, { now: NOW, agentLearning })).toEqual({
+    expect(
+      updateRequestFromDraft(stored, initial, draft, {
+        now: NOW,
+        agentLearning,
+      }),
+    ).toEqual({
       expectedExecutionDigest: stored.executionDigest,
       prompt: "Updated message",
       agentLearning,
@@ -431,14 +458,21 @@ describe("schedule requests", () => {
   });
 
   test("materialized reusable schedules still edit message resources and Slack channel", () => {
-    const stored = task({ runMode: "reusable_session", reusableSessionId: "existing-chat" });
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "existing-chat",
+    });
     stored.agentConfig.model = "stored-default";
     stored.agentConfig.slackBotConnectionId = "bot";
     stored.agentConfig.slackBotChannelId = "old-channel";
     stored.agentConfig.tools = [{ kind: "mcp", id: "example", optional: true }];
     const initial = { ...base(), ...formStateFromScheduledTask(stored) };
     const resources = [
-      { kind: "repository" as const, uri: "https://example.com/example/repo.git", ref: "main" },
+      {
+        kind: "repository" as const,
+        uri: "https://example.com/example/repo.git",
+        ref: "main",
+      },
     ];
     const patch = updateRequestFromDraft(
       stored,
@@ -464,12 +498,15 @@ describe("schedule requests", () => {
       { serverId: "example", connectionId: "old-choice" },
       { serverId: "unavailable", connectionId: "retained-choice" },
       { serverId: "github:personal", connectionId: "repository-choice" },
-      { serverId: "google-drive-publishing", connectionId: "publication-choice" },
+      {
+        serverId: "google-drive-publishing",
+        connectionId: "publication-choice",
+      },
       { serverId: "removed", connectionId: "removed-choice" },
     ];
     const selection = { serverId: "example", connectionId: "new-choice" };
     expect(
-      mergeScheduleConnectionAccounts(saved, [selection], ["example"], {
+      mergeSchedulePinnedAccounts(saved, [selection], ["example"], {
         selectedServerIds: ["example", "unavailable"],
         resources: [
           {
@@ -483,45 +520,76 @@ describe("schedule requests", () => {
     ).toEqual([saved[1]!, saved[2]!, saved[3]!, selection]);
   });
 
-  test("retargeted and materialized chats retain only accounts their current tools can use", () => {
-    for (const runMode of ["existing_session", "reusable_session"] as const) {
-      const stored = task({
-        runMode,
-        targetSessionId: runMode === "existing_session" ? "source-chat" : null,
-        reusableSessionId: runMode === "reusable_session" ? "current-chat" : null,
-      });
-      stored.agentConfig.tools =
-        runMode === "existing_session" ? [] : [{ kind: "mcp", id: "old-tool" }];
-      const saved = [
-        { serverId: "old-tool", connectionId: "old-account" },
-        { serverId: "retained-tool", connectionId: "hidden-retained-account" },
-      ];
-      stored.agentConfig.connectionAccounts = saved;
-      const initial = { ...base(), ...formStateFromScheduledTask(stored) };
-      const selection = { serverId: "current-tool", connectionId: "chosen-account" };
-      const merged = mergeScheduleConnectionAccounts(saved, [selection], ["current-tool"], {
-        selectedServerIds: ["current-tool", "retained-tool"],
+  test("a materialized chat keeps only pins its current tools can use; an existing-chat schedule has none", () => {
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "current-chat",
+    });
+    stored.agentConfig.tools = [{ kind: "mcp", id: "old-tool" }];
+    const saved = [
+      { serverId: "old-tool", connectionId: "old-account" },
+      { serverId: "retained-tool", connectionId: "hidden-retained-account" },
+    ];
+    stored.agentConfig.pinnedAccounts = saved;
+    const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+    expect(initial.pinnedAccounts).toEqual(saved);
+    const selection = {
+      serverId: "current-tool",
+      connectionId: "chosen-account",
+    };
+    const merged = mergeSchedulePinnedAccounts(saved, [selection], ["current-tool"], {
+      selectedServerIds: ["current-tool", "retained-tool"],
+      resources: [],
+      chat: {
         resources: [],
-        chat: { resources: [], firstPartyMcpTools: [], firstPartyMcpPermissions: [] },
-      });
-      const patch = updateRequestFromDraft(
-        stored,
-        initial,
+        firstPartyMcpTools: [],
+        firstPartyMcpPermissions: [],
+      },
+    });
+    const patch = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, pinnedAccounts: merged },
+      { now: NOW },
+    );
+    expect(patch.pinnedAccounts).toEqual([saved[1]!, selection]);
+
+    const chatTask = task({
+      runMode: "existing_session",
+      targetSessionId: "source-chat",
+    });
+    chatTask.agentConfig.tools = [];
+    const chatInitial = { ...base(), ...formStateFromScheduledTask(chatTask) };
+    expect(chatInitial.pinnedAccounts).toEqual([]);
+    const chatPatch = updateRequestFromDraft(
+      chatTask,
+      chatInitial,
+      {
+        ...chatInitial,
+        targetSessionId: "destination-chat",
+        pinnedAccounts: merged,
+      },
+      { now: NOW },
+    );
+    expect(chatPatch).not.toHaveProperty("pinnedAccounts");
+    expect(
+      createRequestFromDraft(
+        { ...chatInitial, pinnedAccounts: merged },
         {
-          ...initial,
-          ...(runMode === "existing_session" ? { targetSessionId: "destination-chat" } : {}),
-          connectionAccounts: merged,
+          now: NOW,
+          learningScope: "workspace",
         },
-        { now: NOW },
-      );
-      expect(patch.connectionAccounts).toEqual([saved[1]!, selection]);
-    }
+      ),
+    ).not.toHaveProperty("pinnedAccounts");
   });
 
   test("retargeting retains only eligible first-party account choices", () => {
     const saved = [
       { serverId: "github:personal", connectionId: "repository-choice" },
-      { serverId: "google-drive-publishing", connectionId: "publication-choice" },
+      {
+        serverId: "google-drive-publishing",
+        connectionId: "publication-choice",
+      },
     ];
     const destination = {
       selectedServerIds: [],
@@ -543,21 +611,28 @@ describe("schedule requests", () => {
       },
     };
     expect(
-      mergeScheduleConnectionAccounts(saved, [], [], {
+      mergeSchedulePinnedAccounts(saved, [], [], {
         ...destination,
-        chat: { ...destination.chat, firstPartyMcpTools: [...destination.chat.firstPartyMcpTools] },
+        chat: {
+          ...destination.chat,
+          firstPartyMcpTools: [...destination.chat.firstPartyMcpTools],
+        },
       }),
     ).toEqual(saved);
     expect(
-      mergeScheduleConnectionAccounts(saved, [], [], {
+      mergeSchedulePinnedAccounts(saved, [], [], {
         ...destination,
         selectedServerIds: ["github:personal", "google-drive-publishing"],
         resources: [],
-        chat: { resources: [], firstPartyMcpTools: [], firstPartyMcpPermissions: [] },
+        chat: {
+          resources: [],
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions: [],
+        },
       }),
     ).toEqual([]);
     expect(
-      mergeScheduleConnectionAccounts(saved, [], [], {
+      mergeSchedulePinnedAccounts(saved, [], [], {
         ...destination,
         chat: {
           resources: [],
@@ -567,7 +642,7 @@ describe("schedule requests", () => {
       }),
     ).toEqual([saved[0]!]);
     expect(
-      mergeScheduleConnectionAccounts(saved, [], [], {
+      mergeSchedulePinnedAccounts(saved, [], [], {
         ...destination,
         chat: {
           ...destination.chat,
@@ -577,7 +652,7 @@ describe("schedule requests", () => {
       }),
     ).toEqual([saved[0]!]);
     expect(
-      mergeScheduleConnectionAccounts(saved, [], [], {
+      mergeSchedulePinnedAccounts(saved, [], [], {
         ...destination,
         chat: {
           ...destination.chat,
@@ -589,7 +664,10 @@ describe("schedule requests", () => {
   });
 
   test("removing the last reusable message repository removes its account during a picker edit", () => {
-    const stored = task({ runMode: "reusable_session", reusableSessionId: "current-chat" });
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "current-chat",
+    });
     stored.agentConfig.resources = [
       {
         kind: "repository",
@@ -598,72 +676,79 @@ describe("schedule requests", () => {
         connectionType: "github_personal",
       },
     ];
-    stored.agentConfig.connectionAccounts = [
+    stored.agentConfig.pinnedAccounts = [
       { serverId: "github:personal", connectionId: "repository-choice" },
     ];
     const initial = { ...base(), ...formStateFromScheduledTask(stored) };
-    const selection = { serverId: "current-tool", connectionId: "chosen-account" };
+    const selection = {
+      serverId: "current-tool",
+      connectionId: "chosen-account",
+    };
     const draft = { ...initial, resources: [] };
-    draft.connectionAccounts = mergeScheduleConnectionAccounts(
-      initial.connectionAccounts ?? [],
+    draft.pinnedAccounts = mergeSchedulePinnedAccounts(
+      initial.pinnedAccounts ?? [],
       [selection],
       ["current-tool"],
       {
         selectedServerIds: ["current-tool"],
         resources: draft.resources,
-        chat: { resources: [], firstPartyMcpTools: [], firstPartyMcpPermissions: [] },
+        chat: {
+          resources: [],
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions: [],
+        },
       },
     );
     const patch = updateRequestFromDraft(stored, initial, draft, { now: NOW });
-    expect(patch.connectionAccounts).toEqual([selection]);
+    expect(patch.pinnedAccounts).toEqual([selection]);
     expect(patch.agentConfig?.resources).toEqual([]);
   });
 
-  test("bound-chat and preserved message repositories both retain their account during picker edits", () => {
+  test("bound-chat and preserved message repositories both retain their pin during picker edits", () => {
     const repository = {
       kind: "repository" as const,
       uri: "https://example.com/example/repo.git",
       ref: "main",
       connectionType: "github_personal" as const,
     };
-    const repositoryAccount = { serverId: "github:personal", connectionId: "repository-choice" };
+    const repositoryAccount = {
+      serverId: "github:personal",
+      connectionId: "repository-choice",
+    };
     const selection = { serverId: "example", connectionId: "new-choice" };
-    for (const runMode of ["existing_session", "reusable_session"] as const) {
-      for (const repositorySource of ["chat", "message"] as const) {
-        const stored = task({
-          runMode,
-          targetSessionId: runMode === "existing_session" ? "bound-chat" : null,
-          reusableSessionId: runMode === "reusable_session" ? "bound-chat" : null,
-        });
-        stored.agentConfig.connectionAccounts = [repositoryAccount];
-        stored.agentConfig.resources = repositorySource === "message" ? [repository] : [];
-        const initial = { ...base(), ...formStateFromScheduledTask(stored) };
-        const connectionAccounts = mergeScheduleConnectionAccounts(
-          initial.connectionAccounts ?? [],
-          [selection],
-          ["example"],
-          {
-            selectedServerIds: ["example"],
-            resources: initial.resources,
-            chat: {
-              resources: repositorySource === "chat" ? [repository] : [],
-              firstPartyMcpTools: [],
-              firstPartyMcpPermissions: [],
-            },
+    for (const repositorySource of ["chat", "message"] as const) {
+      const stored = task({
+        runMode: "reusable_session",
+        reusableSessionId: "bound-chat",
+      });
+      stored.agentConfig.pinnedAccounts = [repositoryAccount];
+      stored.agentConfig.resources = repositorySource === "message" ? [repository] : [];
+      const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+      const pinnedAccounts = mergeSchedulePinnedAccounts(
+        initial.pinnedAccounts ?? [],
+        [selection],
+        ["example"],
+        {
+          selectedServerIds: ["example"],
+          resources: initial.resources,
+          chat: {
+            resources: repositorySource === "chat" ? [repository] : [],
+            firstPartyMcpTools: [],
+            firstPartyMcpPermissions: [],
           },
-        );
-        const patch = updateRequestFromDraft(
-          stored,
-          initial,
-          {
-            ...initial,
-            connectionAccounts,
-          },
-          { now: NOW },
-        );
-        expect(patch.connectionAccounts).toEqual([repositoryAccount, selection]);
-        expect(patch.agentConfig).toBeUndefined();
-      }
+        },
+      );
+      const patch = updateRequestFromDraft(
+        stored,
+        initial,
+        {
+          ...initial,
+          pinnedAccounts,
+        },
+        { now: NOW },
+      );
+      expect(patch.pinnedAccounts).toEqual([repositoryAccount, selection]);
+      expect(patch.agentConfig).toBeUndefined();
     }
   });
 });
@@ -676,44 +761,53 @@ describe("schedule account edit intent", () => {
       name: "Retained",
       accounts: [{ id: "chosen-account" }, { id: "later-account" }],
     },
-    { serverId: "empty", name: "Empty", accounts: [{ id: "not-authorized" }] },
+    {
+      serverId: "unpinned",
+      name: "Unpinned",
+      accounts: [{ id: "current-account" }],
+    },
     { serverId: "added", name: "Added", accounts: [{ id: "new-account" }] },
   ] as ConnectedAccountGroup[];
+  const selectedServerIds = ["retained", "unpinned", "added"];
   const input = {
     saved,
-    frozen: true,
-    initialServerIds: ["retained", "empty"],
-    selectedServerIds: ["retained", "empty", "added"],
     editedServerIds: [] as string[],
     destinationChanged: false,
     toolsChanged: false,
   };
 
-  function submission(intent: ReturnType<typeof scheduleConnectionAccountIntent>) {
+  function submission(
+    intent: ReturnType<typeof scheduleConnectionAccountIntent>,
+    choices = intent.choices,
+    pins = saved,
+  ) {
     const selection = selectedConnectionAccounts(
       groups.filter((group) => intent.changedServerIds.includes(group.serverId)),
-      intent.choices,
+      choices,
     );
     expect(selection.unresolved).toEqual([]);
-    return mergeScheduleConnectionAccounts(saved, selection.selections, intent.changedServerIds, {
-      selectedServerIds: input.selectedServerIds,
+    return mergeSchedulePinnedAccounts(pins, selection.selections, intent.changedServerIds, {
+      selectedServerIds,
       resources: [],
     });
   }
 
-  test("enabling a connector saves its displayed accounts and preserves unrelated saved choices", () => {
-    const intent = scheduleConnectionAccountIntent({ ...input, toolsChanged: true });
-    expect(intent.choices).toEqual({ retained: ["chosen-account"], empty: [] });
-    expect(intent.changedServerIds).toEqual(["added"]);
-    const accounts = submission(intent);
-    expect(accounts).toEqual([...saved, { serverId: "added", connectionId: "new-account" }]);
+  test("enabling a connector leaves it on current accounts and keeps the person's pins", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      toolsChanged: true,
+    });
+    expect(intent.choices).toEqual({ retained: ["chosen-account"] });
+    expect(intent.changed).toBe(true);
+    expect(intent.changedServerIds).toEqual([]);
+    const pins = submission(intent);
+    expect(pins).toEqual(saved);
     const stored = task();
     stored.agentConfig.tools = [
       { kind: "mcp", id: "retained" },
-      { kind: "mcp", id: "empty" },
+      { kind: "mcp", id: "unpinned" },
     ];
-    stored.agentConfig.connectionAccounts = saved;
-    stored.agentConfig.connectionAccountsFrozen = true;
+    stored.agentConfig.pinnedAccounts = saved;
     const initial = {
       ...newScheduleDraft({ includeOpenGeniTool: false }),
       ...formStateFromScheduledTask(stored),
@@ -721,47 +815,59 @@ describe("schedule account edit intent", () => {
     const patch = updateRequestFromDraft(
       stored,
       initial,
-      {
-        ...initial,
-        mcpServerIds: input.selectedServerIds,
-        connectionAccounts: accounts,
-      },
+      { ...initial, mcpServerIds: selectedServerIds, pinnedAccounts: pins },
       { now: NOW },
     );
-    expect(patch.connectionAccounts).toEqual(accounts);
+    expect(patch).not.toHaveProperty("pinnedAccounts");
   });
 
-  test("a destination change captures only newly applicable connector defaults", () => {
-    const intent = scheduleConnectionAccountIntent({ ...input, destinationChanged: true });
+  test("a destination change re-checks pins but pins nothing new", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      destinationChanged: true,
+    });
     expect(intent.changed).toBe(true);
-    expect(intent.changedServerIds).toEqual(["added"]);
-    expect(submission(intent)).toEqual([
-      ...saved,
-      { serverId: "added", connectionId: "new-account" },
-    ]);
-  });
-
-  test("loading a chat with new tools never authorizes its accounts during a message edit", () => {
-    const intent = scheduleConnectionAccountIntent(input);
-    expect(intent.changed).toBe(false);
     expect(intent.changedServerIds).toEqual([]);
-    expect(intent.choices).toEqual({ retained: ["chosen-account"], empty: [], added: [] });
     expect(submission(intent)).toEqual(saved);
   });
 
-  test("an account-only edit cannot default other frozen-empty groups", () => {
-    const intent = scheduleConnectionAccountIntent({ ...input, editedServerIds: ["retained"] });
-    const selection = selectedConnectionAccounts(
-      groups.filter((group) => intent.changedServerIds.includes(group.serverId)),
-      { ...intent.choices, retained: ["later-account"] },
-    );
-    expect(selection.unresolved).toEqual([]);
+  test("loading a chat with new tools never pins its accounts during a message edit", () => {
+    const intent = scheduleConnectionAccountIntent(input);
+    expect(intent.changed).toBe(false);
+    expect(intent.choices).toEqual({ retained: ["chosen-account"] });
+    expect(submission(intent)).toEqual(saved);
+  });
+
+  test("changing one connector pins only that connector", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      editedServerIds: ["unpinned"],
+    });
+    expect(submission(intent, { ...intent.choices, unpinned: ["current-account"] })).toEqual([
+      ...saved,
+      { serverId: "unpinned", connectionId: "current-account" },
+    ]);
+    const repinned = scheduleConnectionAccountIntent({
+      ...input,
+      editedServerIds: ["retained"],
+    });
     expect(
-      mergeScheduleConnectionAccounts(saved, selection.selections, intent.changedServerIds, {
-        selectedServerIds: input.selectedServerIds,
-        resources: [],
+      submission(repinned, {
+        ...repinned.choices,
+        retained: ["later-account"],
       }),
     ).toEqual([{ serverId: "retained", connectionId: "later-account" }]);
+  });
+
+  test("using current accounts clears every pin", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      saved: [],
+      pinsCleared: true,
+    });
+    expect(intent.changed).toBe(true);
+    expect(intent.choices).toEqual({});
+    expect(submission(intent, intent.choices, [])).toEqual([]);
   });
 });
 

@@ -638,13 +638,16 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
-          .omit({ slackBotChannelId: true })
+          .omit({ slackBotChannelId: true, toolPolicy: true })
           .strict()
           .optional(),
       })
+      // Only a person pins connector accounts; agents never do.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
+        pinnedAccounts: true,
+        pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
       })
@@ -1817,7 +1820,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent. Runs retain the schedule owner’s captured account choices and revalidate access; they do not acquire another chat owner’s credentials.",
+          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent; omit agentConfig.tools so each run gets the workspace's default connectors at that time, like a new chat, or list tools to give it exactly those. Each run uses the schedule owner’s current connected accounts; it never uses another chat owner’s credentials.",
         inputSchema: contractToolInput(
           scheduledTaskCreateToolProjection(),
           scheduledTaskCreateToolValidation(sessionId),
@@ -1868,7 +1871,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_update",
       {
         description:
-          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input.",
+          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top.",
         inputSchema: scheduledTaskUpdateToolInput(),
       },
       async ({ id, ...raw }) => {

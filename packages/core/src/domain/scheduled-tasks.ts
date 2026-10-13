@@ -28,6 +28,7 @@ import {
 import type {
   AccessGrant,
   KnowledgeSourceSyncAction,
+  McpConnectionAccountSelection,
   Permission,
   ScheduledTask,
   ScheduledTaskAgentConfig,
@@ -142,8 +143,12 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
-  withWorkspaceDefaultMcpTools,
+  scheduledTaskRunTools,
 } from "./resources";
+import {
+  recordScheduledTaskAccountChoiceChanges,
+  scheduledTaskAccountChoiceChanges,
+} from "./scheduled-task-account-audit";
 
 /**
  * Whether a raw scheduled-task payload explicitly set agentConfig.tools.
@@ -173,7 +178,11 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
   );
 }
 
-/** Message data and captured account choices survive; the destination owns execution. */
+/**
+ * Only the message survives. The destination chat owns execution: its
+ * connectors, and the owner's current accounts resolved at each run. An
+ * existing-chat schedule never saves account choices of its own.
+ */
 function scheduledSessionMessageConfig(config: ScheduledTaskAgentConfig): ScheduledTaskAgentConfig {
   return {
     prompt: config.prompt,
@@ -183,10 +192,6 @@ function scheduledSessionMessageConfig(config: ScheduledTaskAgentConfig): Schedu
     ...(config.approvalTimeoutSeconds !== undefined
       ? { approvalTimeoutSeconds: config.approvalTimeoutSeconds }
       : {}),
-    ...(config.connectionAccounts !== undefined
-      ? { connectionAccounts: config.connectionAccounts }
-      : {}),
-    ...(config.connectionAccountsFrozen ? { connectionAccountsFrozen: true } : {}),
   };
 }
 
@@ -284,6 +289,53 @@ function isScheduledTaskMachinePrincipal(grant: AccessGrant): boolean {
   return grant.principalKind === "api_key" || grant.principalKind === "configured_key";
 }
 
+/**
+ * Only a person pins connector accounts: an authenticated human acting
+ * directly, through the schedule editor or their own API call. Agents, API
+ * keys, services and delegated bearers never pin; schedules they save follow
+ * the owner's current accounts at each run.
+ */
+function requireScheduledTaskPinAuthor(grant: AccessGrant): void {
+  if (
+    isScheduledTaskMachinePrincipal(grant) ||
+    personalConnectionDelegationSourceForGrant(grant).kind !== "subject"
+  ) {
+    throw new HTTPException(403, {
+      message:
+        "Only a person can pin connector accounts on a schedule. Schedules saved by agents, API keys or services use the owner's current accounts.",
+    });
+  }
+}
+
+/** Stable, duplicate-free pin order so equal choices store identically. */
+function normalizedScheduledTaskPins(
+  pins: readonly McpConnectionAccountSelection[],
+): McpConnectionAccountSelection[] {
+  const unique = new Map(
+    pins.map((pin) => [`${pin.serverId}\u0000${pin.connectionId}`, pin] as const),
+  );
+  return [...unique.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, pin]) => ({ serverId: pin.serverId, connectionId: pin.connectionId }));
+}
+
+/** Store pins and the do-not-run switch only when they say something. */
+function withScheduledTaskPins(
+  config: ScheduledTaskAgentConfig,
+  pins: readonly McpConnectionAccountSelection[] | undefined,
+  required: boolean,
+): ScheduledTaskAgentConfig {
+  const {
+    pinnedAccounts: _pinnedAccounts,
+    pinnedAccountsRequired: _pinnedAccountsRequired,
+    ...rest
+  } = config;
+  const normalized = normalizedScheduledTaskPins(pins ?? []);
+  return normalized.length > 0
+    ? { ...rest, pinnedAccounts: normalized, ...(required ? { pinnedAccountsRequired: true } : {}) }
+    : rest;
+}
+
 /** Service attribution cannot become a personal schedule execution owner. */
 function scheduledTaskInitiatorForGrant(grant: AccessGrant) {
   const creator = creationInitiatorForGrant(grant);
@@ -373,7 +425,22 @@ export async function createValidatedScheduledTask(input: {
     ...input,
     workspaceId: input.grant.workspaceId,
   });
-  agentConfig.connectionAccounts = input.payload.connectionAccounts ?? [];
+  // Connector accounts are never saved from what the schedule would resolve
+  // now. Only accounts a person explicitly pins are stored, and only on a
+  // schedule that starts its own session; everything else follows the owner's
+  // current accounts at each run.
+  const requestedPins =
+    "pinnedAccounts" in input.payload ? input.payload.pinnedAccounts : undefined;
+  const requestedPinsRequired =
+    "pinnedAccountsRequired" in input.payload && input.payload.pinnedAccountsRequired === true;
+  if ((requestedPins?.length ?? 0) > 0 || requestedPinsRequired) {
+    if (input.payload.runMode === "existing_session" || knowledgeAction)
+      throw new HTTPException(422, {
+        message:
+          "Pin connector accounts only on a schedule that starts its own session. An existing-chat schedule uses that chat's connectors with the owner's current accounts.",
+      });
+    requireScheduledTaskPinAuthor(input.grant);
+  }
   await validateScheduledTaskSlackChannel({
     grant: input.grant,
     authorization: input.authorization,
@@ -421,7 +488,6 @@ export async function createValidatedScheduledTask(input: {
       });
   }
   if (!knowledgeAction) {
-    agentConfig.connectionAccountsFrozen = true;
     await validateScheduledTaskMachineTarget({
       settings: input.settings,
       db: input.db,
@@ -475,50 +541,44 @@ export async function createValidatedScheduledTask(input: {
     runtimeSettings && target
       ? settingsWithSessionMcpServerMetadata(runtimeSettings, target.mcpServers)
       : runtimeSettings;
-  const acceptedConnections =
-    knowledgeAction || !effectiveRuntimeSettings
-      ? { personalConnectionDelegations: [], mcpAccountBindings: [] }
-      : await freezeConnectionAccounts({
-          db: input.db,
-          accountId: input.grant.accountId,
-          workspaceId: input.grant.workspaceId,
-          settings: effectiveRuntimeSettings,
-          tools: await scheduledConnectionTools(
-            input.db,
-            input.grant.workspaceId,
-            effectiveRuntimeSettings,
-            target,
-            agentConfig.tools,
-            input.grant.subjectId,
-          ),
-          resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
-          source: personalConnectionDelegationSourceForGrant(input.grant),
-          authoritySelections: input.payload.connectionAccounts,
-          ...scheduledConnectionSurfaceEligibility(
-            effectiveRuntimeSettings,
-            target,
-            (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
-          ),
-        });
-  const { personalConnectionDelegations, mcpAccountBindings } = acceptedConnections;
-  if (!knowledgeAction) {
-    const boundRoutes = new Set((mcpAccountBindings ?? []).map((binding) => binding.serverId));
-    agentConfig.connectionAccounts = [
-      ...(mcpAccountBindings ?? []).map(({ canonicalServerId, connectionId }) => ({
-        serverId: canonicalServerId,
-        connectionId,
-      })),
-      ...personalConnectionDelegations
-        .filter(
-          (item) =>
-            !boundRoutes.has(item.serverId) &&
-            (!item.connectionType ||
-              item.connectionType === "mcp" ||
-              item.connectionType === "github_personal"),
-        )
-        .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
-    ];
+  // Prove the creator may use the schedule's connectors and repositories, and
+  // that every pinned account resolves for the owner. Nothing it resolves is
+  // saved: each run resolves the owner's current accounts again, and a
+  // schedule that follows the workspace defaults resolves them again too.
+  if (!knowledgeAction && effectiveRuntimeSettings) {
+    const creationWorkspaceSettings = (await requireWorkspace(input.db, input.grant.workspaceId))
+      .settings;
+    await freezeConnectionAccounts({
+      db: input.db,
+      accountId: input.grant.accountId,
+      workspaceId: input.grant.workspaceId,
+      settings: effectiveRuntimeSettings,
+      tools: await scheduledConnectionTools(
+        input.db,
+        input.grant.workspaceId,
+        effectiveRuntimeSettings,
+        target,
+        scheduledTaskRunTools({
+          agentConfig,
+          settings: input.settings,
+          runtimeSettings: effectiveRuntimeSettings,
+          workspaceDefaults: resolveWorkspaceSessionToolDefaults(creationWorkspaceSettings),
+        }),
+        input.grant.subjectId,
+      ),
+      resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
+      source: personalConnectionDelegationSourceForGrant(input.grant),
+      authoritySelections: requestedPins ?? [],
+      ...scheduledConnectionSurfaceEligibility(
+        effectiveRuntimeSettings,
+        target,
+        creationWorkspaceSettings,
+      ),
+    });
   }
+  const storedAgentConfig = knowledgeAction
+    ? agentConfig
+    : withScheduledTaskPins(agentConfig, requestedPins, requestedPinsRequired);
   const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
   const captureLinkAuthority = prepareExternalLinkTaskAdmission(
     input.authorization,
@@ -595,7 +655,7 @@ export async function createValidatedScheduledTask(input: {
         runMode: input.payload.runMode,
         overlapPolicy: input.payload.overlapPolicy,
         action,
-        agentConfig,
+        agentConfig: storedAgentConfig,
         ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
         ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
         createdByActor: creationInitiator.actor ?? null,
@@ -611,6 +671,13 @@ export async function createValidatedScheduledTask(input: {
         rigId,
         metadata: input.payload.metadata,
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+      });
+      await recordScheduledTaskAccountChoiceChanges(transaction, {
+        grant: input.grant,
+        taskId: task.id,
+        operation: "create",
+        before: null,
+        after: task.agentConfig,
       });
       if (learning && learningContext)
         await saveAgentLearningSettings(transaction, learningContext, {
@@ -1272,7 +1339,36 @@ export async function validatedScheduledTaskUpdate(
     audience: visibility,
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
-  return visibility === current ? update : { ...update, visibility };
+  const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
+  return visibility === current ? audited : { ...audited, visibility };
+}
+
+/**
+ * Record the edit's account and connector choice changes in the transaction
+ * that commits it. Every update writer (form, API, agent tool, access
+ * refresh) commits through the validated update.
+ */
+function withScheduledTaskAccountChoiceAudit(
+  grant: AccessGrant,
+  existing: ScheduledTask,
+  update: UpdateScheduledTaskInput,
+): UpdateScheduledTaskInput {
+  const next = update.agentConfig;
+  if (!next || !scheduledTaskAccountChoiceChanges(existing.agentConfig, next)) return update;
+  const prior = update.beforeUpdateCommit;
+  return {
+    ...update,
+    beforeUpdateCommit: async (tx) => {
+      await prior?.(tx);
+      await recordScheduledTaskAccountChoiceChanges(tx, {
+        grant,
+        taskId: existing.id,
+        operation: "update",
+        before: existing.agentConfig,
+        after: next,
+      });
+    },
+  };
 }
 
 async function validatedScheduledTaskUpdateWithoutAudience(input: {
@@ -1586,6 +1682,9 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
       ...(materializedReusable ? { retainedCreationConfig: input.existing.agentConfig } : {}),
+      ...(input.existing.agentConfig.toolPolicy
+        ? { existingToolPolicy: input.existing.agentConfig.toolPolicy }
+        : {}),
     });
     if (
       materializedReusable &&
@@ -1605,15 +1704,38 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     }
     update.agentConfig = nextAgentConfig;
   }
-  if (
-    (update.agentConfig && !input.payload.agentConfigPatch) ||
-    input.payload.connectionAccounts !== undefined
-  ) {
-    update.agentConfig = {
-      ...(update.agentConfig ?? input.existing.agentConfig),
-      connectionAccounts:
-        input.payload.connectionAccounts ?? input.existing.agentConfig.connectionAccounts ?? [],
-    };
+  // Pins are the only saved account choice, a person's explicit one, and only
+  // a schedule that starts its own session has them. A full config replacement
+  // keeps them unless the request changes them; moving into an existing chat
+  // drops them, because that chat's connectors and the owner's current
+  // accounts apply.
+  const pinsProvided =
+    input.payload.pinnedAccounts !== undefined ||
+    input.payload.pinnedAccountsRequired !== undefined;
+  if (pinsProvided) {
+    if (
+      nextRunMode === "existing_session" &&
+      ((input.payload.pinnedAccounts?.length ?? 0) > 0 ||
+        input.payload.pinnedAccountsRequired === true)
+    )
+      throw new HTTPException(422, {
+        message:
+          "Pin connector accounts only on a schedule that starts its own session. An existing-chat schedule uses that chat's connectors with the owner's current accounts.",
+      });
+    requireScheduledTaskPinAuthor(input.grant);
+  }
+  if (update.agentConfig || pinsProvided || nextRunMode === "existing_session") {
+    const base = update.agentConfig ?? input.existing.agentConfig;
+    const pins =
+      nextRunMode === "existing_session"
+        ? []
+        : (input.payload.pinnedAccounts ?? input.existing.agentConfig.pinnedAccounts ?? []);
+    const required =
+      input.payload.pinnedAccountsRequired ??
+      input.existing.agentConfig.pinnedAccountsRequired === true;
+    const next = withScheduledTaskPins(base, pins, required);
+    if (update.agentConfig || !isDeepStrictEqual(next, input.existing.agentConfig))
+      update.agentConfig = next;
   }
   const nextAgentConfig = {
     ...(update.agentConfig ?? input.existing.agentConfig),
@@ -1659,7 +1781,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     (input.payload.rigId !== undefined && input.payload.rigId !== input.existing.rigId);
   const materialExecutionChange =
     authorityTargetChanged ||
-    input.payload.connectionAccounts !== undefined ||
+    pinsProvided ||
     !isDeepStrictEqual(nextAgentConfig, input.existing.agentConfig) ||
     (input.payload.action !== undefined &&
       !isDeepStrictEqual(input.payload.action, input.existing.action)) ||
@@ -1740,12 +1862,26 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       if (!nextTarget || nextTarget.accountId !== input.existing.accountId)
         throw new HTTPException(409, { message: "Scheduled task chat is unavailable" });
     }
+    const updateWorkspaceDefaults = resolveWorkspaceSessionToolDefaults(
+      (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
+    );
+    // Pins are judged against what a run gets: its own tools plus the
+    // workspace defaults it follows.
+    const runToolsFor = (config: ScheduledTaskAgentConfig) =>
+      scheduledTaskRunTools({
+        agentConfig: config,
+        settings: input.settings,
+        runtimeSettings,
+        workspaceDefaults: updateWorkspaceDefaults,
+      });
+    const nextRunTools = runToolsFor(nextAgentConfig);
+    const priorRunTools = runToolsFor(input.existing.agentConfig);
     const nextConnectionTools = await scheduledConnectionTools(
       input.db,
       input.grant.workspaceId,
       runtimeSettings,
       nextTarget,
-      nextAgentConfig.tools,
+      nextRunTools,
       ownerSubjectId ?? undefined,
     );
     const priorTargetSessionId =
@@ -1772,20 +1908,24 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       input.grant.workspaceId,
       runtimeSettings,
       priorTarget,
-      input.existing.agentConfig.tools,
+      priorRunTools,
       ownerSubjectId ?? undefined,
     );
     const priorAccountSurfaceIds = new Set(
-      [...input.existing.agentConfig.tools, ...(priorTarget?.tools ?? []), ...priorConnectionTools]
+      [...priorRunTools, ...(priorTarget?.tools ?? []), ...priorConnectionTools]
         .filter((tool) => tool.kind === "mcp")
         .map((tool) => tool.id),
     );
     if (personalGitHubRepositoryResources(priorConnectionResources).length)
       priorAccountSurfaceIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
-    const nextMcpIds = new Set(
-      nextConnectionTools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
+    // Compared like for like with the prior surfaces: a connector the task or
+    // its chat still names keeps its pin even while the chat has it turned
+    // off, so only an edit that removes the connector removes the pin.
+    const nextAccountSurfaceIds = new Set(
+      [...nextRunTools, ...(nextTarget?.tools ?? []), ...nextConnectionTools]
+        .filter((tool) => tool.kind === "mcp")
+        .map((tool) => tool.id),
     );
-    const nextAccountSurfaceIds = new Set(nextMcpIds);
     const nextSurfaceEligibility = scheduledConnectionSurfaceEligibility(
       runtimeSettings,
       nextTarget,
@@ -1795,21 +1935,17 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       nextAccountSurfaceIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
     if (personalGitHubRepositoryResources(nextConnectionResources).length)
       nextAccountSurfaceIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
-    const movingChat =
-      nextRunMode !== input.existing.runMode ||
-      nextTargetSessionId !== input.existing.targetSessionId;
-    // Removing a selected tool or repository also removes its inherited account choice.
-    // Keep explicit caller selections subject to normal validation, and retain
-    // account choices for unchanged tools and repository selections.
-    const authoritySelections = (nextAgentConfig.connectionAccounts ?? []).filter(
-      (selection) =>
-        input.payload.connectionAccounts !== undefined ||
-        (movingChat
-          ? nextAccountSurfaceIds.has(selection.serverId)
-          : !priorAccountSurfaceIds.has(selection.serverId) ||
-            nextAccountSurfaceIds.has(selection.serverId)),
+    // Removing a connector or repository also removes its pin. Pins the
+    // request supplies are validated strictly; retained pins are kept even
+    // when their account is gone, so an edit never fails on a stale pin (the
+    // run goes without that connector and the owner is told).
+    const keptPins = (nextAgentConfig.pinnedAccounts ?? []).filter(
+      (pin) =>
+        input.payload.pinnedAccounts !== undefined ||
+        nextAccountSurfaceIds.has(pin.serverId) ||
+        !priorAccountSurfaceIds.has(pin.serverId),
     );
-    const acceptedConnections = await freezeConnectionAccounts({
+    await freezeConnectionAccounts({
       db: input.db,
       accountId: input.grant.accountId,
       workspaceId: input.grant.workspaceId,
@@ -1821,47 +1957,18 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       source: ownerSubjectId
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
-      authoritySelections,
-      // An edit replaces an accepted account set exactly. Omitting a connector
-      // from that set must not attach newly available accounts implicitly.
-      authoritySelectionsFrozen: input.existing.agentConfig.connectionAccountsFrozen === true,
+      authoritySelections: input.payload.pinnedAccounts ?? [],
       ...nextSurfaceEligibility,
     });
-    // A model-only patch still revalidates authority above, but is not an
-    // access refresh. Preserve exact existing selections, including legacy
-    // absent fields, unless the caller also changed accounts or the target.
-    if (
-      !input.payload.agentConfigPatch ||
-      input.payload.connectionAccounts !== undefined ||
-      authorityTargetChanged
-    ) {
-      const routeIds = new Set(
-        (acceptedConnections.mcpAccountBindings ?? []).map((binding) => binding.serverId),
-      );
-      nextAgentConfig.connectionAccounts = [
-        ...(acceptedConnections.mcpAccountBindings ?? []).map(
-          ({ canonicalServerId, connectionId }) => ({
-            serverId: canonicalServerId,
-            connectionId,
-          }),
-        ),
-        ...acceptedConnections.personalConnectionDelegations
-          .filter(
-            (item) =>
-              !routeIds.has(item.serverId) &&
-              (!item.connectionType ||
-                item.connectionType === "mcp" ||
-                item.connectionType === "github_personal"),
-          )
-          .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
-      ];
-      nextAgentConfig.connectionAccountsFrozen = true;
-    }
-    update.agentConfig = nextAgentConfig;
+    update.agentConfig = withScheduledTaskPins(
+      nextAgentConfig,
+      keptPins,
+      nextAgentConfig.pinnedAccountsRequired === true,
+    );
   }
   if (
     !materialExecutionChange &&
-    input.payload.connectionAccounts === undefined &&
+    !pinsProvided &&
     update.clonePersonalResourceAuthorityFromRevision === undefined
   ) {
     // Administrative lifecycle/name edits preserve the exact revision-bound
@@ -2288,6 +2395,12 @@ async function validateScheduledTaskAgentConfig(input: {
   toolsProvided?: boolean;
   /** Only an already materialized reusable chat may retain unused creation defaults. */
   retainedCreationConfig?: ScheduledTaskAgentConfig;
+  /**
+   * The connector policy the schedule already follows. An edit that does not
+   * name a policy keeps it, so replacing the configuration (for example with
+   * the tools a read returned) never turns the defaults into a fixed list.
+   */
+  existingToolPolicy?: ScheduledTaskAgentConfig["toolPolicy"];
 }): Promise<ScheduledTaskAgentConfig> {
   const existingChat = input.payload.runMode === "existing_session";
   if (existingChat)
@@ -2361,21 +2474,24 @@ async function validateScheduledTaskAgentConfig(input: {
     });
   }
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
-  // A task whose creator did not choose tools gets the workspace's exact
-  // session defaults (or the deployment compatibility default), exactly like
-  // a session created without a tools key. Scheduled runs are sessions too;
-
-  // kept falling into (a maintenance task that cannot reach its workspace's
-  // notebook MCP cannot do its job).
-  const tools =
-    retainTools || (input.toolsProvided ?? true)
-      ? requestedTools
-      : withWorkspaceDefaultMcpTools(
-          requestedTools,
-          input.settings,
-          runtimeSettings,
-          workspaceSessionToolDefaults,
-        );
+  // A schedule that starts its own session and whose creator did not choose
+  // tools follows the workspace's default connectors at each run, exactly
+  // like a new chat: nothing about the defaults is copied into the schedule,
+  // so a connector the workspace adds later reaches its next run. A request
+  // may also say so explicitly (`toolPolicy`), with the defaults a person
+  // turned off; its `tools` are then added on top. An edit keeps the policy
+  // the schedule already follows. Only a new schedule created with a list of
+  // tools and no policy gets exactly that list.
+  // A knowledge sync reads one source and never follows the defaults.
+  const toolPolicy =
+    existingChat || input.payload.agentConfig.knowledgeSource
+      ? undefined
+      : (input.payload.agentConfig.toolPolicy ??
+        input.existingToolPolicy ??
+        (retainTools || (input.toolsProvided ?? true)
+          ? undefined
+          : { mode: "workspace_default" as const, excludedMcpServerIds: [] }));
+  const tools = requestedTools;
   const prompt = input.payload.agentConfig.prompt.trim();
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });
@@ -2452,15 +2568,27 @@ async function validateScheduledTaskAgentConfig(input: {
       });
     }
   }
+  const { toolPolicy: _requestedToolPolicy, ...requestedConfig } = input.payload.agentConfig;
   const validated = {
-    ...input.payload.agentConfig,
+    ...requestedConfig,
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,
     tools,
+    ...(toolPolicy ? { toolPolicy } : {}),
   };
-  validateIncidentTelemetryPreflightSelection(input.settings, validated);
+  // Incident preflight names the connectors it needs; judge it on what a run
+  // would get now, including the defaults the schedule follows.
+  validateIncidentTelemetryPreflightSelection(input.settings, {
+    ...validated,
+    tools: scheduledTaskRunTools({
+      agentConfig: validated,
+      settings: input.settings,
+      runtimeSettings,
+      workspaceDefaults: workspaceSessionToolDefaults,
+    }),
+  });
   return existingChat ? scheduledSessionMessageConfig(validated) : validated;
 }
 
