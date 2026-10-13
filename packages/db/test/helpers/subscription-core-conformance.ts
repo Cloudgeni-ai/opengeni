@@ -3118,7 +3118,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("SUB-LEASE-01 SUB-LEASE-02: one turn lease is generation-fenced: replay, renew, foreign holders, release", async () => {
+    test("SUB-LEASE-01 SUB-LEASE-02 SUB-LEASE-03: one turn lease is generation-fenced: replay, renew, foreign holders, release", async () => {
       const org = await organization();
       const connectionId = await sharedConnection(org, `lease-${crypto.randomUUID()}`);
       const turn = await runningTurn(org);

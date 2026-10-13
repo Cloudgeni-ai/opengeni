@@ -326,8 +326,9 @@ for it until the matching requirement below is implemented:
 - **SUB-ACCESS-04** A pool worker never gains visibility of another member's
   private session. Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-05** Revoking a connection or a person's access is enforced on
-  the next selection and physical request authorization. Lease renewal checks
-  ownership and liveness only: extending a lease cannot authorize a request
+  the next selection and physical request authorization. Chat-turn lease renewal
+  checks ownership and liveness; operation leases additionally recheck access.
+  Extending either lease cannot authorize a request
   after revocation. An already dispatched request is not retroactively cancelled.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`,
   `packages/db/test/subscription-core-codex-operations-postgres.test.ts`.
@@ -513,7 +514,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | ID | Date | Decision |
 | --- | --- | --- |
 | D-47 | 2026-10-13 | The product owner accepted refusing cross-provider switching while `remote_v2` is in use. This supersedes D-40 and Q-05 as delivery requirements: portable conversion is deferred; preserve clear refusal, original history and mode. No conversion retry or production deployment is authorized. |
-| D-48 | 2026-10-13 | Finish-line implementation scope: renewal is a lease ownership/liveness check, not a second authorization system. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
+| D-48 | 2026-10-13 | Finish-line implementation scope: chat-turn renewal is a lease ownership/liveness check, not a second authorization system; operation leases retain their existing extra access check. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
 
 ### Open decisions
 

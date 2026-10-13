@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- A person can discover the organization-owned accounts assigned to them
 -- before choosing one. Existing session/turn gates still own execution and
 -- binding writes. These SELECT-only policies confer no mutation authority and

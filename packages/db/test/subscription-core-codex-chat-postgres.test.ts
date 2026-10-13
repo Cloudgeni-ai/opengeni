@@ -358,7 +358,7 @@ async function leaseRows(
 }
 
 describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () => {
-  test("live credit consent preserves held leases after pause, honors revocation and yields to included capacity", async () => {
+  test("SUB-CREDITS-01: live credit consent preserves held leases after pause, honors revocation and yields to included capacity", async () => {
     const org = await organization();
     await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
