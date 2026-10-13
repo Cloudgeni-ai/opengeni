@@ -101,6 +101,15 @@ const integrationMethods = [
   "getSessionMcpToolPermissions",
   "updateSessionMcpToolPermissions",
   "updateSessionSkills",
+  // Site Data management for hosts and scripts; the web Data tab reads,
+  // deletes and exports, and agents manage collections with tools.
+  "defineSiteDataCollection",
+  "deleteSiteDataCollection",
+  "deleteSiteDataFile",
+  "getSiteDataFileUrl",
+  "importSiteData",
+  "listSiteDataFiles",
+  "resetSiteDataCollection",
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push
