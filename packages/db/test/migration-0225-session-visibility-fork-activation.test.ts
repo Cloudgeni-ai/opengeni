@@ -1390,7 +1390,7 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(sharedGoalRevisions[0]?.sessionId).toBe(value.session.id);
   });
 
-  test("returns a typed conflict instead of cancelling a nonquiescent source", async () => {
+  test("returns a typed work conflict and pauses an active goal only with consent", async () => {
     if (!shared || !client) return;
     const value = await sessionVisibilityFixture();
     await shared.admin`
@@ -1406,9 +1406,10 @@ describe("migration 0303 session tenancy product activation", () => {
         operationKey,
       }),
     ).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "active_goal",
+      name: "SessionVisibilityWorkConflictError",
+      reason: "active_work",
+      work: { activeGoal: true },
+      liveAttemptCount: 0,
     });
     const [unchanged] = await shared.admin<
       Array<{ visibility: string; epoch: number; goalStatus: string }>
@@ -1423,8 +1424,6 @@ describe("migration 0303 session tenancy product activation", () => {
       epoch: 1,
       goalStatus: "active",
     });
-    await shared.admin`
-      update session_goals set status = 'completed' where session_id = ${value.session.id}`;
     expect(
       await transitionSessionVisibility(client.db, {
         workspaceId: value.ownerGrant.workspaceId,
@@ -1433,8 +1432,12 @@ describe("migration 0303 session tenancy product activation", () => {
         targetVisibility: "user_private",
         expectedAuthorityEpoch: 1,
         operationKey,
+        stopActiveWork: true,
       }),
     ).toMatchObject({ changed: true, authorityEpoch: 2 });
+    const [paused] = await shared.admin<Array<{ goalStatus: string }>>`
+      select status as "goalStatus" from session_goals where session_id = ${value.session.id}`;
+    expect(paused).toEqual({ goalStatus: "paused" });
   });
 
   test("denies a suspended owner and rejects direct authority writes", async () => {

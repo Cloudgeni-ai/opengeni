@@ -181,7 +181,7 @@ function privatize(f: Fixture) {
 }
 
 describe("tenancy quiescence and pending machine updates", () => {
-  test("another person's frozen authority on a pending update still blocks privatization", async () => {
+  test("another person's frozen authority on a pending update still fails quiescence", async () => {
     const f = await fixture();
     const someoneElse = `user:someone-else-${crypto.randomUUID()}`;
     const foreign: Array<[string, PendingAuthority]> = [
@@ -224,11 +224,15 @@ describe("tenancy quiescence and pending machine updates", () => {
     ];
     for (const [label, authority] of foreign) {
       const id = await insertPendingUpdate(f, authority);
-      await expect(privatize(f), label).rejects.toMatchObject({
-        name: "SessionTenancyConflictError",
-        reason: "not_quiescent",
-        blocker: "pending_system_update",
-      });
+      // Since 0768 a private transition cancels a foreign background-command
+      // result instead of refusing; the quiescence predicate itself (shared
+      // with whole-session forks) still names it.
+      const failure = await shared.admin`select assert_session_tenancy_quiescent(
+          ${f.accountId}::uuid, ${f.workspaceId}::uuid, ${f.sessionId}::uuid, false)`.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure, label).toMatchObject({ code: "55P03", detail: "pending_system_update" });
       await settle(id);
     }
   });

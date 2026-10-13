@@ -1496,6 +1496,46 @@ export type UpdateSessionVisibilityRequest = {
   visibility: SessionVisibility;
   expectedAuthorityEpoch: number;
   idempotencyKey: string;
+  /**
+   * "Make private anyway": stop the chat's work in progress (the running or
+   * parked response, queued messages, an active goal) as part of the change.
+   * Without it such work refuses the change with reason `active_work`.
+   */
+  stopActiveWork?: boolean;
+};
+
+/** What still refuses a visibility change after the chat's own work stops. */
+export type SessionTenancyBlocker =
+  | "nonterminal_turn"
+  | "nonterminal_attempt"
+  | "unsettled_interruption"
+  | "pending_system_update"
+  | "pending_human_input"
+  | "pending_tool_receipt"
+  | "run_state"
+  | "active_goal"
+  | "capacity_waiter"
+  | "active_realtime"
+  | "active_scheduled_task"
+  | "workspace_mutation_admission"
+  | "retained_process"
+  | "active_sandbox_access"
+  | "shared_sandbox_group";
+
+/** The chat's own work that a change to Only me stops when `stopActiveWork` is sent. */
+export type SessionVisibilityWork = {
+  runningTurnCount: number;
+  queuedTurnCount: number;
+  activeGoal: boolean;
+};
+
+export type SessionVisibilityChangePreview = {
+  visibility: SessionVisibility;
+  targetVisibility: SessionVisibility;
+  authorityEpoch: number;
+  work: SessionVisibilityWork;
+  /** A block that remains even after that work stops, such as an active schedule. */
+  blocker: SessionTenancyBlocker | null;
 };
 
 export type UpdateSessionVisibilityResponse = {

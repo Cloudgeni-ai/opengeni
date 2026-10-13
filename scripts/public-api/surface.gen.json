@@ -7853,6 +7853,19 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/visibility/preview",
+      "sdk": [
+        "OpenGeniClient.previewSessionVisibilityChange"
+      ],
+      "request": [
+        "SessionVisibility"
+      ],
+      "response": [
+        "SessionVisibilityChangePreview"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture",
       "sdk": [
         "OpenGeniClient.getWorkspaceCapture"
@@ -23552,6 +23565,14 @@
         "$": "enum=[\"\\\"agent_message\\\"\",\"\\\"agent_steer_instruction\\\"\",\"\\\"background_command_result\\\"\",\"\\\"child_paused\\\"\",\"\\\"child_progress\\\"\",\"\\\"child_requires_action\\\"\",\"\\\"child_requires_action_resolved\\\"\",\"\\\"child_terminal_result\\\"\",\"\\\"child_waiting_capacity\\\"\",\"\\\"goal_continuation\\\"\",\"\\\"media_generation_result\\\"\",\"\\\"scheduled_occurrence\\\"\",\"\\\"session_wait_timeout\\\"\"]"
       }
     },
+    "SessionTenancyBlocker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"active_goal\\\"\",\"\\\"active_realtime\\\"\",\"\\\"active_sandbox_access\\\"\",\"\\\"active_scheduled_task\\\"\",\"\\\"capacity_waiter\\\"\",\"\\\"nonterminal_attempt\\\"\",\"\\\"nonterminal_turn\\\"\",\"\\\"pending_human_input\\\"\",\"\\\"pending_system_update\\\"\",\"\\\"pending_tool_receipt\\\"\",\"\\\"retained_process\\\"\",\"\\\"run_state\\\"\",\"\\\"shared_sandbox_group\\\"\",\"\\\"unsettled_interruption\\\"\",\"\\\"workspace_mutation_admission\\\"\"]"
+      }
+    },
     "SessionTenancyCreateCapabilities": {
       "io": [
         "output"
@@ -23674,6 +23695,30 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]"
+      }
+    },
+    "SessionVisibilityChangePreview": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.authorityEpoch": "integer!",
+        "$.blocker": "ref(SessionTenancyBlocker)! null",
+        "$.targetVisibility": "ref(SessionVisibility)!",
+        "$.visibility": "ref(SessionVisibility)!",
+        "$.work": "ref(SessionVisibilityWork)!"
+      }
+    },
+    "SessionVisibilityWork": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.activeGoal": "boolean!",
+        "$.queuedTurnCount": "integer!",
+        "$.runningTurnCount": "integer!"
       }
     },
     "SetMemberAllowanceRequest": {
@@ -26081,6 +26126,7 @@
         "$": "object",
         "$.expectedAuthorityEpoch": "integer!",
         "$.idempotencyKey": "string!",
+        "$.stopActiveWork": "boolean?",
         "$.visibility": "ref(SessionVisibility)!"
       }
     },
@@ -29732,6 +29778,7 @@
       "SessionSystemUpdate": "type",
       "SessionSystemUpdateKind": "type",
       "SessionSystemUpdateState": "type",
+      "SessionTenancyBlocker": "type",
       "SessionTenancyCreateCapabilities": "type",
       "SessionTenancyPublicProjection": "type",
       "sessionTitleIsPending": "value",
@@ -29740,6 +29787,8 @@
       "SessionTurnSource": "type",
       "SessionTurnStatus": "type",
       "SessionVisibility": "type",
+      "SessionVisibilityChangePreview": "type",
+      "SessionVisibilityWork": "type",
       "SessionWorkspaceWebhookEvent": "type",
       "SetMemberAllowanceRequest": "type",
       "SetSessionModelAccountChoiceRequest": "type",
@@ -33857,6 +33906,7 @@
       "previewApiIntegrationUninstall",
       "previewPlugin",
       "previewPluginUninstall",
+      "previewSessionVisibilityChange",
       "previewSkillImport",
       "previewSkillUninstall",
       "processNextTranscriptionRecordingSegment",
@@ -34507,6 +34557,7 @@
       "previewApiIntegrationUninstall",
       "previewPlugin",
       "previewPluginUninstall",
+      "previewSessionVisibilityChange",
       "previewSkillImport",
       "previewSkillUninstall",
       "processNextTranscriptionRecordingSegment",
@@ -35191,6 +35242,7 @@
       "previewIdentityLink",
       "previewPlugin",
       "previewPluginUninstall",
+      "previewSessionVisibilityChange",
       "previewSkillImport",
       "previewSkillUninstall",
       "processNextTranscriptionRecordingSegment",
@@ -37275,6 +37327,9 @@
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39459,6 +39514,9 @@
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -41472,6 +41530,9 @@
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -43673,6 +43734,9 @@
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45703,6 +45767,9 @@
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

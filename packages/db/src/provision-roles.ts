@@ -1509,6 +1509,19 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format('%I.session_visibility_change_blocker(uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_visibility_change_blocker(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_visibility_change_blocker(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format(
         '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer)',
         ${literal(schema)}

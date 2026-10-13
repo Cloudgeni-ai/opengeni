@@ -127,6 +127,7 @@ function apiError(input: {
   code: string;
   reason?: string;
   blocker?: string;
+  details?: Record<string, unknown>;
   outcomeUnknown?: boolean;
   retryable?: boolean;
 }) {
@@ -143,6 +144,7 @@ function apiError(input: {
               details: {
                 reason: input.reason,
                 ...(input.blocker ? { blocker: input.blocker } : {}),
+                ...input.details,
               },
             }
           : {}),
@@ -598,6 +600,204 @@ describe("SessionTenancyControl", () => {
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
     expect(onOpenSession).toHaveBeenCalledWith("workspace-a", "session-fork");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("summarizes the work a private change stops and sends one consented request", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const updateSessionVisibility = mock(async (_workspaceId, _sessionId, request) => {
+      requests.push(request);
+      return {
+        operationId: crypto.randomUUID(),
+        eventId: crypto.randomUUID(),
+        eventSequence: 9,
+        visibility: "private" as const,
+        authorityEpoch: 5,
+        changed: true,
+        replay: false,
+        revokedGrantCount: 0,
+      };
+    });
+    const previewSessionVisibilityChange = mock(async () => ({
+      visibility: "workspace" as const,
+      targetVisibility: "private" as const,
+      authorityEpoch: 4,
+      work: { runningTurnCount: 1, queuedTurnCount: 2, activeGoal: true },
+      blocker: null,
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={baseSession}
+          client={
+            {
+              updateSessionVisibility,
+              previewSessionVisibilityChange,
+            } as unknown as OpenGeniBrowserClient
+          }
+          managedSession
+          canForkPrivately
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+        />,
+      );
+    });
+    await chooseAccessAction(container, "Limit this session to me…");
+    await flush();
+    expect(previewSessionVisibilityChange).toHaveBeenCalledWith(
+      "workspace-a",
+      "session-a",
+      "private",
+    );
+    expect(container.textContent).toContain("This also stops work in progress");
+    expect(container.textContent).toContain("Stop the response that is in progress");
+    expect(container.textContent).toContain("Cancel 2 queued messages");
+    expect(container.textContent).toContain("Pause the active goal");
+    expect(container.textContent).not.toContain("waits for all current work");
+
+    await act(async () => dialogButton(container, "Stop work and limit to me").click());
+    await flush();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ visibility: "private", stopActiveWork: true });
+    expect(toastSuccess).toHaveBeenCalledWith("Session access updated", {
+      description: "Session is private to you.",
+    });
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("asks again when work starts after the preview, then retries a settling stop with one key", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const updateSessionVisibility = mock(async (_workspaceId, _sessionId, request) => {
+      requests.push(request);
+      if (requests.length === 1) {
+        throw apiError({
+          status: 409,
+          code: "conflict",
+          reason: "active_work",
+          details: { runningTurnCount: 1, queuedTurnCount: 0, activeGoal: false },
+        });
+      }
+      if (requests.length === 2) {
+        throw apiError({
+          status: 409,
+          code: "conflict",
+          reason: "stopping_active_work",
+          retryable: true,
+          details: { runningTurnCount: 1, queuedTurnCount: 0, activeGoal: false },
+        });
+      }
+      return {
+        operationId: crypto.randomUUID(),
+        eventId: crypto.randomUUID(),
+        eventSequence: 9,
+        visibility: "private" as const,
+        authorityEpoch: 5,
+        changed: true,
+        replay: false,
+        revokedGrantCount: 0,
+      };
+    });
+    const previewSessionVisibilityChange = mock(async () => ({
+      visibility: "workspace" as const,
+      targetVisibility: "private" as const,
+      authorityEpoch: 4,
+      work: { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
+      blocker: null,
+    }));
+    const getSession = mock(async () => baseSession);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={baseSession}
+          client={
+            {
+              updateSessionVisibility,
+              previewSessionVisibilityChange,
+              getSession,
+            } as unknown as OpenGeniBrowserClient
+          }
+          managedSession
+          canForkPrivately
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+        />,
+      );
+    });
+    await chooseAccessAction(container, "Limit this session to me…");
+    await flush();
+    expect(container.textContent).not.toContain("This also stops work in progress");
+    await act(async () => dialogButton(container, "Limit to me").click());
+    await flush();
+    expect(requests[0]?.stopActiveWork).toBeUndefined();
+    expect(container.textContent).toContain("Stop the response that is in progress");
+    expect(getSession).not.toHaveBeenCalled();
+
+    await act(async () => dialogButton(container, "Stop work and limit to me").click());
+    await flush();
+    expect(requests).toHaveLength(3);
+    expect(requests[1]).toMatchObject({ stopActiveWork: true });
+    expect(requests[2]).toMatchObject({ stopActiveWork: true });
+    expect(new Set(requests.map((request) => request.idempotencyKey)).size).toBe(1);
+    expect(toastSuccess).toHaveBeenCalledWith("Session access updated", {
+      description: "Session is private to you.",
+    });
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("names a block that stopping work would not clear", async () => {
+    const previewSessionVisibilityChange = mock(async () => ({
+      visibility: "workspace" as const,
+      targetVisibility: "private" as const,
+      authorityEpoch: 4,
+      work: { runningTurnCount: 1, queuedTurnCount: 0, activeGoal: false },
+      blocker: "active_scheduled_task" as const,
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={baseSession}
+          client={{ previewSessionVisibilityChange } as unknown as OpenGeniBrowserClient}
+          managedSession
+          canForkPrivately
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+        />,
+      );
+    });
+    await chooseAccessAction(container, "Limit this session to me…");
+    await flush();
+    expect(container.textContent).toContain("This session can't be limited to you yet");
+    expect(container.textContent).toContain(
+      "Pause the scheduled task that targets this session first.",
+    );
+    expect(container.textContent).not.toContain("This also stops work in progress");
 
     await act(async () => root.unmount());
     container.remove();

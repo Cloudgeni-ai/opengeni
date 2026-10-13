@@ -7,7 +7,10 @@ import {
   prepareSessionVisibilityAttempt,
   privateSessionSandboxNote,
   retryableSessionTenancyReconciliationFailure,
+  isStoppingSessionWorkError,
   sessionTenancyBlockerMessage,
+  sessionVisibilityWorkIsEmpty,
+  sessionVisibilityWorkSummary,
   visibilityAttemptReachedAuthoritativeState,
 } from "./session-tenancy";
 
@@ -173,5 +176,42 @@ describe("session tenancy browser operation state", () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  test("summarizes the work a private change stops and classifies its conflicts", () => {
+    expect(
+      sessionVisibilityWorkSummary({ runningTurnCount: 1, queuedTurnCount: 1, activeGoal: true }),
+    ).toEqual([
+      "Stop the response that is in progress",
+      "Cancel 1 queued message",
+      "Pause the active goal",
+    ]);
+    expect(
+      sessionVisibilityWorkIsEmpty({ runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false }),
+    ).toBe(true);
+    const conflict = (reason: string) =>
+      new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            code: "conflict",
+            message: "conflict",
+            retryable: reason === "stopping_active_work",
+            details: { reason, runningTurnCount: 0, queuedTurnCount: 3, activeGoal: false },
+          },
+        }),
+      );
+    expect(classifySessionTenancyFailure(conflict("active_work"))).toMatchObject({
+      kind: "active_work",
+      retainAttempt: true,
+      reconcile: false,
+      work: { runningTurnCount: 0, queuedTurnCount: 3, activeGoal: false },
+    });
+    expect(classifySessionTenancyFailure(conflict("stopping_active_work"))).toMatchObject({
+      kind: "stopping_work",
+      retainAttempt: true,
+    });
+    expect(isStoppingSessionWorkError(conflict("stopping_active_work"))).toBe(true);
+    expect(isStoppingSessionWorkError(conflict("active_work"))).toBe(false);
   });
 });

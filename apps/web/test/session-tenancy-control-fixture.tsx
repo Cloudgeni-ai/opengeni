@@ -26,6 +26,36 @@ const sharedBoxSession: Partial<Session> | null =
       }
     : null;
 
+// ?case=work renders a workspace-visible session with work in progress, so
+// "Limit to me" summarizes what it stops; ?case=blocked adds a block that
+// stopping work would not clear.
+const workCase = sharedBox === "work" || sharedBox === "blocked" ? sharedBox : null;
+const workSession: Partial<Session> | null = workCase
+  ? {
+      title: "Quarterly planning",
+      status: "running",
+      tenancy: { visibility: "workspace", authorityEpoch: 1, ownedByCurrentUser: true, fork: null },
+    }
+  : null;
+const fixtureClient = {
+  previewSessionVisibilityChange: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return {
+      visibility: "workspace" as const,
+      targetVisibility: "private" as const,
+      authorityEpoch: 1,
+      work: workCase
+        ? { runningTurnCount: 1, queuedTurnCount: 2, activeGoal: true }
+        : { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
+      blocker: workCase === "blocked" ? ("active_scheduled_task" as const) : null,
+    };
+  },
+  updateSessionVisibility: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60_000));
+    throw new Error("fixture does not complete the change");
+  },
+} as unknown as OpenGeniBrowserClient;
+
 function SessionTenancyControlFixture() {
   return (
     <main className="flex min-h-screen items-start justify-end p-6">
@@ -46,9 +76,10 @@ function SessionTenancyControlFixture() {
               fork: null,
             },
             ...sharedBoxSession,
+            ...workSession,
           } as Session
         }
-        client={{} as OpenGeniBrowserClient}
+        client={fixtureClient}
         managedSession
         scopeLabel="Roadmap Personal workspace"
         captureWorkspaceInvocation={() => ({ workspaceId, revision: 1 })}

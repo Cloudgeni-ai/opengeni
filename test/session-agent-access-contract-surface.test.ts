@@ -62,7 +62,13 @@ const MIDDLEWARE_EXEMPT_OPERATIONS = {
   "session.stream.read": { handlerMarker: "requireSessionAuthorization(" },
   // Managed-human-only product mutations: core runs the target-free gates
   // first and then the seam exactly once (packages/core/src/application/session-tenancy.ts).
-  "session.visibility.write": { handlerMarker: "updateManagedHumanSessionVisibility(" },
+  // The owner-only preview of the same change runs the identical gates.
+  "session.visibility.write": {
+    handlerMarker: [
+      "updateManagedHumanSessionVisibility(",
+      "previewManagedHumanSessionVisibilityChange(",
+    ],
+  },
   "session.fork.create": { handlerMarker: "forkManagedHumanSession(" },
 } as const;
 
@@ -281,8 +287,8 @@ describe("agent-access scope stays enforced at every session entry point", () =>
         MIDDLEWARE_EXEMPT_OPERATIONS[operation as keyof typeof MIDDLEWARE_EXEMPT_OPERATIONS];
       if (exemption) {
         expect(
-          route.body.includes(exemption.handlerMarker),
-          `${route.method} ${route.path} bypasses the middleware and must reach the seam through ${exemption.handlerMarker}`,
+          [exemption.handlerMarker].flat().some((marker) => route.body.includes(marker)),
+          `${route.method} ${route.path} bypasses the middleware and must reach the seam through ${[exemption.handlerMarker].flat().join(" or ")}`,
         ).toBe(true);
       }
     }

@@ -248,6 +248,8 @@ export const embeddingMigrationTail = [
   "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
   "0760_terminal_turn_run_state_cleanup.sql",
   "0761_exhausted_scheduled_tasks.sql",
+  // Rewrites the quiescence and visibility routines 0759 and 0761 extend.
+  "0768_private_visibility_ignores_leftovers.sql",
   "0763_queue_steer_admission_recheck_repair.sql",
   "0764_interrupted_turn_recovery.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.

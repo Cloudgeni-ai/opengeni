@@ -5371,6 +5371,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "previewSessionVisibilityChange",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/visibility/preview",
+    "request": [
+      "SessionVisibility"
+    ],
+    "response": [
+      "SessionVisibilityChangePreview"
+    ]
+  },
+  {
     "id": "previewSkillImport",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/skills/preview",

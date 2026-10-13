@@ -172,12 +172,12 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       callType: "function_call",
       callItem: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
     });
-    // While the turn runs, access stays frozen; the earlier turn blocker
-    // reports it before the receipt clause is reached.
+    // While the turn runs, access stays frozen: since 0768 the running
+    // attempt is reported as work to stop before any receipt clause.
     await expect(transition(f)).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "nonterminal_turn",
+      name: "SessionVisibilityWorkConflictError",
+      reason: "active_work",
+      liveAttemptCount: 1,
     });
     await recordPendingSessionToolCallResult(client.db, {
       ...identity,

@@ -1740,9 +1740,40 @@ export const UpdateSessionVisibilityRequest = z
     visibility: SessionVisibility,
     expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     idempotencyKey: SessionTenancyIdempotencyKey,
+    /**
+     * "Make private anyway": stop the chat's visible work (the running or
+     * parked response, queued messages, an active goal) as part of the change.
+     * Without it such work refuses the change with `active_work`. Leftover
+     * records are settled either way.
+     */
+    stopActiveWork: z.boolean().optional(),
   })
   .strict();
 export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
+
+/** The chat's own work that a private change would stop. */
+export const SessionVisibilityWork = z
+  .object({
+    runningTurnCount: z.number().int().nonnegative(),
+    queuedTurnCount: z.number().int().nonnegative(),
+    activeGoal: z.boolean(),
+  })
+  .strict();
+export type SessionVisibilityWork = z.infer<typeof SessionVisibilityWork>;
+
+/** Owner-only answer to "what happens if this chat changes audience?". */
+export const SessionVisibilityChangePreview = z
+  .object({
+    visibility: SessionVisibility,
+    targetVisibility: SessionVisibility,
+    authorityEpoch: z.number().int().positive(),
+    /** Work the change stops when `stopActiveWork` is sent; empty for workspace. */
+    work: SessionVisibilityWork,
+    /** A block that remains even after that work stops, such as someone else's schedule. */
+    blocker: SessionTenancyBlocker.nullable(),
+  })
+  .strict();
+export type SessionVisibilityChangePreview = z.infer<typeof SessionVisibilityChangePreview>;
 
 export const UpdateSessionVisibilityResponse = z
   .object({
