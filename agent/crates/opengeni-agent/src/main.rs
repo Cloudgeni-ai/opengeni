@@ -52,6 +52,7 @@ mod handover;
 mod instance_lock;
 mod job;
 mod legacy;
+mod log_file;
 mod metrics;
 mod ops;
 mod overrides;
@@ -104,7 +105,10 @@ fn main() -> std::process::ExitCode {
     #[cfg(unix)]
     let inherited = handover::inherit_from_env();
     let cli = Cli::parse();
-    init_tracing();
+    // Only the long-running agent persists its log; one-shot CLI commands
+    // print to the terminal and must not interleave with the service's file.
+    let persistent = matches!(cli.command, None | Some(Command::Run(_)));
+    init_tracing(persistent);
     #[cfg(unix)]
     match inherited {
         Ok(true) => info!("continuing commands handed over by the previous agent image"),
@@ -141,13 +145,87 @@ fn main() -> std::process::ExitCode {
 
 /// Initializes structured `tracing` from `$RUST_LOG` (default `info`). Secret
 /// values are NEVER logged; only op labels, counts, and timings.
-fn init_tracing() {
+///
+/// With `persistent`, events also go to the size-bounded `<config>/logs/agent.log`
+/// and panics are recorded there before the default hook runs, so a crashed
+/// agent stays diagnosable on hosts whose service manager keeps no output.
+/// A service definition that captures stderr itself sets
+/// `OPENGENI_AGENT_STDERR_LOG=off` so the same lines are not stored twice.
+fn init_tracing(persistent: bool) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,opengeni_agent=info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+    let mut file_error = None;
+    let log = if persistent {
+        match config::config_dir() {
+            Ok(dir) => {
+                let directory = log_file::log_directory(&dir);
+                log_file::bound_appended_file(
+                    &directory.join(log_file::AGENT_STDERR_LOG),
+                    log_file::MAX_LOG_BYTES,
+                );
+                match log_file::RotatingLogFile::open(
+                    &directory,
+                    log_file::AGENT_LOG,
+                    log_file::MAX_LOG_BYTES,
+                ) {
+                    Ok(log) => Some(log),
+                    Err(error) => {
+                        file_error = Some(format!("{}: {error}", directory.display()));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                file_error = Some(error.to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let stderr_enabled = log.is_none()
+        || !std::env::var(opengeni_agent_platform::service::AGENT_STDERR_LOG_ENV)
+            .is_ok_and(|value| value == "off");
+    let console = stderr_enabled.then(|| tracing_subscriber::fmt::layer().with_target(false));
+    let file = log.map(|log| {
+        tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(log)
+    });
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(console)
+        .with(file)
+        .try_init()
+        .is_ok();
+    if let Some(error) = file_error {
+        warn!(%error, "agent log file unavailable; logging to the console only");
+    }
+    if persistent && installed {
+        install_panic_logging();
+    }
+}
+
+/// Records a panic, with its backtrace, through `tracing` before the default
+/// hook prints it. A panic on a worker thread is otherwise only visible on the
+/// console, which a background service usually does not keep.
+fn install_panic_logging() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        error!(
+            thread = thread.name().unwrap_or("unnamed"),
+            panic = %info,
+            %backtrace,
+            "agent panicked"
+        );
+        default_hook(info);
+    }));
 }
 
 /// The Native Messaging host's stdout is Chrome's message channel: a log line
@@ -1011,5 +1089,62 @@ mod display_offer_tests {
     #[tokio::test]
     async fn headless_enrollment_still_does_not_offer_screen_control() {
         assert!(!probe_offers_display_with_backend(Box::new(NoDesktop)).await);
+    }
+}
+
+#[cfg(test)]
+mod log_persistence_tests {
+    const CHILD: &str = "OPENGENI_TEST_LOG_PERSISTENCE_CHILD";
+
+    /// Runs the real tracing setup in a child process (a process can install a
+    /// global subscriber and panic hook only once) and checks that its events
+    /// and a worker-thread panic land in the bounded log file, not the console.
+    #[test]
+    fn a_service_agent_keeps_its_log_and_panics_on_disk() {
+        if std::env::var_os(CHILD).is_some() {
+            super::init_tracing(true);
+            tracing::info!("persistent log child started");
+            let worker = std::thread::Builder::new()
+                .name("controller-worker".to_string())
+                .spawn(|| panic!("simulated worker failure"))
+                .unwrap();
+            assert!(worker.join().is_err());
+            return;
+        }
+        let config = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "log_persistence_tests::a_service_agent_keeps_its_log_and_panics_on_disk",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("OPENGENI_CONFIG_DIR", config.path())
+            .env(
+                opengeni_agent_platform::service::AGENT_STDERR_LOG_ENV,
+                "off",
+            )
+            .env("RUST_BACKTRACE", "0")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        let log = std::fs::read_to_string(config.path().join("logs").join("agent.log"))
+            .expect("the service agent writes its own log file");
+        assert!(log.contains("persistent log child started"), "{log}");
+        assert!(log.contains("agent panicked"), "{log}");
+        assert!(log.contains("simulated worker failure"), "{log}");
+        assert!(log.contains("controller-worker"), "{log}");
+        assert!(log.contains("backtrace="), "{log}");
+        assert!(
+            !log.contains('\u{1b}'),
+            "the file must not contain terminal colors"
+        );
+        assert!(
+            !stdout.contains("persistent log child started"),
+            "a service that captures stderr itself must not store each line twice"
+        );
     }
 }

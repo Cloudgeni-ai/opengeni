@@ -1259,6 +1259,26 @@ organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
 
+### Agent logs
+
+The running agent (`opengeni-agent run`, or a bare launch of an enrolled
+machine) keeps its own log in `logs/agent.log` under its config directory
+(`~/.config/opengeni/agent` unless `$OPENGENI_CONFIG_DIR` or
+`$XDG_CONFIG_HOME` says otherwise), whatever service manager runs it. The file
+rotates at 8 MiB and keeps two older generations (`agent.log.1`,
+`agent.log.2`); the directory and files are owner-only. It records browser
+controller diagnostics and exit statuses, and a panic on any thread with its
+backtrace, so a crashed agent can be diagnosed afterwards. One-shot CLI
+commands log only to the terminal.
+
+On Linux the same lines also reach the systemd journal
+(`journalctl --user -u opengeni-agent`). The macOS LaunchAgent sends the
+process's raw stdout and stderr to `logs/agent.stderr.log` and sets
+`OPENGENI_AGENT_STDERR_LOG=off`, so that file keeps only output that bypasses
+the agent log, such as an abort message; the agent bounds it at startup. A Mac
+picks up that LaunchAgent change the next time `opengeni-agent service install`
+runs; the agent log itself needs only the new agent.
+
 ## Transactional file edits
 
 Native ranged file reads retain only the selected bytes, rather than allocating
