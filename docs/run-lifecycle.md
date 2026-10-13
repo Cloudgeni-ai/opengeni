@@ -1886,8 +1886,9 @@ work does not dispatch turn activities or schedule retry timers.
 
 An authorized explicit Resume clears the selected session's block and commits
 a new wake, even when inference control was already active. A newly accepted
-Send or Steer also rechecks; an ordinary Send does not become Steer merely
-because admission is blocked. Neither action grants missing authority or
+Send or Steer (including Steer on an existing queue row) also rechecks; an
+ordinary Send does not become Steer merely because admission is blocked.
+Neither action grants missing authority or
 changes earlier accepted snapshots. Repair authority through its normal
 authorized lifecycle, then explicitly recheck; authority changes alone are not
 a polling trigger. Pause and cancellation remain independent controls.

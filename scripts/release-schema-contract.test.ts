@@ -2290,6 +2290,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0764_interrupted_turn_recovery.sql",
+      "0763_queue_steer_admission_recheck_repair.sql",
       "0761_exhausted_scheduled_tasks.sql",
       "0760_terminal_turn_run_state_cleanup.sql",
       "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
