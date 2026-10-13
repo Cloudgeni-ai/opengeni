@@ -1,14 +1,17 @@
 import type { MachineView } from "@opengeni/react/machines";
+import { DEFAULT_SESSION_USAGE_LIMIT_LABELS } from "@opengeni/react/usage";
 import type { NewSessionSelectionHistory, Rig } from "@opengeni/sdk";
 import {
   BoxIcon,
+  GaugeIcon,
+  InfinityIcon,
   LaptopIcon,
   LockIcon,
   MessageSquareIcon,
   ServerIcon,
   UsersIcon,
 } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ComposerMenuHeader } from "@/components/ui/composer-menu";
@@ -33,6 +36,10 @@ import {
   workspaceDefaultRigOptionLabel,
   type SessionDraft,
 } from "@/lib/session-create";
+import {
+  parseSessionUsageLimitDraft,
+  type SessionUsageLimitDraft,
+} from "@/lib/session-usage-limit";
 import { cn } from "@/lib/utils";
 
 /*
@@ -457,6 +464,129 @@ export function VisibilityMenuBody(props: {
             onSelect={() => props.onChange("private")}
           />
         </RadioGroup>
+      </div>
+    </>
+  );
+}
+
+/**
+ * The new chat's usage limit: none (the default), or pause at a dollar amount
+ * of API-equivalent model usage. Local to this composer, never remembered
+ * across chats; sent on create only when the server offers limits.
+ */
+export function UsageLimitMenuBody(props: {
+  leading?: ReactNode;
+  presentation?: MenuBodyPresentation;
+  value: SessionUsageLimitDraft;
+  disabled: boolean;
+  /** A Send was blocked by this amount: show "enter an amount" even when empty. */
+  showRequiredError?: boolean;
+  onChange: (value: SessionUsageLimitDraft) => void;
+}) {
+  const presentation = props.presentation ?? "menu";
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useFocusCheckedRow(bodyRef, presentation);
+  const limitRowRef = useRef<HTMLElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const focusInput = useRef(false);
+  const inputId = useId();
+  const errorId = `${inputId}-error`;
+  const helpId = `${inputId}-help`;
+  const value = props.value;
+  useEffect(() => {
+    if (focusInput.current && inputRef.current) {
+      focusInput.current = false;
+      inputRef.current.focus({ preventScroll: true });
+    }
+  }, [value.kind]);
+  const parsed = parseSessionUsageLimitDraft(value);
+  const error =
+    value.kind === "limit" && !parsed.ok && (value.text.trim() || props.showRequiredError)
+      ? parsed.error
+      : null;
+  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS;
+  return (
+    <>
+      <ComposerMenuHeader title={labels.title} leading={props.leading} />
+      <div
+        ref={bodyRef}
+        data-usage-limit-menu
+        className="min-h-0 overflow-y-auto overscroll-contain pb-1"
+      >
+        <RadioGroup presentation={presentation} label={labels.title} value={value.kind}>
+          <RadioRow
+            value="none"
+            disabled={props.disabled}
+            icon={<InfinityIcon />}
+            label={labels.noLimit}
+            onSelect={() => props.onChange({ kind: "none" })}
+          />
+          <RadioRow
+            value="limit"
+            ref={(node) => {
+              limitRowRef.current = node;
+            }}
+            disabled={props.disabled}
+            icon={<GaugeIcon />}
+            label="Pause at an amount"
+            onSelect={() => {
+              if (value.kind === "limit") {
+                inputRef.current?.focus({ preventScroll: true });
+                return;
+              }
+              focusInput.current = true;
+              props.onChange({ kind: "limit", text: "" });
+            }}
+          />
+        </RadioGroup>
+        {value.kind === "limit" ? (
+          <div className="px-2.5 pt-1 pb-1.5">
+            <label htmlFor={inputId} className="mb-1 block text-xs leading-4.5 text-fg-muted">
+              Limit in US dollars
+            </label>
+            <div className="relative">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-fg-muted"
+              >
+                $
+              </span>
+              <Input
+                id={inputId}
+                ref={inputRef}
+                value={value.text}
+                disabled={props.disabled}
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="25.00"
+                aria-invalid={error ? true : undefined}
+                aria-describedby={error ? `${errorId} ${helpId}` : helpId}
+                onChange={(event) => props.onChange({ kind: "limit", text: event.target.value })}
+                onKeyDown={(event) => {
+                  // Text editing must not trigger menu typeahead or roving focus.
+                  event.stopPropagation();
+                  if (
+                    presentation === "menu" &&
+                    !event.nativeEvent.isComposing &&
+                    (event.key === "Tab" || event.key === "Enter")
+                  ) {
+                    event.preventDefault();
+                    limitRowRef.current?.focus({ preventScroll: true });
+                  }
+                }}
+                className="h-8 pl-6 text-sm"
+              />
+            </div>
+            {error ? (
+              <p id={errorId} className="mt-1.5 text-xs leading-4.5 text-danger">
+                {error}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        <p id={helpId} className={cn(MENU_NOTE_CLASS, "text-xs leading-4.5")}>
+          {labels.explanation} {labels.notYourBill}
+        </p>
       </div>
     </>
   );

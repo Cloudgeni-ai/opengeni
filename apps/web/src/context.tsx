@@ -427,6 +427,8 @@ export type AppContextValue = {
       startMode?: "realtime";
       /** Atomic create-time session visibility. */
       visibility?: "private" | "workspace";
+      /** Create-time per-task usage limit (USD micros); omit for no limit. */
+      usageLimitMicros?: number | null;
       /** Exact attempted request and classified outcome for host reconciliation. */
       /** Return true when the caller handles this failure (including its user-facing error). */
       onFailure?: (failure: StartSessionFailure) => boolean | void;
@@ -1975,6 +1977,7 @@ export function RootRouteComponent() {
       agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
       startMode?: "realtime";
       visibility?: "private" | "workspace";
+      usageLimitMicros?: number | null;
       onFailure?: (failure: StartSessionFailure) => boolean | void;
     },
   ): Promise<Session | null> {
@@ -2051,6 +2054,7 @@ export function RootRouteComponent() {
           agentLearning: options?.agentLearning,
           startMode: options?.startMode,
           visibility: options?.visibility,
+          usageLimitMicros: options?.usageLimitMicros,
         }),
       });
       attempted = attempt;

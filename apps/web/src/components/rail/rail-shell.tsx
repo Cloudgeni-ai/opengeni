@@ -30,6 +30,10 @@ import { OpenInAppBanner } from "@/components/rail/open-in-app-banner";
 import { SessionHeader } from "@/components/rail/session-header";
 import { SessionStartupProvider } from "@/lib/session-startup";
 import {
+  requestSessionUsageLimitEditor,
+  sessionUsageLimitCapability,
+} from "@/lib/session-usage-limit";
+import {
   RAIL_DEFAULT_WIDTH,
   RAIL_MAX_WIDTH,
   RAIL_MIN_WIDTH,
@@ -570,6 +574,11 @@ function SessionRouteHeader({
       onArchive={onArchive}
       repliesMute={repliesMute}
       adminAccess={adminAccess}
+      onOpenUsageLimit={
+        sessionUsageLimitCapability(context.clientConfig) === "absent"
+          ? null
+          : requestSessionUsageLimitEditor
+      }
       leading={hamburger}
       lastStartedModel={lastStartedModel}
       lastStartedReasoningEffort={lastStartedReasoningEffort}

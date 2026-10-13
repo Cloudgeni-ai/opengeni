@@ -24,6 +24,7 @@ import {
   BellIcon,
   BellOffIcon,
   CalendarClockIcon,
+  GaugeIcon,
   LockIcon,
   MoreHorizontalIcon,
   PanelRightCloseIcon,
@@ -89,6 +90,7 @@ export function SessionHeader({
   onArchive,
   repliesMute,
   adminAccess,
+  onOpenUsageLimit,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -131,6 +133,11 @@ export function SessionHeader({
    * Absent hides the shield and the menu action.
    */
   adminAccess?: SessionAdminAccessControl | null;
+  /**
+   * Opens this chat's usage limit (Agent tab > Usage). Absent hides the menu
+   * item, for servers without usage limits.
+   */
+  onOpenUsageLimit?: (() => void) | null;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -436,6 +443,16 @@ export function SessionHeader({
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
                 {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
                 {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+              </DropdownMenuItem>
+            ) : null}
+            {onOpenUsageLimit ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = onOpenUsageLimit;
+                }}
+              >
+                <GaugeIcon />
+                Usage limit
               </DropdownMenuItem>
             ) : null}
             {adminAccess?.state.active && adminAccess.state.canRevoke ? (
