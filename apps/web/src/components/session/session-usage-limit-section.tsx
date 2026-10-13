@@ -104,12 +104,19 @@ export function SessionUsageLimitSection(props: {
   // Header menu / composer notice: open the editor here and put focus in it.
   const focusRequest = props.focusRequest ?? 0;
   const handledFocus = useRef(0);
+  // Focus after the render that shows the editor, not in the same frame as opening it.
+  const [focusNonce, setFocusNonce] = useState(0);
   useEffect(() => {
     if (!focusRequest || handledFocus.current === focusRequest) return;
     if (capability === "absent") return;
     if (editable === false && usage === null && !limit.error) return; // wait for the read
     handledFocus.current = focusRequest;
     if (editable && !editing) openEditor();
+    setFocusNonce((current) => current + 1);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- run per request
+  }, [focusRequest, editable, usage === null, limit.error]);
+  useEffect(() => {
+    if (!focusNonce) return;
     const frame = requestAnimationFrame(() => {
       rootRef.current?.scrollIntoView({ block: "nearest" });
       const target =
@@ -121,8 +128,7 @@ export function SessionUsageLimitSection(props: {
       target?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- run per request
-  }, [focusRequest, editable, usage === null, limit.error]);
+  }, [focusNonce]);
 
   useEffect(() => {
     if (editing && draft.kind === "limit" && touched) amountInput.current?.focus();
@@ -296,11 +302,6 @@ export function SessionUsageLimitSection(props: {
                 </HelpLink>
               ) : null}
             </p>
-          ) : null}
-          {usage.status === "preparing" ? (
-            <InlineHelp icon>
-              {LABELS.preparing}. {LABELS.preparingNote}
-            </InlineHelp>
           ) : null}
           <Field label="Limit" group>
             <SegmentedControl
