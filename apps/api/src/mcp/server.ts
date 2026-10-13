@@ -261,6 +261,7 @@ import {
   scheduledTaskAccess,
   scheduledTaskViewerForGrant,
   siteViewerForGrant,
+  resolveNewSiteAudience,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -1090,21 +1091,22 @@ export function buildOpenGeniMcpServer(
     "artifacts_list",
     {
       description:
-        "List the generic published artifacts in this workspace and their current versions.",
+        "List the published Sites you can see in this workspace (shared with the workspace, or Only me Sites that belong to the person you act for) and their current versions and audience.",
       inputSchema: {},
     },
     async () => {
       if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
-      const listed = redactWorkspaceArtifactListProvenance(
-        await listWorkspaceArtifacts(
-          deps.db,
-          grant.workspaceId,
-          await siteViewerForGrant(deps.db, grant),
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(
+            deps.db,
+            grant.workspaceId,
+            await siteViewerForGrant(deps.db, grant),
+          ),
         ),
       );
-      return json({ ...listed, artifacts: listed.artifacts.map(withoutSiteAudience) });
     },
   );
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
@@ -3302,14 +3304,6 @@ async function authorizeFirstPartySession(
   });
 }
 
-/** Agent tool results keep a Site's established shape, without its audience. */
-function withoutSiteAudience<T extends { visibility?: unknown; ownerSubjectId?: unknown }>(
-  artifact: T,
-): Omit<T, "visibility" | "ownerSubjectId"> {
-  const { visibility: _visibility, ownerSubjectId: _ownerSubjectId, ...rest } = artifact;
-  return rest;
-}
-
 function registerWorkspaceArtifactTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3332,13 +3326,8 @@ function registerWorkspaceArtifactTools(
         if (error instanceof SessionAuthorizationDeniedError) return false;
         throw error;
       });
-  const mutation = async (response: WorkspaceArtifactMutationResponse) => {
-    const projected = await projectWorkspaceArtifactMutationProvenance(
-      response,
-      canReadProvenanceSession,
-    );
-    return { ...projected, artifact: withoutSiteAudience(projected.artifact) };
-  };
+  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
+    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3426,7 +3415,7 @@ function registerWorkspaceArtifactTools(
       ]);
       const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
       return json({
-        detail: { ...detail, artifact: withoutSiteAudience(detail.artifact) },
+        detail,
         version: projectedVersion,
         downloads,
       });
@@ -3437,7 +3426,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        "Create and publish a generic workspace artifact from a complete HTML document. Everyone in the workspace who can read artifacts can open it, even when this chat is private; only the chat link stays hidden. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.",
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3471,6 +3460,7 @@ function registerWorkspaceArtifactTools(
           )
           .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
           .optional(),
+        visibility: z4.enum(["private", "workspace"]).optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
@@ -3481,16 +3471,19 @@ function registerWorkspaceArtifactTools(
       html,
       source,
       requestedTools,
+      visibility,
       idempotencyKey,
       uploadId,
     }) => {
       await authorize();
-      // Shared with the workspace, as agent-published Sites always are; the
-      // person it was made for owns it and can limit it from the Site page.
-      const audience = {
-        visibility: "workspace_shared" as const,
-        ownerSubjectId: (await siteViewerForGrant(deps.db, grant)).subjectId,
-      };
+      const audience = await resolveNewSiteAudience({
+        db: deps.db,
+        settings: deps.settings,
+        grant,
+        viewer: await siteViewerForGrant(deps.db, grant),
+        requested: visibility,
+        sourceSessionId: attempt().sessionId,
+      });
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
