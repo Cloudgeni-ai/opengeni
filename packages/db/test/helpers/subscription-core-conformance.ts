@@ -1400,6 +1400,89 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
     });
 
+    test("SUB-OWN-02: a non-admin can pick their people-scoped shared account, never somebody else's", async () => {
+      const org = await organization();
+      const member = `user:picker-${crypto.randomUUID()}`;
+      const [personalWorkspace] = await admin()<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${org.accountId}::uuid, 'Picker member')
+        returning id::text as id`;
+      const [membership] = await admin()<{ id: string }[]>`
+        insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+        values (${org.accountId}::uuid, ${member}, 'member', 'active', ${personalWorkspace!.id}::uuid)
+        returning id::text as id`;
+      await admin()`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${org.accountId}::uuid, ${org.sharedWorkspaceId}::uuid, ${member}, 'member')`;
+      const own = await sharedConnection(org, `own-people-${crypto.randomUUID()}`, {
+        kind: "people",
+        membershipIds: [membership!.id],
+      });
+      const other = await sharedConnection(org, `other-people-${crypto.randomUUID()}`, {
+        kind: "people",
+        membershipIds: [org.ownerMembershipId],
+      });
+      const turn = await runningTurn({
+        ...org,
+        ownerSubjectId: member,
+        ownerMembershipId: membership!.id,
+      });
+      const scope = {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        sessionId: turn.identity.sessionId,
+        subjectId: member,
+      };
+      const read = () => readSubscriptionCoreSessionAccountChoice(db(), scope, [provider]);
+      const choose = (connectionId: string) =>
+        chooseSubscriptionCoreSessionAccount(db(), { ...scope, connectionId }, [provider]);
+      const choice = await read();
+      expect(choice!.connections.map((row) => row.connectionId)).toEqual([own]);
+      expect(choice!.connections[0]).toMatchObject({ personal: false, choosable: true });
+      expect(JSON.stringify(choice)).not.toMatch(/credential_encrypted|refreshToken|accessToken/);
+      expect((await choose(other)).outcome).toBe("not_found");
+      expect((await choose(own)).outcome).toBe("changed");
+      expect(await placeChecked(turn)).toMatchObject({ kind: "run", connectionId: own });
+      // The organization admin can see the session but cannot borrow its person's scope.
+      const adminChoice = await readSubscriptionCoreSessionAccountChoice(
+        db(),
+        { ...scope, subjectId: org.ownerSubjectId },
+        [provider],
+      );
+      expect(adminChoice!.connections.map((row) => row.connectionId)).not.toContain(own);
+      // New read visibility does not grant account or assignment mutation authority.
+      await withRlsContext(db(), scope, async (tx) => {
+        await setSubjectRlsContext(tx, member);
+        expect(
+          await rawRows(
+            tx,
+            sql`update subscription_connections set allocator_enabled = false
+          where id = ${own}::uuid returning id`,
+          ),
+        ).toEqual([]);
+        expect(
+          await rawRows(
+            tx,
+            sql`delete from subscription_connection_people
+          where connection_id = ${own}::uuid returning connection_id`,
+          ),
+        ).toEqual([]);
+      });
+      await admin()`delete from subscription_connection_people where connection_id = ${own}::uuid`;
+      expect((await read())!.connections).toEqual([]);
+      expect((await choose(own)).outcome).toBe("not_found");
+      expect(
+        await runtime().loadSubscriptionCoreCredential(
+          db(),
+          settings,
+          turn.identity,
+          leaseOf(turn, own),
+        ),
+      ).not.toMatchObject({ kind: "loaded" });
+      expect(await placeChecked(turn)).toMatchObject({
+        kind: "wait",
+        reason: "pinned_account_ineligible",
+      });
+    });
+
     test("SUB-OWN-03: personal connections serve only the owner's own turns with frozen authority", async () => {
       const org = await organization();
       const personal = await personalConnection(org, `personal-${crypto.randomUUID()}`);
@@ -1500,6 +1583,26 @@ export function describeSubscriptionCoreConformance<Credential>(
       ).toEqual(sharedOnly);
     });
 
+    test("SUB-ACCESS-05 SUB-ACCESS-06: offboarding stops a leased personal turn before its next credential read", async () => {
+      const org = await organization();
+      const connectionId = await personalConnection(org, `offboard-${crypto.randomUUID()}`);
+      const turn = await runningTurn(org, { visibility: "user_private", personalAuthority: true });
+      expect(await placeChecked(turn)).toMatchObject({ kind: "run", connectionId, personal: true });
+      // Shared capacity exists, but must not resurrect a turn whose owner lost access.
+      await sharedConnection(org, `offboard-shared-${crypto.randomUUID()}`);
+      await admin()`update organization_memberships set status = 'revoked', revoked_at = now()
+        where account_id = ${org.accountId}::uuid and id = ${org.ownerMembershipId}::uuid`;
+      expect(
+        await runtime().loadSubscriptionCoreCredential(
+          db(),
+          settings,
+          turn.identity,
+          leaseOf(turn, connectionId),
+        ),
+      ).toEqual({ kind: "not_visible" });
+      expect(await place(turn)).toEqual({ kind: "not_visible" });
+    });
+
     test("personal access fails closed: another membership, a stale or revoked authority, personal connections off", async () => {
       const outcome = async (turn: Turn) => {
         const placed = await placeChecked(turn);
@@ -1574,6 +1677,29 @@ export function describeSubscriptionCoreConformance<Credential>(
         kind: "run",
         connectionId: b,
       });
+    });
+
+    test("SUB-SEL-05: concurrent new sessions preserve deterministic spread and one lease per turn", async () => {
+      const org = await organization();
+      await sharedConnection(org, `spread-a-${crypto.randomUUID()}`);
+      await sharedConnection(org, `spread-b-${crypto.randomUUID()}`);
+      const turns: Turn[] = [];
+      for (let index = 0; index < 6; index += 1) turns.push(await runningTurn(org));
+      const now = new Date();
+      const expected = await Promise.all(turns.map((turn) => referenceDecision(turn, now)));
+      const results = await Promise.all(turns.map((turn) => place(turn, { now })));
+      for (let index = 0; index < turns.length; index += 1) {
+        const decision = expected[index]!;
+        if (decision.kind !== "run") throw new Error("expected available shared capacity");
+        expect(results[index]).toMatchObject({ kind: "run", connectionId: decision.connectionId });
+        const turn = turns[index]!;
+        expect(await place(turn, { now })).toMatchObject({
+          kind: "run",
+          connectionId: decision.connectionId,
+          reusedLease: true,
+        });
+        expect(await leaseCount(org, turn)).toBe(1);
+      }
     });
 
     test("SUB-STICK-01, SUB-STICK-02, SUB-STICK-04: a session keeps its account while the cache is warm, whoever sends, and re-runs selection once it is cold", async () => {
@@ -2992,7 +3118,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("SUB-LEASE-01 SUB-LEASE-02: one turn lease is generation-fenced: replay, renew, foreign holders, release", async () => {
+    test("SUB-LEASE-01 SUB-LEASE-02 SUB-LEASE-03: one turn lease is generation-fenced: replay, renew, foreign holders, release", async () => {
       const org = await organization();
       const connectionId = await sharedConnection(org, `lease-${crypto.randomUUID()}`);
       const turn = await runningTurn(org);

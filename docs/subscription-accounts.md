@@ -201,16 +201,19 @@ for it until the matching requirement below is implemented:
   Verification: `packages/subscriptions/test/policy.test.ts`.
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
   that account instead of moving. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
-- **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
-  reservations cannot oversubscribe the primary account or bypass fairness.
-  Verification: pending (verification-suite).
+- **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent first
+  placements use deterministic session-based spread (D-21, D-23), and retries
+  preserve one fenced lease per turn. Account concurrency is not capped
+  (SUB-LEASE-01); a primary is not an exclusive reservation.
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-CREDITS-01** Codex extra credits require connection-specific consent.
   Automatic selection uses an eligible included allowance before paid credits,
   including at a warm binding or configured primary. Explicit pins still bind.
   A live provider refusal, model cooldown, health or access restriction still
   blocks the account. When a refusal expires, the next wait deadline considers
   credit eligibility independently of the included allowance's reset time.
-  Verification: pending (verification-suite).
+  Verification: `packages/subscriptions/test/policy.test.ts`,
+  `packages/db/test/subscription-core-codex-chat-postgres.test.ts`.
 
 ### Stickiness and the prompt cache
 
@@ -275,19 +278,12 @@ for it until the matching requirement below is implemented:
   funding for the new provider and dropping provider-specific history items
   from the request copy, while keeping completed tool calls and accounting
   entries without repeating them. Verification: `packages/db/test/subscription-serving-runtime-postgres.test.ts`, `apps/worker/test/run-input-serving-runtime.test.ts`.
-- **SUB-FAIL-09** New sessions whose model has an effective cross-provider
-  fallback use portable compaction. An existing Codex remote-compaction session
-  converts to portable compaction at its next compaction while Codex has
-  capacity, or at failover by reconstructing and summarizing all retained
-  cleartext work units since the latest context clear on an eligible,
-  authorized target account (D-40). Bounded chunked summarization must cover
-  every such unit; it never silently omits unsummarized units to fit a
-  budget. Original durable history and compaction records remain intact;
-  only the model-visible view and compaction mode change atomically after
-  complete coverage. Unsupported reconstruction or incomplete summarization
-  fails closed with an actionable reason and unchanged active history/mode.
-  Context exclusions are recorded, and retries never repeat completed tool
-  effects or accounting. Verification: pending (failover).
+- **SUB-FAIL-09** Cross-provider failover requires portable compaction.
+  Sessions using Codex `remote_v2` remain Codex-only and refuse cross-provider
+  switching with a compaction-lock reason, preserving history and compaction
+  mode. Conversion is deferred, not a completion blocker for this delivery
+  (D-47). Portable sessions retain the normal failover contract.
+  Verification: `packages/subscriptions/test/policy.test.ts`.
 - **SUB-FAIL-10** Voice, transcription and media generation do not fail over
   across providers in the first release. Verification: pending (consumers).
 - **SUB-FAIL-11** Failover within one turn is bounded and recorded per account,
@@ -330,12 +326,17 @@ for it until the matching requirement below is implemented:
 - **SUB-ACCESS-04** A pool worker never gains visibility of another member's
   private session. Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-05** Revoking a connection or a person's access is enforced on
-  the next selection, lease renewal and dispatch check.
-  Verification: pending (shared-core).
+  the next selection and physical request authorization. Chat-turn lease renewal
+  checks ownership and liveness; operation leases additionally recheck access.
+  Extending either lease cannot authorize a request
+  after revocation. An already dispatched request is not retroactively cancelled.
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`,
+  `packages/db/test/subscription-core-codex-operations-postgres.test.ts`.
 - **SUB-ACCESS-06** When a personal connection's owner disconnects it, loses
   access or leaves the organization, work on it moves to an eligible
   organization account at the next safe point or stops with a clear message.
-  It never moves to another person's account. Verification: pending (personal-connections).
+  It never moves to another person's account. Verification:
+  `packages/db/test/helpers/subscription-core-conformance.ts`.
 
 ### Leases and execution
 
@@ -344,8 +345,13 @@ for it until the matching requirement below is implemented:
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-LEASE-02** A stale worker cannot renew, release or settle its
   successor's lease. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
-- **SUB-LEASE-03** Release is idempotent and expired leases are reaped.
-  Verification: pending (shared-core).
+- **SUB-LEASE-03** Release is idempotent. Expired leases confer no authority
+  and a newer execution generation can reclaim them; stale holders cannot
+  affect the replacement. Release or session/turn deletion removes stored
+  rows. A standalone expired-row sweeper is not required for capacity, since
+  leases do not cap account concurrency.
+  Verification: `packages/db/test/subscription-core-runtime-postgres.test.ts`,
+  `packages/db/test/helpers/subscription-core-conformance.ts`.
 
 ### Usage and accounting
 
@@ -505,6 +511,11 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-45 | 2026-10-12 | Implementer decision, for SUB-FAIL-06 and SUB-COMPAT-02: every serving placement that changes the account or model records `subscription.account.switched` with the provider, both accounts, both models and the reason, referring to that generation's immutable serving revision. The selection hook writes in a separate fenced transaction after placement commits, never while holding binding locks; a retry deduplicates the same selection transition. A pending recovery target emits no switch until the fresh attempt is configured and placed there. `codex.account.switched` stays as the alias for switches within Codex. The runtime changes leave what the web shows unchanged; the serving-model indicator and switch notice ship separately and last, with real-component previews and owner approval (D-08). |
 | D-46 | 2026-10-12 | Implementer decision, for SUB-SEL-04, SUB-FAIL-05 and SUB-WAIT-01, on the per-provider bindings of D-32: the binding of the turn's home provider decides whether the turn may fail over. An explicit choice there, including one whose account was deleted, or "only this model", keeps the turn on its pin or model, and it waits instead of moving. A binding of another provider governs only failover onto that provider: an explicit choice limits it to the pinned account, "only this model" limits it to that row's model, an explicit choice whose account was deleted removes its provider, and a pinned personal account is used only where personal fallback applies (D-12, D-28). Failover never clears or replaces a pin or changes its account, choice or "only this model"; serving through it updates only that row's model and clock, as its provider's placement does. Crossing requires catalog proof that no unique index on the binding table has exactly the workspace/session key attributes, irrespective of name, key order or INCLUDE attributes; matching partial or invalid indexes and catalog uncertainty also block crossing. While 0733's rolling uniqueness remains, only same-provider model fallback is possible. The next drained provider cutover, whichever lands first, must remove it with valid upsert ordering. Whether failover should use a pin on a fallback provider at all is open (Q-06). |
 
+| ID | Date | Decision |
+| --- | --- | --- |
+| D-47 | 2026-10-13 | The product owner accepted refusing cross-provider switching while `remote_v2` is in use. This supersedes D-40 and Q-05 as delivery requirements: portable conversion is deferred; preserve clear refusal, original history and mode. No conversion retry or production deployment is authorized. |
+| D-48 | 2026-10-13 | Finish-line implementation scope: chat-turn renewal is a lease ownership/liveness check, not a second authorization system; operation leases retain their existing extra access check. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
+
 ### Open decisions
 
 | ID | Question | Recommendation |
@@ -517,7 +528,7 @@ by the implementer and recorded here; consequential ones are escalated.
 
 | ID | Question | Resolution |
 | --- | --- | --- |
-| Q-05 | May a Codex remote-compaction session convert to portable compaction at failover on the target provider? | Resolved within the existing implementation scope by D-40, not a new owner decision. Complete-coverage reconstruction and summarization, retained originals and fail-closed unsupported states are required. No extra E1/E2 approval hold; no deployment, cutover or UI approval is implied. |
+| Q-05 | May a Codex remote-compaction session convert to portable compaction at failover on the target provider? | Deferred by the accepted D-47 alternative. `remote_v2` stays Codex-only for now; portable-session failover remains required. |
 
 ## Verification
 

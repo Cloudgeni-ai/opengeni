@@ -9,33 +9,19 @@
  * entry next to Codex's for the exact owner only; and after the receipt no
  * acceptance computes Claude's v1 value from live state.
  *
- * Run this file in its own process: the registration below replaces module
- * bindings for the whole process (the CI shard classifier isolates files that
- * call mock.module).
+ * The shipped registry is used unchanged. Only the historical database
+ * cutover receipt is withheld; no retired runtime is restored.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import * as realRegistry from "../src/subscription-core-providers";
-import type { SubscriptionCoreProvider } from "../src/subscription-core/provider";
-import { SUBSCRIPTION_CORE_CLAUDE } from "../src/subscription-core-claude-adapter";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-// What production registers, read before the test registration.
+// Use the shipped provider registration; only the database cutover is staged.
 const productionProviderIds = realRegistry.subscriptionCoreProviderIds();
-const realProvider = realRegistry.subscriptionCoreProvider;
-const lookup = (providerId: string): SubscriptionCoreProvider =>
-  providerId === "claude"
-    ? (SUBSCRIPTION_CORE_CLAUDE as SubscriptionCoreProvider)
-    : realProvider(providerId);
-mock.module(Bun.resolveSync("../src/subscription-core-providers", import.meta.dir), () => ({
-  ...realRegistry,
-  subscriptionCoreProviderIds: () => [...new Set([...productionProviderIds, "claude"])].sort(),
-  subscriptionCoreProvider: lookup,
-  subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
-}));
 const db = await import("../src");
 const { rawRows } = await import("../src/database");
 const { decryptEnvironmentValue } = await import("../src/environment-crypto");
@@ -233,12 +219,11 @@ async function generation(org: Org, provider: string): Promise<number> {
 }
 
 let org: Org | null = null;
-/** The owner's acceptance before the receipt, with the legacy organization pool. */
+/** The owner's acceptance before the receipt, with the retired v1 default. */
 let beforeReceipt: { v2: unknown; claude: unknown } | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
-  // A world before Claude's drained cutover: this test registers Claude itself.
   shared = await acquireSharedTestDatabase("subscription-core-claude-acceptance", {
     withheldMigrations: [
       "0748_subscription_core_claude_cutover.sql",
@@ -272,7 +257,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
-  test("runs as the restricted application role; production registers Claude", async () => {
+  test("runs as the restricted application role with the shipped Claude registration", async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
       client!.db,
       sql`select current_user as "currentUser", rolsuper as superuser,
@@ -284,9 +269,7 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
     expect(realRegistry.subscriptionCoreProviderIds()).toContain("claude");
   });
 
-  test("even before the receipt, acceptance writes claude's v1 default, never live state", () => {
-    // The legacy runtime that derived it from the live organization pool is
-    // retired (0751); the carrier keeps only its column default.
+  test("before the receipt new work uses the inert v1 default, not the retired pool", () => {
     expect(beforeReceipt!.claude).toEqual({ version: 1, scope: "workspace" });
   });
 

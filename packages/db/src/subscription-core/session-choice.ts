@@ -228,7 +228,12 @@ async function listChoosableConnections(
   const connections: SubscriptionCoreChoosableConnection[] = [];
   for (const binding of await enabledProviders(tx, input.accountId, providers)) {
     const providerId = binding.adapter.provider;
-    const pool = await readSubscriptionCoreWorkspacePool(tx, binding, input);
+    const pool = await readSubscriptionCoreWorkspacePool(tx, binding, {
+      ...input,
+      // People scope belongs to the session owner, not the latest sender.
+      // The SQL reader additionally requires the caller's own live membership.
+      includeOwnPeopleScope: session.ownerSubjectId === input.subjectId,
+    });
     const listed = new Set<string>();
     const add = (
       row: SubscriptionCoreConnectionRow,

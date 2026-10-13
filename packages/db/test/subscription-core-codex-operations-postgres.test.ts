@@ -1330,7 +1330,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     expect(String((direct as { cause?: unknown })?.cause ?? direct)).toContain("permission denied");
   });
 
-  test("personal reads and renewals recheck current settings and authority explicitly", async () => {
+  test("SUB-ACCESS-05: personal reads and renewals recheck current settings and authority explicitly", async () => {
     await personalRevocationCase();
   });
 

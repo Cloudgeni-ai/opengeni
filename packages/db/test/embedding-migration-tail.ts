@@ -237,6 +237,13 @@ export const embeddingMigrationTail = [
   // The drained retirement requires both cutovers; it runs after them.
   "0751_subscription_core_legacy_retirement.sql",
   "0752_subscription_personal_sharing.sql",
+  // Rewrite the scheduled authority ledger and accepted-account fences above.
+  "0753_schedule_live_connector_accounts.sql",
+  "0754_schedule_connectors_follow_workspace_defaults.sql",
+  "0755_turn_connection_account_intent.sql",
+  "0756_turn_connection_account_intent_schema.sql",
+  // Reads shared-core tables and the own-membership helper from withheld 0729.
+  "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501
   // (and 0502/0513) by exact text; replay after them.
   "0738_private_sessions_share_sandboxes.sql",

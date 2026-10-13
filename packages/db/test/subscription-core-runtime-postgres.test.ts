@@ -1425,7 +1425,7 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "chat-turn leases are generation-fenced and provider cutovers fail closed by default",
+    "SUB-LEASE-03: chat-turn leases are generation-fenced and provider cutovers fail closed by default",
     async () => {
       const state = await fixture();
       const actor = {

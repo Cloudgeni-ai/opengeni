@@ -1610,7 +1610,7 @@ describe("Codex credit consent", () => {
     quota({
       windows: [{ id: "weekly", usedPercent: 100, resetsAt: NOW + 3600000, status: "exhausted" }],
     });
-  test("included allowance outranks primary and warm credit fallback; consent is account-specific", () => {
+  test("SUB-CREDITS-01: included allowance outranks primary and warm credit fallback; consent is account-specific", () => {
     const a = connection("a", "codex", { extraCreditsEnabled: true, quota: exhausted() });
     const b = connection("b", "codex");
     const world = input({
