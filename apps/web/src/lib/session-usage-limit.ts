@@ -16,7 +16,9 @@ import {
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
-import { parseDollars } from "@/lib/usage-allowances";
+// Not "@/lib/usage-allowances": that module belongs to the lazy budget pages'
+// chunk, which would then load with every chat.
+import { parseDollars } from "@/lib/dollars";
 import type { ClientConfig, SessionEvent } from "@/types";
 
 /**
