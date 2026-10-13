@@ -831,6 +831,11 @@ telemetry and dedicated DB posture, never API/sandbox credentials. Adapters:
 `apps/worker/src/editable-artifact-materializer-service.ts`
 and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
+Their deployed images contain self-contained Bun bundles, not the source tree
+or development dependencies. The materializer additionally carries the exact
+read-only native runtime and its isolated executable; the final slim image
+verifies the executable's runtime identity and native ABI before publication.
+
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
