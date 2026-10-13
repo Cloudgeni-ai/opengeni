@@ -27,7 +27,6 @@ import {
   createDb,
   createSession,
   peekSessionWork,
-  subscriptionPoolWorkerSubject,
   wakeSubscriptionCoreProviderCapacityWaiters,
   withSessionActivityRlsContext,
   type DbClient,
@@ -45,6 +44,7 @@ import {
 } from "../../packages/db/test/fixtures/legacy-claude/accounts";
 import { armClaudeCapacityWait } from "../../packages/db/test/fixtures/legacy-codex";
 import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtures/legacy-codex/peek";
+import { subscriptionPoolWorkerSubject } from "../../packages/db/test/fixtures/legacy-subscription-session-access";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0748_subscription_core_claude_cutover.sql";

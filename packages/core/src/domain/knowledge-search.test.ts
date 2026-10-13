@@ -40,6 +40,7 @@ const usage = mock(
   async (_db: unknown, _input: { quantity: number; eventType: string }) => undefined,
 );
 mock.module("@opengeni/db", () => ({
+  SUBSCRIPTION_CORE_XAI_PROVIDER: "xai",
   listKnowledgeEntries: list,
   getSpendableCreditBalance: async () => ({ balanceMicros: balance }),
   applyCreditDebitAfterUse: debits,

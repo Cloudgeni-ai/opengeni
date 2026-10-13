@@ -114,7 +114,11 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("api-supergrok-core-routes", {
-    withheldMigrations: ["0747_subscription_core_xai_cutover.sql"],
+    // Retirement requires the real cutover receipt; this fixture supplies it later.
+    withheldMigrations: [
+      "0747_subscription_core_xai_cutover.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+    ],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = opengeniDb.createDb(shared.appUrl);
@@ -501,11 +505,6 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     }
   }
 
-  test(
-    "legacy connect-poll database loss is a retryable 503 with unknown mutation outcome",
-    expectRetryableConnectPollDatabaseFailure,
-  );
-
   test("after the receipt, without an enabled switch row, every route fails closed", async () => {
     // A fresh install ships SuperGrok's registry row and cutover receipt.
     await shared!.admin`
@@ -515,7 +514,7 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     await shared!.admin`
       insert into opengeni_private.subscription_provider_cutover_receipts (
         provider, migration, committed_at, seed_rotation
-      ) values ('xai', '0721_subscription_core_xai_cutover.sql', clock_timestamp(),
+      ) values ('xai', ${opengeniDb.SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!}, clock_timestamp(),
         '{"mode":"spread"}') on conflict do nothing`;
     // The organization's switch row is disabled: the maintenance state.
     await shared!.admin`

@@ -2,8 +2,8 @@
 // tasks and their firings, agent messages and Steer (the receiving source),
 // child-result notices (the outbox), and the internal turn that delivers an
 // update — as the restricted application role. Values are copied, never
-// recomputed; non-human acceptance freezes the empty value; nothing is
-// written before the cutover.
+// recomputed; non-human acceptance freezes the empty value. No serving-cutover
+// switch is consulted when preserving accepted authority.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -39,10 +39,7 @@ const EMPTY: SubscriptionPersonalAuthorityV2 = { version: 2, personal: [] };
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1", {
-    // A Codex-only world: the drained SuperGrok cutover would write a receipt.
-    withheldMigrations: ["0747_subscription_core_xai_cutover.sql"],
-  });
+  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
 }, 180_000);
@@ -273,12 +270,13 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("scheduled tasks freeze v2 once at creation; firings copy it, narrowed for another authorizer", async () => {
     const org = await organization();
-    // Before the cutover nothing is written: v1 stays authoritative.
+    // Capture the empty accepted pool even while serving is disabled. A later
+    // cutover must not resolve fresh personal authority for this saved task.
     const before = await task(org, org.personalWorkspaceId, {
       kind: "subject",
       subjectId: org.ownerSubjectId,
     });
-    expect(await taskAuthority(before.id)).toEqual({ task: null, revision: null });
+    expect(await taskAuthority(before.id)).toEqual({ task: EMPTY, revision: EMPTY });
 
     await setCutover(org.accountId, true);
     await personalConnection(org);
@@ -449,8 +447,10 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
     const org = await organization();
     const target = await session(org, org.personalWorkspaceId);
     await acceptedTurn(org, org.personalWorkspaceId, target.id, org.ownerSubjectId, personal(org));
-    // Before the cutover: nothing.
-    expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toBeNull();
+    // Serving readiness does not erase the receiving turn's accepted pool.
+    expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toEqual(
+      personal(org),
+    );
     await setCutover(org.accountId, true);
     // The owner's own work keeps the owner's frozen entry ...
     expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toEqual(
