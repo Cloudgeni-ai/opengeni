@@ -94,6 +94,11 @@ const withheldMigrations = [
   // The drained retirement requires both cutovers; it runs after them.
   "0751_subscription_core_legacy_retirement.sql",
   "0752_subscription_personal_sharing.sql",
+  // Patch the receipt fence (withheld 0494, 0608) and the capture routine
+  // (withheld 0478) by exact text; replay after them.
+  "0755_turn_connection_account_intent.sql",
+  "0756_turn_connection_account_intent_schema.sql",
+  "0758_connection_account_intent_grants.sql",
   "0746_subscription_failover_readiness_and_request_fence.sql",
   "0749_subscription_shared_personal_choice.sql",
   "0750_subscription_waiter_candidates.sql",
