@@ -90,6 +90,9 @@ const subscriptionCoreMigrations = [
   "0752_subscription_personal_sharing.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
+  // Reads the session_system_updates subscription authority column from withheld 0688.
+  "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+  "0760_terminal_turn_run_state_cleanup.sql",
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.
