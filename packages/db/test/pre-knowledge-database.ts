@@ -46,6 +46,9 @@ export async function acquirePreKnowledgeTestDatabase(
     // fixture never runs that maintenance step or the ones after it (the
     // Claude cutover and the retirement), so they stay recorded.
     await admin`INSERT INTO schema_migrations(name) VALUES('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql')`;
+    // The queue Steer admission repair is a one-time data repair that also
+    // reads the withheld 0560 import column; it changes no schema.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0763_queue_steer_admission_recheck_repair.sql')`;
     await migrate(blank.databaseUrl);
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.
