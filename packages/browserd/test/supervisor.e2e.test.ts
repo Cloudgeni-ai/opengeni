@@ -37,17 +37,13 @@ const recoveryE2e =
 // agent's KillMode and that service is stopped; the browser it launched lives
 // in its own scope and keeps every process. Needs a user service manager.
 // Headed modes run when a display is available (for example, under Xvfb).
-const userServiceManager =
+// A reachable manager is not enough (from another PID namespace it answers but
+// cannot place processes); require that this process can create a scope.
+const userScopes =
   process.platform === "linux" &&
-  spawnSync("busctl", [
-    "--user",
-    "call",
-    "org.freedesktop.systemd1",
-    "/org/freedesktop/systemd1",
-    "org.freedesktop.DBus.Peer",
-    "Ping",
-  ]).status === 0;
-const recoveryEndings = userServiceManager
+  spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--collect", "--", "true"]).status ===
+    0;
+const recoveryEndings = userScopes
   ? (["graceful", "killed", "stopped"] as const)
   : (["graceful", "killed"] as const);
 const recoveryCases = recoveryEndings.flatMap((ending) =>
