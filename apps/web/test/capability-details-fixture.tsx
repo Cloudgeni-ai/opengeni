@@ -3,7 +3,11 @@ import { createRoot } from "react-dom/client";
 import { ConnectionCatalog } from "@opengeni/react/connect";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import "@opengeni/react/connect.css";
-import { CapabilityDetailSheet } from "../src/components/capabilities/capability-detail-sheet";
+import {
+  CapabilityDetailSheet,
+  DetailBody,
+} from "../src/components/capabilities/capability-detail-sheet";
+import { CatalogItemPage } from "../src/components/capabilities/catalog-item-page";
 import { IntegrationSheet } from "../src/components/capabilities/integration-sheet";
 import "../src/styles.css";
 
@@ -13,6 +17,42 @@ function Fixture() {
   const long = params.has("long");
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
+  if (params.has("onepassword")) {
+    const common = {
+      workspaceId: "ws",
+      item: CapabilityCatalogItem.parse({
+        id: "api:1password",
+        kind: "api",
+        source: "built_in",
+        name: "1Password",
+        description:
+          "Connect a 1Password service account so its vaults appear as read-only or read-write secret vaults.",
+        surfaceType: "first_party_onepassword",
+        providerDomain: "1password.com",
+        runtime: { available: true },
+      }),
+      health: { state: "none" } as const,
+      logoSrc: null,
+      busy: false,
+      errorMessage: null,
+      canManageSocial: false,
+      onAction: () => {},
+    };
+    return (
+      <main className="mx-auto max-w-5xl p-6 sm:p-12">
+        {params.has("chat") ? (
+          <DetailBody {...common} inline setupOnly />
+        ) : (
+          <CatalogItemPage
+            {...common}
+            socialConnections={[]}
+            canManageSkills={false}
+            onBack={() => {}}
+          />
+        )}
+      </main>
+    );
+  }
   return (
     <main className="mx-auto max-w-5xl p-6 sm:p-12">
       <h1 className="mb-2 text-xl font-semibold">Capabilities</h1>

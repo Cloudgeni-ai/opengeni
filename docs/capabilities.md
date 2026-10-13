@@ -20,6 +20,13 @@ Native Opengeni product surfaces are deliberately absent from the installable ca
 
 Every catalog item includes a typed `lifecycle` projection and a bounded list of supported `actions` (`install`, `connect`, `configure`, `update`, `repair`, `disconnect`, `uninstall`, or `inspect`). The legacy `enabled` fields remain a compatibility projection while clients migrate; provenance such as `built_in` never implies lifecycle state. External configured MCPs are reported as deployment-managed and inspect-only.
 
+1Password is a built-in connection, not an imported registry row. It appears in
+the default Connections list and agent search even before an account is connected.
+Its catalog and chat setup actions open Secrets, where a person enters a service
+account token, selects ownership, and chooses vaults and their access modes.
+Chat setup opens in a new tab to preserve the conversation. It never uses generic
+MCP enablement; catalog imports and production data repairs are not required.
+
 ## Runtime Behavior
 
 Fresh native connection setup uses the current actor's Connect catalog readiness

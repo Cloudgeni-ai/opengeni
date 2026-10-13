@@ -25,6 +25,7 @@ import {
 } from "./connector-tool-permissions";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
+import { OnePasswordCatalogLink } from "./onepassword-catalog-link";
 import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
   capabilityPresentation,
@@ -418,7 +419,7 @@ export function DetailBody({
         ) : (
           <CuratedSkillProvenanceSection item={item} />
         )}
-        {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
+        {workspaceId && !setupOnly && hasConnectorToolPermissionTarget(item, health) ? (
           <ConnectorToolPermissions
             key={`${workspaceId}:${item.id}`}
             workspaceId={workspaceId}
@@ -451,6 +452,18 @@ export function DetailBody({
                   ? "Select Codex Apps from a session's Tools picker, or leave the policy at the workspace default."
                   : "This surface cannot be enabled from the capability catalog; its authorization is managed by the workspace Codex subscription."}
               </p>
+            </div>
+          ) : item.surfaceType === "first_party_onepassword" && workspaceId ? (
+            <div className="space-y-3">
+              <p className="text-sm text-fg-muted">
+                {setupOnly ? "Opens Secrets in a new tab. " : ""}
+                Connect a service account and choose which vaults agents can use.
+              </p>
+              <OnePasswordCatalogLink
+                workspaceId={workspaceId}
+                connected={item.enabled}
+                preserveChat={setupOnly}
+              />
             </div>
           ) : item.kind === "skill" ? (
             <SkillControls

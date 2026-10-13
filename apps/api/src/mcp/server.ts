@@ -6776,10 +6776,10 @@ async function capabilitySetupProjection(
             "1Password is connected. Its linked vaults are available through secret references and the secrets tools.",
         }
       : {
-          status: "unavailable",
-          action: null,
+          status: "authorization_required",
+          action: "connect",
           detail:
-            "1Password is not connected. Ask the user to connect a 1Password service account in Settings > Secrets.",
+            "Connect a 1Password service account and choose its vaults through the protected setup form.",
         };
   }
   if (item.surfaceType === "first_party_fiken") {
