@@ -289,6 +289,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         key: resolvedKey,
         // No person owns this session (a key or service started it): nobody is notified.
         delivered: target !== null,
+        ...(target === null ? { undeliveredReason: "no_human_recipient" } : {}),
         ...(member ? { recipient: member.label } : {}),
         updatedInPlace: Boolean(existing),
       });

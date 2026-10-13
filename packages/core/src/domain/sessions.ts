@@ -401,6 +401,13 @@ export function resolveFirstPartyMcpToolsForCreate(
   },
 ): FirstPartyMcpToolName[] {
   if (requested !== undefined) {
+    // Check the caller's own names, before legacy aliases expand them.
+    requireDeploymentFirstPartyMcpTools(
+      requested,
+      policy.allowed,
+      [],
+      "Omit firstPartyMcpTools to inherit the effective selection.",
+    );
     requested = currentAgentLearningToolSelection(requested);
     if (parentStored !== undefined) {
       const parentCeiling = effectiveFirstPartyMcpToolCeiling(parentStored, policy);
@@ -430,12 +437,13 @@ export function requireDeploymentFirstPartyMcpTools(
   requested: readonly FirstPartyMcpToolName[],
   allowed: readonly FirstPartyMcpToolName[],
   retained: Iterable<FirstPartyMcpToolName> = [],
+  hint = "",
 ): void {
   const permitted = new Set([...allowed, ...retained]);
   const disallowed = [...new Set(requested.filter((tool) => !permitted.has(tool)))];
   if (disallowed.length > 0) {
     throw new HTTPException(422, {
-      message: `first-party MCP tools are disabled by deployment policy: ${disallowed.join(", ")}. Allowed tools: ${allowed.join(", ") || "(none)"}.`,
+      message: `first-party MCP tools are disabled by deployment policy: ${disallowed.join(", ")}. Allowed tools: ${allowed.join(", ") || "(none)"}.${hint ? ` ${hint}` : ""}`,
     });
   }
 }
@@ -3354,14 +3362,6 @@ async function createSessionForRequestInFileScope(
   // top-level omission selects the workspace's exact default catalog (or the
   // deployment default when the workspace has not configured one).
   const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(settings);
-  const disallowedFirstPartyMcpTool = payload.firstPartyMcpTools?.find(
-    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
-  );
-  if (disallowedFirstPartyMcpTool) {
-    throw new HTTPException(422, {
-      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
-    });
-  }
   const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools?.filter(
     (tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
   );

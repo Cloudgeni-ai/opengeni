@@ -100,7 +100,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     }).config!;
     expect(config).toHaveProperty(
       "unavailableReasons.humanInput",
-      "its tools are not allowed on this server",
+      expect.stringContaining("its tools are not allowed on this server: notify_user"),
     );
     const unrestricted = resolveSessionAgentConfigForCreate({
       ...base,

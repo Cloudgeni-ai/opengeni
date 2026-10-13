@@ -163,7 +163,11 @@ describe("notifying another member of the workspace", () => {
       "This session works for no person",
     );
     // Owner-less notifications are still recorded, saying why nobody was notified.
-    expect(await notify({ title: "Ready", key: "ready" })).toMatchObject({ delivered: false });
+    expect(await notify({ title: "Ready", key: "ready" })).toMatchObject({
+      ok: true,
+      delivered: false,
+      undeliveredReason: "no_human_recipient",
+    });
     const posted = (await listSessionEvents(client.db, scope.workspaceId, session.id)).filter(
       (event) => event.type === "session.notification.posted",
     );
