@@ -438,7 +438,7 @@ export const SCENARIOS: Scenario[] = [
         "signup",
         `Create an account at ${context.fakeLogin.url}/signup with the username ${username}. Generate a strong password and save the login to my vault before you submit the form.`,
       );
-      const saveCall = signup.toolCalls.find((call) => call.name === "secret_save");
+      const saveCall = signup.toolCalls.find((call) => call.name.endsWith("secret_save"));
       run.check("agent saved the login with secret_save", Boolean(saveCall));
       run.check(
         "secret_save used the generator, not a literal value",
@@ -483,8 +483,9 @@ export const SCENARIOS: Scenario[] = [
       const browser = await chromium.launch();
       try {
         for (const [label, viewport] of [
-          ["desktop", { width: 1440, height: 900 }],
+          // Mobile first: answering on desktop removes the pending card.
           ["mobile", { width: 390, height: 844 }],
+          ["desktop", { width: 1440, height: 900 }],
         ] as const) {
           const page = await browser.newPage({
             viewport,
@@ -546,7 +547,7 @@ export const SCENARIOS: Scenario[] = [
 
       // The vault holds the generated password and the site received exactly it.
       const vaults = new VaultClient(context.owner, context.workspaceId);
-      const saved = await vaults.findItemByName(username);
+      const saved = await vaults.findItemByName(username, { contains: true });
       if (!run.check("the login is in the owner's vault", Boolean(saved), username)) return;
       const password = await vaults.revealFieldByName(saved!.vaultId, saved!.id, "password");
       if (!run.check("the saved password can be revealed", Boolean(password))) return;
@@ -652,6 +653,30 @@ export const SCENARIOS: Scenario[] = [
         .trim();
       if (!run.check("service-account token available", Boolean(token))) return;
       const ws = `/v1/workspaces/${context.workspaceId}`;
+      // Rerunnable: unlink the test vaults and drop gate connections from an
+      // earlier run. Unlinking is OpenGeni-only; 1Password is never changed.
+      const cleanup = async () => {
+        const listed: any[] =
+          (await context.owner.request("GET", `${ws}/vaults`)).json?.vaults ?? [];
+        for (const vault of listed.filter(
+          (row) =>
+            row.source === "onepassword" &&
+            (row.name === "OpenGeni Test RO" || row.name === "OpenGeni Test RW"),
+        )) {
+          await context.owner.request("DELETE", `${ws}/vaults/${vault.id}`, {
+            confirmName: vault.name,
+          });
+        }
+        const connections: any[] =
+          (await context.owner.request("GET", `${ws}/connections`)).json?.connections ?? [];
+        // The stack's only 1Password connections are the gate's own.
+        for (const connection of connections.filter(
+          (row) => row.providerDomain === "1password.com",
+        )) {
+          await context.owner.request("DELETE", `${ws}/connections/${connection.id}`);
+        }
+      };
+      await cleanup();
       const install = await context.owner.request("POST", `${ws}/connections/1password/install`, {
         token,
         ownership: "workspace",
@@ -749,7 +774,7 @@ export const SCENARIOS: Scenario[] = [
       );
       run.check(
         "agent saved with secret_save",
-        save.toolCalls.some((call) => call.name === "secret_save"),
+        save.toolCalls.some((call) => call.name.endsWith("secret_save")),
       );
       const savedItems: any[] = (await vaults.listItems(rwVaultId)).json?.items ?? [];
       const saved = savedItems.find((row) => row.name === name);
@@ -764,6 +789,12 @@ export const SCENARIOS: Scenario[] = [
         const after: any[] = (await vaults.listItems(rwVaultId)).json?.items ?? [];
         run.check("the archived item left the mirror", !after.some((row) => row.name === name));
       }
+      await cleanup();
+      const left: any[] = (await context.owner.request("GET", `${ws}/vaults`)).json?.vaults ?? [];
+      run.check(
+        "test vaults unlinked afterwards",
+        !left.some((row) => row.id === roVaultId || row.id === rwVaultId),
+      );
     },
   },
   {

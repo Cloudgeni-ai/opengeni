@@ -246,7 +246,9 @@ async function sweepStack(
   const report = await runSweep({
     ...stackSweepSources(stack),
     values,
-    keyNames: options.expectHits ? [] : ["secretAnswers"],
+    // An answer payload is `"secretAnswers": [...]`; the request_human_input
+    // tool schema stored with each turn has `"secretAnswers": {"type": ...}`.
+    keyNames: options.expectHits ? [] : ['"secretAnswers":[', '"secretAnswers": ['],
     allDatabases: true,
     dirs: [],
     temporalLimit: options.expectHits ? 25 : 500,

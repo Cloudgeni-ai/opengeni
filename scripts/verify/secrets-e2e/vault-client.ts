@@ -77,15 +77,23 @@ export class VaultClient {
     );
   }
 
-  /** The first live item with this exact name in any vault the caller can see. */
-  async findItemByName(name: string): Promise<{ id: string; vaultId: string } | null> {
+  /**
+   * The first live item with this exact name in any vault the caller can see;
+   * `contains` also accepts names that include it (the agent names items).
+   */
+  async findItemByName(
+    name: string,
+    options: { contains?: boolean } = {},
+  ): Promise<{ id: string; vaultId: string } | null> {
     const vaults: any[] = (await this.listVaults()).json?.vaults ?? [];
     for (const vault of vaults) {
       const page = await this.api.request(
         "GET",
         this.#path(`/vaults/${vault.id}/items?q=${encodeURIComponent(name)}`),
       );
-      const item = (page.json?.items ?? []).find((row: any) => row.name === name);
+      const item = (page.json?.items ?? []).find((row: any) =>
+        options.contains ? String(row.name).includes(name) : row.name === name,
+      );
       if (item) return { id: item.id, vaultId: vault.id };
     }
     return null;

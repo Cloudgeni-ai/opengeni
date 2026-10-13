@@ -35,7 +35,6 @@ import { type Browser, type BrowserContext, type Page, chromium } from "playwrig
 
 const LS = process.env.F598_LS ?? "/workspace/sessions/f5980f29/localstack";
 const API_CONTRACT = "2026-09-plugins-and-skills-v1";
-const CLOCK = new Date("2026-10-12T12:00:10Z");
 
 function readEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -62,6 +61,12 @@ const { values: flags } = parseArgs({
     mock: { type: "boolean", default: false },
   },
 });
+// Mock fixtures are dated around this fixed instant; real seeded rows are
+// dated around the stack's start, so real captures pin the clock to now.
+const CLOCK = flags.mock
+  ? new Date("2026-10-12T12:00:10Z")
+  : new Date(Math.floor(Date.now() / 60_000) * 60_000 + 10_000);
+
 const stackEnv = flags.stack ? readEnvFile(join(LS, "run", `stack-${flags.stack}.env`)) : {};
 const WEB = flags.base ?? stackEnv.F598_WEB ?? "http://127.0.0.1:3000";
 const API =
@@ -333,7 +338,7 @@ export const CAPTURE_STATES: CaptureState[] = [
     secrets(ids),
   ),
   s("S1", "member", "Vault list as jonas (member)", (ids) => secrets(ids), { user: "member" }),
-  s("S1", "viewer", "Vault list as tom (viewer, no New vault)", (ids) => secrets(ids), {
+  s("S1", "viewer", "Vault list as aiko (viewer, no New vault)", (ids) => secrets(ids), {
     user: "tom",
   }),
   s("S1", "loading", "Skeleton while vaults load", (ids) => secrets(ids), {
@@ -393,7 +398,9 @@ export const CAPTURE_STATES: CaptureState[] = [
       mock: { scenario: "rate-limited" },
     },
   ),
-  s("S2", "viewer", "Shared vault as tom (viewer)", (ids) => vault(ids, "Shared"), { user: "tom" }),
+  s("S2", "viewer", "Shared vault as aiko (viewer)", (ids) => vault(ids, "Shared"), {
+    user: "tom",
+  }),
   s("S2", "task-vault", "This task vault of the seeded task session", (ids) => vault(ids, "Task")),
   // S3 Item page
   s("S3", "login-totp", "GitHub login with TOTP ring", (ids) => item(ids, "Private/GitHub")),
@@ -416,7 +423,7 @@ export const CAPTURE_STATES: CaptureState[] = [
   s(
     "S3",
     "viewer",
-    "GitHub-like shared item as tom (no Reveal, no Copy)",
+    "GitHub-like shared item as aiko, viewer (no Reveal, no Copy)",
     (ids) => item(ids, "Shared/Deploy key"),
     {
       user: "tom",
@@ -448,7 +455,8 @@ export const CAPTURE_STATES: CaptureState[] = [
     },
   ),
   s("S6", "selected", "Available in editor (Org tooling)", (ids) => vault(ids, "Org tooling"), {
-    user: "admin",
+    // Organization vault availability is an organization-admin action (bendik).
+    user: flags.mock ? "admin" : "owner",
     steps: async (page) => {
       await action(/Available in/u)(page);
       await page
@@ -671,7 +679,7 @@ async function capture(
   if (!path)
     return { ...base, reason: "pending seed (W6): the seeded record for this state was not found" };
   const context = await browser.newContext({
-    storageState: await storageStateFor(browser, flags.mock && user === "tom" ? "viewer" : user),
+    storageState: await storageStateFor(browser, user === "tom" ? "viewer" : user),
     viewport: { width, height },
     colorScheme: theme,
     deviceScaleFactor: 1,
