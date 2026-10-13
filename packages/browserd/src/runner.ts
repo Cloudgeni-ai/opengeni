@@ -181,8 +181,10 @@ export class AgentBrowserJsonRunner {
       if (state === "live") {
         const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
         const runner = new AgentBrowserJsonRunner(binary, options);
-        if (!runner.headlessManaged) throw daemonLineageUnavailable();
-        runner.predecessorDaemon = await runner.headlessDaemonIdentity(options.recoverOwnedProcess);
+        if (options.provider) throw daemonLineageUnavailable();
+        runner.predecessorDaemon = await runner.predecessorDaemonIdentity(
+          options.recoverOwnedProcess,
+        );
         return runner;
       }
       // A positively exited process permits a new launch only in this exact
@@ -373,7 +375,7 @@ export class AgentBrowserJsonRunner {
   async daemonPid(): Promise<number | null> {
     if (this.recoveredProcess) {
       const daemon = this.predecessorDaemon;
-      if (!daemon) throw daemonLineageUnavailable();
+      if (!daemon) return null;
       return (await assertDaemonIdentity(daemon)) ? daemon.pid : null;
     }
     const pid = await readDaemonPid(this.daemonPidFile);
@@ -390,8 +392,17 @@ export class AgentBrowserJsonRunner {
   async terminate(expectedPid?: number | null): Promise<void> {
     if (this.recoveredProcess) {
       const daemon = this.predecessorDaemon;
-      if (!daemon || (expectedPid != null && expectedPid !== daemon.pid))
-        throw daemonLineageUnavailable();
+      if (expectedPid != null && expectedPid !== daemon?.pid) throw daemonLineageUnavailable();
+      if (!daemon) {
+        // The launcher exited before this controller adopted the browser.
+        // The browser's own receipt identity is the whole proof.
+        if (!this.recoveredBrowserClosed) {
+          await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
+          this.recoveredBrowserClosed = true;
+        }
+        await this.cleanupChromeStderrDrain();
+        return;
+      }
       const daemonLive = await assertDaemonIdentity(daemon);
       if (!this.recoveredBrowserClosed) {
         if (daemonLive && (await processParentPid(this.recoveredProcess.pid)) !== daemon.pid)
@@ -496,6 +507,46 @@ export class AgentBrowserJsonRunner {
     if ((await inspectOwnedManagedBrowserProcess(receipt)) !== "live") return null;
     if (needsHeadlessWitness) await this.headlessDaemonIdentity(receipt, this.daemonPidFile);
     return receipt;
+  }
+
+  /** Adopt a live browser launched by an earlier controller, possibly an
+   * earlier release, headed or headless. The browser itself was already proven
+   * from its receipt: PID birth, exact executable, exact private profile and
+   * CDP endpoint. Its profile lock must still name it. When its launcher daemon
+   * is still running it must be the browser's direct parent and the only live
+   * record in this private namespace, and it is retired with the browser. A
+   * launcher that already exited (for example, stopped with its old service)
+   * leaves the proven browser adoptable on its own. */
+  private async predecessorDaemonIdentity(
+    browser: OwnedManagedBrowserProcess,
+  ): Promise<OwnedAgentBrowserDaemon | null> {
+    if ((await readProfileBrowserPid(this.profileDirectory)) !== browser.pid)
+      throw daemonLineageUnavailable();
+    const live: { pid: number; path: string }[] = [];
+    for (const path of await daemonPidRecords(this.daemonRunDirectory)) {
+      const pid = await readDaemonPid(path);
+      if (pid !== null && (await processRunning(pid))) live.push({ pid, path });
+    }
+    if (live.length === 0) return null;
+    const parentPid = await processParentPid(browser.pid);
+    if (live.length !== 1 || live[0]!.pid !== parentPid) throw daemonLineageUnavailable();
+    const pidFile = live[0]!.path;
+    const metadata = await lstat(pidFile);
+    const daemon = {
+      pid: parentPid,
+      birth: await processBirth(parentPid),
+      executablePath: await processExecutableIdentity(parentPid),
+      pidFile,
+      pidFileIdentity: { device: metadata.dev, inode: metadata.ino },
+    };
+    await assertDaemonIdentity(daemon);
+    if (
+      (await processBirth(browser.pid)) !== browser.birth ||
+      (await processParentPid(browser.pid)) !== daemon.pid ||
+      (await readProfileBrowserPid(this.profileDirectory)) !== browser.pid
+    )
+      throw daemonLineageUnavailable();
+    return daemon;
   }
 
   private async headlessDaemonIdentity(
@@ -1550,6 +1601,33 @@ async function processExecutablePath(pid: number): Promise<string> {
   return await realpath(path);
 }
 
+/** The executable a running process was started from, as recorded for later
+ * exact comparison. On Linux this is the kernel's own link text, which stays
+ * stable (with a " (deleted)" suffix) after an upgrade removes the old runtime. */
+async function processExecutableIdentity(pid: number): Promise<string> {
+  if (process.platform !== "linux") return await processExecutablePath(pid);
+  const link = await readlink(`/proc/${pid}/exe`);
+  if (!link.startsWith("/")) throw daemonLineageUnavailable();
+  return link;
+}
+
+async function executableMatches(pid: number, recorded: string): Promise<boolean> {
+  if (process.platform === "linux") {
+    try {
+      if ((await readlink(`/proc/${pid}/exe`)) === recorded) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  try {
+    return await sameExecutable(pid, recorded);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function daemonPidRecords(directory: string): Promise<string[]> {
   const namespace = dirname(directory);
   const namespaces = dirname(namespace);
@@ -1601,7 +1679,7 @@ async function assertDaemonIdentity(daemon: OwnedAgentBrowserDaemon): Promise<bo
         "process_failed",
         "owned agent-browser daemon birth changed",
       );
-    if (!(await sameExecutable(daemon.pid, daemon.executablePath)))
+    if (!(await executableMatches(daemon.pid, daemon.executablePath)))
       throw daemonLineageUnavailable();
   }
   const pid = await readDaemonPid(daemon.pidFile);

@@ -1944,6 +1944,7 @@ export class BrowserSupervisor {
     // Shutdown intent becomes durable before process cleanup; only confirmed
     // suspension permits recovery. Explicit end/capture still retires the runtime.
     // Failed acceptance preserves the live driver and all journals.
+    let keepBrowserRunning = false;
     if (
       suspendForShutdown &&
       runtime.workingJournal &&
@@ -1953,6 +1954,10 @@ export class BrowserSupervisor {
       runtime.workingReceipt.directoryLaunchAllowed
     ) {
       runtime.workingReceipt = runtime.workingJournal.suspend(runtime.workingReceipt);
+      // A controller restart (upgrade, crash recovery) must not cost the page
+      // state an agent is working in. Release only this controller's transport;
+      // the successor adopts the same live browser from the suspended receipt.
+      keepBrowserRunning = runtime.driver.detach !== undefined;
     } else {
       this.retireWorkingRuntime(runtime);
     }
@@ -1963,7 +1968,8 @@ export class BrowserSupervisor {
         failures.push(error);
       }
       try {
-        await runtime.driver.close();
+        if (keepBrowserRunning) await runtime.driver.detach!();
+        else await runtime.driver.close();
         driverClosed = true;
       } catch (error) {
         failures.push(error);

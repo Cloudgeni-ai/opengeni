@@ -501,10 +501,14 @@ become provable in that process, ends the update with retryable
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
 attached browser sessions, browsers without a durable working runtime, and
-isolated virtual desktops. A quiescent managed browser whose owned process
-survives graceful shutdown (reattached on its next request), a session whose
-browser already ended, and a computer session on the machine's own physical
-seat do not keep the host busy. Older agents still end a busy update with
+isolated virtual desktops. A quiescent managed browser with a durable working
+runtime does not: graceful browserd shutdown detaches from it without closing
+it, so its tabs and unsaved page state stay live and the restarted controller
+adopts the same process on its next request, even when the old launcher was
+killed with the stopped service or came from an earlier agent release. A
+session whose browser already ended and a computer session on the machine's
+own physical seat do not keep the host busy either. Older agents still end a
+busy update with
 retryable `update_busy_work`; request it again at a safe idle point.
 
 Machine liveness is independent of accepted host operations. The supervisor

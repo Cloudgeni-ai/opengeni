@@ -50,12 +50,21 @@ proven live process, or launches only after complete proof that the old process
 and other profile writers are absent. Unsettled launch receipts prevent another
 launch. Attached browsers, ephemeral contexts, and unattested directories do not
 enter this path. Accepted interaction commands remain replay-only receipts.
-Live reattachment additionally requires a headless browser's direct lineage to
-the pinned daemon in its exact private socket namespace. Initial headless macOS
-attestation cross-checks the profile lock and CDP browser PID with that lineage,
-process birth and executable. Missing, helper or conflicting daemon lineage is
-refused. Retirement closes both proven processes; uncertain predecessor cleanup
-retains the directory and holder for retry, including after a proved browser stop.
+Graceful controller shutdown suspends an eligible runtime by detaching only its
+own CDP transport: the browser keeps running with its tabs and unsaved page
+state, and the next controller (a restart, or a later release of the agent)
+adopts that same process. Live reattachment works for headed and headless
+browsers. Besides the receipt's process proof, the profile lock must still
+name the browser. If its launcher daemon is still running, it must be the
+browser's direct parent and the only live record in the exact private socket
+namespace; it is recorded by its own running executable, so a launcher from an
+earlier release is adopted too. A launcher that was killed (for example with
+the rest of a stopped service) leaves the proven browser adoptable on its own;
+a stale record whose PID now names an unrelated process is refused. Initial
+headless macOS attestation cross-checks the profile lock and CDP browser PID
+with that lineage, process birth and executable. Retirement closes the proven
+processes; uncertain predecessor cleanup retains the directory and holder for
+retry, including after a proved browser stop.
 Explicit close records retirement before process cleanup. If retirement
 settlement fails, other stores close while the exact directory and cleanup
 holder remain available for retry; removal requires completed retirement and
