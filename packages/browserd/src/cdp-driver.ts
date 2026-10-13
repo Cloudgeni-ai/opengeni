@@ -4853,7 +4853,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 /** Retrying can't help a tab whose page process died; say what will. */
 function tabCrashedError(): InteractionDefiniteDriverError {
   return new InteractionDefiniteDriverError(
-    "resource_unavailable",
+    "tab_crashed",
     "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
     false,
   );

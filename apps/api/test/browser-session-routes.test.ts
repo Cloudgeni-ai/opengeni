@@ -16,7 +16,7 @@ import {
   parseBrowserScreenshotOptions,
   browserScreenshotResponse,
   browserScreenshotError,
-  browserTabNotRespondingError,
+  browserTabDiagnosisError,
   browserCreateInput,
 } from "../src/routes/browser-sessions";
 
@@ -679,7 +679,7 @@ describe("BrowserSession route discipline", () => {
       retryable: false,
     });
     app.on(["GET", "POST"], "/v1/test/tab-not-responding", () => {
-      throw browserTabNotRespondingError(internal);
+      throw browserTabDiagnosisError(internal);
     });
     for (const method of ["GET", "POST"] as const) {
       const response = await app.request("http://localhost/v1/test/tab-not-responding", {
@@ -702,7 +702,47 @@ describe("BrowserSession route discipline", () => {
       message: "input sent",
       retryable: false,
     });
-    expect(browserTabNotRespondingError(uncertain)).toBe(uncertain);
+    expect(browserTabDiagnosisError(uncertain)).toBe(uncertain);
+  });
+
+  test("publishes a crashed tab as its own definite diagnosis, not a retryable outage", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const crashed = new BrowserControlRequestError(409, {
+      code: "tab_crashed",
+      message:
+        "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
+      retryable: false,
+    });
+    app.get("/v1/test/tab-crashed", () => {
+      throw browserTabDiagnosisError(crashed);
+    });
+    const response = await app.request("http://localhost/v1/test/tab-crashed", {
+      headers: { "x-opengeni-correlation-id": "crashed-tab-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "tab_crashed",
+        message: crashed.error.message,
+        retryable: false,
+        requestId: "crashed-tab-request",
+      },
+    });
+    // Any other unavailable verdict keeps the ordinary envelope, which never
+    // publishes a driver's free-form message.
+    const other = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "PRIVATE /home/user/profile detail",
+      retryable: true,
+    });
+    expect(browserTabDiagnosisError(other)).toBe(other);
   });
 
   test("publishes a definite screenshot timeout through the ordinary API error envelope", async () => {

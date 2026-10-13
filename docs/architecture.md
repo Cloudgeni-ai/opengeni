@@ -1717,6 +1717,8 @@ still throws from the interaction executor and never becomes a successful result
 
 Page-command deadlines preserve a definite `tab_not_responding` diagnosis through
 browserd and the API with reload/close guidance, without replacing a live browser.
+A crashed renderer likewise reaches clients as a definite `tab_crashed`
+diagnosis with open-a-new-tab guidance, not as a retryable outage.
 Pre-input failures are definite; already-sent input retains uncertain effects and
 must not replay. Other tabs keep their independent authority and queues.
 

@@ -782,6 +782,7 @@ export const ErrorCode = z.enum([
   "provider_verification_failed",
   "upstream_unavailable",
   "tab_not_responding",
+  "tab_crashed",
   "internal_error",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;

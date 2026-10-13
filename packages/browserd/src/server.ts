@@ -2046,7 +2046,7 @@ function interactionStatus(code: string): number {
   if (code === "resource_not_found" || code === "target_not_found") return 404;
   if (code === "permission_denied") return 403;
   if (code === "machine_locked") return 423;
-  if (code === "tab_not_responding") return 409;
+  if (code === "tab_not_responding" || code === "tab_crashed") return 409;
   if (code.endsWith("_stale") || code === "operation_conflict" || code === "outcome_unknown")
     return 409;
   if (code === "resource_unavailable" || code === "controller_lost" || code === "journal_full")
