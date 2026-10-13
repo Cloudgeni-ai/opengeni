@@ -26,6 +26,7 @@ import {
   modelFundingForAdmission,
   goalRunBudgetBlocked,
   goalSessionUsageLimitBlocked,
+  recordSessionUsageLimitEvent,
   resolveGoalModelAdmission,
 } from "@opengeni/core";
 export { goalContinuationModelDecision, goalRunBudgetBlocked } from "@opengeni/core";
@@ -149,6 +150,9 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
             });
+        if (usageLimitBlocked) {
+          recordSessionUsageLimitEvent(service.observability, "goal", "reached");
+        }
         const budgetBlocked = modelPolicyBlocked
           ? null
           : (usageLimitBlocked ??

@@ -19,6 +19,7 @@ import {
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceCatalogSettings,
   requireSessionUsageLimitAllows,
+  type SessionUsageLimitMetricsSink,
   sessionUsageLimitRefusalFromError,
   settingsWithModelProviderCredentials,
   settleModelUsage,
@@ -68,6 +69,8 @@ export type ModelCallServiceDeps = {
   entitlements?: EntitlementsPort | null;
   codexFetch?: CodexFetch;
   log?: (message: string, attributes: Record<string, string | number | boolean>) => void;
+  /** Content-free task usage-limit counters (closed-set labels). */
+  usageLimitMetrics?: SessionUsageLimitMetricsSink | null;
 };
 
 const PROVIDER_MESSAGE_MAX_LENGTH = 512;
@@ -234,6 +237,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             normalizedUsage: normalizeModelCallUsage(usage.usage),
             sourceId: `model_call:${input.requestId}`,
             ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
+            usageLimitMetrics: deps.usageLimitMetrics ?? null,
             debitMetadata: { modelCallId: input.requestId },
           }),
         ).catch((error: unknown) => {
@@ -257,11 +261,17 @@ function attemptSessionId(grant: ModelCallInput["grant"]): string | null {
 }
 
 async function requireSingleCallSessionUsageLimit(
-  deps: { db: Parameters<typeof requireSessionUsageLimitAllows>[0] },
+  deps: {
+    db: Parameters<typeof requireSessionUsageLimitAllows>[0];
+    usageLimitMetrics?: SessionUsageLimitMetricsSink | null;
+  },
   input: { accountId: string; workspaceId: string; sessionId: string },
 ): Promise<void> {
   try {
-    await requireSessionUsageLimitAllows(deps.db, input);
+    await requireSessionUsageLimitAllows(deps.db, input, {
+      sink: deps.usageLimitMetrics,
+      boundary: "single_call",
+    });
   } catch (error) {
     const refusal = sessionUsageLimitRefusalFromError(error);
     if (refusal) {

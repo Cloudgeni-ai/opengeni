@@ -24,6 +24,10 @@ import {
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
+import {
+  recordSessionUsageLimitEvent,
+  type SessionUsageLimitMetricsSink,
+} from "../session-usage-limit-metrics";
 
 /**
  * Price and settle one authoritative model response: the token-cap usage
@@ -78,6 +82,8 @@ export type ModelUsageSettlementInput = {
   debitMetadata?: Record<string, unknown>;
   /** Best-effort metrics hook after a committed debit. */
   onCreditsDebited?: (result: { debitedMicros: number; grantDebitedMicros: number }) => void;
+  /** Content-free per-task usage limit diagnostics (closed-set labels only). */
+  usageLimitMetrics?: SessionUsageLimitMetricsSink | null;
 };
 
 export async function settleModelUsage(
@@ -205,16 +211,31 @@ export async function settleModelUsage(
   // the database recovers; the provider call is never replayed.
   const usageLimitSessionId = input.usageLimitSessionId ?? input.sessionId;
   if (usageLimitSessionId) {
-    await settleSessionUsageReceipt(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: usageLimitSessionId,
-      sourceId: input.sourceId,
-      turnId: input.turnId ?? null,
-      amountMicros: estimatedProviderCostMicros,
-      pricingSource,
-      model: input.model,
-    });
+    let receipt: Awaited<ReturnType<typeof settleSessionUsageReceipt>>;
+    try {
+      receipt = await settleSessionUsageReceipt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: usageLimitSessionId,
+        sourceId: input.sourceId,
+        turnId: input.turnId ?? null,
+        amountMicros: estimatedProviderCostMicros,
+        pricingSource,
+        model: input.model,
+      });
+    } catch (error) {
+      recordSessionUsageLimitEvent(input.usageLimitMetrics, "settlement", "accounting_failure");
+      throw error;
+    }
+    recordSessionUsageLimitEvent(
+      input.usageLimitMetrics,
+      "settlement",
+      receipt.outcome === "conflict"
+        ? "source_conflict"
+        : estimatedProviderCostMicros === null && receipt.outcome === "recorded"
+          ? "unpriced"
+          : receipt.outcome,
+    );
   }
   // Provider settlement and workspace-facing cost are separate. Externally
   // metered subscription/workspace turns remain exempt from the Opengeni token

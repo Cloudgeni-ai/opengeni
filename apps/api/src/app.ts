@@ -619,6 +619,7 @@ export function createAppComposition(deps: AppDependencies): {
           entitlements: deps.entitlements ?? null,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
           log: (message, attributes) => observability.error(message, attributes),
+          usageLimitMetrics: observability,
         })
       : deps.modelCalls;
   registerProductUsageMetricBaselines(observability);

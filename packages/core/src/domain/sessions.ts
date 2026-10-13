@@ -219,6 +219,7 @@ import {
   sessionUsageLimitsProducerEnabled,
   sessionUsageLimitWriteActorForAccess,
 } from "../session-usage-limits";
+import { recordSessionUsageLimitEvent } from "../session-usage-limit-metrics";
 import type {
   AcceptSessionUserMessageDependencies,
   ApiRouteDeps,
@@ -2387,11 +2388,11 @@ export async function retryFailedSession(
   if (replay) return replay;
   const session = await requireSession(deps.db, workspaceId, sessionId);
   // A retry is a new model request: a reached task usage limit refuses it.
-  await requireSessionUsageLimitAllows(deps.db, {
-    accountId: grant.accountId,
-    workspaceId,
-    sessionId,
-  });
+  await requireSessionUsageLimitAllows(
+    deps.db,
+    { accountId: grant.accountId, workspaceId, sessionId },
+    { sink: deps.observability, boundary: "send" },
+  );
   const failure = await getSessionEvent(deps.db, workspaceId, request.failureEventId);
   if (!failure || failure.sessionId !== sessionId)
     throw new SessionRetryConflictError("RETRY_STALE_FAILURE", "The failure event is unavailable");
@@ -2597,23 +2598,28 @@ async function createSessionForRequestInFileScope(
   // OPE-798: a create-time usage limit belongs to a new ROOT task and only a
   // person or the trusted host may set it. Agents (including children, which
   // always share their root's limit) are rejected even when the value is null.
-  const initialUsageLimitActor =
-    payload.usageLimitMicros !== undefined
-      ? parentSessionId || !authorization
-        ? (() => {
-            throw new SessionUsageLimitHttpError(
-              403,
-              "session_usage_limit_forbidden",
-              "Only a person or the application's server can set a task usage limit.",
-            );
-          })()
-        : sessionUsageLimitWriteActorForAccess(authorization)
-      : null;
+  let initialUsageLimitActor: ReturnType<typeof sessionUsageLimitWriteActorForAccess> | null = null;
+  if (payload.usageLimitMicros !== undefined) {
+    try {
+      if (parentSessionId || !authorization) {
+        throw new SessionUsageLimitHttpError(
+          403,
+          "session_usage_limit_forbidden",
+          "Only a person or the application's server can set a task usage limit.",
+        );
+      }
+      initialUsageLimitActor = sessionUsageLimitWriteActorForAccess(authorization);
+    } catch (error) {
+      recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "forbidden");
+      throw error;
+    }
+  }
   if (
     payload.usageLimitMicros !== undefined &&
     payload.usageLimitMicros !== null &&
     !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)
   ) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
     throw new SessionUsageLimitHttpError(
       422,
       "session_usage_limit_disabled",
@@ -2623,11 +2629,11 @@ async function createSessionForRequestInFileScope(
   // A task whose usage limit is reached cannot start more inference by
   // spawning another agent.
   if (parentSessionId) {
-    await requireSessionUsageLimitAllows(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId: parentSessionId,
-    });
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId: parentSessionId },
+      { sink: unresolvedDeps.observability, boundary: "child_create" },
+    );
   }
   const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
   if (parentSessionId && !parentSession) {
@@ -4291,11 +4297,11 @@ async function acceptSessionUserMessageInFileScope(
     assertSessionIsNotImported(existingSession);
     // OPE-798: a reached task usage limit refuses a fresh Send/Steer here,
     // after exact replays returned above and before any queue/interrupt write.
-    await requireSessionUsageLimitAllows(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-    });
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId },
+      { sink: deps.observability, boundary: delivery === "steer" ? "steer" : "send" },
+    );
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
       grant,

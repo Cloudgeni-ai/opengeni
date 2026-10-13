@@ -1,3 +1,4 @@
+import { recordSessionUsageLimitEvent } from "@opengeni/core";
 import {
   requestSessionTurnRecovery,
   recordUsageEvent,
@@ -1024,6 +1025,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   ) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
+    if (error.sessionUsageLimit) {
+      recordSessionUsageLimitEvent(observability, "between_calls", "reached");
+    }
     if (
       !(await eventing.settle!(
         error.sessionUsageLimit

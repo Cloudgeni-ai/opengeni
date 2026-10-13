@@ -48,6 +48,7 @@ import {
   resolveCatalogSettings,
   resolveCodexAppsDesignationForRun,
   resolveContinuedConnectionAccounts,
+  recordSessionUsageLimitEvent,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
@@ -573,6 +574,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   } catch (error) {
     if (error instanceof SessionUsageLimitReachedError) {
       sessionUsageLimitRefusal = error.refusal;
+      recordSessionUsageLimitEvent(observability, "claim", "reached");
     } else if (error instanceof AllowanceExhaustedError) {
       allowanceRefusal = error.refusal;
     } else {

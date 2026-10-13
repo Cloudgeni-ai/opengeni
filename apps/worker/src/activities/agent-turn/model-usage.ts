@@ -725,6 +725,7 @@ export async function recordModelUsageAndDebitCredits(
     sessionId: input.sessionId,
     turnId: input.turnId,
     turnAttemptId: input.turnAttemptId,
+    usageLimitMetrics: input.observability ?? null,
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
     debitMetadata: {
       sessionId: input.sessionId,

@@ -29,6 +29,12 @@ import {
   requireSessionAuthorization,
   type SessionAuthorizationDependencies,
 } from "./session-authorization";
+import {
+  recordSessionUsageLimitEvent,
+  type SessionUsageLimitMetricBoundary,
+  type SessionUsageLimitMetricOutcome,
+  type SessionUsageLimitMetricsSink,
+} from "./session-usage-limit-metrics";
 
 /**
  * Producer flag for per-task usage limits. Off by default. When off, new
@@ -244,6 +250,7 @@ function setResultToHttp(result: SessionUsageLimitSetResult): SessionUsageLimit 
 export async function setSessionUsageLimitForAccess(
   deps: SessionAuthorizationDependencies & {
     settings: { sessionUsageLimitsEnabled?: boolean | undefined };
+    observability?: SessionUsageLimitMetricsSink | undefined;
   },
   access: AccessGrantAuthorization,
   sessionId: string,
@@ -252,7 +259,13 @@ export async function setSessionUsageLimitForAccess(
 ): Promise<SessionUsageLimit> {
   const { grant } = access;
   requirePermission(grant, "sessions:control");
-  const actor = sessionUsageLimitWriteActorForAccess(access, rawRequest);
+  let actor: SessionUsageLimitWriteActor;
+  try {
+    actor = sessionUsageLimitWriteActorForAccess(access, rawRequest);
+  } catch (error) {
+    recordSessionUsageLimitEvent(deps.observability, "write", "forbidden");
+    throw error;
+  }
   await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: "session.control",
@@ -282,11 +295,40 @@ export async function setSessionUsageLimitForAccess(
         : await withWorkspaceSessionActivityRls(deps.db, grant.workspaceId, write);
   } catch (error) {
     if (error instanceof SessionUsageLimitForbiddenError) {
+      recordSessionUsageLimitEvent(deps.observability, "write", "forbidden");
       throw new SessionUsageLimitHttpError(403, "session_usage_limit_forbidden", error.message);
+    }
+    if (error instanceof SessionUsageLimitUnavailableError) {
+      recordSessionUsageLimitEvent(deps.observability, "write", "unavailable");
     }
     throw error;
   }
+  const metricOutcome = writeMetricOutcome(result, request.limitMicros);
+  if (metricOutcome) recordSessionUsageLimitEvent(deps.observability, "write", metricOutcome);
   return setResultToHttp(result);
+}
+
+function writeMetricOutcome(
+  result: SessionUsageLimitSetResult,
+  limitMicros: number | null,
+): SessionUsageLimitMetricOutcome | null {
+  switch (result.outcome) {
+    case "ok":
+      return limitMicros === null ? "cleared" : "set";
+    case "replayed":
+      return "replayed";
+    case "conflict":
+    case "operation_conflict":
+      return "cas_conflict";
+    case "preparing":
+      return "preparing";
+    case "disabled":
+      return "disabled";
+    case "not_root":
+      return "not_root";
+    case "not_found":
+      return null;
+  }
 }
 
 /**
@@ -331,17 +373,23 @@ export async function applyInitialSessionUsageLimit(
 export async function requireSessionUsageLimitAllows(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string },
+  metrics?: {
+    sink: SessionUsageLimitMetricsSink | null | undefined;
+    boundary: SessionUsageLimitMetricBoundary;
+  },
 ): Promise<void> {
   let admission: Awaited<ReturnType<typeof checkSessionUsageLimitAdmission>>;
   try {
     admission = await checkSessionUsageLimitAdmission(db, input);
   } catch (error) {
     if (error instanceof SessionUsageLimitUnavailableError) {
+      if (metrics) recordSessionUsageLimitEvent(metrics.sink, metrics.boundary, "unavailable");
       throw new HTTPException(503, { message: error.message, cause: error });
     }
     throw error;
   }
   if (!admission.allowed) {
+    if (metrics) recordSessionUsageLimitEvent(metrics.sink, metrics.boundary, "reached");
     throw new HTTPException(402, {
       message: admission.refusal.message,
       cause: admission.refusal,
