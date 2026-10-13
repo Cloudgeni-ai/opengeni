@@ -1619,7 +1619,7 @@ jobs:
             --setuid="$(id -u)" --setgid="$(id -g)" \
             "$(command -v bun)" test --timeout 120000 \
             packages/browserd/test/supervisor.e2e.test.ts \
-            --test-name-pattern '^graceful shutdown'
+            --test-name-pattern '^a (graceful|killed) controller leaves the same live browser'
 
       - name: Run actual browserd end-to-end suite
         timeout-minutes: 6

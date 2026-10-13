@@ -193,7 +193,9 @@ recoveryE2e.each(recoveryCases)(
       expect(semanticNames(page)).toContain("Counter 2");
       expect(semanticNames(page).join(" ")).toContain("Cookie counter=2");
       await second.endSession(options, { removeState: true });
-      await waitForProcessExit(browserPid);
+      // After a killed controller, Chromium is reparented to this PID namespace's
+      // init (the test runner), which does not reap it: a zombie counts as gone.
+      await waitForProcessDeath(browserPid);
     } catch (error) {
       failures.push(error);
       if (browserPid) {
