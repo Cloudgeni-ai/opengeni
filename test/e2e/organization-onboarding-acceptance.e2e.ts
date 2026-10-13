@@ -218,7 +218,9 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
     pathname === "/v1/config/client" ||
     pathname === "/v1/auth/get-session" ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname) ||
-    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft)$/u.test(pathname) ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft|vaults)$/u.test(
+      pathname,
+    ) ||
     // Sending from the new-chat page routes to the new session, which can
     // cancel that session's first composer-draft read.
     /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/composer-draft$/u.test(pathname) ||
