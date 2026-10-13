@@ -298,3 +298,28 @@ export type SiteDataFileResponse = {
   createdBy: string;
   createdAt: string;
 };
+
+export type SiteDataQueryResponse = {
+  records: SiteDataRecordResponse[];
+  nextCursor: string | null;
+  count?: number;
+};
+
+export type SiteDataWriteResultResponse =
+  | { op: "insert" | "put" | "patch" | "increment"; record: SiteDataRecordResponse }
+  | { op: "delete"; deleted: { id: string } };
+
+export type SiteDataWriteResponse = { results: SiteDataWriteResultResponse[] };
+
+export type SiteDataImportResponse = { imported: number };
+
+export type SiteDataFileListResponse = {
+  files: SiteDataFileResponse[];
+  nextCursor: string | null;
+};
+
+export type SiteDataFileUrlResponse = {
+  url: string;
+  expiresAt: string;
+  file: SiteDataFileResponse;
+};

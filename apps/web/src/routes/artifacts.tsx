@@ -14,6 +14,7 @@ import {
 } from "@opengeni/react/artifacts";
 import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
+import { SiteData } from "@/components/artifacts/site-data";
 import { useSiteAudience } from "@/components/artifacts/site-audience";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -297,7 +298,7 @@ function ArtifactListRoute({
   );
 }
 
-type SiteTab = "site" | "versions" | "conversations";
+type SiteTab = "site" | "versions" | "conversations" | "data";
 
 export function ArtifactDetailRoute({
   embedded = false,
@@ -479,6 +480,15 @@ function ArtifactDetailPage({
     }
   };
   const archived = detail?.artifact.status === "archived";
+  // Site Data is for the people who manage the Site: its owner and workspace
+  // admins. The API decides; an ownerless Site shows the tab and its answer.
+  const manageData = Boolean(
+    canPublish &&
+    detail &&
+    (hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin") ||
+      !detail.artifact.ownerSubjectId ||
+      detail.artifact.ownerSubjectId === context.accessContext.subjectId),
+  );
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   // A Personal workspace has nobody to share with, so there is no audience.
   const showAudience = !isPersonalWorkspace(workspace, context.managedSelfContext);
@@ -606,6 +616,7 @@ function ArtifactDetailPage({
                   Versions
                 </LineTabsTrigger>
                 <LineTabsTrigger value="conversations">Conversations</LineTabsTrigger>
+                {manageData ? <LineTabsTrigger value="data">Data</LineTabsTrigger> : null}
               </LineTabsList>
             }
           />
@@ -707,6 +718,16 @@ function ArtifactDetailPage({
               title={artifact.title}
             />
           </LineTabsContent>
+          {manageData ? (
+            <LineTabsContent value="data" className="pt-6">
+              <SiteData
+                key={artifactId}
+                workspaceId={workspaceId}
+                siteId={artifactId}
+                title={artifact.title}
+              />
+            </LineTabsContent>
+          ) : null}
         </LineTabs>
       </DetailPage>
       {showAudience ? audience.dialog : null}
