@@ -2796,7 +2796,9 @@ function databaseUrlFor(value: string, database: string): string {
 // what `bun src/provision-roles.ts` / the `provision-roles` package script
 // invokes — standalone byte-for-byte the historical script (public schema,
 // force strategy, env-driven creds).
-if (import.meta.main) {
+/** Command-line entry. Bundled release images call this explicitly; see
+ * scripts/assemble-server-runtime.ts. */
+export async function runProvisionRolesCli(): Promise<void> {
   const adminUrl =
     process.env.OPENGENI_MIGRATIONS_DATABASE_URL ??
     process.env.OPENGENI_DATABASE_ADMIN_URL ??
@@ -2813,3 +2815,5 @@ if (import.meta.main) {
   });
   console.log(JSON.stringify(result, null, 2));
 }
+
+if (import.meta.main) await runProvisionRolesCli();
