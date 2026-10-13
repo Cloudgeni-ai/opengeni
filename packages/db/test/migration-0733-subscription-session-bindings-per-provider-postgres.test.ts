@@ -40,6 +40,7 @@ import {
 } from "../src/subscription-core-repository";
 import {
   stageVaultPolicyColumns,
+  withoutAbsentLaterPosture,
   withoutAbsentVaultPosture,
   stageConnectionAccountIntentColumns,
 } from "./vault-policy-column-fixture";
@@ -350,12 +351,15 @@ beforeAll(async () => {
     targetSchema: "public",
     requiredRuntimeRoutines: [],
   };
-  // Stopped before 0739: the absent vault objects are expected.
+  // Stopped before 0739 and 0761: the absent vault and exhausted-schedule
+  // objects are expected.
   const evaluate = async () =>
-    withoutAbsentVaultPosture(
-      evaluateRuntimeDatabasePosture(
-        await inspectRuntimeDatabasePosture(client!.db, options),
-        options,
+    withoutAbsentLaterPosture(
+      withoutAbsentVaultPosture(
+        evaluateRuntimeDatabasePosture(
+          await inspectRuntimeDatabasePosture(client!.db, options),
+          options,
+        ),
       ),
     );
   const unprovisioned = await evaluate();

@@ -392,10 +392,21 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       [...rows].sort((a, b) =>
         `${a.relname}\0${a.polname}` < `${b.relname}\0${b.polname}` ? -1 : 1,
       );
+    // ...and 0761, which adds the exact-owner exhausted-schedule inventory read.
+    const exhaustedScheduleRead = {
+      relname: "scheduled_task_runs",
+      polname: "exhausted_schedule_inventory_read",
+      polcmd: "r",
+      polpermissive: true,
+      roles: "{0}",
+      qual: `session_tenancy_fence_owner_policy_active((CURRENT_USER)::text, '${owned.ownerRole}'::text, (2200)::oid, workspace_id, true)`,
+      check: null,
+    };
     const plannedWithVaults = byPolicy([
       ...plannedPolicies,
       vaultRead("scheduled_task_runs"),
       vaultRead("session_turns"),
+      exhaustedScheduleRead,
     ]);
     expect(byPolicy([...(await snapshot())])).toEqual(plannedWithVaults);
     const [backfill] =
