@@ -399,6 +399,15 @@ the initial state hash and binding cannot be changed by registration replay.
 Neither registration nor a supplied bootstrap-evidence hash certifies the
 bootstrap or grants command authority.
 
+The broker binding keeps the immutable warming-time `createEpoch`. The warm
+transition advances the lease epoch, so initial retained-command attachment
+checks the current admission epoch separately against the locked live lease
+and rechecks the original creation operation, epoch, instance and namespace.
+It must not compare a command's current lease epoch for equality with its
+broker's creation epoch. Subsequent output capture keeps the original retained
+command identity even when the live lease advances; that is not authority for
+a new command.
+
 `native-command-broker-bootstrap-capture.ts` reads a bounded initial hello and
 complete artifact prefix before journal registration. It accepts only the exact
 initial stdout identity, no EOF or trailing partial frame, and sends no input or

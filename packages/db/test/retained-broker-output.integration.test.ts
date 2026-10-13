@@ -6,6 +6,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  commitWarmingToWarm,
   getRetainedProcess,
   settleRetainedProcess,
   type DbClient,
@@ -49,7 +50,12 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(pty = false, change?: (command: ModalBrokerProviderCommand) => void) {
+async function fixture(
+  pty = false,
+  change?: (command: ModalBrokerProviderCommand) => void,
+  staleEpoch = false,
+  changeCreation?: (attempt: Record<string, unknown>) => void,
+) {
   const session = await createSession(client.db, {
     accountId,
     workspaceId,
@@ -81,7 +87,7 @@ async function fixture(pty = false, change?: (command: ModalBrokerProviderComman
     leaseId,
     sandboxGroupId,
     createOperationId: crypto.randomUUID(),
-    createEpoch: 1,
+    createEpoch: 0,
     sandboxId: `sb-${processId}`,
     taskId: `ta-${processId}`,
     providerBindingKey: JSON.stringify(providerBinding),
@@ -97,12 +103,12 @@ async function fixture(pty = false, change?: (command: ModalBrokerProviderComman
     backend: "modal",
     instance_id: binding.sandboxId,
     liveness: "warming",
-    lease_epoch: 1,
+    lease_epoch: binding.createEpoch,
     expires_at: new Date(Date.now() + 60000),
     provider_create_attempt: shared.admin.json({
       version: 1,
       operationId: binding.createOperationId,
-      leaseEpoch: 1,
+      leaseEpoch: binding.createEpoch,
       providerBindingKey: binding.providerBindingKey,
       appId: "ap-test",
       providerName: `opengeni-create-${binding.createOperationId}`,
@@ -121,6 +127,25 @@ async function fixture(pty = false, change?: (command: ModalBrokerProviderComman
         value: `fixture frame ${sequence}`,
       });
   });
+  const warm = await commitWarmingToWarm(client.db, {
+    accountId,
+    workspaceId,
+    sandboxGroupId,
+    expectedEpoch: binding.createEpoch,
+    instanceId: binding.sandboxId,
+    leaseTtlMs: 60_000,
+  });
+  expect(warm.committed).toBe(true);
+  expect(warm.lease?.leaseEpoch).toBe(binding.createEpoch + 1);
+  const commandEpoch = staleEpoch ? binding.createEpoch : warm.lease!.leaseEpoch;
+  if (changeCreation) {
+    const [row] = await shared.admin`select provider_create_attempt from sandbox_leases
+      where id=${leaseId}`;
+    const attempt = structuredClone(row!.provider_create_attempt);
+    changeCreation(attempt);
+    await shared.admin`update sandbox_leases
+      set provider_create_attempt=${shared.admin.json(attempt)} where id=${leaseId}`;
+  }
   const execId = crypto.randomUUID();
   const original = ModalBrokerProviderCommand.parse({
     kind: "modal-broker-v1",
@@ -155,7 +180,7 @@ async function fixture(pty = false, change?: (command: ModalBrokerProviderComman
     actor_id: actorId,
     holder_kind: "direct",
     holder_id: `direct:${actorId}`,
-    lease_epoch: 1,
+    lease_epoch: commandEpoch,
     provider_backend: "modal",
     provider_instance_id: binding.sandboxId,
     route_kind: "active",
@@ -175,7 +200,7 @@ async function fixture(pty = false, change?: (command: ModalBrokerProviderComman
     holder_id: `process:${processId}`,
     owner_actor_kind: "direct",
     owner_actor_id: actorId,
-    lease_epoch: 1,
+    lease_epoch: commandEpoch,
     provider_backend: "modal",
     provider_instance_id: binding.sandboxId,
     route_kind: "active",
@@ -284,6 +309,48 @@ test("broker capture is exact-session scoped and cannot expose a foreign process
   ).rejects.toThrow("unavailable");
   expect(await getRetainedProviderCommand(client.db, f.scope)).toEqual(f.original);
 });
+
+test("broker command uses the current warm admission epoch, not its immutable creation epoch", async () => {
+  const f = await fixture();
+  expect(f.process.lease_epoch).toBe(f.binding.createEpoch + 1);
+  expect(await getRetainedProviderCommand(client.db, f.scope)).toEqual(f.original);
+  await expect(fixture(false, undefined, true)).rejects.toThrow(
+    "current lease and original creation",
+  );
+});
+
+test("retained broker output remains readable after the live lease epoch advances", async () => {
+  const f = await fixture();
+  await shared.admin`update sandbox_leases set lease_epoch=lease_epoch+1,
+    liveness='draining' where id=${f.leaseId}`;
+  const page = output(f.original, "old-epoch");
+  expect((await captureRetainedBrokerOutput(client.db, f.scope, page)).captured).toBe(true);
+  const read = await readSessionBackgroundCommandOutput(client.db, {
+    ...f.scope,
+    commandId: f.scope.processId,
+  });
+  expect(read.chunks.map((chunk) => chunk.chunk).join("")).toBe("old-epoch");
+  expect(read.terminal).toBe(false);
+  await f.persistence.recordSupervisionReceipt(f.receipt);
+  expect(
+    (await captureRetainedBrokerOutput(client.db, f.scope, output(page.command, "", true)))
+      .captured,
+  ).toBe(true);
+  // Capturing the old command does not let a stale owner skip reconciliation.
+  await expect(f.settle()).rejects.toThrow("requires durable provider proof");
+});
+
+test.each(["operationId", "leaseEpoch", "instanceId", "providerBindingKey"] as const)(
+  "initial broker attachment rejects changed original creation %s",
+  async (field) => {
+    await expect(
+      fixture(false, undefined, false, (attempt) => {
+        attempt[field] = field === "leaseEpoch" ? 1 : "different-creation";
+        if (field === "operationId") attempt.providerName = `opengeni-create-${attempt[field]}`;
+      }),
+    ).rejects.toThrow("current lease and original creation");
+  },
+);
 
 test("broker readiness requires the independently enabled never-started settlement guard", async () => {
   await shared.admin`alter table sandbox_retained_processes disable trigger native_broker_launch_rejection_guard`;

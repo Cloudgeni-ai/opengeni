@@ -187,9 +187,27 @@ BEGIN
       AND broker_binding->>'sandboxId' = NEW.provider_command->>'sandboxId'
       AND broker_binding->>'taskId' = NEW.provider_command->>'taskId'
       AND broker_binding->>'providerBindingKey' = NEW.provider_binding_key
-      AND (broker_binding->>'createEpoch')::bigint = NEW.lease_epoch
+      AND (broker_binding->>'createEpoch')::bigint <= NEW.lease_epoch
     ) IS TRUE) THEN
       RAISE EXCEPTION 'Broker command requires its exact registered physical scope' USING ERRCODE = '55000';
+    END IF;
+    -- Creation is frozen at warming; committing warm advances the lease epoch.
+    -- Only initial attachment needs the live admission epoch. Later capture
+    -- must retain the original command scope even after the lease advances.
+    IF TG_OP = 'INSERT' OR NOT (coalesce(OLD.provider_command, '{}'::jsonb) ? 'supervision') THEN
+      IF NOT ((capture_lease.account_id = NEW.account_id
+        AND capture_lease.workspace_id = NEW.workspace_id
+        AND capture_lease.sandbox_group_id = NEW.sandbox_group_id
+        AND capture_lease.backend = NEW.provider_backend
+        AND capture_lease.instance_id = NEW.provider_instance_id
+        AND capture_lease.lease_epoch = NEW.lease_epoch
+        AND capture_lease.provider_create_attempt->>'operationId' = broker_binding->>'createOperationId'
+        AND capture_lease.provider_create_attempt->>'leaseEpoch' = broker_binding->>'createEpoch'
+        AND capture_lease.provider_create_attempt->>'instanceId' = broker_binding->>'sandboxId'
+        AND capture_lease.provider_create_attempt->>'providerBindingKey' = broker_binding->>'providerBindingKey'
+      ) IS TRUE) THEN
+        RAISE EXCEPTION 'Broker command requires its current lease and original creation' USING ERRCODE = '55000';
+      END IF;
     END IF;
     IF (NEW.provider_command->'capture'->>'sequence')::bigint > coalesce((
       SELECT max(sequence) FROM native_command_broker_entries
