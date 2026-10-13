@@ -216,6 +216,14 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+Renaming a Chrome profile is inventory metadata, not a connection transition.
+The extension keeps the same ready native port and sends optional
+`profile: { profileLabel }` metadata with its inventory revision. The agent updates
+the profile name without replacing its generation, debugger attachments or pending
+commands. A null label restores the default name. Older extensions may omit this
+metadata; an older agent ignores it and keeps its last announced name until a real
+reconnect, rather than interrupting the profile's work.
+
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it

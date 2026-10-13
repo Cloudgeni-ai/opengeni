@@ -1728,6 +1728,10 @@ mutations are never replayed. Partially dispatched input remains outcome unknown
 queued input, DOM changes, navigation and emulation cannot cross into a replacement
 attachment. See [Connected Machines](connected-machines.md).
 
+Attached profile labels update through optional native-bridge inventory metadata.
+A rename preserves the ready native connection and its generation; it must not
+retire active browser/computer sessions or fence pending commands.
+
 Browser tab open/close keeps each physical outcome available to its caller.
 An older response or follow-up observation cannot replace a later selection.
 Once all pending selections settle, superseded tab mutations reconcile fresh

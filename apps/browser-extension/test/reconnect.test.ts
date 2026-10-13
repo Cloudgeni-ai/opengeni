@@ -113,6 +113,87 @@ function harness() {
 }
 
 describe("native bridge reconnection", () => {
+  test("renaming the profile preserves the ready connection and publishes metadata", async () => {
+    const h = harness();
+    await flush();
+    const port = h.ports[0];
+    const hello = port.messages[0];
+    port.onMessage.emit({
+      type: "ready",
+      protocolVersion: 1,
+      deviceId: hello.device.id,
+      connectionGeneration: hello.device.connectionGeneration,
+    });
+    let response: unknown;
+    h.chrome.runtime.onMessage.emit(
+      { type: "set_profile_label", profileLabel: "  Work browser  " },
+      {},
+      (result: unknown) => {
+        response = result;
+      },
+    );
+    await flush();
+    expect(response).toEqual({ saved: true, profileLabel: "Work browser" });
+    expect(h.ports).toHaveLength(1);
+    expect(port.disconnected).toBe(false);
+    expect(h.status()).toMatchObject({
+      connected: true,
+      connectionGeneration: hello.device.connectionGeneration,
+      profileLabel: "Work browser",
+    });
+    expect(port.messages.at(-1)).toMatchObject({
+      type: "inventory",
+      deviceId: hello.device.id,
+      connectionGeneration: hello.device.connectionGeneration,
+      profile: { profileLabel: "Work browser" },
+    });
+    const revisions = port.messages
+      .filter((message: any) => message.type === "inventory")
+      .map((message: any) => message.inventoryRevision);
+    expect(
+      revisions.every(
+        (revision: number, index: number) => index === 0 || revision > revisions[index - 1],
+      ),
+    ).toBe(true);
+  });
+  test("a rename during the handshake waits for readiness on the original port", async () => {
+    const h = harness();
+    await flush();
+    const port = h.ports[0];
+    const hello = port.messages[0];
+    h.chrome.runtime.onMessage.emit(
+      { type: "set_profile_label", profileLabel: "New label" },
+      {},
+      () => {},
+    );
+    await flush();
+    expect(h.ports).toHaveLength(1);
+    expect(port.messages.map((message: any) => message.type)).toEqual(["hello"]);
+    port.onMessage.emit({
+      type: "ready",
+      protocolVersion: 1,
+      deviceId: hello.device.id,
+      connectionGeneration: hello.device.connectionGeneration,
+    });
+    await flush();
+    expect(port.messages.at(-1)).toMatchObject({
+      type: "inventory",
+      connectionGeneration: hello.device.connectionGeneration,
+      profile: { profileLabel: "New label" },
+    });
+    expect(h.status().connected).toBe(true);
+    h.chrome.runtime.onMessage.emit(
+      { type: "set_profile_label", profileLabel: null },
+      {},
+      () => {},
+    );
+    await flush();
+    expect(port.messages.at(-1)).toMatchObject({
+      type: "inventory",
+      profile: { profileLabel: null },
+    });
+    expect(port.disconnected).toBe(false);
+  });
   test("a handshake timeout reconnects without a local onDisconnect event", async () => {
     const h = harness();
     await flush();

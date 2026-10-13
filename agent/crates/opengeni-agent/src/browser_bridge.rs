@@ -319,6 +319,12 @@ struct ExtensionDevice {
     capabilities: ExtensionCapabilities,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExtensionProfileMetadata {
+    profile_label: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Chrome's tab observation is a boolean field set.
@@ -353,6 +359,8 @@ enum ExtensionMessage {
         connection_generation: String,
         #[serde(rename = "inventoryRevision")]
         inventory_revision: u64,
+        #[serde(default)]
+        profile: Option<ExtensionProfileMetadata>,
         tabs: Vec<AttachedTab>,
     },
     CommandResult {
@@ -628,9 +636,16 @@ impl BrowserBridgeInventory {
         device_id: &str,
         connection_generation: &str,
         inventory_revision: u64,
+        metadata: Option<ExtensionProfileMetadata>,
         tabs: Vec<AttachedTab>,
     ) -> Result<(), BrowserBridgeError> {
         validate_tabs(&tabs)?;
+        if let Some(label) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.profile_label.as_ref())
+        {
+            bounded_string(label, 1, 200, "browser profile label")?;
+        }
         let mut state = self.state.write().expect("browser bridge inventory lock");
         let profile = state.profiles.get_mut(device_id).ok_or_else(|| {
             BrowserBridgeError::Protocol("inventory arrived before profile hello".to_string())
@@ -643,10 +658,22 @@ impl BrowserBridgeInventory {
         if inventory_revision < profile.device.inventory_revision {
             return Ok(());
         }
-        if inventory_revision == profile.device.inventory_revision && tabs == profile.tabs {
+        if inventory_revision == profile.device.inventory_revision
+            && tabs == profile.tabs
+            && metadata
+                .as_ref()
+                .is_none_or(|metadata| metadata.profile_label == profile.device.profile_label)
+        {
             return Ok(());
         }
         profile.device.inventory_revision = inventory_revision;
+        if let Some(metadata) = metadata {
+            profile.device.name = metadata
+                .profile_label
+                .clone()
+                .unwrap_or_else(|| "Chrome profile".to_string());
+            profile.device.profile_label = metadata.profile_label;
+        }
         profile.tabs = tabs;
         state.revision = state.revision.saturating_add(1);
         Ok(())
@@ -948,11 +975,11 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                 .await?;
                                 debug!(%device_id, connection_generation = %generation, tab_count, "attached browser profile registered");
                             }
-                            ExtensionMessage::Inventory { device_id, connection_generation, inventory_revision, tabs } => {
+                            ExtensionMessage::Inventory { device_id, connection_generation, inventory_revision, profile, tabs } => {
                                 if claim.as_ref() != Some(&(device_id.clone(), connection_generation.clone())) {
                                     return Err(BrowserBridgeError::Protocol("inventory does not belong to this native-host connection".to_string()));
                                 }
-                                inventory.update(&device_id, &connection_generation, inventory_revision, tabs)?;
+                                inventory.update(&device_id, &connection_generation, inventory_revision, profile, tabs)?;
                             }
                             ExtensionMessage::CommandResult { request_id, device_id, connection_generation, ok, payload, error } => {
                                 if claim.as_ref() != Some(&(device_id.clone(), connection_generation.clone())) {
@@ -1470,6 +1497,7 @@ mod tests {
             let update = serde_json::to_vec(&json!({
                 "type": "inventory", "deviceId": device_id,
                 "connectionGeneration": generation, "inventoryRevision": 2,
+                "profile": { "profileLabel": "Work browser" },
                 "tabs": [tab("11")]
             }))
             .expect("inventory");
@@ -1542,10 +1570,7 @@ mod tests {
                 .expect("command settled");
             assert_eq!(result.payload, Some(json!({ "pong": true })));
             assert!(result.error.is_none());
-            let snapshot = inventory.snapshot();
-            assert_eq!(snapshot.devices.len(), 1);
-            assert_eq!(snapshot.devices[0].connection_generation, generation);
-            assert_eq!(snapshot.devices[0].inventory_revision, 2);
+            assert_renamed_profile(&inventory.snapshot(), generation);
             drop(client);
             connection
                 .await
@@ -1554,6 +1579,94 @@ mod tests {
         })
         .await
         .expect("bounded partial-frame regression");
+    }
+
+    fn assert_renamed_profile(snapshot: &v1::AttachedBrowserInventorySnapshot, generation: &str) {
+        assert_eq!(snapshot.devices.len(), 1);
+        assert_eq!(snapshot.devices[0].connection_generation, generation);
+        assert_eq!(snapshot.devices[0].inventory_revision, 2);
+        assert_eq!(snapshot.devices[0].name, "Work browser");
+        assert_eq!(snapshot.devices[0].profile_label, "Work browser");
+    }
+
+    #[test]
+    fn inventory_metadata_is_optional_and_can_clear_a_profile_label() {
+        let inventory = BrowserBridgeInventory {
+            state: Arc::new(RwLock::new(InventoryState {
+                bridge_generation: "test-bridge".to_string(),
+                revision: 0,
+                profiles: BTreeMap::new(),
+                pending: HashMap::new(),
+            })),
+            update_drain: Arc::new(UpdateDrain::default()),
+        };
+        let id = "11111111-1111-4111-8111-111111111111";
+        let generation = "connection-1";
+        let ExtensionMessage::Hello { device, tabs, .. } =
+            serde_json::from_slice(&hello(id, generation, 1)).unwrap()
+        else {
+            panic!("hello fixture");
+        };
+        let (outbound, _receiver) = mpsc::channel(1);
+        inventory.register(device, tabs.clone(), outbound).unwrap();
+        inventory
+            .update(id, generation, 2, None, tabs.clone())
+            .unwrap();
+        assert_eq!(
+            inventory.snapshot().devices[0].profile_label,
+            "example.test"
+        );
+        inventory
+            .update(
+                id,
+                generation,
+                3,
+                Some(ExtensionProfileMetadata {
+                    profile_label: None,
+                }),
+                tabs.clone(),
+            )
+            .unwrap();
+        let snapshot = inventory.snapshot();
+        assert_eq!(snapshot.devices[0].name, "Chrome profile");
+        assert_eq!(snapshot.devices[0].profile_label, "");
+        assert_eq!(snapshot.devices[0].connection_generation, generation);
+        inventory
+            .update(
+                id,
+                generation,
+                2,
+                Some(ExtensionProfileMetadata {
+                    profile_label: Some("Stale name".to_string()),
+                }),
+                tabs.clone(),
+            )
+            .unwrap();
+        assert_eq!(inventory.snapshot().devices[0].profile_label, "");
+        assert!(inventory
+            .update(
+                id,
+                "old-connection",
+                4,
+                Some(ExtensionProfileMetadata {
+                    profile_label: Some("Stale connection".to_string())
+                }),
+                tabs.clone()
+            )
+            .is_err());
+        assert_eq!(inventory.snapshot().devices[0].profile_label, "");
+        assert!(inventory
+            .update(
+                id,
+                generation,
+                4,
+                Some(ExtensionProfileMetadata {
+                    profile_label: Some("x".repeat(201))
+                }),
+                tabs
+            )
+            .is_err());
+        assert_eq!(inventory.snapshot().devices[0].inventory_revision, 3);
     }
 
     #[test]

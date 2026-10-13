@@ -55,6 +55,7 @@ export type ExtensionInventory = {
   deviceId: string;
   connectionGeneration: string;
   inventoryRevision: number;
+  profile?: { profileLabel: string | null };
   tabs: AttachedTab[];
 };
 
