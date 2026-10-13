@@ -143,12 +143,17 @@ export function createBootGraceDatabaseSocket(
 /**
  * postgres.js options that add the boot connect grace to a client for
  * `databaseUrl`. A multi-host URL keeps postgres.js's own host failover, which
- * a custom socket would replace, so it gets no factory.
+ * a custom socket would replace, so it gets no factory. A `graceMs` of 0
+ * disables the grace: the first refused connection fails immediately.
  */
-export function databaseBootConnectOptions(databaseUrl: string): {
+export function databaseBootConnectOptions(
+  databaseUrl: string,
+  graceMs: number = DATABASE_BOOT_CONNECT_GRACE_MS,
+): {
   socket?: (target: DatabaseSocketTarget) => Promise<net.Socket>;
 } {
+  if (graceMs <= 0) return {};
   const authority = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?([^/?#]*)/i.exec(databaseUrl)?.[1] ?? "";
   if (authority.includes(",")) return {};
-  return { socket: createBootGraceDatabaseSocket() };
+  return { socket: createBootGraceDatabaseSocket({ graceMs }) };
 }

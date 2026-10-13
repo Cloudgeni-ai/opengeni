@@ -108,6 +108,7 @@ describe("database boot connect grace", () => {
   test("a multi-host URL keeps postgres.js host failover", () => {
     expect(databaseBootConnectOptions("postgres://u:p@a:5432,b:5432/db").socket).toBeUndefined();
     expect(databaseBootConnectOptions("postgres://u:p@a:5432/db").socket).toBeFunction();
+    expect(databaseBootConnectOptions("postgres://u:p@a:5432/db", 0).socket).toBeUndefined();
   });
 });
 
