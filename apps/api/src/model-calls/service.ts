@@ -18,6 +18,8 @@ import {
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceCatalogSettings,
+  requireSessionUsageLimitAllows,
+  sessionUsageLimitRefusalFromError,
   settingsWithModelProviderCredentials,
   settleModelUsage,
   type ModelCallCaller,
@@ -145,6 +147,17 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       const subscription = source.kind === "connected_subscription" ? source.provider : null;
       const chargesOpenGeniCredits = model.billing.metering === "opengeni_credits";
       const countsTowardTokenCap = model.billing.upstreamPayer === "deployment";
+      // OPE-798: a call made by a live agent attempt (its grant was verified
+      // by the attempt boundary) counts against that task's usage limit and is
+      // refused once the limit is reached. Other callers have no task.
+      const usageLimitSessionId = attemptSessionId(input.grant);
+      if (usageLimitSessionId) {
+        await requireSingleCallSessionUsageLimit(deps, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: usageLimitSessionId,
+        });
+      }
       const admission = await admitModelCall(deps, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -220,6 +233,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
             normalizedUsage: normalizeModelCallUsage(usage.usage),
             sourceId: `model_call:${input.requestId}`,
+            ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
             debitMetadata: { modelCallId: input.requestId },
           }),
         ).catch((error: unknown) => {
@@ -233,6 +247,39 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       return { model: model.id, result } satisfies ModelCallOutput;
     },
   };
+}
+
+/** The session of a verified live agent attempt, or null for every other caller. */
+function attemptSessionId(grant: ModelCallInput["grant"]): string | null {
+  if (grant?.principalKind !== "agent_attempt") return null;
+  const sessionId = grant.metadata?.sessionId;
+  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
+}
+
+async function requireSingleCallSessionUsageLimit(
+  deps: { db: Parameters<typeof requireSessionUsageLimitAllows>[0] },
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<void> {
+  try {
+    await requireSessionUsageLimitAllows(deps.db, input);
+  } catch (error) {
+    const refusal = sessionUsageLimitRefusalFromError(error);
+    if (refusal) {
+      throw new ModelCallError({
+        status: 402,
+        type: "insufficient_quota",
+        code: "session_usage_limit_reached",
+        message: refusal.message,
+      });
+    }
+    // Unreadable usage state is never treated as unlimited.
+    throw new ModelCallError({
+      status: 503,
+      type: "service_unavailable",
+      code: "session_usage_limit_unavailable",
+      message: "Usage for this task is temporarily unavailable. Try again shortly.",
+    });
+  }
 }
 
 function assertModelSupportsRequest(model: ConfiguredModel, request: ModelCallInput["request"]) {

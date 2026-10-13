@@ -64,6 +64,13 @@ export type ModelUsageSettlementInput = {
   /** Durable source identity (for a turn, `${turnId}:${sourceKey}`). */
   sourceId: string;
   sessionId?: string | null;
+  /**
+   * The session whose task usage limit this response counts against when it
+   * differs from the usage attribution `sessionId` (an attempt-authenticated
+   * single-model call keeps its existing usage attribution). Defaults to
+   * `sessionId`.
+   */
+  usageLimitSessionId?: string | null;
   turnId?: string | null;
   turnAttemptId?: string | null;
   latencyMode?: LatencyMode;
@@ -196,11 +203,12 @@ export async function settleModelUsage(
   // per source identity against the session's task root, for every funding
   // path. A failure throws so no further model request is dispatched until
   // the database recovers; the provider call is never replayed.
-  if (input.sessionId) {
+  const usageLimitSessionId = input.usageLimitSessionId ?? input.sessionId;
+  if (usageLimitSessionId) {
     await settleSessionUsageReceipt(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
+      sessionId: usageLimitSessionId,
       sourceId: input.sourceId,
       turnId: input.turnId ?? null,
       amountMicros: estimatedProviderCostMicros,

@@ -2612,12 +2612,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "sessions:control",
-    );
+    // Checked first: an agent acting for a person (connected agent, admin
+    // access, personal API key) is refused whatever access it holds.
     if (isAgentActingAsPerson(c)) {
       throw new SessionUsageLimitHttpError(
         403,
@@ -2625,6 +2621,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         "Only a person or the application's server can change a task usage limit.",
       );
     }
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:control",
+    );
     const payload = await parseRequestJson(c, SetSessionUsageLimitRequest);
     return c.json(
       await setSessionUsageLimitForAccess(deps, authorization, sessionId, payload, c.req.raw),
@@ -5407,6 +5409,13 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
+  // OPE-798 task usage limit: read with the session; change as a control write
+  // (the route additionally admits only a person or the host server key).
+  if (suffix === "/usage-limit") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT") return "session.control";
+    return null;
+  }
   if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
@@ -6239,6 +6248,18 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionUsageLimitHttpError) {
+    // OPE-798: a create-time usage limit the caller may not set (agents and
+    // children) or that this server does not accept yet (producer flag off).
+    return c.json(
+      {
+        code: error.status === 403 ? "SESSION_CREATE_FORBIDDEN" : "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { code: error.code },
+      },
+      error.status as 403 | 404 | 409 | 422 | 503,
+    );
+  }
   if (error instanceof UnsupportedLatencyModeError) {
     return c.json(
       {
