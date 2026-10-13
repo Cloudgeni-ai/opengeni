@@ -50,6 +50,7 @@ export function artifactKernelWasmRebuildDockerArguments(
       ? `bun scripts/build-artifact-kernel-wasm-packages.ts --rebuild --check${options.diagnosticOutput ? ` --diagnostic-output ${canonicalDiagnostics}` : ""}`
       : [
           "bun scripts/build-artifact-runtime-target.ts --target wasm-web --output /tmp/opengeni-artifact-wasm-runtime",
+          `mkdir -p ${canonicalRoot}/packages/artifact-tool/kernel/bindings/dist/wasm-web`,
           `cp -a /tmp/opengeni-artifact-wasm-runtime/wasm-web/. ${canonicalRoot}/packages/artifact-tool/kernel/bindings/dist/wasm-web/`,
           "bun scripts/build-artifact-kernel-wasm-packages.ts",
         ].join(" && ");
