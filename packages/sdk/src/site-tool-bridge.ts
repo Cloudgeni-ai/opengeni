@@ -34,6 +34,8 @@ export type SiteToolBridge = {
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayInvokeResponse>;
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
+  /** The host serves Site Data for its pinned published Site through `fetch`. */
+  siteData?: boolean;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -159,6 +161,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
   };
   return {
     ...(targeted ? { resolve, invoke } : {}),
+    ...(input.fetchResponse && input.artifactId ? { siteData: true } : {}),
     ...(input.fetchResponse
       ? {
           fetch: async (message: SiteHttpRequest, signal: AbortSignal) => {

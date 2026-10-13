@@ -3,6 +3,7 @@ import {
   SiteBridgeDocumentLease,
   SiteBridgeRequestRegistry,
   siteBridgeError,
+  siteBridgeReadyMessage,
   handleSiteBridgeRequest,
   publishedHtmlArtifactDocument,
 } from "../src/components/artifacts/published-html-artifact-frame";
@@ -396,5 +397,47 @@ describe("Site bridge request ownership", () => {
     childBootstrap.close();
     toolChannel.port2.close();
     for (const channel of channels) channel.port1.close();
+  });
+});
+
+test("hosts advertise Site Data only for a pinned published Site with an HTTP transport", () => {
+  const tools = {
+    $catalog: async () => {
+      throw new Error("unused");
+    },
+  } as never;
+  const callTool = async () => {
+    throw new Error("unused");
+  };
+  const pinned = createSiteToolBridge({
+    workspaceTools: tools,
+    workspaceId: "workspace",
+    artifactId: "artifact",
+    siteVersionId: "version",
+    requestedTools: [],
+    callTool,
+    fetchResponse: async () => new Response(null),
+  });
+  expect(siteBridgeReadyMessage(pinned)).toMatchObject({ siteData: 1 });
+  // Inline HTML and tools-only hosts keep the older capability set.
+  const inline = createSiteToolBridge({
+    workspaceTools: tools,
+    workspaceId: "workspace",
+    callTool,
+    fetchResponse: async () => new Response(null),
+  });
+  expect(siteBridgeReadyMessage(inline)).not.toHaveProperty("siteData");
+  const toolsOnly = createSiteToolBridge({
+    workspaceTools: tools,
+    workspaceId: "workspace",
+    artifactId: "artifact",
+    siteVersionId: "version",
+    requestedTools: [],
+    callTool,
+  });
+  expect(siteBridgeReadyMessage(toolsOnly)).not.toHaveProperty("siteData");
+  expect(siteBridgeReadyMessage(undefined)).toEqual({
+    type: OPENGENI_SITE_BRIDGE_READY,
+    version: OPENGENI_SITE_BRIDGE_VERSION,
   });
 });

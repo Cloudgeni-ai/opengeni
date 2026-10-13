@@ -1,4 +1,6 @@
 const SITE_WORKSPACE_PREFIX = "/v1/workspaces/site-host";
+/** Site Data routes name the host's pinned Site as `current`, never an id. */
+const SITE_DATA_CURRENT_PREFIX = `${SITE_WORKSPACE_PREFIX}/published-artifacts/current/`;
 
 /** A Site/Codemode SDK request named a route outside the proxied surface. */
 export class SiteSessionPathError extends Error {
@@ -34,6 +36,14 @@ export function siteSessionPath(
     "/workspaces/site-host",
     `/workspaces/${encodeURIComponent(workspaceId)}`,
   );
+  if (pathname.startsWith(SITE_DATA_CURRENT_PREFIX) && workspaceId !== "site-host") {
+    // Only a host bound to a published Site serves its data.
+    if (!siteId) throw new SiteSessionPathError();
+    return rewritten.replace(
+      "/published-artifacts/current/",
+      `/published-artifacts/${encodeURIComponent(siteId)}/`,
+    );
+  }
   // Preview has no published Site identity. Never widen a Site-only list to the workspace.
   const url = new URL(rewritten, "http://site.invalid");
   if (url.searchParams.get("originSiteId") === "current" && workspaceId !== "site-host") {
