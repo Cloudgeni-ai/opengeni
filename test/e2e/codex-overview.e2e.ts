@@ -293,10 +293,12 @@ function failureDiagnostics(page: Page): string {
 /** The shared workspace's page in Organization settings > Models names it in back links. */
 const WORKSPACE_NAME = "Codex quota workspace";
 
-/** A workspace's Models page: the Accounts section renders before the async account rows. */
+/** A workspace's Models page: the Model providers section renders before the async account rows. */
 async function waitForAccountsSection(page: Page): Promise<void> {
   try {
-    await page.getByRole("heading", { name: "Accounts", exact: true }).waitFor({ timeout: 20_000 });
+    await page
+      .getByRole("heading", { name: "Model providers", exact: true })
+      .waitFor({ timeout: 20_000 });
   } catch (error) {
     const [title, body] = await Promise.all([
       page.title().catch(() => "<unavailable>"),
