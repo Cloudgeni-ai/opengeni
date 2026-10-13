@@ -512,7 +512,7 @@ by the implementer and recorded here; consequential ones are escalated.
 
 | ID | Date | Decision |
 | --- | --- | --- |
-| D-47 | 2026-10-13 | Jørgen accepted refusing cross-provider switching while `remote_v2` is in use. This supersedes D-40 and Q-05 as delivery requirements: portable conversion is deferred; preserve clear refusal, original history and mode. No conversion retry or production deployment is authorized. |
+| D-47 | 2026-10-13 | The product owner accepted refusing cross-provider switching while `remote_v2` is in use. This supersedes D-40 and Q-05 as delivery requirements: portable conversion is deferred; preserve clear refusal, original history and mode. No conversion retry or production deployment is authorized. |
 | D-48 | 2026-10-13 | Finish-line implementation scope: renewal is a lease ownership/liveness check, not a second authorization system. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
 
 ### Open decisions
