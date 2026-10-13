@@ -1575,7 +1575,8 @@ const SettingsSchema = z.object({
     .default(1024 * 1024 * 1024),
   siteDataViewerWritesPerMinute: z.coerce.number().int().positive().default(120),
   siteDataSiteWritesPerMinute: z.coerce.number().int().positive().default(600),
-  siteDataBillingMode: z.enum(["usage_only"]).default("usage_only"),
+  siteDataViewerReadsPerMinute: z.coerce.number().int().positive().default(600),
+  siteDataMaxRecordsPerCollection: z.coerce.number().int().positive().default(100_000),
   // Explicit commercial cutover. Existing queued revisions remain unpriced;
   // only jobs created at or after this instant may enter the paid rail.
   documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
@@ -4915,7 +4916,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     siteDataWorkspaceBytes: optional("OPENGENI_SITE_DATA_WORKSPACE_BYTES"),
     siteDataViewerWritesPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_WRITES_PER_MINUTE"),
     siteDataSiteWritesPerMinute: optional("OPENGENI_SITE_DATA_SITE_WRITES_PER_MINUTE"),
-    siteDataBillingMode: optional("OPENGENI_SITE_DATA_BILLING_MODE"),
+    siteDataViewerReadsPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_READS_PER_MINUTE"),
+    siteDataMaxRecordsPerCollection: optional("OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION"),
     documentEmbeddingCreditsActivatedAt: optional(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
     ),

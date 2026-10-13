@@ -399,7 +399,7 @@ test("each access mode applies to viewers and managers", async () => {
   expect(locked.status).toBe(409);
 });
 
-test("Site frames read their own records and never manage", async () => {
+test("Site frames get viewer reach whoever views them, and never manage", async () => {
   const f = await fixture();
   const first = await f.publish("Tracker");
   const second = await f.publish("Other");
@@ -408,13 +408,47 @@ test("Site frames read their own records and never manage", async () => {
   await s.write(f.member, [{ op: "insert", collection: "tracker", data: { steps: 1 } }]);
   const own = await s.write(f.owner, [{ op: "insert", collection: "tracker", data: { steps: 2 } }]);
   const frame = { "x-opengeni-site-id": first.id };
-  // The owner's own Site page shows only their records unless it asks for all.
+  // Site HTML is untrusted: even the owner's own Site page reads with viewer
+  // reach, so asking for all records still returns only the owner's.
   expect(ids(await s.query(f.owner, { collection: "tracker" }, frame))).toEqual([
     own.json.results[0].record.id,
   ]);
+  expect(ids(await s.query(f.owner, { collection: "tracker", scope: "all" }, frame))).toEqual([
+    own.json.results[0].record.id,
+  ]);
+  // Outside the frame the owner manages and reads everything.
   expect(
-    (await s.query(f.owner, { collection: "tracker", scope: "all" }, frame)).json.records,
+    (await s.query(f.owner, { collection: "tracker", scope: "all" })).json.records,
   ).toHaveLength(2);
+  // A frame cannot write a shared_read collection, even on the owner's behalf.
+  await s.define(f.owner, "news", { accessMode: "shared_read" });
+  const framedWrite = await s.write(
+    f.owner,
+    [{ op: "insert", collection: "news", data: { title: "x" } }],
+    frame,
+  );
+  expect(framedWrite.status).toBe(403);
+  expect(
+    (await s.write(f.owner, [{ op: "insert", collection: "news", data: { title: "x" } }])).status,
+  ).toBe(200);
+  // Another viewer's private file stays hidden from the owner's frame.
+  const privateFile = await s.request(
+    f.member,
+    "POST",
+    "/files?name=id.pdf&scope=private",
+    new TextEncoder().encode("%PDF-1.7 test"),
+    { "content-type": "application/pdf", ...frame },
+  );
+  expect(privateFile.status).toBe(201);
+  expect((await s.request(f.owner, "GET", "/files", undefined, frame)).json.files).toHaveLength(0);
+  expect((await s.request(f.owner, "GET", "/files")).json.files).toHaveLength(1);
+  // The host-set frame marker alone makes a request framed; without the Site id it names no Site.
+  const markerOnly = await s.query(
+    f.owner,
+    { collection: "tracker" },
+    { "x-opengeni-site-frame": "1" },
+  );
+  expect(markerOnly.status).toBe(403);
   // A frame cannot define, describe, export, or reach another Site.
   expect(
     (await s.request(f.owner, "PUT", "/data/collections/x", { accessMode: "shared" }, frame))
@@ -590,7 +624,8 @@ test("batches are atomic and queries filter, sort, count and page", async () => 
 test("quotas and write limits are enforced", async () => {
   const f = await fixture({
     siteDataMaxRecordBytes: 200,
-    siteDataRecordBytesPerSite: 600,
+    // Each record is charged its JSON plus 512 bytes.
+    siteDataRecordBytesPerSite: 3_000,
     siteDataMaxCollectionsPerSite: 2,
     siteDataViewerWritesPerMinute: 3,
     siteDataMaxFileBytes: 64,
@@ -617,10 +652,12 @@ test("quotas and write limits are enforced", async () => {
   expect(full.json.error.details.quota).toBe("site_record_bytes");
 
   // Viewers get a per-minute write window; managers are bounded by quotas.
+  const r = f.site((await f.publish("Busy")).id);
+  await r.define(f.owner, "b", { accessMode: "shared" });
   const statuses: number[] = [];
   for (let index = 0; index < 4; index += 1)
     statuses.push(
-      (await s.write(f.member, [{ op: "insert", collection: "b", data: { n: index } }])).status,
+      (await r.write(f.member, [{ op: "insert", collection: "b", data: { n: index } }])).status,
     );
   expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
   expect(statuses[3]).toBe(429);
@@ -768,7 +805,13 @@ test("an agent defines and feeds a collection the way a schedule would", async (
     const text = (result.content as Array<{ type: string; text?: string }>).find(
       (item) => item.type === "text",
     )?.text;
-    return { isError: result.isError === true, value: JSON.parse(text ?? "null") };
+    let value: any = text ?? null;
+    try {
+      value = JSON.parse(text ?? "null");
+    } catch {
+      // Argument errors are plain text.
+    }
+    return { isError: result.isError === true, value };
   };
   try {
     expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
@@ -824,7 +867,7 @@ test("an agent defines and feeds a collection the way a schedule would", async (
     // The agent acts for the owner: records are owned by the person, written by the agent.
     expect(page.json.records[0]).toMatchObject({
       owner: `user:${f.owner.subjectId}`,
-      updatedBy: "agent:worker:first-party-mcp",
+      updatedBy: `agent:session:${session.id}`,
     });
 
     const exported = await callTool("site_data_export", {
@@ -844,6 +887,37 @@ test("an agent defines and feeds a collection the way a schedule would", async (
       keyField: "domain",
     });
     expect(imported.value).toEqual({ imported: 2 });
+    // The tools reuse the contracts: a json import needs records, keyField is a field path.
+    const empty = await callTool("site_data_import", {
+      siteId: created.id,
+      collection: "companies",
+      format: "json",
+    });
+    expect(empty.isError).toBe(true);
+    const badKey = await callTool("site_data_import", {
+      siteId: created.id,
+      collection: "companies",
+      format: "json",
+      records: [{ domain: "x.com" }],
+      keyField: "__proto__",
+    });
+    expect(badKey.isError).toBe(true);
+    const own = await callTool("site_data_query", {
+      siteId: created.id,
+      collection: "companies",
+      scope: "own",
+      count: true,
+    });
+    expect(own.isError, JSON.stringify(own.value)).toBe(false);
+    expect(own.value.count).toBe(4);
+    const listed = (await mcp.listTools()).tools;
+    const upload = listed.find((tool) => tool.name === "site_files_upload")!;
+    expect(JSON.stringify(upload.inputSchema)).toContain(
+      "only the uploader and the Site's managers",
+    );
+    expect(
+      (listed.find((tool) => tool.name === "site_data_query")!.inputSchema as any).properties.scope,
+    ).toBeDefined();
     const described = await callTool("site_data_describe", { siteId: created.id });
     expect(described.value.collections[0]).toMatchObject({ name: "companies", recordCount: 4 });
     const uploaded = await callTool("site_files_upload", {
@@ -873,4 +947,319 @@ test("an agent defines and feeds a collection the way a schedule would", async (
   } finally {
     await mcp.close();
   }
+});
+
+test("paths that name a prototype are refused everywhere", async () => {
+  const f = await fixture();
+  const s = f.site((await f.publish("Pollution")).id);
+  await s.define(f.owner, "rows", { accessMode: "shared" });
+  const polluted = () => ({}) as Record<string, unknown>;
+  for (const header of ["__proto__.x", "constructor.prototype.x", "prototype"]) {
+    const imported = await s.request(f.owner, "POST", "/data/collections/rows/import", {
+      format: "csv",
+      csv: `${header}\nhacked\n`,
+    });
+    expect(imported.status, header).toBe(422);
+  }
+  expect(polluted().x).toBeUndefined();
+  for (const field of ["constructor", "__proto__", "prototype.x", "$id2", "$toString"]) {
+    const sorted = await s.query(f.owner, { collection: "rows", sort: [{ field }] });
+    expect(sorted.status, field).toBe(422);
+  }
+  // Names an object inherits are ordinary data fields, never system sorts.
+  for (const field of ["toString", "hasOwnProperty", "valueOf"]) {
+    const sorted = await s.query(f.owner, { collection: "rows", sort: [{ field }] });
+    expect(sorted.status, field).toBe(200);
+  }
+  const filtered = await s.query(f.owner, {
+    collection: "rows",
+    where: [{ field: "__proto__.polluted", op: "eq", value: 1 }],
+  });
+  expect(filtered.status).toBe(422);
+  const keyed = await s.request(f.owner, "POST", "/data/collections/rows/import", {
+    format: "json",
+    records: [{ a: 1 }],
+    keyField: "constructor",
+  });
+  expect(keyed.status).toBe(422);
+  const increment = await s.write(f.owner, [
+    { op: "increment", collection: "rows", key: "k", field: "__proto__.count" },
+  ]);
+  expect(increment.status).toBe(422);
+  const indexed = await s.define(f.owner, "rows", {
+    accessMode: "shared",
+    indexedFields: ["prototype"],
+  });
+  expect(indexed.status).toBe(422);
+  const unique = await s.define(f.owner, "rows", {
+    accessMode: "shared",
+    uniqueFields: [["constructor"]],
+  });
+  expect(unique.status).toBe(422);
+  // A JSON key named __proto__ is ordinary own data, never a prototype.
+  const stored = await s.write(f.owner, [
+    { op: "insert", collection: "rows", key: "own", data: JSON.parse('{"__proto__":{"x":1}}') },
+  ]);
+  expect([200, 422]).toContain(stored.status);
+  expect(polluted().x).toBeUndefined();
+  // The API keeps serving.
+  expect((await s.query(f.owner, { collection: "rows" })).status).toBe(200);
+});
+
+test("collection schemas are isolated, local and regex-free", async () => {
+  const f = await fixture();
+  const a = f.site((await f.publish("Schema A")).id);
+  const b = f.site((await f.publish("Schema B")).id);
+  for (const [schema, message] of [
+    [{ $id: "https://example.test/x", type: "object" }, "$id"],
+    [{ type: "object", properties: { a: { $ref: "https://example.test/other#" } } }, "$ref"],
+    [{ type: "object", properties: { a: { $ref: "other.json" } } }, "$ref"],
+    [{ type: "object", properties: { a: { type: "string", pattern: "^(a+)+$" } } }, "pattern"],
+    [{ type: "object", patternProperties: { "^x": { type: "string" } } }, "patternProperties"],
+    [{ $schema: "https://json-schema.org/draft/2020-12/schema" }, "$schema"],
+    [{ $anchor: "here" }, "$anchor"],
+    [{ $dynamicRef: "#here" }, "$dynamicRef"],
+  ] as const) {
+    const defined = await a.define(f.owner, "rows", { accessMode: "shared", jsonSchema: schema });
+    expect(defined.status, JSON.stringify(schema)).toBe(422);
+    expect(defined.json.error.message).toContain(message);
+  }
+  // Property names that look like keywords are fine, and local references work.
+  const schema = {
+    type: "object",
+    $defs: { name: { type: "string", maxLength: 20 } },
+    properties: {
+      id: { type: "string" },
+      pattern: { $ref: "#/$defs/name" },
+      name: { $ref: "#/$defs/name" },
+    },
+    required: ["name"],
+  };
+  for (const site of [a, b]) {
+    expect(
+      (await site.define(f.owner, "rows", { accessMode: "shared", jsonSchema: schema })).status,
+    ).toBe(201);
+    // Writes keep working after the first: nothing registers globally.
+    for (let index = 0; index < 2; index += 1)
+      expect(
+        (
+          await site.write(f.owner, [
+            { op: "insert", collection: "rows", data: { name: `n${index}`, pattern: "p" } },
+          ])
+        ).status,
+      ).toBe(200);
+    const invalid = await site.write(f.owner, [
+      { op: "insert", collection: "rows", data: { name: "x".repeat(30) } },
+    ]);
+    expect(invalid.status).toBe(422);
+  }
+  const { siteDataSchemaCacheSize, validateSiteDataRecord } =
+    await import("../src/site-data/service");
+  for (let index = 0; index < 300; index += 1)
+    validateSiteDataRecord({ type: "object", maxProperties: index + 1 }, {});
+  expect(siteDataSchemaCacheSize()).toBeLessThanOrEqual(128);
+});
+
+test("only personless keys and people who manage the Site are managers", async () => {
+  const { siteDataRole } = await import("../src/site-data/service");
+  const site = { ownerSubjectId: "owner", createdBySubjectId: "owner" };
+  const grant = (principalKind: AccessGrant["principalKind"]): AccessGrant => ({
+    accountId: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
+    subjectId: "subject",
+    permissions: ["artifacts:read", "artifacts:publish"],
+    ...(principalKind ? { principalKind } : {}),
+  });
+  expect(siteDataRole(grant("api_key"), site, null)).toBe("manager");
+  expect(siteDataRole(grant("configured_key"), site, null)).toBe("manager");
+  expect(siteDataRole(grant("service"), site, null)).toBe("manager");
+  expect(siteDataRole(grant("agent_attempt"), site, null)).toBe("viewer");
+  expect(siteDataRole(grant("human_session"), site, null)).toBe("viewer");
+  expect(siteDataRole(grant(undefined), site, null)).toBe("viewer");
+  expect(siteDataRole(grant("agent_attempt"), site, "owner")).toBe("manager");
+  expect(siteDataRole(grant("human_session"), site, "someone")).toBe("viewer");
+});
+
+test("counters, per-record charge, record cap, bounded filters and tampered cursors", async () => {
+  const f = await fixture({ siteDataMaxRecordsPerCollection: 3 });
+  const s = f.site((await f.publish("Counters")).id);
+  await s.define(f.owner, "rows", { accessMode: "shared" });
+  const written = await s.write(f.owner, [
+    { op: "insert", collection: "rows", data: {} },
+    { op: "insert", collection: "rows", data: { null: "named null", n: -5 } },
+  ]);
+  expect(written.status).toBe(200);
+  const described = await s.describe(f.owner);
+  // `{}` is 2 bytes of JSON but is charged 514.
+  const sizes = written.json.results.map((item: any) => item.record.sizeBytes);
+  expect(described.json.collections[0]).toMatchObject({
+    recordCount: 2,
+    recordBytes: sizes[0] + sizes[1] + 2 * 512,
+  });
+  expect(described.json.usage.recordBytes).toBe(sizes[0] + sizes[1] + 2 * 512);
+  // A field literally named null is queryable.
+  const byNull = await s.query(f.owner, {
+    collection: "rows",
+    where: [{ field: "null", op: "eq", value: "named null" }],
+  });
+  expect(byNull.json.records).toHaveLength(1);
+  // The collection cap counts every record in the batch.
+  const capped = await s.write(f.owner, [
+    { op: "insert", collection: "rows", data: { a: 1 } },
+    { op: "insert", collection: "rows", data: { a: 2 } },
+  ]);
+  expect(capped.status).toBe(413);
+  expect(capped.json.error.details.quota).toBe("collection_records");
+  expect((await s.describe(f.owner)).json.collections[0].recordCount).toBe(2);
+  // Deleting gives the room back.
+  await s.write(f.owner, [
+    { op: "delete", collection: "rows", id: written.json.results[0].record.id },
+  ]);
+  const after = await s.describe(f.owner);
+  expect(after.json.collections[0]).toMatchObject({ recordCount: 1, recordBytes: sizes[1] + 512 });
+  expect((await s.query(f.owner, { collection: "rows", count: true })).json.count).toBe(1);
+  // Filters are bounded.
+  const long = await s.query(f.owner, {
+    collection: "rows",
+    where: [{ field: "a", op: "eq", value: "x".repeat(2000) }],
+  });
+  expect(long.status).toBe(422);
+  const wide = await s.query(f.owner, {
+    collection: "rows",
+    where: [{ field: "a", op: "in", value: Array.from({ length: 101 }, (_, i) => i) }],
+  });
+  expect(wide.status).toBe(422);
+  // Tampered cursors are validation errors, never server errors.
+  const tamper = (value: unknown, sort: unknown[]) =>
+    Buffer.from(
+      JSON.stringify({
+        s: JSON.stringify([...sort, (sort.at(-1) as string[] | undefined)?.[1] ?? "asc"]),
+        v: [value],
+        id: crypto.randomUUID(),
+      }),
+    ).toString("base64url");
+  for (const [field, value] of [
+    ["$createdAt", "not a time"],
+    ["$updatedAt", 12],
+    ["$version", "1; drop"],
+    ["$version", 1.5],
+    ["$key", 7],
+  ] as const) {
+    const result = await s.query(f.owner, {
+      collection: "rows",
+      sort: [{ field }],
+      cursor: tamper(value, [[field, "asc"]]),
+    });
+    expect(result.status, `${field} ${String(value)}`).toBe(422);
+  }
+  const garbage = await s.query(f.owner, { collection: "rows", cursor: "!!!" });
+  expect(garbage.status).toBe(422);
+  const files = await s.request(f.owner, "GET", "/files?cursor=abc");
+  expect(files.status).toBe(422);
+});
+
+test("the workspace total is shared across its Sites", async () => {
+  const f = await fixture({ siteDataWorkspaceBytes: 2_000 });
+  const a = f.site((await f.publish("WA")).id);
+  const b = f.site((await f.publish("WB")).id);
+  await a.define(f.owner, "rows", { accessMode: "shared" });
+  await b.define(f.owner, "rows", { accessMode: "shared" });
+  for (let index = 0; index < 3; index += 1)
+    expect(
+      (await a.write(f.owner, [{ op: "insert", collection: "rows", data: { i: index } }])).status,
+    ).toBe(200);
+  const full = await b.write(f.owner, [{ op: "insert", collection: "rows", data: { i: 9 } }]);
+  expect(full.status).toBe(413);
+  expect(full.json.error.details.quota).toBe("workspace_bytes");
+  const file = await b.request(f.owner, "POST", "/files?name=a.bin", new Uint8Array(500), {
+    "content-type": "application/octet-stream",
+  });
+  expect(file.status).toBe(413);
+  expect(file.json.error.details.quota).toBe("workspace_bytes");
+});
+
+test("rate windows count attempts before any work, and uploads check before storing", async () => {
+  const f = await fixture({
+    siteDataViewerWritesPerMinute: 2,
+    siteDataViewerReadsPerMinute: 2,
+    siteDataFileBytesPerSite: 20,
+  });
+  const created = await f.publish("Limits");
+  const s = f.site(created.id);
+  const frame = { "x-opengeni-site-id": created.id };
+  await s.define(f.owner, "news", { accessMode: "shared_read" });
+  await s.define(f.owner, "notes", { accessMode: "shared" });
+  // Refused writes count: two forbidden attempts use the viewer's window.
+  for (let index = 0; index < 2; index += 1)
+    expect(
+      (await s.write(f.member, [{ op: "insert", collection: "news", data: { i: index } }])).status,
+    ).toBe(403);
+  const limited = await s.write(f.member, [
+    { op: "insert", collection: "notes", data: { ok: true } },
+  ]);
+  expect(limited.status).toBe(429);
+  expect(errorCode(limited)).toBe("rate_limited");
+  // Another viewer has their own window.
+  expect(
+    (await s.write(f.third, [{ op: "insert", collection: "notes", data: { ok: true } }])).status,
+  ).toBe(200);
+  // An upload over the window never reaches storage.
+  const before = f.objects.size;
+  const throttled = await s.request(f.member, "POST", "/files?name=a.png", PNG, {
+    "content-type": "image/png",
+    ...frame,
+  });
+  expect(throttled.status).toBe(429);
+  // An upload over the quota never reaches storage either.
+  const tooMuch = await s.request(f.owner, "POST", "/files?name=b.bin", new Uint8Array(30), {
+    "content-type": "application/octet-stream",
+  });
+  expect(tooMuch.status).toBe(413);
+  expect(tooMuch.json.error.details.quota).toBe("site_file_bytes");
+  expect(f.objects.size).toBe(before);
+  // A body without Content-Length is cut off at the per-file cap while streaming.
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let index = 0; index < 20; index += 1) controller.enqueue(new Uint8Array(1024 * 1024));
+      controller.close();
+    },
+  });
+  const streamed = await f.app.request(
+    `/v1/workspaces/${f.workspace.id}/published-artifacts/${created.id}/files?name=big.bin`,
+    {
+      method: "POST",
+      headers: { ...f.owner.headers, "content-type": "application/octet-stream" },
+      body: stream,
+      duplex: "half",
+    } as RequestInit,
+  );
+  expect(streamed.status).toBe(413);
+  expect(f.objects.size).toBe(before);
+  // Site frames get a generous read window; reads outside a frame are not windowed.
+  const reads: number[] = [];
+  for (let index = 0; index < 3; index += 1)
+    reads.push((await s.query(f.third, { collection: "notes" }, frame)).status);
+  expect(reads).toEqual([200, 200, 429]);
+  expect((await s.query(f.third, { collection: "notes" })).status).toBe(200);
+});
+
+test("CSV exports neutralize formulas and cap their columns", async () => {
+  const f = await fixture();
+  const s = f.site((await f.publish("Export")).id);
+  await s.define(f.owner, "rows", { accessMode: "shared" });
+  await s.write(f.member, [
+    { op: "insert", collection: "rows", data: { a: '=HYPERLINK("x")', b: -5, c: "+1", d: "@x" } },
+  ]);
+  const csv = await s.request(f.owner, "GET", "/data/collections/rows/export?format=csv");
+  expect(csv.status).toBe(200);
+  const [header, row] = (csv.json as string).split("\r\n");
+  expect(header).toBe("$id,$key,$owner,$createdAt,$updatedAt,a,b,c,d");
+  expect(row!.split(",").slice(-4)).toEqual(['"\'=HYPERLINK(""x"")"', "-5", "'+1", "'@x"]);
+  // A viewer cannot blow up the export's width.
+  const wideData = Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`k${i}`, i]));
+  await s.write(f.member, [{ op: "insert", collection: "rows", data: wideData }]);
+  const wide = await s.request(f.owner, "GET", "/data/collections/rows/export?format=csv");
+  const [wideHeader, ...rows] = (wide.json as string).trim().split("\r\n");
+  expect(wideHeader).toBe("$id,$key,$owner,$createdAt,$updatedAt,$data");
+  expect(rows).toHaveLength(2);
 });

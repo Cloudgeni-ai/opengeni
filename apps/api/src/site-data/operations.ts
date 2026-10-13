@@ -11,6 +11,7 @@ import type {
 import {
   parseSiteDataPath,
   readSiteDataPath,
+  writeSiteDataPath,
   SiteDataError,
   SITE_DATA_MAX_BATCH,
   type SiteDataFile,
@@ -24,9 +25,11 @@ import {
   publicSiteDataLimits,
   resolveSiteDataAccess,
   sha256Hex,
+  warmSiteDataSchemas,
   siteDataFileContentType,
   siteDataFileName,
   siteDataObjectKey,
+  type SiteDataAccess,
   type SiteDataDeps,
   type SiteDataSurface,
 } from "./service";
@@ -35,7 +38,42 @@ import {
 
 export const SITE_DATA_EXPORT_MAX_RECORDS = 10_000;
 export const SITE_DATA_IMPORT_MAX_RECORDS = 1_000;
+/** CSV exports name at most this many data columns; wider data goes in one JSON column. */
+export const SITE_DATA_EXPORT_MAX_COLUMNS = 200;
+/** Exports stop adding records past this many bytes and report truncation. */
+export const SITE_DATA_EXPORT_MAX_BYTES = 16 * 1024 * 1024;
 const FILE_URL_SECONDS = 300;
+
+/**
+ * Count a rate-limited caller's attempt before any work, in its own
+ * transaction, so failed and refused attempts count too. Managers outside a
+ * Site frame are bounded by quotas, not windows.
+ */
+async function consume(access: SiteDataAccess, kind: "write" | "read", operations: number) {
+  if (!access.rateLimited) return;
+  // Reads are limited only for Site frames, generously.
+  if (kind === "read" && !access.caller.framed) return;
+  await access.store.consumeRate(access.caller, kind, Math.max(1, operations), access.limits);
+}
+
+/** Compile touched collections' schemas before the write takes the Site's lock. */
+async function prepareWrite(
+  access: SiteDataAccess,
+  operations: readonly { collection?: unknown }[],
+) {
+  await consume(access, "write", operations.length);
+  await warmSiteDataSchemas(
+    access,
+    operations.flatMap((op) => (typeof op?.collection === "string" ? [op.collection] : [])),
+  );
+}
+
+function logCleanupFailure(what: string, objectKey: string, error: unknown): void {
+  console.warn(`[site-data] ${what} left an unreachable object`, {
+    objectKey,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
 
 export async function describeSiteData(
   deps: SiteDataDeps,
@@ -100,6 +138,7 @@ export async function querySiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await consume(access, "read", 1);
   return access.store.query(access.caller, {
     collection: query.collection,
     ...(query.where ? { where: query.where } : {}),
@@ -119,6 +158,7 @@ export async function getSiteDataRecord(
   surface: SiteDataSurface = {},
 ): Promise<SiteDataRecord | null> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await consume(access, "read", 1);
   return access.store.get(
     access.caller,
     request.collection,
@@ -134,6 +174,7 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await prepareWrite(access, operations);
   return access.store.write(access.caller, operations as SiteDataWriteOp[], access.writeOptions);
 }
 
@@ -174,11 +215,12 @@ export function parseSiteDataCsv(text: string): string[][] {
   return rows;
 }
 
-function csvCell(value: unknown): string {
+export function siteDataCsvCell(value: unknown): string {
   if (value === undefined || value === null) return "";
   let text = typeof value === "string" ? value : JSON.stringify(value);
-  // Spreadsheet formula injection: stored records are untrusted.
-  if (/^[=+\-@\t\r]/u.test(text)) text = `'${text}`;
+  // Spreadsheet formula injection: stored strings are untrusted. Numbers
+  // (including negative ones) and other JSON values are left as they are.
+  if (typeof value === "string" && /^[=+\-@\t\r]/u.test(text)) text = `'${text}`;
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
@@ -199,22 +241,15 @@ export async function importSiteData(
     for (const name of header)
       if (!parseSiteDataPath(name))
         throw new SiteDataError("validation", `Invalid CSV column name: ${name}`);
-    records = body.map((cells) => {
-      let record: Record<string, unknown> = {};
-      header.forEach((name, column) => {
-        const segments = parseSiteDataPath(name)!;
-        let target = record;
-        segments.forEach((segment, depth) => {
-          if (depth === segments.length - 1) target[segment] = cells[column] ?? "";
-          else {
-            const next = target[segment];
-            target[segment] = typeof next === "object" && next !== null ? next : {};
-            target = target[segment] as Record<string, unknown>;
-          }
-        });
-      });
-      return record;
-    });
+    // parseSiteDataPath refuses __proto__, prototype and constructor, and
+    // writeSiteDataPath only ever defines own properties.
+    records = body.map((cells) =>
+      header.reduce<Record<string, unknown>>(
+        (record, name, column) =>
+          writeSiteDataPath(record, parseSiteDataPath(name)!, cells[column] ?? ""),
+        {},
+      ),
+    );
   } else records = request.records ?? [];
   if (records.length > SITE_DATA_IMPORT_MAX_RECORDS)
     throw new SiteDataError(
@@ -233,6 +268,7 @@ export async function importSiteData(
       });
     return { op: "put", collection, key: String(key), data };
   });
+  await warmSiteDataSchemas(access, [collection]);
   let imported = 0;
   // Each batch is atomic; a failure reports how many records were imported.
   for (let start = 0; start < operations.length; start += SITE_DATA_MAX_BATCH) {
@@ -269,21 +305,26 @@ export async function exportSiteData(
   const records: SiteDataRecord[] = [];
   let cursor: string | null = null;
   let truncated = false;
-  do {
+  let bytes = 0;
+  // Collected up front and capped by count and bytes; the result is one bounded string.
+  pages: do {
     const page = await access.store.query(access.caller, {
       collection,
       sort: [{ field: "$createdAt", direction: "asc" }],
       limit: 200,
       ...(cursor ? { cursor } : {}),
     });
-    records.push(...page.records);
-    cursor = page.nextCursor;
-    if (records.length >= SITE_DATA_EXPORT_MAX_RECORDS && cursor) {
-      truncated = true;
-      break;
+    for (const record of page.records) {
+      bytes += record.sizeBytes + 256;
+      if (records.length >= SITE_DATA_EXPORT_MAX_RECORDS || bytes > SITE_DATA_EXPORT_MAX_BYTES) {
+        truncated = true;
+        break pages;
+      }
+      records.push(record);
     }
+    cursor = page.nextCursor;
   } while (cursor);
-  const exported = records.slice(0, SITE_DATA_EXPORT_MAX_RECORDS);
+  const exported = records;
   if (format === "json")
     return {
       collection,
@@ -302,10 +343,31 @@ export async function exportSiteData(
         })),
       ),
     };
-  const columns = [...new Set(exported.flatMap((record) => Object.keys(record.data)))].sort();
-  const header = ["$id", "$key", "$owner", "$createdAt", "$updatedAt", ...columns];
+  // Viewers can shape records, so the column set is bounded: past the cap,
+  // every record's data goes into a single JSON column instead.
+  const seen = new Set<string>();
+  let wide = false;
+  for (const record of exported) {
+    for (const key of Object.keys(record.data)) {
+      seen.add(key);
+      if (seen.size > SITE_DATA_EXPORT_MAX_COLUMNS) {
+        wide = true;
+        break;
+      }
+    }
+    if (wide) break;
+  }
+  const columns = wide ? [] : [...seen].sort();
+  const header = [
+    "$id",
+    "$key",
+    "$owner",
+    "$createdAt",
+    "$updatedAt",
+    ...(wide ? ["$data"] : columns),
+  ];
   const lines = [
-    header.map(csvCell).join(","),
+    header.map(siteDataCsvCell).join(","),
     ...exported.map((record) =>
       [
         record.id,
@@ -313,9 +375,13 @@ export async function exportSiteData(
         record.owner,
         record.createdAt,
         record.updatedAt,
-        ...columns.map((column) => record.data[column]),
+        ...(wide
+          ? [JSON.stringify(record.data)]
+          : columns.map((column) =>
+              Object.hasOwn(record.data, column) ? record.data[column] : undefined,
+            )),
       ]
-        .map(csvCell)
+        .map(siteDataCsvCell)
         .join(","),
     ),
   ];
@@ -350,12 +416,9 @@ export async function uploadSiteDataFile(
 ): Promise<SiteDataFile> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
   const objects = storage(deps);
-  if (input.bytes.byteLength > access.limits.maxFileBytes)
-    throw new SiteDataError(
-      "quota_exceeded",
-      `A file can be at most ${Math.floor(access.limits.maxFileBytes / (1024 * 1024))} MB`,
-      { quota: "file_bytes", limit: access.limits.maxFileBytes },
-    );
+  // Rate, then quota, before a single byte reaches object storage.
+  await consume(access, "write", 1);
+  await access.store.checkFileQuota(access.caller, input.bytes.byteLength, access.limits);
   const name = siteDataFileName(input.name);
   const contentType = siteDataFileContentType(input.contentType, input.bytes);
   const scope = input.scope ?? "shared";
@@ -371,13 +434,14 @@ export async function uploadSiteDataFile(
       { id, name, contentType, sizeBytes: input.bytes.byteLength, sha256, objectKey, scope },
       {
         limits: access.limits,
-        rateLimit: access.writeOptions.rateLimit,
         afterWrite: (tx, summary) =>
           meterSiteData(tx, grant, access.caller, access.subjectId, "upload", summary),
       },
     );
   } catch (error) {
-    await objects.deleteObject(objectKey).catch(() => undefined);
+    await objects
+      .deleteObject(objectKey)
+      .catch((cleanup: unknown) => logCleanupFailure("A refused upload", objectKey, cleanup));
     throw error;
   }
 }
@@ -390,6 +454,7 @@ export async function listSiteDataFiles(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await consume(access, "read", 1);
   return access.store.listFiles(access.caller, options);
 }
 
@@ -402,6 +467,7 @@ export async function getSiteDataFileUrl(
   audience: "public" | "sandbox" = "public",
 ): Promise<{ file: SiteDataFile; url: string; expiresAt: string }> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await consume(access, "read", 1);
   const stored = await access.store.getFile(access.caller, fileId);
   if (!stored) throw new SiteDataError("not_found", "File not found");
   const { objectKey, ...file } = stored;
@@ -422,10 +488,11 @@ export async function deleteSiteDataFile(
   surface: SiteDataSurface = {},
 ): Promise<{ deleted: { id: string } }> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await consume(access, "write", 1);
   const removed = await access.store.deleteFile(access.caller, fileId);
   // The metadata row is gone; a failed object delete leaves an unreachable blob.
   await storage(deps)
     .deleteObject(removed.objectKey)
-    .catch(() => undefined);
+    .catch((cleanup: unknown) => logCleanupFailure("A file delete", removed.objectKey, cleanup));
   return { deleted: { id: removed.id } };
 }

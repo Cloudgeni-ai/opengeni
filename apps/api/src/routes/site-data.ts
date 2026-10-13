@@ -1,3 +1,4 @@
+import { SITE_FRAME_HEADER } from "@opengeni/contracts/site-session-http";
 import {
   SiteDataCollectionDefinitionRequest,
   SiteDataConfirmRequest,
@@ -84,10 +85,59 @@ function siteId(context: Context): string {
   return parsed.data;
 }
 
-/** Requests a host forwards from a Site frame carry its pinned Site id. */
+/**
+ * Requests a host forwards from a Site frame carry the host-set frame marker
+ * and the pinned Site id. Either one makes the request framed; a frame
+ * without its Site id names no Site and is refused.
+ */
 function surface(context: Context): SiteDataSurface {
   const frame = context.req.header("x-opengeni-site-id");
-  return frame ? { frameSiteId: frame } : {};
+  const marked = context.req.header(SITE_FRAME_HEADER) !== undefined;
+  if (!frame && !marked) return {};
+  return { frameSiteId: frame ?? "" };
+}
+
+function framed(context: Context): boolean {
+  return surface(context).frameSiteId !== undefined;
+}
+
+/** Read an upload body, refusing it as soon as it passes the size cap. */
+async function boundedBody(context: Context, maxBytes: number): Promise<Uint8Array> {
+  const tooLarge = () =>
+    siteDataHttpError(
+      new SiteDataError("quota_exceeded", "This file is too large", {
+        quota: "file_bytes",
+        limit: maxBytes,
+      }),
+    );
+  const declared = context.req.header("content-length");
+  if (declared !== undefined && Number(declared) > maxBytes) throw tooLarge();
+  const stream = context.req.raw.body;
+  if (!stream) return new Uint8Array();
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw tooLarge();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 /**
@@ -102,14 +152,14 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/data`, async (context) => {
     const grant = await grantFor(context, "artifacts:read");
-    if (surface(context).frameSiteId) throw invalid("Use site.data from a Site");
+    if (framed(context)) throw invalid("Use site.data from a Site");
     return context.json(await run(() => describeSiteData(deps, grant, siteId(context))));
   });
 
   app.put(`${base}/data/collections/:name`, async (context) => {
     const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, SiteDataCollectionDefinitionRequest);
-    if (surface(context).frameSiteId)
+    if (framed(context))
       throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot define collections"));
     const result = await run(() =>
       defineSiteDataCollection(deps, grant, siteId(context), context.req.param("name")!, request),
@@ -121,7 +171,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:publish");
     if (context.req.query("confirm") !== "true")
       throw invalid("Deleting a collection needs confirm=true");
-    if (surface(context).frameSiteId)
+    if (framed(context))
       throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot delete collections"));
     return context.json(
       await run(() =>
@@ -133,7 +183,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(`${base}/data/collections/:name/reset`, async (context) => {
     const grant = await grantFor(context, "artifacts:publish");
     await body(context, SiteDataConfirmRequest);
-    if (surface(context).frameSiteId)
+    if (framed(context))
       throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot clear collections"));
     return context.json(
       await run(() =>
@@ -145,7 +195,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(`${base}/data/collections/:name/import`, async (context) => {
     const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, SiteDataImportRequest);
-    if (surface(context).frameSiteId)
+    if (framed(context))
       throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot import records"));
     return context.json(
       await run(() =>
@@ -157,7 +207,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get(`${base}/data/collections/:name/export`, async (context) => {
     const grant = await grantFor(context, "artifacts:read");
     const format = context.req.query("format") === "csv" ? "csv" : "json";
-    if (surface(context).frameSiteId)
+    if (framed(context))
       throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot export records"));
     const name = context.req.param("name")!;
     const exported = await run(() => exportSiteData(deps, grant, siteId(context), name, format));
@@ -220,15 +270,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:read");
     const scope = SiteDataFileScope.safeParse(context.req.query("scope") ?? "shared");
     if (!scope.success) throw invalid("scope must be shared or private");
-    const declared = Number(context.req.header("content-length") ?? "0");
-    if (declared > deps.settings.siteDataMaxFileBytes)
-      throw siteDataHttpError(
-        new SiteDataError("quota_exceeded", "This file is too large", {
-          quota: "file_bytes",
-          limit: deps.settings.siteDataMaxFileBytes,
-        }),
-      );
-    const bytes = new Uint8Array(await context.req.arrayBuffer());
+    const bytes = await boundedBody(context, deps.settings.siteDataMaxFileBytes);
     const file = await run(() =>
       uploadSiteDataFile(
         deps,
