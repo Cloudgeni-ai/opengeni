@@ -13593,7 +13593,7 @@
         "$.scopeSubjectId": "unknown?",
         "$.skills": "array?",
         "$.skills[]": "ref(SessionSkill)",
-        "$.startMode": "const?=[\"\\\"realtime\\\"\"]",
+        "$.startMode": "enum?=[\"\\\"realtime\\\"\",\"\\\"standard\\\"\"]",
         "$.targetSandboxId": "string?",
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)",
@@ -29434,6 +29434,7 @@
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
       "OpenGeniSessionUsageLimitReachedError": "value",
+      "OpenGeniSessionUsageLimitUnsupportedError": "value",
       "OpenGeniSetupError": "value",
       "OpenGeniSignatureError": "value",
       "OpenGeniSiteBridgeCancelMessage": "type",
@@ -30306,6 +30307,7 @@
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
       "OpenGeniSessionUsageLimitReachedError": "value",
+      "OpenGeniSessionUsageLimitUnsupportedError": "value",
       "OpenGeniSetupError": "value",
       "OpenGeniStreamError": "value",
       "OpenGeniToolCallError": "value",
@@ -35579,6 +35581,10 @@
       "status",
       "usedMicros"
     ],
+    "OpenGeniSessionUsageLimitUnsupportedError": [
+      "code",
+      "sessionId"
+    ],
     "OpenGeniSetupError": [
       "body",
       "code",
@@ -38148,6 +38154,14 @@
       ],
       "usedMicros": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNumberKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}}"
+      ]
+    },
+    "@opengeni/sdk:OpenGeniSessionUsageLimitUnsupportedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "sessionId": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
       ]
     },
     "@opengeni/sdk:OpenGeniSetupError": {
@@ -42327,6 +42341,14 @@
       ],
       "usedMicros": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNumberKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}}"
+      ]
+    },
+    "@opengeni/sdk/browser:OpenGeniSessionUsageLimitUnsupportedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "sessionId": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
       ]
     },
     "@opengeni/sdk/browser:OpenGeniSetupError": {
