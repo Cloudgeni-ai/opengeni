@@ -6,6 +6,7 @@ import {
 
 import {
   beaconSender,
+  clientErrorDetail,
   clientRevision,
   clientRoutePattern,
   createClientErrorReporter,
@@ -17,6 +18,7 @@ import {
   resetChunkLoadFailureState,
   routePatternFromMatches,
   routePatternFromRoutes,
+  type ClientErrorDetail,
   type ClientErrorKind,
 } from "./client-error-reporting";
 
@@ -121,13 +123,32 @@ describe("client error report projection", () => {
 });
 
 describe("client error reporter", () => {
-  test("sends only kind, route pattern, and revision", () => {
+  test("sends kind, route pattern and revision, plus the error when there is one", () => {
     const sent: string[] = [];
     const reporter = createClientErrorReporter({ send: (body) => sent.push(body), revision: "r1" });
     expect(reporter.report("route_error", "/workspaces/$workspaceId/sessions")).toBe(true);
+    expect(
+      reporter.report("window_error", "/", { name: "TypeError", message: "x is undefined" }),
+    ).toBe(true);
     expect(sent.map((body) => JSON.parse(body))).toEqual([
       { kind: "route_error", route: "/workspaces/$workspaceId/sessions", revision: "r1" },
+      {
+        kind: "window_error",
+        route: "/",
+        revision: "r1",
+        error: { name: "TypeError", message: "x is undefined" },
+      },
     ]);
+  });
+
+  test("a different error on the same route is not deduped away", () => {
+    const sent: string[] = [];
+    const reporter = createClientErrorReporter({ send: (body) => sent.push(body), revision: "r1" });
+    const first = { name: "TypeError", message: "a is undefined\n  detail" };
+    expect(reporter.report("route_error", "/", first)).toBe(true);
+    expect(reporter.report("route_error", "/", { ...first, stack: "other frames" })).toBe(false);
+    expect(reporter.report("route_error", "/", { name: "TypeError", message: "b" })).toBe(true);
+    expect(sent).toHaveLength(2);
   });
 
   test("dedupes a repeated kind and route, then caps the total per window", () => {
@@ -185,15 +206,44 @@ describe("global error listeners", () => {
   function install() {
     const target = new EventTarget() as unknown as Window;
     const reports: Array<[ClientErrorKind, string]> = [];
+    const details: Array<ClientErrorDetail | undefined> = [];
     const uninstall = installGlobalClientErrorReporting({
       target,
       routePattern: () => "/workspaces/$workspaceId/sessions",
-      report: (kind, route) => reports.push([kind, route]),
+      report: (kind, route, detail) => {
+        reports.push([kind, route]);
+        details.push(detail);
+      },
     });
     const dispatch = (type: string, fields: Record<string, unknown>) =>
       target.dispatchEvent(Object.assign(new Event(type), fields));
-    return { reports, uninstall, dispatch };
+    return { reports, details, uninstall, dispatch };
   }
+
+  test("reports what failed: the error, a rejected non-error, or an error event alone", () => {
+    const { details, dispatch } = install();
+    const thrown = new TypeError("x is undefined");
+    dispatch("error", { message: "Uncaught TypeError: x is undefined", error: thrown });
+    dispatch("unhandledrejection", { reason: { status: 500, token: "abc" } });
+    dispatch("error", {
+      message: "Uncaught SyntaxError: Unexpected token",
+      error: null,
+      filename: "https://app.example.test/assets/a.js?v=1",
+      lineno: 3,
+      colno: 14,
+    });
+    expect(details[0]).toMatchObject({ name: "TypeError", message: "x is undefined" });
+    expect(details[0]?.stack).toContain("x is undefined");
+    expect(details[1]).toEqual({
+      name: "NonError",
+      message: '{"status":500,"token":"[redacted]"}',
+    });
+    expect(details[2]).toEqual({
+      name: "ErrorEvent",
+      message: "Uncaught SyntaxError: Unexpected token",
+      stack: "at https://app.example.test/assets/a.js:3:14",
+    });
+  });
 
   test("classifies window errors and unhandled rejections", () => {
     const { reports, dispatch } = install();
@@ -273,6 +323,33 @@ describe("chunk-load failures", () => {
       ["route_error", "/billing"],
       ["chunk_load", "/billing"],
     ]);
+  });
+
+  test("a chunk-load report carries the import error", () => {
+    const details: Array<ClientErrorDetail | undefined> = [];
+    const target = new EventTarget();
+    installVitePreloadErrorReporting({
+      target,
+      routePattern: () => "/",
+      report: (_kind, _route, detail) => details.push(detail),
+    });
+    target.dispatchEvent(
+      Object.assign(new Event("vite:preloadError", { cancelable: true }), {
+        payload: new TypeError(
+          "Failed to fetch dynamically imported module: https://app.example.test/assets/a.js",
+        ),
+      }),
+    );
+    expect(details).toEqual([
+      {
+        name: "TypeError",
+        message:
+          "Failed to fetch dynamically imported module: https://app.example.test/assets/a.js",
+        stack: expect.any(String),
+      },
+    ]);
+    resetChunkLoadFailureState();
+    expect(clientErrorDetail(undefined)).toEqual({ name: "NonError", message: "undefined" });
   });
 
   test("a chunk-load error caught without a Vite event is reported once as chunk_load", () => {

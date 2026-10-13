@@ -33,7 +33,12 @@ import {
   type EnrollmentRecord,
   type MachineMetricsRow,
 } from "@opengeni/db";
-import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
+import {
+  MachineView,
+  MetricSample,
+  type MachineRuntime,
+  type MachinesResponse,
+} from "@opengeni/contracts";
 import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "@opengeni/core";
 import { selfhostedHeartbeatLiveness } from "@opengeni/runtime/sandbox";
 
@@ -84,28 +89,40 @@ export function machineUpdateBlockedReason(os: string, version: string | null): 
     : "Install Opengeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
 }
 
+type AgentUpdateRecord = EnrollmentRecord["agentUpdate"];
+
+/** Where the installed agent stands against the promoted build. A failed update
+ * stops mattering once its target (or newer) is installed, and a busy machine
+ * postponing an update (`update_busy_*`) has not failed: it is still outdated. */
+export function agentVersionState(
+  installedVersion: string | null,
+  desiredVersion: string | null,
+  update: AgentUpdateRecord,
+): MachineRuntime["versionState"] {
+  if (update && ACTIVE_UPDATE_STATUSES.has(update.status)) return "updating";
+  if (
+    update?.status === "failed" &&
+    !update.errorCode?.startsWith("update_busy") &&
+    !(installedVersion && (compareAgentVersions(installedVersion, update.targetVersion) ?? -1) >= 0)
+  ) {
+    return "update_failed";
+  }
+  const order =
+    installedVersion && desiredVersion
+      ? compareAgentVersions(installedVersion, desiredVersion)
+      : null;
+  if (order === null) return "unknown";
+  if (order === 0) return "current";
+  return order < 0 ? "outdated" : "ahead";
+}
+
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
   const desiredVersion =
     enrollment.agentUpdateChannel === "beta"
       ? (settings.agentBetaVersion ?? settings.agentStableVersion)
       : settings.agentStableVersion;
   const update = enrollment.agentUpdate;
-  const activeUpdate = update ? ACTIVE_UPDATE_STATUSES.has(update.status) : false;
-  const order =
-    enrollment.agentVersion && desiredVersion
-      ? compareAgentVersions(enrollment.agentVersion, desiredVersion)
-      : null;
-  const versionState = activeUpdate
-    ? "updating"
-    : update?.status === "failed"
-      ? "update_failed"
-      : order === null
-        ? "unknown"
-        : order === 0
-          ? "current"
-          : order < 0
-            ? "outdated"
-            : "ahead";
+  const versionState = agentVersionState(enrollment.agentVersion, desiredVersion, update);
   const capability = (name: string): boolean => enrollment.agentCapabilities[name] === true;
   return {
     installedVersion: enrollment.agentVersion,

@@ -175,7 +175,9 @@ export async function compactLegacySessionContent(
   return result;
 }
 
-if (import.meta.main) {
+/** Command-line entry. Bundled release images call this explicitly; see
+ * scripts/assemble-server-runtime.ts. */
+export async function runSessionContentCompactionCli(): Promise<void> {
   const { createDb } = await import("./index");
   const url = process.env.OPENGENI_DATABASE_URL;
   if (!url) throw new Error("Set OPENGENI_DATABASE_URL to the application database URL");
@@ -196,3 +198,5 @@ if (import.meta.main) {
     await client.close();
   }
 }
+
+if (import.meta.main) await runSessionContentCompactionCli();

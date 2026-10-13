@@ -12148,13 +12148,31 @@ export const scheduledTasks = pgTable(
   }),
 );
 
+/** Durable latest-state synchronization after schedule retirement. */
+export const scheduledTaskScheduleOutbox = pgTable(
+  "scheduled_task_schedule_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    taskId: uuid("task_id").notNull().unique(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    temporalScheduleId: text("temporal_schedule_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    due: index("scheduled_task_schedule_outbox_due_idx").on(table.nextAttemptAt, table.id),
+  }),
+);
+
 /**
  * Durable ownership of Temporal schedules whose database owner was deleted.
- *
- * Deliberately no workspace/account foreign key: this row must survive the
- * workspace cascade that creates it. Ordinary runtime code may insert it while
- * the workspace is still RLS-visible; cross-workspace claim/settlement is only
- * available through migration-owned SECURITY DEFINER functions.
+ * No workspace/account foreign key: deletion cleanup survives the cascade.
+ * Cross-workspace claim/settlement uses migration-owned lifecycle functions.
  */
 export const temporalScheduleCleanupOutbox = pgTable(
   "temporal_schedule_cleanup_outbox",

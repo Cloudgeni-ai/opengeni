@@ -9,6 +9,16 @@
  * client delivery rely on their exact-content `create_file` semantics), the
  * model-facing tool appends one empty `+` line to each non-empty Add File
  * section before the SDK applies it. Update and Delete sections are untouched.
+ *
+ * The same rewrite also repairs unambiguous framing slips that the SDK's
+ * strict parser rejects and models (Claude in particular) make on long Add
+ * File payloads, each of which otherwise costs a full resend of the patch:
+ * a repeated trailing `*** End Patch`, an interior `*** End Patch` (optionally
+ * with a new `*** Begin Patch`) before the next file section, a stray interior
+ * `*** Begin Patch`, bare empty lines inside an Add File section, and Add File
+ * content whose `+` prefixes stop after some line (see
+ * `canPrefixAddFileSection`). Every repair applies only to input the SDK
+ * would reject, so patches it accepts today parse exactly as before.
  */
 
 const BEGIN_PATCH = "*** Begin Patch";
@@ -33,17 +43,114 @@ export function withCodexAddFileDiff(diff: string): string {
   return `${[...lines, "+"].join("\n")}\n`;
 }
 
+function isBlank(line: string): boolean {
+  return line.trim() === "";
+}
+
+/**
+ * Whether the Add File section starting at `start` dropped its `+` prefixes
+ * from some line onward (often all but the first line), so prefixing the
+ * unprefixed lines is the only reading. Once a line lacks the prefix, a later
+ * `+` line is ambiguous (`++i;` or a `+ item` bullet may be content), and a
+ * `@@` line means an Update hunk was sent under Add File; both are left for
+ * the SDK to reject.
+ */
+function canPrefixAddFileSection(lines: readonly string[], start: number): boolean {
+  let unprefixedSeen = false;
+  for (let index = start; index < lines.length - 1; index += 1) {
+    const line = lines[index]!;
+    if (isFileOperationHeader(line) || line === END_PATCH) break;
+    if (line === "" || line === BEGIN_PATCH) continue;
+    if (line.startsWith("+")) {
+      if (unprefixedSeen) return false;
+    } else {
+      if (line.startsWith("@@")) return false;
+      unprefixedSeen = true;
+    }
+  }
+  return true;
+}
+
+/**
+ * Repair framing slips the SDK parser would reject but whose intent is
+ * unambiguous. Expects `lines` to start with `*** Begin Patch`; returns a new
+ * array. Valid content lines are never altered, so a file that legitimately
+ * contains `*** End Patch` (written as `+*** End Patch`) is safe, and a stray
+ * unprefixed `*** End Patch` is left for the SDK to reject.
+ */
+export function withLenientPatchFraming(lines: readonly string[]): string[] {
+  let end = lines.length;
+  while (end > 1 && isBlank(lines[end - 1]!)) end -= 1;
+  // A repeated trailing `*** End Patch` (blank lines between them included).
+  while (end > 2 && lines[end - 1] === END_PATCH) {
+    let previous = end - 2;
+    while (previous > 0 && isBlank(lines[previous]!)) previous -= 1;
+    if (lines[previous] !== END_PATCH) break;
+    end = previous + 1;
+  }
+  const body = lines.slice(0, end);
+  if (body.at(-1) !== END_PATCH) return [...lines];
+
+  const output = [body[0]!];
+  let inAddFile = false;
+  let prefixRepairable = false;
+  let pendingBlankAddLines = 0;
+  for (let index = 1; index < body.length; index += 1) {
+    const line = body[index]!;
+    const isEnd = index === body.length - 1;
+    if (!isEnd && line === END_PATCH) {
+      // An interior End Patch is dropped only when another file section
+      // follows (optionally behind a fresh Begin Patch).
+      let next = index + 1;
+      while (next < body.length - 1 && isBlank(body[next]!)) next += 1;
+      if (body[next] === BEGIN_PATCH) {
+        next += 1;
+        while (next < body.length - 1 && isBlank(body[next]!)) next += 1;
+      }
+      if (next < body.length - 1 && isFileOperationHeader(body[next]!)) {
+        pendingBlankAddLines = 0;
+        index = next - 1;
+        continue;
+      }
+    }
+    const isHeader = !isEnd && isFileOperationHeader(line);
+    if (isHeader || isEnd) {
+      // Bare empty lines that end an Add File section are separators.
+      pendingBlankAddLines = 0;
+      inAddFile = isHeader && line.startsWith(ADD_FILE);
+      prefixRepairable = inAddFile && canPrefixAddFileSection(body, index + 1);
+      output.push(line);
+      continue;
+    }
+    // A Begin Patch inside the body is never valid and carries no content.
+    if (line === BEGIN_PATCH) continue;
+    if (inAddFile && line === "") {
+      pendingBlankAddLines += 1;
+      continue;
+    }
+    if (inAddFile && (line.startsWith("+") || (prefixRepairable && line !== END_PATCH))) {
+      for (; pendingBlankAddLines > 0; pendingBlankAddLines -= 1) output.push("+");
+      output.push(line.startsWith("+") ? line : `+${line}`);
+      continue;
+    }
+    output.push(line);
+  }
+  return output;
+}
+
 /**
  * Rewrite a freeform `*** Begin Patch` payload so each non-empty Add File
- * section ends with one extra empty `+` line. Line splitting and section
- * boundaries match the SDK parser exactly; a payload the SDK would reject is
- * returned unchanged so it keeps the SDK's own error.
+ * section ends with one extra empty `+` line, after repairing framing slips
+ * (`withLenientPatchFraming`). Line splitting and section boundaries match the
+ * SDK parser; a payload whose framing cannot be repaired is returned unchanged
+ * so it keeps the SDK's own error.
  */
 export function withCodexAddFilePatch(patch: string): string {
   const trimmed = patch.trimStart();
-  const lines = trimmed.split(/\r?\n/);
-  const trailingNewline = lines.at(-1) === "";
-  if (trailingNewline) lines.pop();
+  const rawLines = trimmed.split(/\r?\n/);
+  const trailingNewline = rawLines.at(-1) === "";
+  if (rawLines[0] !== BEGIN_PATCH) return patch;
+  const lines = withLenientPatchFraming(rawLines);
   if (lines[0] !== BEGIN_PATCH || lines.length < 2 || lines.at(-1) !== END_PATCH) return patch;
   const output = [lines[0]];
   let inAddFile = false;

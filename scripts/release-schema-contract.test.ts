@@ -131,6 +131,55 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers owner pending update tenancy quiescence as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) =>
+          migration.path === "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+      ),
+    ).toMatchObject({
+      path: "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers private visibility that never blocks as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0769_private_visibility_never_blocks.sql",
+      ),
+    ).toMatchObject({
+      path: "0769_private_visibility_never_blocks.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers private visibility leftover settlement as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0768_private_visibility_ignores_leftovers.sql",
+      ),
+    ).toMatchObject({
+      path: "0768_private_visibility_ignores_leftovers.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the in-place connected machine audience switch as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0765_connected_machine_audience_switch.sql",
+      ),
+    ).toMatchObject({
+      path: "0765_connected_machine_audience_switch.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers private sessions on shared sandboxes as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2276,6 +2325,15 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0770_attached_browser_connection_history.sql",
+      "0769_private_visibility_never_blocks.sql",
+      "0768_private_visibility_ignores_leftovers.sql",
+      "0765_connected_machine_audience_switch.sql",
+      "0764_interrupted_turn_recovery.sql",
+      "0763_queue_steer_admission_recheck_repair.sql",
+      "0761_exhausted_scheduled_tasks.sql",
+      "0760_terminal_turn_run_state_cleanup.sql",
+      "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
       "0758_connection_account_intent_grants.sql",
       "0757_subscription_people_picker_reads.sql",
       "0756_turn_connection_account_intent_schema.sql",

@@ -111,6 +111,7 @@ import {
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
   UpdateSessionVisibilityRequest,
+  SessionVisibility,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
@@ -225,6 +226,7 @@ import {
   SessionTenancyConflictError,
   SessionTenancyInvalidRequestError,
   SessionTenancyNotActivatedError,
+  SessionVisibilityWorkConflictError,
   HumanInputResponseValidationError,
   SkillHumanResponseError,
   latestWorkspaceCapture,
@@ -342,6 +344,7 @@ import {
   submitComposerDraftForRequest,
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
+  previewManagedHumanSessionVisibilityChange,
   updateSessionToolPolicy,
   updateSessionAgent,
   updateSessionSkills,
@@ -1371,6 +1374,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId,
           sessionId,
           parsed.data,
+          "http",
+        ),
+      );
+    } catch (error) {
+      throw sessionTenancyHttpError(error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/visibility/preview", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const target = SessionVisibility.safeParse(c.req.query("visibility"));
+    if (!target.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid session visibility preview request.",
+        retryable: false,
+        details: { fields: zodErrorFields(target.error) },
+      });
+    }
+    try {
+      return c.json(
+        await previewManagedHumanSessionVisibilityChange(
+          deps,
+          authorization,
+          workspaceId,
+          sessionId,
+          target.data,
           "http",
         ),
       );
@@ -5417,6 +5449,8 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";
+  // Owner-only preview of the same change: identical authority to making it.
+  if (suffix === "/visibility/preview" && verb === "GET") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
@@ -5598,6 +5632,25 @@ export function sessionTenancyHttpError(error: unknown): Error {
       details: {
         reason: error.reason,
         ...(error.blocker ? { blocker: error.blocker } : {}),
+      },
+    });
+  }
+  if (error instanceof SessionVisibilityWorkConflictError) {
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message:
+        error.reason === "active_work"
+          ? "The chat has work in progress. Send stopActiveWork to stop it and make the change."
+          : "The chat's work is still stopping. Retry with the same idempotency key.",
+      retryable: error.reason === "stopping_active_work",
+      details: {
+        reason: error.reason,
+        runningTurnCount: error.work.runningTurnCount,
+        queuedTurnCount: error.work.queuedTurnCount,
+        activeGoal: error.work.activeGoal,
+        liveVoice: error.work.liveVoice,
+        otherPeoplePendingUpdateCount: error.work.otherPeoplePendingUpdateCount,
+        otherPeopleAccountChoiceCount: error.work.otherPeopleAccountChoiceCount,
       },
     });
   }

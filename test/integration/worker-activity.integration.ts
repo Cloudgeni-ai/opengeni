@@ -4676,9 +4676,36 @@ describe("worker activities integration", () => {
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },
           action: "pause",
-          reason: "verify scheduled idle reservation",
+          reason: "verify Pause skips a reusable occurrence",
           operationKey: `pause:${crypto.randomUUID()}`,
           expectedRevision: 0,
+        }),
+      ),
+    );
+    // Pause skips the occurrence instead of reserving a queued boundary that
+    // nothing could service until Resume.
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      status: "idle",
+      effectiveControl: { state: "paused" },
+    });
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "resume",
+          reason: "verify the next reusable occurrence after Resume",
+          operationKey: `resume:${crypto.randomUUID()}`,
+          expectedRevision: 1,
         }),
       ),
     );
@@ -4688,14 +4715,10 @@ describe("worker activities integration", () => {
       triggerType: "scheduled",
       producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
-    expect(third).toMatchObject({
-      action: "signal",
-      sessionId: first.sessionId,
-      workflowWakeRevision: null,
-    });
+    expect(third).toMatchObject({ action: "signal", sessionId: first.sessionId });
     expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
       status: "queued",
-      effectiveControl: { state: "paused" },
+      effectiveControl: { state: "active" },
     });
     expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
       id: goalAfterFirst.id,
@@ -4726,7 +4749,7 @@ describe("worker activities integration", () => {
       (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
         (run) => run.status === "skipped" && run.error === "scheduled_session_not_idle",
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {

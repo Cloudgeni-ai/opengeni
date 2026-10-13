@@ -71,6 +71,40 @@ const common = {
 };
 
 describe("connector page account management", () => {
+  test("1Password opens its protected setup and management pages instead of generic MCP setup", async () => {
+    for (const enabled of [false, true]) {
+      const action = mock(() => {});
+      const view = await render(
+        <CatalogItemPage
+          {...common}
+          item={item({
+            id: "api:1password",
+            kind: "api",
+            source: "built_in",
+            name: "1Password",
+            providerDomain: "1password.com",
+            surfaceType: "first_party_onepassword",
+            enabled,
+            authKind: "api_key",
+            mcpUrl: null,
+            endpointUrl: null,
+          })}
+          onAction={action}
+        />,
+      );
+      try {
+        const link = view.container.querySelector<HTMLAnchorElement>('a[href*="/secrets"]');
+        expect(link?.getAttribute("href")).toBe(
+          `/workspaces/ws/secrets${enabled ? "" : "?view=connect-1password"}`,
+        );
+        expect(link?.textContent).toContain(enabled ? "Manage 1Password" : "Connect 1Password");
+        expect(view.container.querySelector('input[type="password"]')).toBeNull();
+        expect(action).not.toHaveBeenCalled();
+      } finally {
+        await view.unmount();
+      }
+    }
+  });
   test("the header action that only disables the connector says so, and accounts are managed per row", async () => {
     const enabled = item({
       enabled: true,

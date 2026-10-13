@@ -1875,8 +1875,11 @@ describe.skipIf(!realDb)(
         subscriptionCoreOperations(
           subscriptionCoreProvider("claude"),
         ).recordSubscriptionCoreUsageObservation(client.db, claudeQuotaScope(), a.c1, reading);
-      const weeklyObservedAt = Date.now();
-      const weeklyReset = weeklyObservedAt + 2 * HOUR;
+      // Stamped when the first reading is recorded, not when the file loads: a
+      // slow setup can otherwise make these "newer" readings older than the
+      // fixture's own observations.
+      let weeklyObservedAt = 0;
+      let weeklyReset = 0;
       const migratedC1Windows = async () => {
         const [row] = await owned.admin`SELECT quota FROM subscription_connection_quota
           WHERE connection_id = ${a.c1}`;
@@ -1884,6 +1887,8 @@ describe.skipIf(!realDb)(
       };
 
       test("a newer Claude response-header reading that omits a still-exhausted window keeps it until its reset", async () => {
+        weeklyObservedAt = Date.now();
+        weeklyReset = weeklyObservedAt + 2 * HOUR;
         expect(
           await recordClaudeReading(
             claudeReading("response_headers", weeklyObservedAt, [

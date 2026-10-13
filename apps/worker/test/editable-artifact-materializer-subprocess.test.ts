@@ -124,7 +124,7 @@ describe("native editable artifact materializer subprocess", () => {
     await expect(
       createNativeEditableArtifactSubprocessPort({
         ...options(),
-        executable: "/bin/false",
+        executable: Bun.which("false") ?? "/bin/false",
         launcher: recordingLauncher(spawned),
       }),
     ).rejects.toThrow("native materializer identity probe failed");

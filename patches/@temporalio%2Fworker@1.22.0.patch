@@ -1,5 +1,56 @@
+diff --git a/lib/index.js b/lib/index.js
+index 65bb00005129dea877eb486d27567cbab15f55da..b4df76b954637efc4537a178ee0ed945c6e6cba5 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -77,8 +77,12 @@ Object.defineProperty(exports, "defaultPayloadConverter", { enumerable: true, ge
+ Object.defineProperty(exports, "Worker", { enumerable: true, get: function () { return worker_1.Worker; } });
+ var replay_1 = require("./replay");
+ Object.defineProperty(exports, "ReplayError", { enumerable: true, get: function () { return replay_1.ReplayError; } });
+-var bundler_1 = require("./workflow/bundler");
+-Object.defineProperty(exports, "bundleWorkflowCode", { enumerable: true, get: function () { return bundler_1.bundleWorkflowCode; } });
++// Prebuilt workflow hosts do not need webpack or the source-workflow compiler.
++// Keep the public compilation entry available without loading it at import time.
++async function bundleWorkflowCode(options) {
++    return require("./workflow/bundler").bundleWorkflowCode(options);
++}
++exports.bundleWorkflowCode = bundleWorkflowCode;
+ var worker_tuner_1 = require("./worker-tuner");
+ Object.defineProperty(exports, "ResourceBasedController", { enumerable: true, get: function () { return worker_tuner_1.ResourceBasedController; } });
+ // Anything below this line is deprecated
+diff --git a/lib/worker.js b/lib/worker.js
+index 5eaf0fbe7997e1ca2b5024117f45abde3ce769ef..2e4a34b948fa43f2751d8a7d57df2633086c670e 100644
+--- a/lib/worker.js
++++ b/lib/worker.js
+@@ -60,7 +60,7 @@ const rxutils_1 = require("./rxutils");
+ const utils_1 = require("./utils");
+ const worker_options_1 = require("./worker-options");
+ const workflow_codec_runner_1 = require("./workflow-codec-runner");
+-const bundler_1 = require("./workflow/bundler");
++const defaultWorkflowInterceptorModules = [require.resolve("./workflow-log-interceptor")];
+ const reusable_vm_1 = require("./workflow/reusable-vm");
+ const threaded_vm_1 = require("./workflow/threaded-vm");
+ const vm_1 = require("./workflow/vm");
+@@ -433,7 +433,7 @@ class Worker {
+             const modules = new Set(compiledOptions.interceptors.workflowModules);
+             // Warn if user tries to customize the default set of workflow interceptor modules
+             if (modules &&
+-                new Set([...modules, ...bundler_1.defaultWorkflowInterceptorModules]).size !== bundler_1.defaultWorkflowInterceptorModules.length) {
++                new Set([...modules, ...defaultWorkflowInterceptorModules]).size !== defaultWorkflowInterceptorModules.length) {
+                 logger.warn('Ignoring WorkerOptions.interceptors.workflowModules because WorkerOptions.workflowBundle is set.\n' +
+                     'To use workflow interceptors with a workflowBundle, pass them in the call to bundleWorkflowCode.');
+             }
+@@ -449,7 +449,8 @@ class Worker {
+             }
+         }
+         else if (compiledOptions.workflowsPath) {
+-            const bundler = new bundler_1.WorkflowCodeBundler({
++            const { WorkflowCodeBundler } = require("./workflow/bundler");
++            const bundler = new WorkflowCodeBundler({
+                 logger,
+                 workflowsPath: compiledOptions.workflowsPath,
+                 workflowInterceptorModules: compiledOptions.interceptors.workflowModules,
 diff --git a/lib/workflow/threaded-vm.js b/lib/workflow/threaded-vm.js
-index 343a7e2..f9992cb 100644
+index bc01fa6a624008719671e2d809be112ba81c4fee..5d63f485f738c2368fdeef059b4f1c6d6e5e071d 100644
 --- a/lib/workflow/threaded-vm.js
 +++ b/lib/workflow/threaded-vm.js
 @@ -149,7 +149,10 @@ class WorkerThreadClient {
@@ -14,13 +65,50 @@ index 343a7e2..f9992cb 100644
              throw new errors_1.UnexpectedError(`Failed to terminate Worker thread, exit code: ${exitCode}`);
          }
      }
+diff --git a/src/index.ts b/src/index.ts
+index 927eac6a2959ed0176840664636158f1578146c2..361b56bd2ad481391dc9f6c43169ed69771001d2 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -80,7 +80,12 @@ export {
+   WorkflowBundlePath,
+ } from './worker-options';
+ export { ReplayError, ReplayHistoriesIterable, ReplayResult } from './replay';
+-export { BundleOptions, bundleWorkflowCode, WorkflowBundleWithSourceMap, BundlerPlugin } from './workflow/bundler';
++export type { BundleOptions, WorkflowBundleWithSourceMap, BundlerPlugin } from './workflow/bundler';
++export async function bundleWorkflowCode(
++  options: import('./workflow/bundler').BundleOptions
++): Promise<import('./workflow/bundler').WorkflowBundleWithSourceMap> {
++  return (await import('./workflow/bundler')).bundleWorkflowCode(options);
++}
+ export {
+   WorkerTuner,
+   TunerHolder,
+diff --git a/src/worker.ts b/src/worker.ts
+index 23734c8f2d13e16a2704f186b1635dcc0fc50aea..a775fde991380d6332a445602f6915e08fed8847 100644
+--- a/src/worker.ts
++++ b/src/worker.ts
+@@ -89,7 +89,7 @@ import type {
+ } from './worker-options';
+ import { compileWorkerOptions, isCodeBundleOption, isPathBundleOption, toNativeWorkerOptions } from './worker-options';
+ import { WorkflowCodecRunner } from './workflow-codec-runner';
+-import { defaultWorkflowInterceptorModules, WorkflowCodeBundler } from './workflow/bundler';
++const defaultWorkflowInterceptorModules = [require.resolve('./workflow-log-interceptor')];
+ import type { Workflow, WorkflowCreator } from './workflow/interface';
+ import { ReusableVMWorkflowCreator } from './workflow/reusable-vm';
+ import { ThreadedVMWorkflowCreator } from './workflow/threaded-vm';
+@@ -802,6 +802,7 @@ export class Worker {
+         throw new TypeError('Invalid WorkflowOptions.workflowBundle');
+       }
+     } else if (compiledOptions.workflowsPath) {
++      const { WorkflowCodeBundler } = await import('./workflow/bundler');
+       const bundler = new WorkflowCodeBundler({
+         logger,
+         workflowsPath: compiledOptions.workflowsPath,
 diff --git a/src/workflow/threaded-vm.ts b/src/workflow/threaded-vm.ts
-index 2689244..4d7070c 100644
+index 8191cfea614a7bb4a01957c543b977ae7797f3ea..4d78694b9d352db4cbe3e736d7a139d894fbc22a 100644
 --- a/src/workflow/threaded-vm.ts
 +++ b/src/workflow/threaded-vm.ts
-@@ -181,7 +181,10 @@ export class WorkerThreadClient {
-     this.shutDownRequested = true;
-     await this.send({ type: 'destroy' });
+@@ -183,5 +183,8 @@ export class WorkerThreadClient {
      const exitCode = await (isBun ? this.terminateWithBunWorkaround() : this.workerThread.terminate());
 -    if (exitCode !== null && exitCode !== TERMINATED_EXIT_CODE) {
 +    // Bun 1.4 aligned Worker.terminate() with Node and now returns 1;

@@ -3841,6 +3841,14 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/audience\/preview$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/audience$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines$/,
     label: "/v1/workspaces/:workspaceId/machines",
   },

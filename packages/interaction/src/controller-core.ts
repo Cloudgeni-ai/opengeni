@@ -315,6 +315,11 @@ export class InteractionControllerCore<
     }));
   }
 
+  /** True when no admitted command is queued or running on any target. */
+  isIdle(): boolean {
+    return this.targetTails.size === 0;
+  }
+
   /** Wait until every command already admitted to a target queue settles.
    * Callers must fence new dispatch through `authority` before awaiting this. */
   async waitForIdle(): Promise<void> {

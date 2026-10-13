@@ -1948,7 +1948,7 @@ chromiumE2e(
           (error: unknown) => error,
         );
         expect(Date.now() - started).toBeLessThan(5_000);
-        expect(failure).toMatchObject({ code: "resource_unavailable", retryable: false });
+        expect(failure).toMatchObject({ code: "tab_crashed", retryable: false });
         expect(String((failure as Error).message)).toContain("crashed");
       }
 

@@ -172,12 +172,12 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       callType: "function_call",
       callItem: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
     });
-    // While the turn runs, access stays frozen; the earlier turn blocker
-    // reports it before the receipt clause is reached.
+    // While the turn runs, access stays frozen: since 0768 the running
+    // attempt is reported as work to stop before any receipt clause.
     await expect(transition(f)).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "nonterminal_turn",
+      name: "SessionVisibilityWorkConflictError",
+      reason: "active_work",
+      liveAttemptCount: 1,
     });
     await recordPendingSessionToolCallResult(client.db, {
       ...identity,
@@ -254,7 +254,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
     expect(await receiptCount(f)).toBe(1);
   }, 180_000);
 
-  test("a receipt whose settled attempt still owes its interruption receipt keeps blocking", async () => {
+  test("a receipt whose settled attempt still owes its interruption receipt blocks forks, not Only me", async () => {
     const f = await fixture();
     const callId = `call-${crypto.randomUUID()}`;
     await registerPendingSessionToolCall(client.db, {
@@ -297,12 +297,15 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       (account_id, workspace_id, session_id, operation_id, attempt_id, kind, control_revision, state)
       values (${f.accountId}, ${f.workspaceId}, ${f.sessionId}, ${operation!.id},
         ${f.attemptId}, 'steer', 1, 'settled')`;
-    await expect(transition(f)).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "pending_tool_receipt",
-    });
-    await shared.admin`update session_turn_attempts set quiesced_at = now() where id = ${f.attemptId}`;
+    // Whole-session forks and Variable Set changes keep the full predicate.
+    const failure = await shared.admin`select assert_session_tenancy_quiescent(
+        ${f.accountId}::uuid, ${f.workspaceId}::uuid, ${f.sessionId}::uuid, false)`.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ code: "55P03", detail: "pending_tool_receipt" });
+    // Since 0769 nothing refuses Only me: the turn is over and its attempt is
+    // closed, so the receipt cannot carry anyone's authority into the chat.
     expect((await transition(f)).visibility).toBe("user_private");
   }, 180_000);
 });

@@ -697,3 +697,26 @@ export async function settleExpiredSessionRealtimeInTransaction(
   const expired = await endWithEvent(db, session, row, "lease_expired", now);
   return expired.session;
 }
+
+/**
+ * End the chat's voice session because the chat became Only me: whoever
+ * started it, its delegations and account bindings stop applying. An
+ * already-expired lease ends as `lease_expired`, exactly as it would lazily.
+ * Callers hold the session-event write locks.
+ */
+export async function endSessionRealtimeForPrivateTransitionInTransaction(
+  db: SessionActivityDatabase,
+  session: SessionRow,
+  now = new Date(),
+): Promise<{ eventId: string; workflowWakeRevision: number } | null> {
+  const row = await loadActiveRowForUpdate(db, session.workspaceId, session.id);
+  if (!row) return null;
+  const ended = await endWithEvent(
+    db,
+    session,
+    row,
+    row.leaseExpiresAt <= now ? "lease_expired" : "authority_revoked",
+    now,
+  );
+  return { eventId: ended.eventId, workflowWakeRevision: ended.workflowWakeRevision };
+}

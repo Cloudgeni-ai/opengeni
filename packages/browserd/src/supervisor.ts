@@ -43,7 +43,7 @@ import {
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
-import { createAttachedChromeTransport } from "./attached-cdp";
+import { createAttachedChromeDriver, createAttachedChromeTransport } from "./attached-cdp";
 import { CdpConnection } from "./cdp";
 import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
@@ -590,15 +590,21 @@ export class BrowserSupervisor {
     }
   }
 
-  /** Update safety includes work hidden from the public active-session list. */
+  /** Update safety includes work hidden from the public active-session list.
+   * An open session does not by itself make a restart unsafe: a quiescent
+   * managed session with a completed working-runtime launch is preserved by
+   * graceful shutdown and reattached on its next causal request, and a session
+   * whose driver already ended has nothing left to lose. Any other session
+   * (attached Chrome, external providers, launches without a durable working
+   * runtime) or any admitted command still blocks. */
   isIdle(): boolean {
     return (
       !this.cleanupUncertain &&
       this.creationRequests.size === 0 &&
-      this.sessions.size === 0 &&
       this.creating.size === 0 &&
       this.ending.size === 0 &&
-      this.stateTransferTails.size === 0
+      this.stateTransferTails.size === 0 &&
+      [...this.sessions.values()].every((runtime) => restartPreservesRuntime(runtime))
     );
   }
 
@@ -946,15 +952,7 @@ export class BrowserSupervisor {
       return;
     }
     const driverAlreadyClosed = runtime.lifecycle === "captured";
-    const preserveWorkingRuntime =
-      suspendForShutdown &&
-      runtime.lifecycle === "active" &&
-      !runtime.driver.isTerminal?.() &&
-      runtime.workingJournal !== null &&
-      runtime.workingReceipt?.intent === "launch" &&
-      runtime.workingReceipt.state === "completed" &&
-      runtime.workingReceipt.process !== null &&
-      runtime.workingReceipt.directoryLaunchAllowed;
+    const preserveWorkingRuntime = suspendForShutdown && hasPreservableWorkingRuntime(runtime);
     runtime.lifecycle = "ending";
     const ending = (async () => {
       if (runtime.driver.isTerminal?.() || preserveWorkingRuntime) {
@@ -1946,6 +1944,7 @@ export class BrowserSupervisor {
     // Shutdown intent becomes durable before process cleanup; only confirmed
     // suspension permits recovery. Explicit end/capture still retires the runtime.
     // Failed acceptance preserves the live driver and all journals.
+    let keepBrowserRunning = false;
     if (
       suspendForShutdown &&
       runtime.workingJournal &&
@@ -1955,6 +1954,10 @@ export class BrowserSupervisor {
       runtime.workingReceipt.directoryLaunchAllowed
     ) {
       runtime.workingReceipt = runtime.workingJournal.suspend(runtime.workingReceipt);
+      // A controller restart (upgrade, crash recovery) must not cost the page
+      // state an agent is working in. Release only this controller's transport;
+      // the successor adopts the same live browser from the suspended receipt.
+      keepBrowserRunning = runtime.driver.detach !== undefined;
     } else {
       this.retireWorkingRuntime(runtime);
     }
@@ -1965,7 +1968,8 @@ export class BrowserSupervisor {
         failures.push(error);
       }
       try {
-        await runtime.driver.close();
+        if (keepBrowserRunning) await runtime.driver.detach!();
+        else await runtime.driver.close();
         driverClosed = true;
       } catch (error) {
         failures.push(error);
@@ -2091,15 +2095,7 @@ async function createBrowserDriver(
         ? { authorityFile: context.transport.authorityFile }
         : {}),
     });
-    return new AgentBrowserDriver({
-      browserSessionId: context.browserSessionId,
-      controllerGeneration: context.controllerGeneration,
-      runner: attached.runner,
-      targetLifecycle: "cdp",
-      connect: async () => attached.connection,
-      engine: "chrome",
-      permissionControl: false,
-    });
+    return createAttachedChromeDriver(context, attached);
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {
@@ -2246,6 +2242,29 @@ async function createBrowserDriver(
         }
       : {}),
   });
+}
+
+/** Graceful shutdown keeps this owned browser running and its next causal
+ * request reattaches it from the completed working-runtime launch receipt. */
+function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
+  return (
+    runtime.lifecycle === "active" &&
+    !runtime.driver.isTerminal?.() &&
+    runtime.workingJournal !== null &&
+    runtime.workingReceipt?.intent === "launch" &&
+    runtime.workingReceipt.state === "completed" &&
+    runtime.workingReceipt.process !== null &&
+    runtime.workingReceipt.directoryLaunchAllowed
+  );
+}
+
+/** A restart now loses neither admitted work nor unrecoverable session state. */
+function restartPreservesRuntime(runtime: Runtime): boolean {
+  if (runtime.recovery !== null || runtime.externalAuthTail !== null) return false;
+  if (!runtime.controller.isIdle()) return false;
+  // A session whose driver already ended has no live state left to lose.
+  if (runtime.driver.isTerminal?.()) return true;
+  return hasPreservableWorkingRuntime(runtime);
 }
 
 function binding(runtime: Runtime): BrowserSessionReference {

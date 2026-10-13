@@ -835,41 +835,79 @@ pub(crate) fn validate_table_style_parts(
     page: PageGeometry,
 ) -> Result<(), DocumentError> {
     let usable_width = page.width_pt - page.margin_left_pt - page.margin_right_pt;
-    if style
+    // Name the field, the value, and the bound: a bare "invalid style" left
+    // agents guessing (for example rewriting valid colors) instead of fixing
+    // the column widths that actually overflowed the page.
+    let usable = || {
+        format!(
+            "the usable page width is {usable_width}pt (page {}pt minus margins {}pt and {}pt)",
+            page.width_pt, page.margin_left_pt, page.margin_right_pt
+        )
+    };
+    let invalid = |reason: String| Err(DocumentError::InvalidTableStyle(reason));
+    if let Some(width) = style
         .width_pt
-        .is_some_and(|value| !in_range(value, 1.0, usable_width))
-        || style
-            .header_rows
-            .is_some_and(|rows| usize::try_from(rows).map_or(true, |rows| rows > row_count))
-        || style
-            .cell_padding_pt
-            .is_some_and(|value| !in_range(value, 0.0, 144.0))
-        || style
-            .border_color
-            .as_deref()
-            .is_some_and(|value| !valid_color(value))
-        || style
-            .header_fill
-            .as_deref()
-            .is_some_and(|value| !valid_color(value))
+        .filter(|value| !in_range(*value, 1.0, usable_width))
     {
-        return Err(DocumentError::InvalidTableStyle);
+        return invalid(format!(
+            "widthPt {width} must be at least 1 and fit the page; {}",
+            usable()
+        ));
+    }
+    if let Some(rows) = style
+        .header_rows
+        .filter(|rows| usize::try_from(*rows).map_or(true, |rows| rows > row_count))
+    {
+        return invalid(format!(
+            "headerRows {rows} exceeds the table's {row_count} rows"
+        ));
+    }
+    if let Some(padding) = style
+        .cell_padding_pt
+        .filter(|value| !in_range(*value, 0.0, 144.0))
+    {
+        return invalid(format!("cellPaddingPt {padding} must be between 0 and 144"));
+    }
+    for (field, value) in [
+        ("borderColor", style.border_color.as_deref()),
+        ("headerFill", style.header_fill.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|value| !valid_color(value)) {
+            return invalid(format!(
+                "{field} {value:?} must be a 6-digit hex color such as \"#1F2937\""
+            ));
+        }
     }
     if let Some(widths) = &style.column_widths_pt {
-        if widths.len() != column_count
-            || widths
-                .iter()
-                .any(|width| !in_range(*width, 1.0, usable_width))
+        if widths.len() != column_count {
+            return invalid(format!(
+                "columnWidthsPt has {} entries but the table has {column_count} columns",
+                widths.len()
+            ));
+        }
+        if let Some((index, width)) = widths
+            .iter()
+            .enumerate()
+            .find(|(_, width)| !in_range(**width, 1.0, usable_width))
         {
-            return Err(DocumentError::InvalidTableStyle);
+            return invalid(format!(
+                "columnWidthsPt[{index}] {width} must be at least 1 and fit the page; {}",
+                usable()
+            ));
         }
         let sum: f64 = widths.iter().sum();
-        if sum > usable_width + 0.01
-            || style
-                .width_pt
-                .is_some_and(|width| (sum - width).abs() > 0.01)
-        {
-            return Err(DocumentError::InvalidTableStyle);
+        if sum > usable_width + 0.01 {
+            return invalid(format!(
+                "columnWidthsPt sum to {sum}pt, wider than the page; {}. Scale the widths down \
+                 or widen the section page",
+                usable()
+            ));
+        }
+        if let Some(width) = style.width_pt.filter(|width| (sum - width).abs() > 0.01) {
+            return invalid(format!(
+                "columnWidthsPt sum to {sum}pt but widthPt is {width}pt; they must match, or \
+                 omit widthPt"
+            ));
         }
     }
     Ok(())

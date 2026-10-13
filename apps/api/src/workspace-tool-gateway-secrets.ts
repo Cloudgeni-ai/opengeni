@@ -69,7 +69,7 @@ export function workspaceGatewaySecretArguments(input: {
 }): ToolGatewayArgumentResolver {
   const encryptionKey = environmentsEncryptionKeyBytes(input.settings) ?? null;
   return async (call) => {
-    if (secretArgumentMode(call.entry.source) !== "literal") return call.arguments;
+    if (secretArgumentMode(call.entry) !== "literal") return call.arguments;
     const site = siteSecretContexts.getStore() ?? null;
     // Site viewers are checked in the database (secrets:use on the viewer);
     // people and services are checked here, like the vault routes.

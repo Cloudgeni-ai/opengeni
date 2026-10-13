@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@opengeni/contracts";
 import {
   acceptOrganizationInvitation,
+  claimSessionWorkForAttempt,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -10,7 +11,10 @@ import {
   importArchivedSession,
   createFileUpload,
   completeFileUpload,
+  settleSessionAttemptInterruptions,
+  submitHumanPromptInTransaction,
   withSessionRlsActorContext,
+  withWorkspaceSubjectSessionActivityRls,
   SessionTenancyConflictError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
@@ -30,6 +34,7 @@ import { readSessionAttachmentFiles } from "../src/domain/session-file-access";
 import {
   forkManagedHumanSession,
   getManagedHumanSessionCreateCapabilities,
+  previewManagedHumanSessionVisibilityChange,
   requireManagedHumanPrivateSessionCreate,
   SessionTenancyManagedHumanRequiredError,
   updateManagedHumanSessionVisibility,
@@ -811,6 +816,217 @@ describe("managed-human session tenancy application service", () => {
       authorityEpoch: 1,
       ownedByCurrentUser: true,
       fork: { sourceVisibility: "private", sourceAuthorityEpoch: 2 },
+    });
+  }, 180_000);
+
+  test("make private anyway stops a running response and drops another member's authority in one call", async () => {
+    if (!shared || !client) return;
+    const db = client.db;
+    const userId = `core-private-anyway-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Make private anyway",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    await shared.admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
+    const session = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const submit = async (text: string) =>
+      await withWorkspaceSubjectSessionActivityRls(db, grant.workspaceId, subjectId, (scoped) =>
+        scoped.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof scoped, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text,
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+      );
+    const running = await submit("running right now");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed" || claimed.turn.id !== running.turnId) {
+      throw new Error("turn was not claimed");
+    }
+    await submit("queued behind it");
+    // Another member's authority in the chat: a pending update carrying their
+    // delegation and their personal subscription account chosen for the chat.
+    const otherSubjectId = `user:core-private-anyway-member-${crypto.randomUUID()}`;
+    const foreignUpdateId = crypto.randomUUID();
+    const foreignConnectionId = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role=replica`;
+      await tx`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, classification, source_id, dedupe_key,
+         summary, payload, lineage, personal_connection_delegations,
+         xai_provider_account_authority_snapshot)
+        values (${foreignUpdateId}, ${grant.accountId}, ${grant.workspaceId}, ${session.id},
+          'session_wait_timeout', 'info', ${foreignUpdateId}, ${foreignUpdateId}, 'Wait ended',
+          ${tx.json({ type: "session_wait_timeout", deadlineAt: new Date().toISOString() })},
+          ${tx.json({ connectionAuthoritySubjectId: otherSubjectId })},
+          ${tx.json([
+            {
+              kind: "oauth2",
+              serverId: `account-${foreignConnectionId}`,
+              connectionId: foreignConnectionId,
+              connectionType: "mcp",
+              ownerSubjectId: otherSubjectId,
+              providerDomain: "mcp.example.test",
+              canonicalServerId: "example-mcp",
+            },
+          ])},
+          ${tx.json({ version: 1, scope: "workspace" })})`;
+      await tx`insert into subscription_connections (
+          id, account_id, provider, credential_encrypted, ownership, scope_kind,
+          owner_organization_membership_id, owner_subject_id, authority_id,
+          authority_resource_kind, authority_generation, provider_account_id
+        ) values (
+          ${foreignConnectionId}::uuid, ${grant.accountId}::uuid, 'codex', 'sealed', 'personal',
+          'people', ${crypto.randomUUID()}::uuid, ${otherSubjectId}, ${crypto.randomUUID()}::uuid,
+          'subscription_connection', 1, ${`chatgpt-${foreignConnectionId}`}
+        )`;
+      await tx`insert into subscription_session_bindings (
+          account_id, workspace_id, session_id, provider, connection_id, model_id, choice,
+          last_switch_reason
+        ) values (
+          ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${session.id}::uuid, 'codex',
+          ${foreignConnectionId}::uuid, 'gpt-test', 'explicit', 'explicit_choice'
+        )`;
+    });
+
+    const authorization: AccessGrantAuthorization = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    // The fake worker: an interruption wake makes it settle the attempt the
+    // way the real worker does when it observes the interruption.
+    const wakes: Array<{ interruptionRequested?: boolean }> = [];
+    const workflowClient = {
+      wakeSessionWorkflow: async (input: { interruptionRequested?: boolean }) => {
+        wakes.push(input);
+        if (input.interruptionRequested) {
+          await settleSessionAttemptInterruptions(db, grant.workspaceId, session.id, attemptId);
+        }
+      },
+    };
+    const bus = new MemoryEventBus();
+    const deps = { db, bus, sessionAuthorization, settings: testSettings(), workflowClient };
+
+    expect(
+      await previewManagedHumanSessionVisibilityChange(
+        deps,
+        authorization,
+        grant.workspaceId,
+        session.id,
+        "private",
+      ),
+    ).toEqual({
+      visibility: "workspace",
+      targetVisibility: "private",
+      authorityEpoch: 1,
+      work: {
+        runningTurnCount: 1,
+        queuedTurnCount: 1,
+        activeGoal: false,
+        liveVoice: false,
+        otherPeoplePendingUpdateCount: 1,
+        otherPeopleAccountChoiceCount: 1,
+      },
+      blocker: null,
+    });
+    const request = {
+      visibility: "private" as const,
+      expectedAuthorityEpoch: 1,
+      idempotencyKey: `private-anyway-${crypto.randomUUID()}`,
+    };
+    await expect(
+      updateManagedHumanSessionVisibility(
+        deps,
+        authorization,
+        grant.workspaceId,
+        session.id,
+        request,
+      ),
+    ).rejects.toMatchObject({ reason: "active_work", liveAttemptCount: 1 });
+    expect(wakes).toEqual([]);
+
+    const changed = await updateManagedHumanSessionVisibility(
+      deps,
+      authorization,
+      grant.workspaceId,
+      session.id,
+      { ...request, stopActiveWork: true },
+    );
+    expect(changed).toMatchObject({ visibility: "private", authorityEpoch: 2, changed: true });
+    expect(wakes.some((wake) => wake.interruptionRequested === true)).toBe(true);
+    const turns = await shared.admin<Array<{ status: string; cancelReason: string | null }>>`
+      select status, cancel_reason as "cancelReason" from session_turns
+      where session_id = ${session.id} order by position`;
+    expect(turns).toEqual([
+      { status: "cancelled", cancelReason: "authority_changed" },
+      { status: "cancelled", cancelReason: "authority_changed" },
+    ]);
+    const published = bus.published.flat().map((event) => event.type);
+    expect(published).toContain("turn.cancelled");
+    expect(published.at(-1)).toBe("session.visibility.changed");
+    // Nothing of the other member's is usable from the private chat.
+    const [foreignUpdate] = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates where id = ${foreignUpdateId}`;
+    expect(foreignUpdate?.state).toBe("cancelled");
+    expect(
+      await shared.admin`select 1 from subscription_session_bindings where session_id = ${session.id}`,
+    ).toHaveLength(0);
+    expect(
+      await previewManagedHumanSessionVisibilityChange(
+        deps,
+        authorization,
+        grant.workspaceId,
+        session.id,
+        "private",
+      ),
+    ).toMatchObject({
+      visibility: "private",
+      work: { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
     });
   }, 180_000);
 

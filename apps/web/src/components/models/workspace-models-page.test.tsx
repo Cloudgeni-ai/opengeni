@@ -857,9 +857,12 @@ describe("Models list", () => {
       expect(view.container.textContent).not.toContain("New chats here start with");
       const row = view.container.querySelector('[data-testid="default-model-row"]');
       expect(row?.textContent).toContain("paid by this workspace's Codex subscription");
-      // Defaults come before Accounts.
+      // Accounts come first, as on the organization's page, then Defaults.
       const headings = [...view.container.querySelectorAll("h2")].map((h) => h.textContent);
-      expect(headings.indexOf("Defaults")).toBeLessThan(headings.indexOf("Accounts"));
+      expect(headings.indexOf("Accounts")).toBeGreaterThan(-1);
+      expect(headings.indexOf("Accounts")).toBeLessThan(headings.indexOf("Defaults"));
+      // The header says this is one workspace, not the organization's page.
+      expect(view.container.textContent).toContain("Changes here apply only to this workspace");
     } finally {
       await cleanup(view);
     }
@@ -1149,10 +1152,18 @@ describe("Codex pool controls", () => {
     });
     const view = await render();
     try {
+      // One "Codex accounts" row in How accounts are used, and no legacy pool control.
+      const groups = [...view.container.querySelectorAll("[role='radiogroup']")].filter(
+        (group) =>
+          document.getElementById(group.getAttribute("aria-labelledby") ?? "")?.textContent ===
+          "Codex accounts",
+      );
+      expect(groups).toHaveLength(1);
       expect(
-        view.container.querySelectorAll('select[aria-label="Codex account rotation"]'),
+        [...view.container.querySelectorAll("button")].filter(
+          (candidate) => candidate.textContent?.trim() === "Spread work",
+        ),
       ).toHaveLength(1);
-      expect(button(view.container, "Spread work")).toBeUndefined();
     } finally {
       await cleanup(view);
     }
@@ -2262,7 +2273,7 @@ describe("One Models page for the organization and the workspace", () => {
       expect(text).toContain("Company plan");
       expect(text).toContain("Everyone in Acme");
       expect(text).toContain("Team plan");
-      expect(text).toContain("Design preview only");
+      expect(text).toContain("Belongs to Design preview");
       expect(button(view.container, /Connect account/)).toBeDefined();
       // Every workspace, with its rules; one this person can't change says who can.
       expect(text).toContain("Workspaces");
@@ -2366,7 +2377,7 @@ describe("One Models page for the organization and the workspace", () => {
         // Accounts reach workspaces or people, and their tags say which: the
         // section doesn't promise only workspaces.
         expect(sectionDescription(view.container, "Accounts")).toBe(
-          "Subscriptions, API keys and credits that pay for models.",
+          "Subscriptions, API keys and credits that pay for models. Open one to see its usage, choose who can use it, or reconnect it.",
         );
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
@@ -2923,7 +2934,7 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
-          "Design preview only",
+          "Belongs to Design preview",
         );
       } finally {
         await cleanup(view);
@@ -2957,7 +2968,7 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
-          "Design preview only",
+          "Belongs to Design preview",
         );
       } finally {
         await cleanup(view);
@@ -2982,7 +2993,7 @@ describe("One Models page for the organization and the workspace", () => {
         await flush();
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
-          "Personal workspace only",
+          "Your Personal workspace",
         );
       } finally {
         await cleanup(view);

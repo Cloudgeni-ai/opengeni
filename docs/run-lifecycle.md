@@ -1226,6 +1226,158 @@ the session locks and registers one ordinary queue wake. It writes no receipt:
 the woken workflow still proves through Temporal that the exact activity is
 gone and rechecks both writer gates before `reconcileSessionAttemptQuiescence`
 commits. A paused session then parks idle for Resume as usual.
+Migration 0764 extends that same inventory to quiesced recovering logical turns,
+regardless of a stale idle/queued session projection. Its scoped repair uses
+`peekSessionWork` before waking a quiesced turn, preserving Pause, admission,
+capacity and sandbox setup/lifecycle blockers. Current runnable recovery wakes
+cannot be acknowledged merely because Temporal accepted a signal; claim of that
+same turn consumes the obligation.
+
+Historical retirement is an explicit operator operation, never a reaper age
+heuristic. Supply `MigrationRuntimeOptions.interruptedTurnRetirement` or a private
+JSON file via `OPENGENI_MIGRATION_INTERRUPTED_TURN_RETIREMENT_MANIFEST` when
+running migrations. Explicit retirement also works after 0764 was recorded
+without a manifest; it is never silently ignored. The manifest has one operation UUID and at most 1,000 unique
+session targets: account/workspace/session/turn UUIDs, workflow ID, exact turn
+version and session event sequence. The migration aborts atomically if any
+target changed, has another executable turn (withdrawn drafts are preserved), or lacks a closed, physically
+quiesced recoverable attempt with no live writers. Canonical failure settlement
+closes its interactions, fails pending inputs/runs, suppresses unchanged goal
+continuation and changes the turn/session to failed. It creates no attempt or
+prompt, and preserves history and Pause. After every target passes its reviewed
+fences, a second phase appends one passive parent timeline receipt per retired
+child in the same transaction. This phase order prevents a selected child's
+receipt from invalidating its selected parent's sequence fence. The receipt is
+visible when someone opens the parent chat, but creates no input, child outbox
+row, wake, parent turn, goal continuation or model-history item. It supersedes
+that child's obsolete pending nonterminal notices and exact retired-turn result
+inputs/outboxes; earlier terminal answers and unrelated senders remain intact.
+Captured retries of superseded outbox rows fail their source callback atomically.
+Replaying the same manifest matches the exact audit receipt, not a newer epoch.
+Without a manifest an ordinary upgrade changes only recovery discovery.
+Operator reasons and manifest fences stay in the audit timeline; any realtime
+terminal uses the existing generic failure projection and preserves earlier
+context byte-for-byte. Deploy the notification-only retirement implementation
+before applying a manifest: replay of an older actionable retirement receipt
+fails closed rather than claiming that no parent execution occurred. Migration
+0764's frozen SQL is unchanged; this is the migration runner's operator hook.
+
+Build the private manifest with a read-only query (psql variables
+`workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its
+count and scope before supplying it to the migration runner. Selection is not
+proof: the repair repeats all admission-independent safety checks under locks.
+The cursor, not a potentially stale wide-row projection, supplies the sequence
+fence. Do not commit the resulting identifiers to a public repository.
+
+```sql
+SELECT jsonb_build_object('operationId', :'operation_id'::uuid,
+  'targets', jsonb_agg(jsonb_build_object(
+    'accountId', s.account_id, 'workspaceId', s.workspace_id,
+    'sessionId', s.id, 'turnId', t.id,
+    'workflowId', coalesce(s.temporal_workflow_id, t.temporal_workflow_id),
+    'expectedVersion', t.version,
+    'expectedLastSequence', coalesce(c.last_sequence, s.last_sequence)
+  ) ORDER BY s.id))
+FROM sessions s
+JOIN session_turns t ON t.workspace_id = s.workspace_id
+  AND t.session_id = s.id AND t.id = s.active_turn_id
+LEFT JOIN session_event_cursors c ON c.workspace_id = s.workspace_id
+  AND c.session_id = s.id AND c.account_id = s.account_id
+JOIN LATERAL (
+  SELECT state, outcome, quiesced_at, closed_at FROM session_turn_attempts a
+  WHERE a.workspace_id = t.workspace_id AND a.session_id = t.session_id
+    AND a.turn_id = t.id
+  ORDER BY execution_generation DESC, updated_at DESC, id DESC LIMIT 1
+) a ON true
+WHERE s.workspace_id = :'workspace_id'::uuid
+  AND s.status IN ('idle', 'queued', 'recovering')
+  AND t.status = 'recovering' AND t.active_attempt_id IS NULL
+  AND t.updated_at < :'interrupted_before'::timestamptz
+  AND a.closed_at < :'interrupted_before'::timestamptz
+  AND a.state = 'closed' AND a.outcome = 'interrupted_recoverable'
+  AND a.quiesced_at IS NOT NULL;
+```
+
+Verify that the exact operation settled its selected turns, emitted no new
+attempt, and left no active pointer to them. Compare `retired` to the reviewed
+manifest count; the other three counts must be zero.
+
+```sql
+WITH retired AS (
+  SELECT session_id, turn_id, occurred_at FROM session_events
+  WHERE workspace_id = :'workspace_id'::uuid AND type = 'turn.failed'
+    AND payload->>'code' = 'interrupted_turn_retired'
+    AND payload->>'retirementOperationId' = :'operation_id'
+)
+SELECT count(*) AS retired,
+  count(*) FILTER (WHERE t.status <> 'failed') AS not_failed,
+  count(*) FILTER (WHERE s.active_turn_id = t.id) AS active_pointers,
+  count(*) FILTER (WHERE EXISTS (
+    SELECT 1 FROM session_turn_attempts a WHERE a.workspace_id = t.workspace_id
+      AND a.session_id = t.session_id AND a.turn_id = t.id
+      AND a.started_at >= r.occurred_at)) AS replayed_turns
+FROM retired r JOIN session_turns t ON t.id = r.turn_id
+JOIN sessions s ON s.id = r.session_id;
+```
+
+Run the following immediately after the operation, or set `verify_before` to a
+captured verification timestamp. `parent_receipts` must equal the manifest's
+selected children with parents, and every other count must be zero. The start
+check includes both `turn.started` events (including pre-existing queued turns)
+and newly created turns/attempts. Unrelated human or already-authorized background
+work during this window can produce starts; investigate any nonzero count rather
+than attributing it automatically to retirement. Old unrelated pending inputs
+are deliberately not hidden by these checks.
+
+```sql
+WITH retired AS (
+  SELECT id, session_id, turn_id, occurred_at FROM session_events
+  WHERE workspace_id = :'workspace_id'::uuid AND type = 'turn.failed'
+    AND payload->>'code' = 'interrupted_turn_retired'
+    AND payload->>'retirementOperationId' = :'operation_id'
+), children AS (
+  SELECT r.*, s.parent_session_id FROM retired r
+  JOIN sessions s ON s.id = r.session_id
+), parents AS (
+  SELECT DISTINCT parent_session_id AS id FROM children
+  WHERE parent_session_id IS NOT NULL
+), operation_window AS (
+  SELECT min(occurred_at) AS began, :'verify_before'::timestamptz AS ended FROM retired
+)
+SELECT
+  (SELECT count(*) FROM session_events e JOIN children c
+    ON e.session_id = c.parent_session_id
+    AND e.payload->>'childTerminalEventId' = c.id::text
+    WHERE e.workspace_id = :'workspace_id'::uuid
+      AND e.type = 'system.update.settled'
+      AND e.payload->>'notificationOnly' = 'true'
+      AND e.payload->>'retirementOperationId' = :'operation_id') AS parent_receipts,
+  (SELECT count(*) FROM session_system_updates u JOIN children c
+    ON u.session_id = c.parent_session_id AND u.source_id = c.session_id::text
+    WHERE u.workspace_id = :'workspace_id'::uuid AND u.state = 'pending'
+      AND (u.kind IN ('child_requires_action','child_requires_action_resolved',
+        'child_paused','child_waiting_capacity','child_progress')
+        OR (u.kind = 'child_terminal_result' AND u.payload->>'turnId' = c.turn_id::text)))
+      AS pending_retired_child_inputs,
+  (SELECT count(*) FROM session_system_update_outbox o JOIN children c
+    ON o.target_session_id = c.parent_session_id AND o.source_session_id = c.session_id
+    WHERE o.workspace_id = :'workspace_id'::uuid AND o.status = 'pending'
+      AND (o.kind IN ('child_requires_action','child_requires_action_resolved',
+        'child_paused','child_waiting_capacity','child_progress')
+        OR (o.kind = 'child_terminal_result' AND o.payload->>'turnId' = c.turn_id::text)))
+      AS pending_retired_child_outboxes,
+  (SELECT count(*) FROM session_events e JOIN parents p ON p.id = e.session_id
+    CROSS JOIN operation_window w WHERE e.workspace_id = :'workspace_id'::uuid
+      AND e.type = 'turn.started' AND e.occurred_at >= w.began AND e.occurred_at <= w.ended)
+      AS parent_turns_started,
+  (SELECT count(*) FROM session_turns t JOIN parents p ON p.id = t.session_id
+    CROSS JOIN operation_window w WHERE t.workspace_id = :'workspace_id'::uuid
+      AND t.created_at >= w.began AND t.created_at <= w.ended) AS parent_turns_created,
+  (SELECT count(*) FROM session_turn_attempts a JOIN parents p ON p.id = a.session_id
+    CROSS JOIN operation_window w WHERE a.workspace_id = :'workspace_id'::uuid
+      AND a.started_at >= w.began AND a.started_at <= w.ended) AS parent_attempts_created;
+```
+
 The initial session status and replay cursor come from one SQL statement
 snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless
@@ -1886,8 +2038,9 @@ work does not dispatch turn activities or schedule retry timers.
 
 An authorized explicit Resume clears the selected session's block and commits
 a new wake, even when inference control was already active. A newly accepted
-Send or Steer also rechecks; an ordinary Send does not become Steer merely
-because admission is blocked. Neither action grants missing authority or
+Send or Steer (including Steer on an existing queue row) also rechecks; an
+ordinary Send does not become Steer merely because admission is blocked.
+Neither action grants missing authority or
 changes earlier accepted snapshots. Repair authority through its normal
 authorized lifecycle, then explicitly recheck; authority changes alone are not
 a polling trigger. Pause and cancellation remain independent controls.
@@ -4485,6 +4638,11 @@ without waiting for its root to end. Claims that have not completed and export
 latency remain explicit limits; this does not enable ordinary stdout retention.
 Missing traces may reflect sampling or retention; the durable session timeline
 remains authoritative. This linkage does not retroactively identify old traces.
+
+Codex joins request custody settlement before exposing a parsed provider failure
+to the worker's recovery classifier, including a final buffered event without a
+trailing blank separator. A pending or failed custody write never becomes replay
+permission; audit failure on these paths preserves the original provider diagnostic.
 
 Codex EOF classification waits for the SSE parser's final buffered block, including
 a valid terminal without a trailing blank separator. Raw transport EOF is not

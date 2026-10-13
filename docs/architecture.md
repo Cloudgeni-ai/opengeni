@@ -85,12 +85,27 @@ explicit session folders remain authoritative. Service rendering is owned by
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
 
+Connected Machine control replies use a negotiated, process-scoped receipt
+journal (`agent/crates/opengeni-agent/src/rpc_replay.rs`). NATS/JWT rotation
+rebuilds transport, not execution: immutable delivery identities join accepted
+work or replay its reply. Expired deliveries cannot execute after receipt GC;
+unknown outcomes never become never-sent merely because a later retry has no
+responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
+bounded recovery; legacy agents keep one-shot mutation semantics. See the
+[recovery contract](connected-machines.md#control-transport-recovery).
+
 Control revisions increase.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
+
+Settled one-shot and bounded interval schedules retire to `paused` when they
+cannot fire again. The existing 24-hour Temporal catch-up window and pending
+occurrences remain authoritative. Retirement atomically enqueues external
+schedule reconciliation; its per-schedule lock rereads the latest saved task,
+so a concurrent future reschedule is preserved.
 
 Temporal coordinates; activities read Postgres obligations, not signals.
 Conversation/goals/queues/usage/provider/tool transcripts never enter workflow history.
@@ -254,8 +269,26 @@ Empty finals after goal completion get one handoff, then a typed notice.
 See [run lifecycle](run-lifecycle.md).
 
 Non-transient preclaim rejection parks accepted work behind a durable admission
-block. Resume/Send/Steer rechecks without granting authority; operational outages
-retain backoff.
+block. Resume/Send/Steer (including queue-row Steer) clears that block atomically
+with the accepted direction and wake, without granting authority; receipt replay
+never clears a newer rejection. Operational outages retain backoff. Migration
+0763 repairs only unchanged, explicitly requested historical queue rechecks.
+Paused recovering turns and capacity waiters remain resumable obligations, not
+age-based cancellation candidates.
+
+A quiescence receipt proves the previous writer stopped; it does not consume
+the recovering logical turn. Wake acknowledgement retains current runnable
+recovery debt until claim, and the bounded recovery inventory also rediscovers
+quiesced recoveries with lost wakes (0764), using ordinary admission blockers.
+Migration 0764 may terminally retire an operator-selected, exact version and
+event-sequence-fenced manifest without replay. No manifest means no retirement:
+Pause remains resumable, and historical age alone grants no cancellation intent.
+Historical child retirement appends a passive, idempotent parent timeline receipt,
+not an executable child-result input. It supersedes that child's obsolete pending
+nonterminal notices without changing parent control, wakes or model history.
+All manifest targets settle before parent receipts advance any event cursors.
+Reusable schedules skip under effective Pause instead of reserving an input
+that cannot execute; Resume makes later occurrences eligible normally.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
@@ -275,6 +308,11 @@ See [`goals.md`](goals.md).
 | `session_goals` | Standing objective/continuation obligation | Workflow-local state |
 | Sandbox leases/envelopes | Provider identity/routing/recovery/workspace-generation truth | Conversation state |
 | Knowledge/instructions/Skills/organization identity | Scoped retrieval/governance authorities and lifecycle | Conversation history/temporary task notes |
+
+Terminal turn transitions retire their `agent_run_states` snapshots atomically
+at the database boundary, including SQL lifecycle writers. Nonterminal approval,
+recovery and capacity waits retain them; later turns use paired canonical history,
+not a terminal turn's control snapshots.
 
 The wake reaper repairs already-pending authentic terminal results for idle
 goalless parents through bounded identity-only discovery and scoped, fenced
@@ -823,6 +861,19 @@ Materializer/outbox sidecars use `packages/config` storage/broker settings,
 telemetry and dedicated DB posture, never API/sandbox credentials. Adapters:
 `apps/worker/src/editable-artifact-materializer-service.ts`
 and `apps/worker/src/editable-artifact-outbox-service.ts`.
+
+Their deployed images contain self-contained Bun bundles, not the source tree
+or development dependencies. The materializer additionally carries the exact
+read-only native runtime and its isolated executable; the final slim image
+verifies the executable's runtime identity and native ABI before publication.
+
+API/worker deployment images use `scripts/assemble-server-runtime.ts` and
+`scripts/copy-runtime-dependencies.ts` to retain only bundled entrypoints/assets
+and their frozen external dependency closures. Migration and catalog Jobs keep
+their command paths and reviewed data in the API image. Temporal's prebuilt
+workflow path does not eagerly load its source compiler; explicit compilation
+keeps the existing compiler behavior. Native conversions and role boundaries
+remain unchanged.
 
 ### 4.1 Request and event path
 
@@ -1683,6 +1734,8 @@ still throws from the interaction executor and never becomes a successful result
 
 Page-command deadlines preserve a definite `tab_not_responding` diagnosis through
 browserd and the API with reload/close guidance, without replacing a live browser.
+A crashed renderer likewise reaches clients as a definite `tab_crashed`
+diagnosis with open-a-new-tab guidance, not as a retryable outage.
 Pre-input failures are definite; already-sent input retains uncertain effects and
 must not replay. Other tabs keep their independent authority and queues.
 
@@ -1693,6 +1746,10 @@ require profile reconnection. Chrome and unrelated tabs remain intact, and
 mutations are never replayed. Partially dispatched input remains outcome unknown;
 queued input, DOM changes, navigation and emulation cannot cross into a replacement
 attachment. See [Connected Machines](connected-machines.md).
+
+Attached profile labels update through optional native-bridge inventory metadata.
+A rename preserves the ready native connection and its generation; it must not
+retire active browser/computer sessions or fence pending commands.
 
 Browser tab open/close keeps each physical outcome available to its caller.
 An older response or follow-up observation cannot replace a later selection.

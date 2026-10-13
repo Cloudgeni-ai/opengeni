@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as C from "@opengeni/contracts";
 import type { z } from "zod";
-import { VAULT_ITEM_PAGE_LIMIT } from "@opengeni/react";
+import { VAULT_ITEM_PAGE_LIMIT, vaultErrorCode } from "@opengeni/react";
 import type * as R from "@opengeni/react";
 
 // @opengeni/react mirrors the vault wire types by hand (it ships no contracts
@@ -29,6 +29,8 @@ assert<Equal<R.RevealVaultFieldResponse, C.RevealVaultFieldResponse>>();
 assert<Equal<R.SessionSecretsView, C.SessionSecretsView>>();
 assert<Equal<R.ProviderVaultMeta, C.ProviderVaultMeta>>();
 assert<Equal<R.InstallOnePasswordResponse, C.InstallOnePasswordResponse>>();
+assert<Equal<R.OnePasswordConnectionSummary, C.OnePasswordConnectionSummary>>();
+assert<Equal<R.DisconnectOnePasswordResponse, C.DisconnectOnePasswordResponse>>();
 assert<Equal<R.VaultOwnerKind, C.VaultOwnerKind>>();
 assert<Equal<R.VaultSyncStatus, C.VaultSyncStatus>>();
 assert<Equal<R.VaultItemType, C.VaultItemType>>();
@@ -44,6 +46,9 @@ assert<Assignable<R.MoveVaultItemRequest, z.input<typeof C.MoveVaultItemRequest>
 assert<Assignable<R.InstallOnePasswordRequest, z.input<typeof C.InstallOnePasswordRequest>>>();
 assert<Assignable<R.LinkProviderVaultRequest, z.input<typeof C.LinkProviderVaultRequest>>>();
 assert<
+  Assignable<R.ReplaceOnePasswordTokenRequest, z.input<typeof C.ReplaceOnePasswordTokenRequest>>
+>();
+assert<
   Assignable<
     R.CreateManagedProviderVaultRequest,
     z.input<typeof C.CreateManagedProviderVaultRequest>
@@ -51,6 +56,12 @@ assert<
 >();
 
 describe("vault wire types", () => {
+  test("every error code the API can send is recognized at runtime", () => {
+    for (const code of C.VaultErrorCode.options) {
+      expect(vaultErrorCode({ code })).toBe(code);
+    }
+  });
+
   test("the item page size is one the items route accepts", () => {
     expect(C.ListVaultItemsQuery.safeParse({ limit: String(VAULT_ITEM_PAGE_LIMIT) }).success).toBe(
       true,

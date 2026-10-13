@@ -26,7 +26,7 @@ export const secretsModule: AgentPromptModule = {
       bullets(
         sentences(
           "Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).",
-          "Write them directly in shell commands, browser typing, files and tool calls; they resolve only where they execute and stay references everywhere else, so use them freely.",
+          "A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call. To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.",
           search && "Find saved items and their ready references with `secret_search`.",
         ),
         `Sign in yourself, in this order: ${ladder.join("; ")}.`,

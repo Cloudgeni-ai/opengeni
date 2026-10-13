@@ -1525,6 +1525,32 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format('%I.session_visibility_change_blocker(uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_visibility_change_blocker(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_visibility_change_blocker(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.session_visibility_foreign_authority_items(uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_visibility_foreign_authority_items(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_visibility_foreign_authority_items(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format(
         '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer)',
         ${literal(schema)}
@@ -1951,6 +1977,12 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_machine_dependent_sessions(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.detach_scoped_machine_dependent_sessions(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(
+        format('%I.change_connected_machine_audience(uuid,uuid,uuid,bigint,text,text,boolean)', ${literal(schema)})
+      ) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.preview_connected_machine_audience_change(uuid, uuid, uuid, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.change_connected_machine_audience(uuid, uuid, uuid, bigint, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_connected_machine_authorizations FROM %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
@@ -2335,6 +2367,16 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
       EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
     END IF;
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'opengeni_private.list_exhausted_scheduled_tasks(integer)',
+      'opengeni_private.list_scheduled_task_schedule_reconciliations(integer)',
+      format('%I.scheduled_task_is_exhausted(uuid)', ${literal(schema)})
+    ] LOOP
+      IF to_regprocedure(routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', routine_signature);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     -- Read-only maintenance work checks (0730, 0732) carry exactly the authority of
     -- the claim each one previews: same owner, no PUBLIC, runtime EXECUTE.
     DECLARE
@@ -2770,7 +2812,9 @@ function databaseUrlFor(value: string, database: string): string {
 // what `bun src/provision-roles.ts` / the `provision-roles` package script
 // invokes — standalone byte-for-byte the historical script (public schema,
 // force strategy, env-driven creds).
-if (import.meta.main) {
+/** Command-line entry. Bundled release images call this explicitly; see
+ * scripts/assemble-server-runtime.ts. */
+export async function runProvisionRolesCli(): Promise<void> {
   const adminUrl =
     process.env.OPENGENI_MIGRATIONS_DATABASE_URL ??
     process.env.OPENGENI_DATABASE_ADMIN_URL ??
@@ -2787,3 +2831,5 @@ if (import.meta.main) {
   });
   console.log(JSON.stringify(result, null, 2));
 }
+
+if (import.meta.main) await runProvisionRolesCli();

@@ -29,6 +29,7 @@ import {
 
 import { apiBaseUrl } from "@/api";
 import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
+import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
 import { TechnicalDetails } from "@/components/ui/error-message";
@@ -36,6 +37,7 @@ import { Notice } from "@/components/ui/notice";
 import { PageHeader } from "@/components/ui/page-header";
 import { useAppContext } from "@/context";
 import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** While the connect dialog waits for the new machine, look for it sooner. */
@@ -53,7 +55,7 @@ export async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
-  const { client, workspaces } = useAppContext();
+  const { client, workspaces, accessContext } = useAppContext();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const machines = useWorkspaceMachines({
     pollIntervalMs: enrollOpen ? CONNECT_WATCH_POLL_MS : MACHINES_DASHBOARD_POLL_MS,
@@ -67,6 +69,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
   const [detailId, setDetailId] = useState<string | null>(null);
+  // "Who can use it?" for the open machine.
+  const [audienceOpen, setAudienceOpen] = useState(false);
   const [detailWindow, setDetailWindow] = useState<MetricWindow>("1h");
   const [detailSeries, setDetailSeries] = useState<MetricSample[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -85,6 +89,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
     ? (machines.machines.find((m) => m.sandboxId === detailId) ?? null)
     : null;
   const selectedEnrollmentId = selectedMachine?.enrollmentId ?? null;
+  const subjectId = accessContext?.subjectId ?? null;
+  const workspaceAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
+  const audienceMachine =
+    audienceOpen && selectedMachine?.enrollmentId && selectedMachine.scope !== "organization"
+      ? { ...selectedMachine, enrollmentId: selectedMachine.enrollmentId }
+      : null;
 
   // Fetch the compact card sparkline history for every enrolled machine. Keyed on
   // the SET of enrollment ids (not the 5s-polled array identity) + a 30s refresh,
@@ -202,6 +212,18 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const featureUnavailable =
     machines.error instanceof OpenGeniApiError && machines.error.status === 404;
 
+  const requestAgentUpdate = (machine: MachineView) => {
+    if (!machine.enrollmentId) return;
+    void machines.updateAgent(machine.enrollmentId).then((result) => {
+      if (result?.accepted) {
+        toast.success(`Updating ${machine.name} to v${result.targetVersion}`, {
+          description:
+            "The agent installs it once the machine is idle. If work is running, the update is postponed and you can start it again later.",
+        });
+      }
+    });
+  };
+
   return (
     <ContentPage width="standard">
       <PageHeader
@@ -228,7 +250,21 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             window={detailWindow}
             onWindowChange={setDetailWindow}
             loadingSeries={detailLoading}
-            onBack={() => setDetailId(null)}
+            onBack={() => {
+              setAudienceOpen(false);
+              setDetailId(null);
+            }}
+            {...(machines.canManage && subjectId
+              ? { onChangeAudience: () => setAudienceOpen(true) }
+              : {})}
+            {...(machines.canUpdateAgent
+              ? {
+                  onUpdateAgent: requestAgentUpdate,
+                  updatingAgent:
+                    selectedMachine.enrollmentId !== null &&
+                    machines.updatingEnrollmentId === selectedMachine.enrollmentId,
+                }
+              : {})}
             {...(machines.canRemove
               ? {
                   onRemove: (machine: MachineView) => {
@@ -270,16 +306,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onEnroll={machines.canManage ? () => setEnrollOpen(true) : undefined}
             {...(machines.canUpdateAgent
               ? {
-                  onUpdateAgent: (machine: MachineView) => {
-                    if (!machine.enrollmentId) return;
-                    void machines.updateAgent(machine.enrollmentId).then((result) => {
-                      if (result?.accepted) {
-                        toast.success(`Update requested for ${machine.name}`, {
-                          description: `Installing v${result.targetVersion} requires an idle machine. If it is busy, retry after its work finishes.`,
-                        });
-                      }
-                    });
-                  },
+                  onUpdateAgent: requestAgentUpdate,
                   updatingEnrollmentId: machines.updatingEnrollmentId,
                 }
               : {})}
@@ -407,6 +434,20 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           </div>
         ) : null}
       </ConfirmDialog>
+      {audienceMachine && subjectId ? (
+        <MachineAudienceDialog
+          key={audienceMachine.enrollmentId}
+          client={client}
+          workspaceId={workspaceId}
+          machine={audienceMachine}
+          subjectId={subjectId}
+          workspaceAdmin={workspaceAdmin}
+          personalWorkspace={personalWorkspace}
+          open
+          onOpenChange={setAudienceOpen}
+          onChanged={() => void machines.refresh()}
+        />
+      ) : null}
     </ContentPage>
   );
 }

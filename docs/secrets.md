@@ -137,6 +137,7 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
 | MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed here. |
+| Opengeni's own tools (messages, sessions, schedules, goals, Knowledge, artifacts, admin actions) | Resolved like connectors: the executing call receives values, while the journal keeps the reference. To store or hand on a reference for later work, escape it (`\{{secret:Item}}`); the tool receives `{{secret:Item}}`. The `secret_*` tools take references as names and never resolve them. |
 | Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
 | Passkeys | Registering a passkey in the managed browser saves a `passkey` item; later logins use it from the vault and write the sign count back. |
@@ -176,7 +177,7 @@ With the `secrets` capability on, agents get:
 
 | Tool | Purpose | Needs |
 |---|---|---|
-| `secret_search` | Find items by name, website or type, with ready references. | `secrets:list` |
+| `secret_search` | Find or list items by name, website, type or vault, with ready references. The first page lists every reachable vault and its item count; `nextCursor` pages through the rest (up to 1,000 items examined per call). | `secrets:list` |
 | `secret_save` | Create or update an item; fields take a value, a generated password, another reference or a version to restore. | `secrets:write` |
 | `secret_get` | Reveal a value to the model. Agents do not hold `secrets:read` by default. | `secrets:read` |
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |
@@ -198,6 +199,19 @@ vaults with `POST /v1/workspaces/:workspaceId/vaults/link` (read-only or
 read-write) or create a managed vault with
 `POST /v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults`.
 
+- A connection belongs to one person (Only me), the workspace or the
+  organization, and the vaults linked through it carry the same owner. In the
+  web app, Settings › Secrets lists each connection under 1Password; its page
+  links more vaults, replaces the token and disconnects it.
+- `GET /connections/1password/service-accounts` lists the connections the
+  caller can see (never their tokens), with `canManage` when the caller could
+  have installed them.
+- `PUT /connections/:connectionId/1password/token` checks a new token and
+  stores it on the same connection, so linked vaults keep their links and sync
+  again. A token for a different 1Password account is refused with
+  `provider_conflict`.
+- `DELETE /connections/:connectionId/1password` unlinks every vault linked
+  through the connection, then revokes it. Nothing is deleted in 1Password.
 - OpenGeni mirrors item metadata only; values are fetched live and cached per
   attempt for at most 60 seconds, with at most 50 provider reads per attempt.
 - Edits in a read-write linked vault are written to 1Password first, then the
@@ -230,7 +244,8 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
-| `POST /connections/1password/install`; `GET /connections/:connectionId/provider-vaults` | 1Password connection |
+| `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
+| `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
 | `POST /vaults/link`; `POST /vaults/:vaultId/sync` | Provider vaults |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`

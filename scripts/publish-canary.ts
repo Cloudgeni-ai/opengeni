@@ -547,7 +547,12 @@ export async function publishPreparedCanaries(
 }
 
 function receiptObservation(pkg: CanaryArchive, current: RegistryPackage): string {
-  if (current["dist-tags"].latest !== pkg.previousLatest) {
+  // npm always points `latest` at a package's first published version, whatever
+  // tag the publish asked for. For a package with no stable release yet that is
+  // this canary, and nothing else may have moved the tag.
+  const latest = current["dist-tags"].latest;
+  const firstPublication = pkg.previousLatest === undefined && latest === pkg.version;
+  if (latest !== pkg.previousLatest && !firstPublication) {
     throw new Error(`Stable tag changed during canary publication for ${pkg.name}`);
   }
   if (!Object.hasOwn(current.versions, pkg.version)) return "version_pending";

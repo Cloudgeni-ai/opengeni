@@ -1806,6 +1806,80 @@ The activated database contract is intentionally narrow:
   receipt. A receipt stranded by a completed turn cannot be resumed or
   resolved, so it no longer blocks transitions, whole-session forks or
   Variable Set changes. This is the same predicate Retry already uses.
+  Rolling migration 0759 does the same for pending machine updates (finished
+  background commands, child results, agent messages) that an idle session
+  keeps until its next turn. Such an update blocks only when its frozen
+  authority belongs to someone other than the session owner: a personal
+  connection delegation, subject-scoped account binding or personal
+  subscription authority of another person, a lineage authority subject other
+  than the owner, a user-scoped provider snapshot without its causal subject,
+  or a causal human turn by someone else (an unreadable or malformed causal
+  turn counts as foreign). The owner's own pending updates stay pending across
+  privatization and are delivered by the next turn, because the delivering
+  turn executes with authority the private session could already use.
+- Leftover records never block making a session Only me (rolling migration
+  0768). The private transition settles them in the same transaction instead
+  of refusing: turns left `queued`, `recovering` or `waiting_capacity` on a
+  session whose status shows no work are cancelled with reason
+  `authority_changed`, together with their parked questions, capacity waiters
+  and pending tool calls; RunState rows, questions and capacity waiters whose
+  turn is already terminal are ignored; a finished background command result
+  that carries someone else's authority is cancelled
+  (`system.update.cancelled`, reason `authority_changed`) because the private
+  session could never deliver it; and a schedule that can no longer run
+  (`scheduled_task_is_exhausted`, see 0761) or is deleted no longer counts.
+  Work the person can see is different: a running or parked response, queued
+  messages and an active goal refuse the change with a typed `active_work`
+  conflict unless the request carries `stopActiveWork` ("make private
+  anyway"). With that consent the change cancels parked and queued turns and
+  pauses the goal atomically. A response a worker is executing right now is
+  interrupted first with an `authority_change` interruption, which the worker
+  settles as a terminal cancellation; core waits briefly for that settlement
+  and then makes the same transition, answering a retryable
+  `stopping_active_work` with the same idempotency key if the worker is slow.
+  The owner-only `GET .../visibility/preview?visibility=private`
+  (`session_visibility_change_blocker`) reports that work and any block that
+  stopping it would not clear, so the console shows one summary and one
+  confirmation. Under 0768 alone, other foreign pending updates, live
+  schedules, realtime, workspace writers, retained processes and sandbox
+  access holders still refused the change; 0769 below removes those refusals.
+  Whole-session forks share the
+  narrowed predicate (terminal-turn rows and exhausted schedules no longer
+  count) but still refuse any nonterminal work; they never cancel anything.
+- Nothing in a session refuses making it Only me (rolling migration 0769).
+  The private transition checks only `session_private_transition_blocker`:
+  the session's own work, which the application settles in the same
+  transaction, and a live voice session. Everything else is acted on or
+  ignored:
+  - Another member's authority is dropped. Every pending update that carries
+    someone else's frozen authority (the 0759 rules) is cancelled with
+    `system.update.cancelled`, reason `authority_changed`. A subscription
+    account choice for the session (`subscription_session_bindings`) that
+    points at another person's personal connection, or at a connection the
+    owner cannot see, is removed, so the next response is placed
+    automatically. A `BEFORE INSERT` trigger on `session_system_updates`
+    stores any later pending update with foreign authority on a private
+    session as `cancelled` (scheduled occurrences keep their own run-time
+    validation), so a command another member started earlier cannot deliver
+    into the private session afterwards.
+  - A live voice session ends with `authority_revoked` (an expired lease ends
+    as `lease_expired`); voice connections of an ended voice session close.
+  - Schedules are ignored: each run is admitted under its owner's own session
+    access. Sandbox processes, file operations and viewer holders are ignored
+    as well: they record the authority epoch and visibility they were
+    admitted under, which stop matching after the change, and since 0738
+    files are as shared as the sandbox.
+  The preview's `work` lists what the one confirmation does:
+  `runningTurnCount`, `queuedTurnCount`, `activeGoal`, `liveVoice`,
+  `otherPeoplePendingUpdateCount` and `otherPeopleAccountChoiceCount` (the
+  last two from the owner-only `session_visibility_foreign_authority_items`).
+  A finished background-command notice is not listed; it is a leftover and
+  is cancelled silently as under 0768. A non-empty `work` needs
+  `stopActiveWork`; an empty one changes visibility directly, and the console
+  then shows no dialog. The preview's `blocker` field is deprecated and always
+  `null`, and `session_visibility_change_blocker` always answers `NULL`. Whole-session
+  forks and Variable Set changes keep the full `assert_session_tenancy_quiescent`
+  check.
 - Who can read a session and who can use its sandbox are separate. Since
   rolling migration 0738, a session may become private, or be created private,
   while it shares a sandbox group or Connected Machine with other sessions.

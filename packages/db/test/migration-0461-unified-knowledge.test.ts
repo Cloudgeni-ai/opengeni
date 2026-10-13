@@ -418,6 +418,16 @@ beforeAll(async () => {
     // fixture never runs that maintenance step or the ones after it (the
     // Claude cutover and the retirement), so they stay recorded.
     await owner`INSERT INTO schema_migrations(name) VALUES ('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql')`;
+    // The queue Steer admission repair is a one-time data repair that also
+    // reads the withheld 0560 import column; it changes no schema.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0763_queue_steer_admission_recheck_repair.sql')`;
+    // The private-visibility leftover rewrite anchors on the current
+    // quiescence function body, which this fixture's withheld migrations shape
+    // differently; it adds no storage this fixture reads.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0768_private_visibility_ignores_leftovers.sql')`;
+    // 0769 rewrites the same routines again; it adds a trigger on
+    // session_system_updates whose columns this fixture's withheld migrations shape.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0769_private_visibility_never_blocks.sql')`;
     await migrate(owned.ownerUrl);
     // Current session adapters select these nullable reader fields. Do not
     // activate the import lifecycle before its withheld 0499 prerequisite.

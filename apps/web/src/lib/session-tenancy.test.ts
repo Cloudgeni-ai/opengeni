@@ -7,7 +7,12 @@ import {
   prepareSessionVisibilityAttempt,
   privateSessionSandboxNote,
   retryableSessionTenancyReconciliationFailure,
+  isStoppingSessionWorkError,
+  normalizeSessionVisibilityWork,
   sessionTenancyBlockerMessage,
+  sessionVisibilityWorkIsEmpty,
+  sessionVisibilityWorkStopsWork,
+  sessionVisibilityWorkSummary,
   visibilityAttemptReachedAuthoritativeState,
 } from "./session-tenancy";
 
@@ -173,5 +178,76 @@ describe("session tenancy browser operation state", () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  test("summarizes the work a private change stops and classifies its conflicts", () => {
+    const none = {
+      runningTurnCount: 0,
+      queuedTurnCount: 0,
+      activeGoal: false,
+      liveVoice: false,
+      otherPeoplePendingUpdateCount: 0,
+      otherPeopleAccountChoiceCount: 0,
+    };
+    expect(
+      sessionVisibilityWorkSummary({
+        ...none,
+        runningTurnCount: 1,
+        queuedTurnCount: 1,
+        activeGoal: true,
+        liveVoice: true,
+      }),
+    ).toEqual([
+      "Stop the response that is in progress",
+      "Cancel 1 queued message",
+      "Pause the active goal",
+      "End the live voice conversation",
+    ]);
+    const othersOnly = {
+      ...none,
+      otherPeoplePendingUpdateCount: 3,
+      otherPeopleAccountChoiceCount: 2,
+    };
+    expect(sessionVisibilityWorkSummary(othersOnly)).toEqual([
+      "Drop 3 pending updates that use other people's access",
+      "Stop using other people's accounts in this session",
+    ]);
+    expect(sessionVisibilityWorkIsEmpty(none)).toBe(true);
+    expect(sessionVisibilityWorkIsEmpty(othersOnly)).toBe(false);
+    expect(sessionVisibilityWorkStopsWork(othersOnly)).toBe(false);
+    expect(sessionVisibilityWorkStopsWork({ ...none, liveVoice: true })).toBe(true);
+    // An older server reports only the first three fields.
+    expect(
+      normalizeSessionVisibilityWork({
+        runningTurnCount: 1,
+        queuedTurnCount: 0,
+        activeGoal: false,
+      }),
+    ).toEqual({ ...none, runningTurnCount: 1 });
+    expect(normalizeSessionVisibilityWork({ runningTurnCount: "1" })).toBeNull();
+    const conflict = (reason: string) =>
+      new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            code: "conflict",
+            message: "conflict",
+            retryable: reason === "stopping_active_work",
+            details: { reason, runningTurnCount: 0, queuedTurnCount: 3, activeGoal: false },
+          },
+        }),
+      );
+    expect(classifySessionTenancyFailure(conflict("active_work"))).toMatchObject({
+      kind: "active_work",
+      retainAttempt: true,
+      reconcile: false,
+      work: { runningTurnCount: 0, queuedTurnCount: 3, activeGoal: false },
+    });
+    expect(classifySessionTenancyFailure(conflict("stopping_active_work"))).toMatchObject({
+      kind: "stopping_work",
+      retainAttempt: true,
+    });
+    expect(isStoppingSessionWorkError(conflict("stopping_active_work"))).toBe(true);
+    expect(isStoppingSessionWorkError(conflict("active_work"))).toBe(false);
   });
 });

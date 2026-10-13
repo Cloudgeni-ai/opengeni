@@ -56,8 +56,10 @@ import {
   type MachineMetricsSample,
 } from "@opengeni/db";
 import {
+  AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndContract,
   AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContract,
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContractValue,
+  type AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndValue,
 } from "@opengeni/contracts";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -66,10 +68,12 @@ import {
   AgentEvent,
   AgentUpdateStage,
   Arch,
+  AttachedBrowserConnectionEndReason as WireConnectionEndReason,
   GoingOfflineReason,
   Hello,
   Os,
   goingOfflineReasonToJSON,
+  type AttachedBrowserConnectionEnd as WireAttachedBrowserConnectionEnd,
   type AttachedBrowserInventorySnapshot as WireAttachedBrowserInventorySnapshot,
   type MetricsSample,
 } from "@opengeni/agent-proto";
@@ -318,7 +322,51 @@ export function wireAttachedBrowserInventoryToContract(
       tabCount: safeWireInteger(device.tabCount, "attached browser tab count"),
       capabilities: device.capabilities,
     })),
+    connectionEnds: (wire.connectionEnds ?? []).flatMap(wireConnectionEndToContract),
   });
+}
+
+const WIRE_CONNECTION_END_REASONS = new Map<
+  WireConnectionEndReason,
+  AttachedBrowserConnectionEndValue["reason"]
+>([
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_CLOSED_PORT,
+    "browser_closed_port",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_MESSAGE_INVALID,
+    "browser_message_invalid",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_OUTPUT_FAILED,
+    "browser_output_failed",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_NATIVE_HOST_LOST,
+    "native_host_lost",
+  ],
+  [WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_AGENT_REJECTED, "agent_rejected"],
+]);
+
+/** Connection ends are diagnostics. One the contract cannot hold (a future
+ *  reason, or the generation of a hello the bridge rejected as malformed) is
+ *  dropped instead of rejecting the authoritative device inventory. */
+function wireConnectionEndToContract(
+  wire: WireAttachedBrowserConnectionEnd,
+): AttachedBrowserConnectionEndValue[] {
+  const reason = WIRE_CONNECTION_END_REASONS.get(wire.reason);
+  const endedAtMs = Number(wire.endedAtUnixMs);
+  if (!reason || !Number.isSafeInteger(endedAtMs) || endedAtMs <= 0) return [];
+  const parsed = AttachedBrowserConnectionEndContract.safeParse({
+    deviceId: wire.deviceId,
+    connectionGeneration: wire.connectionGeneration,
+    reason,
+    detail: wire.detail.slice(0, 512) || null,
+    endedAt: new Date(endedAtMs).toISOString(),
+    connectedMs: Math.min(Number(wire.connectedMs) || 0, Number.MAX_SAFE_INTEGER),
+  });
+  return parsed.success ? [parsed.data] : [];
 }
 
 function safeWireInteger(value: string | number, label: string): number {

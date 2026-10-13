@@ -133,4 +133,36 @@ describe("skill_save gateway", () => {
     await f.call({ ...args, expectedRevisionId: null, files: [original[0]] });
     expect(f.writes).toHaveLength(1);
   });
+
+  test("normalizes a stringified null creation revision before reads and persistence", async () => {
+    const f = fixture();
+    const creation = { ...args, expectedRevisionId: "null", files: [original[0]] };
+    await f.call(creation);
+    expect(f.calls).toEqual(["authorize"]);
+    expect(f.writes[0]?.expectedRevisionId).toBeNull();
+    expect(f.writes[0]?.files).toEqual([original[0]]);
+    await f.call({ ...creation, expectedRevisionId: null });
+    expect(f.writes[1]).toEqual(f.writes[0]);
+  });
+
+  test("rejects invalid write identities before loading or saving any content", async () => {
+    for (const invalid of [
+      { expectedRevisionId: "not-a-revision" },
+      { expectedRevisionId: "" },
+      { expectedRevisionId: undefined },
+      { expectedRevisionId: false },
+      { skillId: "not-a-skill" },
+      { operationId: "not-an-operation" },
+      { expectedScopeVersion: -1 },
+      { expectedScopeVersion: 1.5 },
+    ]) {
+      const f = fixture();
+      await expect(f.call({ ...args, ...invalid, files: [original[0]] })).rejects.toThrow(
+        Object.keys(invalid)[0]!,
+      );
+      // The outer gateway may reject before dispatch; neither layer may load.
+      expect(f.calls.filter((call) => call !== "authorize")).toEqual([]);
+      expect(f.writes).toEqual([]);
+    }
+  });
 });

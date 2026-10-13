@@ -243,6 +243,17 @@ export const embeddingMigrationTail = [
   "0755_turn_connection_account_intent.sql",
   "0756_turn_connection_account_intent_schema.sql",
   "0758_connection_account_intent_grants.sql",
+  // Reads the subscription, binding and provider-snapshot columns of
+  // session_system_updates added by withheld migrations above.
+  "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+  "0760_terminal_turn_run_state_cleanup.sql",
+  "0761_exhausted_scheduled_tasks.sql",
+  // Rewrites the quiescence and visibility routines 0759 and 0761 extend.
+  "0768_private_visibility_ignores_leftovers.sql",
+  // Rewrites the same quiescence and visibility routines again.
+  "0769_private_visibility_never_blocks.sql",
+  "0763_queue_steer_admission_recheck_repair.sql",
+  "0764_interrupted_turn_recovery.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501

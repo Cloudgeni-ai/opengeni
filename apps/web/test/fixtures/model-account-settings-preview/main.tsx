@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster } from "sonner";
 import {
-  AccountRulesOverviewSection,
+  AccountRuleLocksPage,
   OrganizationAccountRulesSection,
   WorkspaceAccountRulesSection,
   useModelAccountSettingsOverview,
@@ -22,20 +23,18 @@ const LABELS: Record<string, string> = {
 
 function Organization() {
   const state = useModelAccountSettingsOverview("acme", true);
+  const [locks, setLocks] = useState(false);
+  if (locks)
+    return (
+      <AccountRuleLocksPage organizationName="Acme" state={state} onClose={() => setLocks(false)} />
+    );
   return (
     <SectionStack>
       <OrganizationAccountRulesSection
         organizationName="Acme"
         state={state}
         modelLabel={(id) => LABELS[id] ?? id}
-      />
-      <AccountRulesOverviewSection
-        organizationName="Acme"
-        state={state}
-        modelLabel={(id) => LABELS[id] ?? id}
-        onOpenWorkspace={(id) => {
-          document.body.dataset.opened = id;
-        }}
+        onEditLocks={() => setLocks(true)}
       />
     </SectionStack>
   );

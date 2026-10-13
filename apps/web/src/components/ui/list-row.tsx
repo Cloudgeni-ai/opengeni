@@ -626,8 +626,10 @@ export function ListRow({
         {narrowState}
       </MetaPart>
     ) : null;
-  const lineParts = [
-    ...metaParts,
+  const lineParts = metaParts;
+  // The status and the narrow state end the line and always stay whole: the
+  // description and the facts before them give way instead.
+  const trailingParts = [
     ...(singleLine && statusPart ? [statusPart] : []),
     ...(narrowStatePart ? [narrowStatePart] : []),
   ];
@@ -811,7 +813,10 @@ export function ListRow({
             {secondary}
           </p>
         ) : null}
-        {singleLine && ((secondary && !(disabled && disabledReason)) || lineParts.length > 0) ? (
+        {singleLine &&
+        ((secondary && !(disabled && disabledReason)) ||
+          lineParts.length > 0 ||
+          trailingParts.length > 0) ? (
           <p
             className={cn(
               "m-0 mt-0.5 flex min-w-0 items-center overflow-hidden text-xs leading-4.5 whitespace-nowrap text-fg-subtle",
@@ -847,6 +852,19 @@ export function ListRow({
                 )}
               >
                 {restLineParts}
+              </span>
+            ) : null}
+            {trailingParts.length > 0 ? (
+              <span
+                className={cn(
+                  "flex shrink-0 items-center",
+                  // Nothing before it: drop its leading dot.
+                  !(secondary && !(disabled && disabledReason)) &&
+                    restLineParts.length === 0 &&
+                    "-ml-4",
+                )}
+              >
+                {trailingParts}
               </span>
             ) : null}
           </p>

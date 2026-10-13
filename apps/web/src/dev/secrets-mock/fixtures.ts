@@ -2,6 +2,7 @@
 // the Secrets UI before the vault API exists (and for transient states after).
 // Every value is fake.
 import type {
+  OnePasswordConnectionSummary,
   PasskeySummary,
   VaultFieldKind,
   VaultFieldVersionMeta,
@@ -34,10 +35,17 @@ export type MockField = VaultItemField & {
   versions: { value: string; createdAt: string; by: VaultFieldVersionMeta["createdByKind"] }[];
 };
 export type MockItem = Omit<VaultItem, "fields"> & { fields: MockField[] };
+/** A 1Password vault a mock service account can see. */
+export type MockProviderVault = { externalVaultId: string; name: string; itemCount: number };
 export type MockState = {
   workspaceId: string;
   vaults: VaultSummary[];
   items: MockItem[];
+  connections: OnePasswordConnectionSummary[];
+  /** What each connection's service account can see in 1Password. */
+  providerVaults: Record<string, MockProviderVault[]>;
+  /** `${connectionId}/${externalVaultId}` → linked Opengeni vault id. */
+  links: Record<string, string>;
   taskSessionId: string;
   childSessionId: string;
   narrowedSessionId: string;
@@ -231,6 +239,7 @@ export function buildMockState(workspaceId: string): MockState {
     availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: false },
   });
   const connectionId = mockId("1password-connection");
+  const personalConnectionId = mockId("1password-personal");
   const opEngineering = vault(workspaceId, {
     name: "1P Engineering",
     ownerKind: "workspace",
@@ -249,6 +258,14 @@ export function buildMockState(workspaceId: string): MockState {
     syncErrorCode: "provider_unavailable",
     syncErrorMessage: "1Password didn't respond.",
     lastSyncedAt: iso(-3 * HOUR),
+  });
+  const opPersonal = vault(workspaceId, {
+    name: "Personal",
+    ownerKind: "user",
+    source: "onepassword",
+    mode: "read_only",
+    providerConnectionId: personalConnectionId,
+    lastSyncedAt: iso(-9 * 60_000),
   });
   const taskSessionId = mockId("task-session");
   const childSessionId = mockId("child-session");
@@ -367,6 +384,14 @@ export function buildMockState(workspaceId: string): MockState {
       type: "login",
       fields: login("calendar@acme.dev", "fake-cal"),
     }),
+    ...["Bank", "Email"].map((name) =>
+      item(opPersonal, {
+        name,
+        type: "login",
+        fields: login("me@example.com", `fake-${name}`),
+        lastUsedAgo: null,
+      }),
+    ),
     ...["AWS console", "Datadog", "Linear", "Notion", "Vercel", "Cloudflare"].map((name) =>
       item(opEngineering, {
         name,
@@ -446,15 +471,58 @@ export function buildMockState(workspaceId: string): MockState {
     noPersonal,
     opEngineering,
     opShared,
+    opPersonal,
     taskVault,
   ];
   for (const each of vaults) {
     each.itemCount = items.filter((entry) => entry.vaultId === each.id && !entry.archivedAt).length;
   }
+  const connections: OnePasswordConnectionSummary[] = [
+    {
+      id: connectionId,
+      ownership: "workspace",
+      accountName: "acme.1password.com",
+      label: null,
+      planTier: "business",
+      verifiedAt: iso(-4 * 60_000),
+      createdAt: iso(-12 * DAY),
+      createdBySubjectId: null,
+      canManage: true,
+    },
+    {
+      id: personalConnectionId,
+      ownership: "user",
+      accountName: "my.1password.com",
+      label: null,
+      planTier: "family",
+      verifiedAt: iso(-9 * 60_000),
+      createdAt: iso(-2 * DAY),
+      createdBySubjectId: null,
+      canManage: true,
+    },
+  ];
   return {
     workspaceId,
     vaults,
     items,
+    connections,
+    providerVaults: {
+      [connectionId]: [
+        { externalVaultId: "op-eng", name: "1P Engineering", itemCount: 6 },
+        { externalVaultId: "op-shared", name: "1P Shared", itemCount: 3 },
+        { externalVaultId: "op-mkt", name: "Marketing", itemCount: 7 },
+        { externalVaultId: "op-finance", name: "Finance", itemCount: 12 },
+      ],
+      [personalConnectionId]: [
+        { externalVaultId: "op-personal", name: "Personal", itemCount: 2 },
+        { externalVaultId: "op-family", name: "Family", itemCount: 31 },
+      ],
+    },
+    links: {
+      [`${connectionId}/op-eng`]: opEngineering.id,
+      [`${connectionId}/op-shared`]: opShared.id,
+      [`${personalConnectionId}/op-personal`]: opPersonal.id,
+    },
     taskSessionId,
     childSessionId,
     narrowedSessionId,

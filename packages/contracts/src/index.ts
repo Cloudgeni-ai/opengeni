@@ -785,6 +785,7 @@ export const ErrorCode = z.enum([
   "provider_verification_failed",
   "upstream_unavailable",
   "tab_not_responding",
+  "tab_crashed",
   "internal_error",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
@@ -1743,9 +1744,48 @@ export const UpdateSessionVisibilityRequest = z
     visibility: SessionVisibility,
     expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     idempotencyKey: SessionTenancyIdempotencyKey,
+    /**
+     * "Make private anyway": stop the chat's visible work (the running or
+     * parked response, queued messages, an active goal, a live voice session)
+     * and drop what carries another person's access (their pending updates and
+     * account choices) as part of the change. Without it, any of that answers
+     * `active_work` with the same summary. Leftover records are settled either
+     * way, and nothing else refuses the change.
+     */
+    stopActiveWork: z.boolean().optional(),
   })
   .strict();
 export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
+
+/** What a confirmed change to Only me stops or removes. */
+export const SessionVisibilityWork = z
+  .object({
+    runningTurnCount: z.number().int().nonnegative(),
+    queuedTurnCount: z.number().int().nonnegative(),
+    activeGoal: z.boolean(),
+    liveVoice: z.boolean(),
+    otherPeoplePendingUpdateCount: z.number().int().nonnegative(),
+    otherPeopleAccountChoiceCount: z.number().int().nonnegative(),
+  })
+  .strict();
+export type SessionVisibilityWork = z.infer<typeof SessionVisibilityWork>;
+
+/** Owner-only answer to "what happens if this chat changes audience?". */
+export const SessionVisibilityChangePreview = z
+  .object({
+    visibility: SessionVisibility,
+    targetVisibility: SessionVisibility,
+    authorityEpoch: z.number().int().positive(),
+    /**
+     * What the change stops or removes when `stopActiveWork` is sent; empty
+     * for workspace. Nothing else refuses a change to Only me.
+     */
+    work: SessionVisibilityWork,
+    /** @deprecated Always `null`: nothing refuses a change to Only me any more. */
+    blocker: SessionTenancyBlocker.nullable(),
+  })
+  .strict();
+export type SessionVisibilityChangePreview = z.infer<typeof SessionVisibilityChangePreview>;
 
 export const UpdateSessionVisibilityResponse = z
   .object({
@@ -19096,6 +19136,116 @@ export const EnableMachineScreenControlResponse = z.object({
   message: z.string().nullable(),
 });
 export type EnableMachineScreenControlResponse = z.infer<typeof EnableMachineScreenControlResponse>;
+
+/** Who can use a Connected Machine: everyone in its workspace, or one person. */
+export const MachineAudience = z.enum(["workspace", "only_me"]);
+export type MachineAudience = z.infer<typeof MachineAudience>;
+
+/**
+ * POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview. The plan for
+ * changing who can use the machine: everything one confirmation will do.
+ * `ownerSubjectId` names who owns the machine as Only me (defaults to the
+ * caller; naming someone else needs workspace admin).
+ */
+export const MachineAudiencePreviewRequest = z.object({
+  audience: MachineAudience,
+  ownerSubjectId: z.string().min(1).max(512).optional(),
+});
+export type MachineAudiencePreviewRequest = z.infer<typeof MachineAudiencePreviewRequest>;
+
+/** PUT /v1/workspaces/:ws/machines/:enrollmentId/audience applies the plan.
+ * `expectedGeneration` is the machine generation the preview was read at. */
+export const ChangeMachineAudienceRequest = MachineAudiencePreviewRequest.extend({
+  expectedGeneration: z.number().int().positive(),
+});
+export type ChangeMachineAudienceRequest = z.infer<typeof ChangeMachineAudienceRequest>;
+
+/**
+ * What the change does to one thing on the machine. `move_off`: the chat
+ * leaves the machine (its history and files stay). `keep`: the owner's chat
+ * stays and keeps its audience. `make_only_me` / `pause`: a schedule that runs
+ * on the machine. `remove_first`: the same computer is connected a second
+ * time; remove that copy before switching.
+ */
+export const MachineAudienceAction = z.enum([
+  "move_off",
+  "keep",
+  "make_only_me",
+  "pause",
+  "remove_first",
+]);
+export type MachineAudienceAction = z.infer<typeof MachineAudienceAction>;
+
+/**
+ * One thing an audience change affects. Another member's private chat or
+ * schedule is listed without its title or owner. `stopsTurn`: a running turn
+ * there stops for good. `stopsCommands`: the agent's commands still running
+ * there that stop.
+ */
+export const MachineAudienceItem = z.object({
+  kind: z.enum(["chat", "schedule", "duplicate_connection"]),
+  action: MachineAudienceAction,
+  sessionId: z.string().nullable().default(null),
+  scheduledTaskId: z.string().nullable().default(null),
+  enrollmentId: z.string().nullable().default(null),
+  workspaceId: z.string().nullable().default(null),
+  relation: z
+    .enum(["other_member", "owner_shared", "owner_private", "other_workspace"])
+    .nullable()
+    .default(null),
+  visibility: z.enum(["user_private", "workspace_shared"]).nullable().default(null),
+  title: z.string().nullable().default(null),
+  ownerSubjectId: z.string().nullable().default(null),
+  stopsTurn: z.boolean().default(false),
+  stopsCommands: z.number().int().nonnegative().default(0),
+});
+export type MachineAudienceItem = z.infer<typeof MachineAudienceItem>;
+
+/** Counts of what one change does. */
+export const MachineAudienceSummary = z.object({
+  /** The owner's chats that keep working with no change. */
+  keptChats: z.number().int().nonnegative(),
+  /** The owner's shared chats that stay on the machine and stay shared. */
+  keptSharedChats: z.number().int().nonnegative(),
+  movedOffChats: z.number().int().nonnegative(),
+  schedulesMadeOnlyMe: z.number().int().nonnegative(),
+  schedulesPaused: z.number().int().nonnegative(),
+  stoppedTurns: z.number().int().nonnegative(),
+  stoppedCommands: z.number().int().nonnegative(),
+  /** People who get one inbox notice each. */
+  notifiedPeople: z.number().int().nonnegative(),
+});
+export type MachineAudienceSummary = z.infer<typeof MachineAudienceSummary>;
+
+/** The plan. `ready` is false only while the same computer is also connected
+ * as a separate machine (`remove_first`). Apply it at `generation`. */
+export const MachineAudiencePreview = z.object({
+  enrollmentId: z.string(),
+  sandboxId: z.string(),
+  machineName: z.string(),
+  currentAudience: MachineAudience,
+  targetAudience: MachineAudience,
+  generation: z.number().int().positive(),
+  ownerSubjectId: z.string().nullable(),
+  summary: MachineAudienceSummary,
+  items: z.array(MachineAudienceItem),
+  ready: z.boolean(),
+});
+export type MachineAudiencePreview = z.infer<typeof MachineAudiencePreview>;
+
+/** The applied change. The machine keeps its sandbox ID and connection. */
+export const ChangeMachineAudienceResponse = z.object({
+  enrollmentId: z.string(),
+  sandboxId: z.string(),
+  previousAudience: MachineAudience,
+  audience: MachineAudience,
+  ownerSubjectId: z.string().nullable(),
+  generation: z.number().int().positive(),
+  summary: MachineAudienceSummary,
+  detachedSessionIds: z.array(z.string()),
+  keptSessionIds: z.array(z.string()),
+});
+export type ChangeMachineAudienceResponse = z.infer<typeof ChangeMachineAudienceResponse>;
 
 /** macOS Privacy & Security panes the agent needs for desktop capture/input. */
 export const MachinePrivacySettingsPane = z.enum([

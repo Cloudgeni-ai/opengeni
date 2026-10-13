@@ -18,6 +18,45 @@ generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
 generation and invalidates existing grants.
 
+### Control transport recovery
+
+The API/worker uses its shared NATS connection for control RPC, operation frames,
+and acknowledgements. The native supervisor treats either control- or bulk-lane
+loss, including scheduled five-minute user-JWT expiry, as a transport-generation
+change: it reconnects, authenticates again, resubscribes, and detaches rather than
+restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+it does not carry these NATS control requests. Codemode's NATS dispatch is only
+a wake-up for its PostgreSQL operation journal; clients re-notify the same
+operation, and the worker claims that row before execution.
+
+For control reply recovery, a read-only ping negotiates the NATS response header
+`Opengeni-Control-Replay: 1`. Supporting agents accept an immutable delivery at
+`<exact-process-rpc-subject>.replay.<expiry-unix-ms>.<delivery-uuid>`, with the
+unchanged protobuf request as its payload. One atomic admission owns execution;
+duplicates join its pending reply or retrieve the exact retained bytes. A changed
+payload or expiry under an existing identity is refused. The journal survives
+socket/JWT/credential replacement, including removal and re-addition of the same
+exact origin/connection/process scope, but is not shared across different scopes.
+Receipts are collected after expiry; the expired delivery itself remains
+inadmissible, including after an observed wall-clock rollback. Controller and
+machine clocks must be synchronized, as for absolute command deadlines.
+
+The requester retries transient transport failures within the operation's request
+timeout plus a two-minute recovery allowance, preserving the delivery identity
+and bytes. It never retries a received tool error. A later no-responder cannot
+erase uncertainty from an earlier send. Accepted physical work and any unflushed
+reply retain the existing update-drain reservation until a successful socket
+publication; expiry without that proof remains unsettled. This is transport proof,
+not proof that a caller consumed the reply.
+
+The guarantee requires both the updated server runtime and a native agent with
+the journal. An older agent does not advertise the header and retains the
+existing conservative mutation behavior. Native process replacement, revoked
+authority, genuine tool errors, and outages beyond the recovery deadline are not
+transparent successes: the existing failure/unknown-outcome semantics remain,
+and ambiguous mutations are never automatically reissued as fresh deliveries.
+No model-visible schema, result text, or previously sent history changes.
+
 ### Enrollment maintenance boundary
 
 Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval
@@ -215,6 +254,29 @@ exit; otherwise ScreenCaptureKit leaves `replayd` and multiple
 ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
+
+Each ended connection generation is recorded with its reason in
+`attached_browser_devices.connection_history` (the latest 50 per profile).
+The native host sends a final `native_host_closing` frame before it exits,
+naming whether Chrome closed the port (`browser_closed_port`), sent an
+unreadable message (`browser_message_invalid`) or stopped accepting output
+(`browser_output_failed`). A socket end without that frame is
+`native_host_lost`: the native host process itself vanished. A hello or message
+the agent refuses is `agent_rejected`. The agent reports its recent ends in
+every inventory snapshot. The server records `agent_restarted` for generations
+that ended with a replaced bridge and `unreported` for older agents; a later
+agent report for the same generation replaces either inference. Native-host
+diagnostics are written to stderr because stdout carries Chrome frames.
+Oversized tab titles are truncated and oversized tab URLs make only that tab
+uncontrollable; neither ends the profile's connection.
+
+Renaming a Chrome profile is inventory metadata, not a connection transition.
+The extension keeps the same ready native port and sends optional
+`profile: { profileLabel }` metadata with its inventory revision. The agent updates
+the profile name without replacing its generation, debugger attachments or pending
+commands. A null label restores the default name. Older extensions may omit this
+metadata; an older agent ignores it and keeps its last announced name until a real
+reconnect, rather than interrupting the profile's work.
 
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
@@ -426,17 +488,28 @@ machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
 means a verified self-update is draining accepted work; `queue_breaker` and
 `wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
 detail remains an unspecified admission refusal. The same distinction survives
-retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
-`update_busy_uploads`) and immediately reopens admission. It does not wait for
-long-lived servers, cancel accepted work, or restart the host. Open browser and
-computer controllers also keep the host busy, including pending creation and
-shutdown. The agent checks every owned browserd scope through its private
-admin-only idle proof after fencing new routed work; unavailable, crashed, or
-older incompatible controllers return retryable `update_state_unavailable`.
-An empty controller may remain running without blocking an update. Request an update
-again at a safe idle point. Older runners can remain draining indefinitely;
-inspect their accepted operations and coordinate a safe stop/restart with their
-owners instead of killing useful work or increasing concurrency limits.
+retry exhaustion and structured tool-error rendering. A self-update on a busy
+host is accepted and waits for idle: the agent reports `waiting_for_idle` with
+the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
+unreadable controller as `update_state_unavailable`), keeps admitting new work,
+and every few seconds re-attempts a short fenced idle proof, reopening
+admission whenever it is still busy. It never cancels accepted work, stops
+long-lived servers, or restarts the host early; an update behind a long-lived
+command simply keeps waiting. Only lost physical settlement, which can never
+become provable in that process, ends the update with retryable
+`update_state_unavailable`. The agent checks every owned browserd scope through
+its private admin-only idle proof. Open sessions block only when a restart
+would lose something: admitted commands, pending creation or shutdown,
+attached browser sessions, browsers without a durable working runtime, and
+isolated virtual desktops. A quiescent managed browser with a durable working
+runtime does not: graceful browserd shutdown detaches from it without closing
+it, so its tabs and unsaved page state stay live and the restarted controller
+adopts the same process on its next request, even when the old launcher was
+killed with the stopped service or came from an earlier agent release. A
+session whose browser already ended and a computer session on the machine's
+own physical seat do not keep the host busy either. Older agents still end a
+busy update with
+retryable `update_busy_work`; request it again at a safe idle point.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
@@ -822,7 +895,10 @@ The command and relay transport credentials last 30 days. The agent renews them
 with seven days remaining, using its existing install key and current enrollment
 generation. A machine returning after a longer offline period uses the same
 renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
-renewal cannot change ownership, scope or screen-control consent. Updated
+renewal itself cannot change ownership, scope or screen-control consent. Who can
+use a machine changes in place through **Who can use it?** (see
+[Change who can use a machine](#change-who-can-use-a-machine)), and screen
+control through its own request below; neither needs a reconnect. Updated
 credentials load into the existing process, preserving host operations.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
@@ -966,6 +1042,81 @@ report only a missing Screen Recording grant, as `desktopUnavailableReason`.
 Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
 nothing; the person switches OpenGeni on there. The chat card walks the missing
 permissions in that order, from what the Mac reports.
+
+### Change who can use a machine
+
+A connected machine switches between **This workspace** and **Only me** in
+place. The machine keeps its enrollment id, sandbox id, credentials and live
+connection, so its chats, schedules and the installed agent are not registered
+again, and the agent keeps running (with its running commands) without a
+restart or an upgrade. On the Machines page, open the machine and choose
+**Who can use it?**. Organization machines are shared with the whole
+organization and cannot be changed here.
+
+- Narrowing to **Only me** is done by the person who will own the machine, or by
+  a workspace admin who picks that owner. The owner must be an active member who
+  can use the workspace.
+- Widening to **This workspace** needs `workspace:admin`, and is done by the
+  machine's owner, so nobody exposes another person's Only me machine.
+- Both need `enrollments:manage`. An agent cannot change it.
+
+The dialog shows what one confirmation will do, as counts in plain sentences
+with the itemized chats and schedules behind **Chats and schedules affected**.
+Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
+
+- **The owner's chats** stay on the machine and keep their audience. A shared
+  chat stays shared, so the workspace keeps reading it, but only the owner's
+  turns can use the machine (who reads a chat and who uses a machine are
+  separate, as when choosing a personal machine for a shared chat). Each kept
+  chat gets a per-chat `connected_machine.use` grant, and the owner's running
+  attempts are re-authorized in place, so their running turns and commands
+  carry on.
+- **Other people's chats** move off the machine. Their history stays, their
+  files stay on the machine, and their next turn needs another machine. Another
+  member's private chat is listed without its title or owner.
+- **Running turns** that may no longer use the machine stop now and end as
+  cancelled (`authority_changed`): turns in chats that move off, and turns
+  someone other than the owner started in the owner's shared chats. The agent's
+  commands still running in chats that move off are stopped too.
+- **Schedules** that target the machine: the owner's Workspace schedules become
+  Only me schedules when the owner may have Only me schedules, and pause
+  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Notices**: each affected person other than the one switching gets one
+  inbox notification saying what moved, paused or stopped, and that they can
+  choose another machine to continue.
+- **A duplicate connection**: if the same computer is also connected separately
+  under the target audience, remove that copy first; this is the only thing
+  that blocks the switch. A removed copy is retired by the switch.
+
+Undo is switching back to **This workspace**. Moved chats and paused schedules
+are not restored automatically, and the notices say so; people choose another
+machine or resume their schedules. Widening keeps the owner's chats and
+schedules in this workspace where they are; chats and schedules in other
+workspaces move off or pause, since a workspace machine serves only its own
+workspace. The round trip Workspace → Only me → Workspace keeps the same
+machine throughout.
+
+The switch is one transaction. It recomputes the plan under the machine's row
+lock and the session fences of every workspace it touches, applies it,
+advances the machine's generation, moves the owner authority and
+re-authorizes the owner's live attachments. The worker reads the machine's
+current audience on every operation, so live sessions follow the new audience
+without being rebuilt and the agent needs no restart or upgrade. Each change
+records a `connected_machine.audience_changed` audit event with the counts.
+
+The API is the same flow:
+
+- `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
+  `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
+  `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
+  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
+  machine's `generation`.
+- `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
+  plus `expectedGeneration` applies it and returns the counts and the chats it
+  moved off. It answers `409` with `details.reason: "stale"` when the machine
+  changed since the preview (preview again and retry), and
+  `details.reason: "blocked"` with the preview while a duplicate connection
+  remains.
 
 ### Zero-click token (fleet / headless)
 

@@ -42,13 +42,15 @@ for (const theme of ["light", "dark"] as const) {
       const context = await browser.newContext({
         viewport: { width, height: 950 },
         colorScheme: theme,
+        locale: "en-US",
       });
       const page = await context.newPage();
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       try {
         await page.goto(`${baseUrl}/test/codex-account.html`);
-        await page.getByText("120.50", { exact: true }).waitFor();
+        // The balance is formatted for reading (#4307), not the raw "120.50".
+        await page.getByText("120.5", { exact: true }).waitFor();
         const consent = page.getByRole("switch", {
           name: "Use extra credits on subscription@example.test",
         });

@@ -9,6 +9,8 @@ import {
   markSessionAttemptQuiesced,
   repairMissingQuiescenceReceiptWakes,
   requestSessionTurnRecovery,
+  mutateSessionControlInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
 let shared: SharedTestDatabase;
@@ -102,7 +104,13 @@ async function strandedRecovery(input: {
       updated_at = now() - make_interval(secs => ${input.wakeDeliveredSecondsAgo})
     where session_id = ${session.id}
   `;
-  return { workspaceId, sessionId: session.id, attemptId };
+  return {
+    accountId: grant.accountId,
+    subjectId: grant.subjectId,
+    workspaceId,
+    sessionId: session.id,
+    attemptId,
+  };
 }
 
 async function wakeOf(sessionId: string) {
@@ -166,7 +174,7 @@ describe("missing quiescence-receipt wake repair", () => {
     expect((await wakeOf(fresh.sessionId)).pending).toBe(false);
   });
 
-  test("a quiesced attempt or a recently woken session is left alone", async () => {
+  test("a quiesced active recovery is rediscovered, but a recent wake is paced", async () => {
     const quiesced = await strandedRecovery({
       closedSecondsAgo: 300,
       wakeDeliveredSecondsAgo: 1_200,
@@ -176,9 +184,47 @@ describe("missing quiescence-receipt wake repair", () => {
       closedSecondsAgo: 300,
       wakeDeliveredSecondsAgo: 60,
     });
+    // Historical projection drift must not hide the logical turn from the
+    // bounded inventory; actual admission still owns whether it can execute.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update sessions set status = 'idle' where id = ${quiesced.sessionId}`;
+    });
     await repairAll();
-    expect((await wakeOf(quiesced.sessionId)).pending).toBe(false);
+    expect(await wakeOf(quiesced.sessionId)).toEqual({
+      pending: true,
+      reason: "turn_recovery_repair",
+    });
     expect((await wakeOf(recentlyWoken.sessionId)).pending).toBe(false);
+  });
+
+  test("a durable receipt does not turn intentional Pause into abandoned work", async () => {
+    const paused = await strandedRecovery({
+      closedSecondsAgo: 300,
+      wakeDeliveredSecondsAgo: 1_200,
+      quiesce: true,
+    });
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      paused.workspaceId,
+      paused.subjectId,
+      (db) =>
+        mutateSessionControlInTransaction(db, {
+          accountId: paused.accountId,
+          workspaceId: paused.workspaceId,
+          sessionId: paused.sessionId,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+          actor: { type: "human", subjectId: paused.subjectId },
+        }),
+    );
+    await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision,
+      updated_at = now() - interval '20 minutes' where session_id = ${paused.sessionId}`;
+    await repairAll();
+    expect((await wakeOf(paused.sessionId)).pending).toBe(false);
+    const [turn] =
+      await shared.admin`select status from session_turns where session_id = ${paused.sessionId}`;
+    expect(turn!.status).toBe("recovering");
   });
 
   test("the inventory is the dispatcher's private capability", async () => {

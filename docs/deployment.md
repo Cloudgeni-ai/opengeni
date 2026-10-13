@@ -1327,7 +1327,11 @@ this setting does not remove production email-provider configuration requirement
 
 Migration 0351 is rolling and additive. Before inviting users, configure
 `OPENGENI_RESEND_API_KEY` and `OPENGENI_EMAIL_FROM`; production managed-mode
-configuration validation requires the provider key. Embedded hosts may bind an
+configuration validation requires the provider key unless
+`OPENGENI_MANAGED_EMAIL_DELIVERY=disabled`. That explicit setting is for
+deployments that provision accounts another way: the provider key must then be
+unset, nothing is ever sent, and sign-up verification, organization user setup
+and sign-in method notices settle as failed with `delivery_disabled`. Embedded hosts may bind an
 equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
 does not relax the deployment preflight today. Keep
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
@@ -1743,6 +1747,28 @@ mandatory and never fall back to the application login. Sharing a ConfigMap that
 selects managed access or a remote sandbox does not require sharing API signing,
 email or sandbox-provider secrets with either sidecar. API and ordinary worker
 authentication and provider validation are unchanged.
+
+Artifact sidecar images use slim Bun runtime stages. Neither ships the
+development checkout or npm dependency tree: the outbox needs only its bundled
+entrypoint, while the materializer also carries the verified read-only native
+runtime and isolated executable. The materializer identity/ABI probe runs in the
+final image as the unprivileged runtime user. API/worker image capabilities and
+the sidecars' separate database roles, health ports and sandboxing are unchanged.
+
+API and ordinary worker images also use slim final stages. Their builders retain
+the full frozen development install; `scripts/assemble-server-runtime.ts` copies
+only the process bundle, runtime assets and the exact installed dependency graph
+of its external packages (including optional native bindings and required peers).
+The worker retains its prebuilt workflows and managed Codemode client; API retains
+signed machine installers, the read-only artifact runtime, bundled database
+commands with the unchanged SQL ledger, and the stock catalog-import command and
+reviewed catalog/logo assets. Office/OCR/media, Docker and source-control tools
+are unchanged. Temporal retains only its loader-selected native platform binary;
+its Rust build tree and foreign binaries are not runtime dependencies. Source
+workflow compilation remains available but its compiler is loaded only on demand.
+Run the assembled-runtime conformance gate with
+`OPENGENI_VERIFY_SERVER_RUNTIME=1 bun test scripts/server-runtime-image.test.ts`
+after building/assembling both roles; it executes without monorepo ancestors.
 
 Native dependencies remain running after `Ctrl-C`, matching Compose's warm
 restart behavior. `bun run dev:down` stops only the infrastructure recorded for
@@ -3409,7 +3435,7 @@ Long-lived public deployments should still sit behind a gateway or ingress stack
 - Access logs that include request id, user or tenant id from the gateway, route, status, and duration.
 - Explicit deny rules for internal-only surfaces if you expose only the public client API.
 
-When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `POST /v1/client-errors` remains public so the web app can count failures before sign-in (it accepts only a closed, content-free report from the deployment's own web origins and bounds its own admission; the browser sends it with `credentials: "omit"`, so a host behind edge basic auth must also list `/v1/client-errors` as an `Exact` path on the Helm `publicIngress` to receive it), `POST /v1/analytics-consent` remains public on the same terms so the analytics banner's answer is counted before sign-in (list it as an `Exact` `publicIngress` path too behind edge basic auth), the Connected Machine agent's own `POST /v1/enrollments/token/exchange`, `/v1/enrollments/device/start`, `/v1/enrollments/device/poll`, and `/v1/enrollments/renew` remain public because a machine never holds the access key and each route authenticates its own enroll token, device code, or signed install-key proof (device-code lookup and approval stay behind the key), `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
+When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `POST /v1/client-errors` remains public so the web app can count failures before sign-in (it accepts only a closed report with scrubbed, bounded error diagnostics from the deployment's own web origins and bounds its own admission; the browser sends it with `credentials: "omit"`, so a host behind edge basic auth must also list `/v1/client-errors` as an `Exact` path on the Helm `publicIngress` to receive it), `POST /v1/analytics-consent` remains public on the same terms so the analytics banner's answer is counted before sign-in (list it as an `Exact` `publicIngress` path too behind edge basic auth), the Connected Machine agent's own `POST /v1/enrollments/token/exchange`, `/v1/enrollments/device/start`, `/v1/enrollments/device/poll`, and `/v1/enrollments/renew` remain public because a machine never holds the access key and each route authenticates its own enroll token, device code, or signed install-key proof (device-code lookup and approval stay behind the key), `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
 
 For AKS smoke deployments using `ingress-nginx` behind an Azure LoadBalancer service, configure the ingress controller service health probes explicitly. HTTP/HTTPS probes to `/` can mark ingress-nginx unhealthy when the default backend returns a non-200 response, leaving the public VIP allocated but unrouted. TCP probes are sufficient for the temporary ingress-controller smoke path:
 

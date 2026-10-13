@@ -1620,7 +1620,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -1641,7 +1643,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -1664,7 +1668,9 @@
         "UpdateWorkspaceRequest"
       ],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3454,6 +3460,46 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/connections/:connectionId/1password",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/connections/:connectionId/1password/token",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultSummary"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect",
       "sdk": [
@@ -3522,7 +3568,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3540,7 +3588,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3582,7 +3632,29 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/connections/1password/service-accounts",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -3732,7 +3804,9 @@
       "response": [
         "ConnectionMetadata",
         "ConnectionResponse",
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -5266,6 +5340,32 @@
       "request": [],
       "response": [
         "MachinesResponse"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience",
+      "sdk": [
+        "OpenGeniClient.changeMachineAudience"
+      ],
+      "request": [
+        "ChangeMachineAudienceRequest"
+      ],
+      "response": [
+        "ChangeMachineAudienceResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview",
+      "sdk": [
+        "OpenGeniClient.previewMachineAudience"
+      ],
+      "request": [
+        "MachineAudiencePreviewRequest"
+      ],
+      "response": [
+        "MachineAudiencePreview"
       ]
     },
     {
@@ -7624,7 +7724,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -7820,7 +7922,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -7876,6 +7980,19 @@
       ],
       "response": [
         "UpdateSessionVisibilityResponse"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/visibility/preview",
+      "sdk": [
+        "OpenGeniClient.previewSessionVisibilityChange"
+      ],
+      "request": [
+        "SessionVisibility"
+      ],
+      "response": [
+        "SessionVisibilityChangePreview"
       ]
     },
     {
@@ -8550,7 +8667,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8568,7 +8687,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8586,7 +8707,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8605,7 +8728,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8624,7 +8749,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8643,7 +8770,9 @@
       ],
       "request": [],
       "response": [
+        "DisconnectOnePasswordResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -8827,8 +8956,10 @@
         "EnsureWorkspaceRequest"
       ],
       "response": [
+        "DisconnectOnePasswordResponse",
         "EnsureWorkspaceResponse",
         "InstallOnePasswordResponse",
+        "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
         "SessionSecretsView",
@@ -10477,7 +10608,7 @@
         "$.controllerGeneration": "string!",
         "$.dispatchedAt": "string! null",
         "$.error": "object! null",
-        "$.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_crashed\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
         "$.error.details": "object?",
         "$.error.details{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
         "$.error.details{}|0": "string",
@@ -11119,7 +11250,7 @@
         "$.operation.createdAt": "string!",
         "$.operation.dispatchedAt": "string! null",
         "$.operation.error": "object! null",
-        "$.operation.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.operation.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_crashed\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
         "$.operation.error.details": "object?",
         "$.operation.error.details{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
         "$.operation.error.details{}|0": "string",
@@ -11398,6 +11529,36 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"agent_offline\\\"\",\"\\\"agent_reconnecting\\\"\",\"\\\"backend_unsupported\\\"\",\"\\\"consent_required\\\"\",\"\\\"disabled_by_policy\\\"\",\"\\\"display_unavailable\\\"\",\"\\\"lease_cold\\\"\",\"\\\"not_provisioned\\\"\",\"\\\"os_unsupported\\\"\",\"\\\"tier_headless\\\"\"]"
+      }
+    },
+    "ChangeMachineAudienceRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.audience": "ref(MachineAudience)!",
+        "$.expectedGeneration": "integer!",
+        "$.ownerSubjectId": "string?"
+      }
+    },
+    "ChangeMachineAudienceResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.audience": "ref(MachineAudience)!",
+        "$.detachedSessionIds": "array!",
+        "$.detachedSessionIds[]": "string",
+        "$.enrollmentId": "string!",
+        "$.generation": "integer!",
+        "$.keptSessionIds": "array!",
+        "$.keptSessionIds[]": "string",
+        "$.ownerSubjectId": "string! null",
+        "$.previousAudience": "ref(MachineAudience)!",
+        "$.sandboxId": "string!",
+        "$.summary": "ref(MachineAudienceSummary)!"
       }
     },
     "ChangePreferenceRegistryScopeRequest": {
@@ -12242,7 +12403,7 @@
         "$.controllerGeneration": "string!",
         "$.dispatchedAt": "string! null",
         "$.error": "object! null",
-        "$.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_crashed\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
         "$.error.details": "object?",
         "$.error.details{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
         "$.error.details{}|0": "string",
@@ -12378,7 +12539,7 @@
         "$.controllerGeneration": "string!",
         "$.dispatchedAt": "string! null",
         "$.error": "object! null",
-        "$.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_crashed\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
         "$.error.details": "object?",
         "$.error.details{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
         "$.error.details{}|0": "string",
@@ -12394,7 +12555,7 @@
         "$.observation.computerSessionId": "string!",
         "$.observation.controllerGeneration": "string!",
         "$.observation.error": "object! null",
-        "$.observation.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.observation.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_crashed\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
         "$.observation.error.details": "object?",
         "$.observation.error.details{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
         "$.observation.error.details{}|0": "string",
@@ -12566,7 +12727,7 @@
         "$.operation.createdAt": "string!",
         "$.operation.dispatchedAt": "string! null",
         "$.operation.error": "object! null",
-        "$.operation.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.operation.error.code": "enum!=[\"\\\"attempt_stale\\\"\",\"\\\"controller_lost\\\"\",\"\\\"controller_stale\\\"\",\"\\\"document_stale\\\"\",\"\\\"driver_failed\\\"\",\"\\\"frame_stale\\\"\",\"\\\"invalid_action\\\"\",\"\\\"locator_ambiguous\\\"\",\"\\\"locator_not_found\\\"\",\"\\\"machine_locked\\\"\",\"\\\"observation_stale\\\"\",\"\\\"operation_conflict\\\"\",\"\\\"outcome_unknown\\\"\",\"\\\"permission_denied\\\"\",\"\\\"resource_not_found\\\"\",\"\\\"resource_unavailable\\\"\",\"\\\"tab_crashed\\\"\",\"\\\"tab_not_responding\\\"\",\"\\\"target_not_found\\\"\",\"\\\"target_stale\\\"\",\"\\\"timeout\\\"\",\"\\\"unsupported\\\"\"]",
         "$.operation.error.details": "object?",
         "$.operation.error.details{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
         "$.operation.error.details{}|0": "string",
@@ -14053,6 +14214,16 @@
         "$": "object",
         "$.expectedPolicyRevision": "integer!",
         "$.operationId": "string!"
+      }
+    },
+    "DisconnectOnePasswordResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.unlinkedVaultIds": "array!",
+        "$.unlinkedVaultIds[]": "string"
       }
     },
     "DiscoverMcpCapabilitiesResponse": {
@@ -15637,6 +15808,14 @@
         "$": "object",
         "$.action": "enum!=[\"\\\"pause\\\"\",\"\\\"resume\\\"\"]",
         "$.expectedVersion": "integer!"
+      }
+    },
+    "GoogleDriveTargetScope": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"organization\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "GovernedLearningActivationAuthorityKind": {
@@ -18011,6 +18190,88 @@
         "$.webhooks[]": "ref(WorkspaceWebhook)"
       }
     },
+    "MachineAudience": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"only_me\\\"\",\"\\\"workspace\\\"\"]"
+      }
+    },
+    "MachineAudienceAction": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"keep\\\"\",\"\\\"make_only_me\\\"\",\"\\\"move_off\\\"\",\"\\\"pause\\\"\",\"\\\"remove_first\\\"\"]"
+      }
+    },
+    "MachineAudienceItem": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.action": "ref(MachineAudienceAction)!",
+        "$.enrollmentId": "string! null",
+        "$.kind": "enum!=[\"\\\"chat\\\"\",\"\\\"duplicate_connection\\\"\",\"\\\"schedule\\\"\"]",
+        "$.ownerSubjectId": "string! null",
+        "$.relation": "enum! null=[\"\\\"other_member\\\"\",\"\\\"other_workspace\\\"\",\"\\\"owner_private\\\"\",\"\\\"owner_shared\\\"\"]",
+        "$.scheduledTaskId": "string! null",
+        "$.sessionId": "string! null",
+        "$.stopsCommands": "integer!",
+        "$.stopsTurn": "boolean!",
+        "$.title": "string! null",
+        "$.visibility": "ref(SessionTenancyVisibility)! null",
+        "$.workspaceId": "string! null"
+      }
+    },
+    "MachineAudiencePreview": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.currentAudience": "ref(MachineAudience)!",
+        "$.enrollmentId": "string!",
+        "$.generation": "integer!",
+        "$.items": "array!",
+        "$.items[]": "ref(MachineAudienceItem)",
+        "$.machineName": "string!",
+        "$.ownerSubjectId": "string! null",
+        "$.ready": "boolean!",
+        "$.sandboxId": "string!",
+        "$.summary": "ref(MachineAudienceSummary)!",
+        "$.targetAudience": "ref(MachineAudience)!"
+      }
+    },
+    "MachineAudiencePreviewRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.audience": "ref(MachineAudience)!",
+        "$.ownerSubjectId": "string?"
+      }
+    },
+    "MachineAudienceSummary": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.keptChats": "integer!",
+        "$.keptSharedChats": "integer!",
+        "$.movedOffChats": "integer!",
+        "$.notifiedPeople": "integer!",
+        "$.schedulesMadeOnlyMe": "integer!",
+        "$.schedulesPaused": "integer!",
+        "$.stoppedCommands": "integer!",
+        "$.stoppedTurns": "integer!"
+      }
+    },
     "MachineConnectionAuthority": {
       "io": [
         "output"
@@ -19226,6 +19487,23 @@
         "$.authorizationUrl": "string! null",
         "$.expiresAt": "string!",
         "$.state": "string!"
+      }
+    },
+    "OnePasswordConnectionSummary": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountName": "string! null",
+        "$.canManage": "boolean!",
+        "$.createdAt": "string!",
+        "$.createdBySubjectId": "string! null",
+        "$.id": "string!",
+        "$.label": "string! null",
+        "$.ownership": "ref(GoogleDriveTargetScope)!",
+        "$.planTier": "enum!=[\"\\\"business\\\"\",\"\\\"family\\\"\",\"\\\"teams\\\"\"]",
+        "$.verifiedAt": "string!"
       }
     },
     "OpenGeniSlackBotDisplayName": {
@@ -23584,6 +23862,14 @@
         "$": "enum=[\"\\\"agent_message\\\"\",\"\\\"agent_steer_instruction\\\"\",\"\\\"background_command_result\\\"\",\"\\\"child_paused\\\"\",\"\\\"child_progress\\\"\",\"\\\"child_requires_action\\\"\",\"\\\"child_requires_action_resolved\\\"\",\"\\\"child_terminal_result\\\"\",\"\\\"child_waiting_capacity\\\"\",\"\\\"goal_continuation\\\"\",\"\\\"media_generation_result\\\"\",\"\\\"scheduled_occurrence\\\"\",\"\\\"session_wait_timeout\\\"\"]"
       }
     },
+    "SessionTenancyBlocker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"active_goal\\\"\",\"\\\"active_realtime\\\"\",\"\\\"active_sandbox_access\\\"\",\"\\\"active_scheduled_task\\\"\",\"\\\"capacity_waiter\\\"\",\"\\\"nonterminal_attempt\\\"\",\"\\\"nonterminal_turn\\\"\",\"\\\"pending_human_input\\\"\",\"\\\"pending_system_update\\\"\",\"\\\"pending_tool_receipt\\\"\",\"\\\"retained_process\\\"\",\"\\\"run_state\\\"\",\"\\\"shared_sandbox_group\\\"\",\"\\\"unsettled_interruption\\\"\",\"\\\"workspace_mutation_admission\\\"\"]"
+      }
+    },
     "SessionTenancyCreateCapabilities": {
       "io": [
         "output"
@@ -23744,6 +24030,33 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]"
+      }
+    },
+    "SessionVisibilityChangePreview": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.authorityEpoch": "integer!",
+        "$.blocker": "ref(SessionTenancyBlocker)! null",
+        "$.targetVisibility": "ref(SessionVisibility)!",
+        "$.visibility": "ref(SessionVisibility)!",
+        "$.work": "ref(SessionVisibilityWork)!"
+      }
+    },
+    "SessionVisibilityWork": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.activeGoal": "boolean!",
+        "$.liveVoice": "boolean!",
+        "$.otherPeopleAccountChoiceCount": "integer!",
+        "$.otherPeoplePendingUpdateCount": "integer!",
+        "$.queuedTurnCount": "integer!",
+        "$.runningTurnCount": "integer!"
       }
     },
     "SetMemberAllowanceRequest": {
@@ -26163,6 +26476,7 @@
         "$": "object",
         "$.expectedAuthorityEpoch": "integer!",
         "$.idempotencyKey": "string!",
+        "$.stopActiveWork": "boolean?",
         "$.visibility": "ref(SessionVisibility)!"
       }
     },
@@ -28718,6 +29032,8 @@
       "CapabilityRuntime": "type",
       "CapabilitySource": "type",
       "CapabilityUnavailableReason": "type",
+      "ChangeMachineAudienceRequest": "type",
+      "ChangeMachineAudienceResponse": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
       "Chats": "type",
@@ -28963,6 +29279,7 @@
       "DeviceEnrollmentLookupRequest": "type",
       "DeviceEnrollmentLookupResponse": "type",
       "DisableOrganizationRecoveryPolicyRequest": "type",
+      "DisconnectOnePasswordResponse": "type",
       "DiscoverMcpCapabilitiesResponse": "type",
       "Document": "type",
       "DocumentAuthorityKind": "type",
@@ -29295,6 +29612,12 @@
       "ListWorkspaceMembersResponse": "type",
       "ListWorkspaceWebhookDeliveriesResponse": "type",
       "ListWorkspaceWebhooksResponse": "type",
+      "MachineAudience": "type",
+      "MachineAudienceAction": "type",
+      "MachineAudienceItem": "type",
+      "MachineAudiencePreview": "type",
+      "MachineAudiencePreviewRequest": "type",
+      "MachineAudienceSummary": "type",
       "MachineConnectionAuthority": "type",
       "MachineKind": "type",
       "MachineMacPermissions": "type",
@@ -29402,6 +29725,7 @@
       "normalizeWorkspaceInstructionPolicyRoleKey": "value",
       "OAuthStartRequest": "type",
       "OAuthStartResponse": "type",
+      "OnePasswordConnectionSummary": "type",
       "OnePasswordPlanTier": "type",
       "OPENGENI_API_CONTRACT_HEADER": "value",
       "OPENGENI_API_CONTRACT_REVISION": "value",
@@ -29634,6 +29958,7 @@
       "RemoveWorkspaceSkillRequest": "type",
       "RenewSessionRealtimeRequest": "type",
       "ReorderChannelsRequest": "type",
+      "ReplaceOnePasswordTokenRequest": "type",
       "ReplacePersonalGitHubRepositorySelectionsRequest": "type",
       "ReportAuthRunRequest": "type",
       "RepositoryResourceRef": "type",
@@ -29816,6 +30141,7 @@
       "SessionSystemUpdate": "type",
       "SessionSystemUpdateKind": "type",
       "SessionSystemUpdateState": "type",
+      "SessionTenancyBlocker": "type",
       "SessionTenancyCreateCapabilities": "type",
       "SessionTenancyPublicProjection": "type",
       "sessionTitleIsPending": "value",
@@ -29824,6 +30150,8 @@
       "SessionTurnSource": "type",
       "SessionTurnStatus": "type",
       "SessionVisibility": "type",
+      "SessionVisibilityChangePreview": "type",
+      "SessionVisibilityWork": "type",
       "SessionWorkspaceWebhookEvent": "type",
       "SetMemberAllowanceRequest": "type",
       "SetSessionModelAccountChoiceRequest": "type",
@@ -31411,6 +31739,7 @@
       "DiffViewProps": "type",
       "DisclosureChip": "type",
       "DisclosureDefaultsProvider": "value",
+      "DisconnectOnePasswordResponse": "type",
       "effortOptionsForModel": "value",
       "EmbeddedBrowserInteractionClientLike": "type",
       "EmbeddedComputerInteractionClientLike": "type",
@@ -31596,6 +31925,7 @@
       "NoticeItem": "type",
       "OlderHistoryLoader": "type",
       "OlderHistoryLoadReceipt": "type",
+      "OnePasswordConnectionSummary": "type",
       "OnePasswordPlanTier": "type",
       "OPEN_WORKSTREAM_CONTROL_EVENT": "value",
       "OpenGeniChat": "value",
@@ -31666,6 +31996,7 @@
       "registerSandboxTerminal": "value",
       "RenderAllowanceExhausted": "type",
       "RenderMessageSender": "type",
+      "ReplaceOnePasswordTokenRequest": "type",
       "ResponsiveBasis": "type",
       "RetainedArtifactLoader": "type",
       "RetainedArtifactLoaderClient": "type",
@@ -33565,6 +33896,7 @@
       "captureBrowserTarget",
       "captureComputerTarget",
       "catalogAssetUrl",
+      "changeMachineAudience",
       "changePreferenceRegistryScope",
       "clearCodexAppsAccount",
       "clearSessionContext",
@@ -33972,8 +34304,10 @@
       "prepareSlackUserLinkAccess",
       "previewApiIntegration",
       "previewApiIntegrationUninstall",
+      "previewMachineAudience",
       "previewPlugin",
       "previewPluginUninstall",
+      "previewSessionVisibilityChange",
       "previewSkillImport",
       "previewSkillUninstall",
       "processNextTranscriptionRecordingSegment",
@@ -34227,6 +34561,7 @@
       "captureBrowserTarget",
       "captureComputerTarget",
       "catalogAssetUrl",
+      "changeMachineAudience",
       "changePreferenceRegistryScope",
       "clearCodexAppsAccount",
       "clearSessionContext",
@@ -34624,8 +34959,10 @@
       "prepareSlackUserLinkAccess",
       "previewApiIntegration",
       "previewApiIntegrationUninstall",
+      "previewMachineAudience",
       "previewPlugin",
       "previewPluginUninstall",
+      "previewSessionVisibilityChange",
       "previewSkillImport",
       "previewSkillUninstall",
       "processNextTranscriptionRecordingSegment",
@@ -34887,6 +35224,7 @@
       "captureBrowserTarget",
       "captureComputerTarget",
       "catalogAssetUrl",
+      "changeMachineAudience",
       "changePreferenceRegistryScope",
       "clearCodexAppsAccount",
       "clearSessionContext",
@@ -35310,8 +35648,10 @@
       "previewApiIntegration",
       "previewApiIntegrationUninstall",
       "previewIdentityLink",
+      "previewMachineAudience",
       "previewPlugin",
       "previewPluginUninstall",
+      "previewSessionVisibilityChange",
       "previewSkillImport",
       "previewSkillUninstall",
       "processNextTranscriptionRecordingSegment",
@@ -36137,6 +36477,9 @@
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
+      ],
+      "changeMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "changePreferenceRegistryScope": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangePreferenceRegistryScopeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreferenceRegistryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -37411,11 +37754,17 @@
       "previewIdentityLink": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalIdentityLinkPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "previewMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreviewRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "previewPlugin": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewPluginRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -38414,6 +38763,9 @@
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
+      ],
+      "changeMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "changePreferenceRegistryScope": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangePreferenceRegistryScopeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreferenceRegistryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39640,11 +39992,17 @@
       "previewApiIntegrationUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiIntegrationUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "previewMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreviewRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "previewPlugin": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewPluginRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -40497,6 +40855,9 @@
       ],
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
+      ],
+      "changeMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "changePreferenceRegistryScope": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangePreferenceRegistryScopeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreferenceRegistryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -41660,11 +42021,17 @@
       "previewApiIntegrationUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiIntegrationUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "previewMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreviewRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "previewPlugin": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewPluginRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42711,6 +43078,9 @@
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
       ],
+      "changeMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "changePreferenceRegistryScope": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangePreferenceRegistryScopeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreferenceRegistryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -43906,11 +44276,17 @@
       "previewApiIntegrationUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiIntegrationUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "previewMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreviewRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "previewPlugin": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewPluginRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44748,6 +45124,9 @@
       "catalogAssetUrl": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
       ],
+      "changeMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangeMachineAudienceResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "changePreferenceRegistryScope": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChangePreferenceRegistryScopeRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreferenceRegistryMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45943,11 +46322,17 @@
       "previewApiIntegrationUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiIntegrationUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "previewMachineAudience": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreviewRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MachineAudiencePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "previewPlugin": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewPluginRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewPluginUninstall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PluginUninstallPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "previewSessionVisibilityChange": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibility\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionVisibilityChangePreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "previewSkillImport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PreviewSkillImportRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SkillImportPreview\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

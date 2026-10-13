@@ -1,5 +1,13 @@
+export {
+  listExhaustedScheduledTasks,
+  retireExhaustedScheduledTask,
+  listScheduledTaskScheduleReconciliations,
+  acknowledgeScheduledTaskScheduleReconciliation,
+  deferScheduledTaskScheduleReconciliation,
+} from "./scheduled-task-lifecycle";
 export * from "./session-target";
 export * from "./human-input-secret-answers";
+export * from "./connected-machine-audience";
 import { sessionRetentionFromRow } from "./session-archive";
 import {
   applyPreparedSecretAnswersInTransaction,
@@ -1082,7 +1090,11 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
-export * from "./quiescence-receipt-wake-repair";
+export type { QuiescenceReceiptWakeRepairCursor } from "./quiescence-receipt-wake-repair";
+import {
+  repairMissingQuiescenceReceiptWakesWith,
+  type QuiescenceReceiptWakeRepairCursor,
+} from "./quiescence-receipt-wake-repair";
 export * from "./maintenance-work-probes";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
@@ -73012,8 +73024,13 @@ export async function settleSessionAttemptInterruptions(
       }
 
       const terminalCancel = session.status === "cancelled";
+      // Revoked membership, an owner's "make private anyway" stop and a machine
+      // that became someone else's Only me machine (0765) all end the turn:
+      // the authority it was accepted under no longer applies.
       const membershipAuthorityRevoked = interruptions.some(
-        (interruption) => interruption.kind === "organization_membership_revoked",
+        (interruption) =>
+          interruption.kind === "organization_membership_revoked" ||
+          interruption.kind === "authority_change",
       );
       const terminalTurnCancel = terminalCancel || membershipAuthorityRevoked;
       const steer =
@@ -73694,6 +73711,17 @@ async function sessionInputWaitStateTx(
   return {
     disposition: wait.inputWaitUntil.getTime() <= dbNow.getTime() ? "timeout" : "held",
   };
+}
+
+/** A keyset cursor lets busy candidates coexist with later eligible sessions.
+ * It is inventory progress only; every target is rechecked and a restart
+ * safely begins another idempotent lap. */
+export function repairMissingQuiescenceReceiptWakes(
+  db: Database,
+  limit = 100,
+  after: QuiescenceReceiptWakeRepairCursor | null = null,
+) {
+  return repairMissingQuiescenceReceiptWakesWith(peekSessionWork, db, limit, after);
 }
 
 export async function peekSessionWork(
@@ -74519,6 +74547,15 @@ export type FailSessionWorkBeforeAttemptClaimResult =
   | { action: "terminal"; turnId: null; events: [] }
   | { action: "stale"; turnId: null; events: [] };
 
+/** Maintenance-only authorization, supplied by the migration operator's exact
+ * manifest, never inferred from idle status, Pause, or elapsed time. */
+export type InterruptedTurnRetirementProof = {
+  turnId: string;
+  expectedVersion: number;
+  expectedLastSequence: number;
+  operationId: string;
+};
+
 export type RecoverSessionWorkFailedBeforeAttemptClaimInput = {
   accountId: string;
   sessionId: string;
@@ -74552,6 +74589,219 @@ export async function failSessionWorkBeforeAttemptClaim(
   workspaceId: string,
   input: FailSessionWorkBeforeAttemptClaimInput,
 ): Promise<FailSessionWorkBeforeAttemptClaimResult> {
+  return await settleSessionWorkBeforeAttemptClaim(db, workspaceId, input);
+}
+
+/** Explicit operator maintenance, not normal admission and never a reaper
+ * age heuristic. Exact manifest fences and physical quiescence are mandatory. */
+export async function retireInterruptedSessionTurn(
+  db: Database,
+  workspaceId: string,
+  input: {
+    accountId: string;
+    sessionId: string;
+    workflowId: string;
+  } & InterruptedTurnRetirementProof,
+): Promise<FailSessionWorkBeforeAttemptClaimResult> {
+  return await settleSessionWorkBeforeAttemptClaim(
+    db,
+    workspaceId,
+    {
+      accountId: input.accountId,
+      sessionId: input.sessionId,
+      workflowId: input.workflowId,
+      trigger: { kind: "next" },
+      error: "Interrupted work was terminally retired by the operator without replay.",
+    },
+    input,
+  );
+}
+
+/** Operator retirement is a terminal historical receipt, not fresh execution
+ * intent for the parent. Called only after all manifest fences have passed,
+ * in the same transaction as their retirement. Normal child delivery is not
+ * changed, and neither existing model history nor parent control is touched. */
+export async function recordRetiredChildNotice(
+  db: Database,
+  workspaceId: string,
+  input: { accountId: string; sessionId: string } & InterruptedTurnRetirementProof,
+): Promise<SessionEvent | null> {
+  return await retrySessionActivityRls(
+    db,
+    workspaceId,
+    {
+      stage: "session_lifecycle_outbox.retirement_notice",
+      eventTypes: ["system.update.settled"],
+      maxAttempts: 3,
+    },
+    async (scoped) =>
+      await scoped.transaction(async (tx) => {
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(
+          tx as unknown as Database,
+          workspaceId,
+          {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+          },
+        );
+        const child = locks.session;
+        if (!locks.workspace || child.accountId !== input.accountId || child.status !== "failed")
+          throw new Error("Retired child notice scope or terminal state changed");
+        if (!child.parentSessionId) return null;
+        const parent = locks.sessions.find((row) => row.id === child.parentSessionId);
+        const turn = locks.turns.find((row) => row.id === input.turnId);
+        if (!parent || !turn || turn.status !== "failed" || turn.sessionId !== child.id)
+          throw new Error("Retired child notice lost its canonical parent or turn");
+        const [terminal] = await tx
+          .select({
+            id: schema.sessionEvents.id,
+            payload: schema.sessionEvents.payload,
+            payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+          })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, child.id),
+              eq(schema.sessionEvents.turnId, turn.id),
+              eq(schema.sessionEvents.type, "turn.failed"),
+              sql`${schema.sessionEvents.payload}->>'code' = 'interrupted_turn_retired'`,
+              sql`${schema.sessionEvents.payload}->>'retirementOperationId' = ${input.operationId}`,
+              sql`${schema.sessionEvents.payload}->>'retiredVersion' = ${String(input.expectedVersion)}`,
+              sql`${schema.sessionEvents.payload}->>'retiredLastSequence' = ${String(input.expectedLastSequence)}`,
+            ),
+          )
+          .limit(1);
+        if (
+          !terminal ||
+          sessionEventPayloadRecord(terminal.payload, terminal.payloadCodecVersion)
+            .parentNotificationMode !== "timeline_only"
+        )
+          throw new Error("Retired child notice requires the notification-only retirement receipt");
+        const [existing] = await tx
+          .select()
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, parent.id),
+              eq(schema.sessionEvents.type, "system.update.settled"),
+              sql`${schema.sessionEvents.payload}->>'retirementOperationId' = ${input.operationId}`,
+              sql`${schema.sessionEvents.payload}->>'childTerminalEventId' = ${terminal.id}`,
+            ),
+          )
+          .limit(1);
+        if (existing) return mapEvent(existing);
+
+        // A terminal historical retirement also supersedes this child's obsolete
+        // nonterminal notices. Preserve earlier terminal answers and all unrelated
+        // senders. Captured outbox retries lose atomically at their source callback.
+        const nonterminalKinds = [
+          "child_requires_action",
+          "child_requires_action_resolved",
+          "child_paused",
+          "child_waiting_capacity",
+          "child_progress",
+        ];
+        const obsoleteInput = or(
+          inArray(schema.sessionSystemUpdates.kind, nonterminalKinds),
+          and(
+            eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
+            sql`${schema.sessionSystemUpdates.payload}->>'turnId' = ${turn.id}`,
+          ),
+        );
+        const obsoleteOutbox = or(
+          inArray(schema.sessionSystemUpdateOutbox.kind, nonterminalKinds),
+          and(
+            eq(schema.sessionSystemUpdateOutbox.kind, "child_terminal_result"),
+            sql`${schema.sessionSystemUpdateOutbox.payload}->>'turnId' = ${turn.id}`,
+          ),
+        );
+        const supersededInputs = await tx
+          .update(schema.sessionSystemUpdates)
+          .set({ state: "superseded" })
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, parent.id),
+              eq(schema.sessionSystemUpdates.sourceId, child.id),
+              eq(schema.sessionSystemUpdates.state, "pending"),
+              obsoleteInput,
+            ),
+          )
+          .returning({ id: schema.sessionSystemUpdates.id });
+        const supersededOutbox = await tx
+          .update(schema.sessionSystemUpdateOutbox)
+          .set({
+            status: "failed",
+            lastError: "Superseded by operator retirement; see the parent timeline receipt.",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionSystemUpdateOutbox.workspaceId, workspaceId),
+              eq(schema.sessionSystemUpdateOutbox.sourceSessionId, child.id),
+              eq(schema.sessionSystemUpdateOutbox.targetSessionId, parent.id),
+              eq(schema.sessionSystemUpdateOutbox.status, "pending"),
+              obsoleteOutbox,
+            ),
+          )
+          .returning({ id: schema.sessionSystemUpdateOutbox.id });
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: parent.accountId,
+                workspaceId,
+                sessionId: parent.id,
+                sequence: parent.lastSequence + 1,
+                type: "system.update.settled",
+                payload: {
+                  notificationOnly: true,
+                  reason: "operator_retirement",
+                  retirementOperationId: input.operationId,
+                  childSessionId: child.id,
+                  childTurnId: turn.id,
+                  childTerminalEventId: terminal.id,
+                  supersededUpdateIds: supersededInputs.map((row) => row.id).sort(),
+                  supersededOutboxIds: supersededOutbox.map((row) => row.id).sort(),
+                  members: [
+                    {
+                      id: terminal.id,
+                      kind: "child_terminal_result",
+                      classification: "failure",
+                      sourceId: child.id,
+                      summary: "Child work was interrupted and retired without replay.",
+                    },
+                  ],
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Retired child notice was not recorded");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: parent.lastSequence + 1, updatedAt: now })
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, parent.id)),
+          );
+        return mapEvent(event);
+      }),
+  );
+}
+
+async function settleSessionWorkBeforeAttemptClaim(
+  db: Database,
+  workspaceId: string,
+  input: FailSessionWorkBeforeAttemptClaimInput,
+  retirement?: InterruptedTurnRetirementProof,
+): Promise<FailSessionWorkBeforeAttemptClaimResult> {
   return await retrySessionActivityRls(
     db,
     workspaceId,
@@ -74579,6 +74829,25 @@ export async function failSessionWorkBeforeAttemptClaim(
           );
         }
         if (session.status === "failed" || session.status === "cancelled") {
+          if (retirement && session.status === "failed") {
+            const [prior] = await tx
+              .select({ id: schema.sessionEvents.id })
+              .from(schema.sessionEvents)
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, workspaceId),
+                  eq(schema.sessionEvents.sessionId, session.id),
+                  eq(schema.sessionEvents.turnId, retirement.turnId),
+                  eq(schema.sessionEvents.type, "turn.failed"),
+                  sql`${schema.sessionEvents.payload}->>'code' = 'interrupted_turn_retired'`,
+                  sql`${schema.sessionEvents.payload}->>'retirementOperationId' = ${retirement.operationId}`,
+                  sql`${schema.sessionEvents.payload}->>'retiredVersion' = ${String(retirement.expectedVersion)}`,
+                  sql`${schema.sessionEvents.payload}->>'retiredLastSequence' = ${String(retirement.expectedLastSequence)}`,
+                ),
+              )
+              .limit(1);
+            if (prior) return { action: "failed", turnId: retirement.turnId, events: [] } as const;
+          }
           return { action: "terminal", turnId: null, events: [] } as const;
         }
         if (
@@ -74593,7 +74862,14 @@ export async function failSessionWorkBeforeAttemptClaim(
           input.sessionId,
           { workspaceControl: baseLocks.control ?? undefined },
         );
-        if (!baseLocks.workspace || effectiveControl.state !== "active") {
+        if (!baseLocks.workspace || (!retirement && effectiveControl.state !== "active")) {
+          return { action: "stale", turnId: null, events: [] } as const;
+        }
+        if (
+          retirement &&
+          (session.activeTurnId !== retirement.turnId ||
+            session.lastSequence !== retirement.expectedLastSequence)
+        ) {
           return { action: "stale", turnId: null, events: [] } as const;
         }
 
@@ -74752,6 +75028,42 @@ export async function failSessionWorkBeforeAttemptClaim(
           }
         }
 
+        if (retirement) {
+          if (
+            !turn ||
+            turn.id !== retirement.turnId ||
+            turn.status !== "recovering" ||
+            turn.activeAttemptId !== null ||
+            turn.version !== retirement.expectedVersion
+          )
+            return { action: "stale", turnId: null, events: [] } as const;
+          const [proof] = await rawRows<{ safe: boolean }>(
+            tx as unknown as Database,
+            sql`
+            select exists (
+              select 1 from session_turn_attempts attempt
+              where attempt.workspace_id = ${workspaceId}
+                and attempt.session_id = ${session.id} and attempt.turn_id = ${turn.id}
+                and attempt.state = 'closed' and attempt.outcome = 'interrupted_recoverable'
+                and attempt.quiesced_at is not null
+                and not exists (
+                  select 1 from session_turn_attempts newer
+                  where newer.workspace_id = attempt.workspace_id
+                    and newer.session_id = attempt.session_id and newer.turn_id = attempt.turn_id
+                    and newer.execution_generation > attempt.execution_generation)
+            ) and not exists (
+              select 1 from session_turn_attempts attempt
+              where attempt.workspace_id = ${workspaceId} and attempt.session_id = ${session.id}
+                and (attempt.state <> 'closed' or ${sessionAttemptPendingWritersSql(sql`attempt`)})
+            ) and not exists (
+              select 1 from session_turns sibling
+              where sibling.workspace_id = ${workspaceId} and sibling.session_id = ${session.id}
+                and sibling.id <> ${turn.id}
+                and sibling.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+            ) as safe`,
+          );
+          if (!proof?.safe) return { action: "stale", turnId: null, events: [] } as const;
+        }
         const now = new Date();
         let sequence = session.lastSequence;
         let closedToolEvents: SessionEvent[] = [];
@@ -74804,10 +75116,10 @@ export async function failSessionWorkBeforeAttemptClaim(
               questions: schema.sessionHumanInputRequests.questions,
               turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
             });
-          // The child's blocked boundary died with the turn: resolve each
-          // request for the parent (locked by the child-lifecycle prefix
-          // above) so its pending child_requires_action can be superseded.
-          for (const request of cancelledHumanInputs) {
+          // Normal failure resolves each request for the parent. Historical
+          // retirement supersedes obsolete notices in its later passive phase;
+          // never create a fresh resolution input that could wake old work.
+          for (const request of retirement ? [] : cancelledHumanInputs) {
             await enqueueChildRequiresActionResolvedOutboxTx(
               tx as unknown as Database,
               workspaceId,
@@ -74828,22 +75140,53 @@ export async function failSessionWorkBeforeAttemptClaim(
           workspaceId,
           sessionId: input.sessionId,
         });
-        if (!turn) {
-          failedSystemUpdateIds = (
-            await tx
-              .update(schema.sessionSystemUpdates)
-              .set({ state: "failed" })
-              .where(
-                and(
-                  eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-                  eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-                  eq(schema.sessionSystemUpdates.state, "pending"),
-                ),
-              )
-              .returning({ id: schema.sessionSystemUpdates.id })
-          )
-            .map((update) => update.id)
-            .sort();
+        if (!turn || retirement) {
+          const failedUpdates = await tx
+            .update(schema.sessionSystemUpdates)
+            .set({ state: "failed" })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.state, "pending"),
+              ),
+            )
+            .returning({
+              id: schema.sessionSystemUpdates.id,
+              scheduledTaskRunId: schema.sessionSystemUpdates.scheduledTaskRunId,
+            });
+          failedSystemUpdateIds = failedUpdates.map((update) => update.id).sort();
+          if (retirement) {
+            // Settle only the exact occurrences whose pending inputs were
+            // retired. Dispatched is accepted source truth, not a running
+            // agent status; use its canonical lifecycle capability, never a
+            // broad session-wide update of dispatch history.
+            const runIds = [
+              ...new Set(failedUpdates.flatMap((update) => update.scheduledTaskRunId ?? [])),
+            ].sort();
+            for (const runId of runIds)
+              await markScheduledTaskRunAuthorityRejectedInTransaction(tx as unknown as Database, {
+                workspaceId,
+                sessionId: session.id,
+                runId,
+                error: input.error,
+              });
+          }
+        }
+        if (retirement && turn) {
+          await tx
+            .update(schema.sessionGoals)
+            .set({
+              continuationSuppressedTurnId: turn.id,
+              continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, workspaceId),
+                eq(schema.sessionGoals.sessionId, session.id),
+              ),
+            );
         }
         const values = [
           ...(turn
@@ -74874,8 +75217,17 @@ export async function failSessionWorkBeforeAttemptClaim(
                   type: "turn.failed" as const,
                   payload: {
                     triggerEventId: turn.triggerEventId,
-                    code: "pre_claim_failure",
+                    code: retirement ? "interrupted_turn_retired" : "pre_claim_failure",
                     error: input.error,
+                    ...(retirement
+                      ? {
+                          retirementOperationId: retirement.operationId,
+                          retiredVersion: retirement.expectedVersion,
+                          retiredLastSequence: retirement.expectedLastSequence,
+                          parentNotificationMode: "timeline_only",
+                          failedSystemUpdateIds,
+                        }
+                      : {}),
                   },
                   turnId: turn.id,
                   turnGeneration: turn.executionGeneration,
@@ -74893,8 +75245,16 @@ export async function failSessionWorkBeforeAttemptClaim(
             type: "session.status.changed" as const,
             payload: {
               status: "failed",
-              code: "pre_claim_failure",
+              code: retirement ? "interrupted_turn_retired" : "pre_claim_failure",
               error: input.error,
+              ...(retirement
+                ? {
+                    retirementOperationId: retirement.operationId,
+                    retiredVersion: retirement.expectedVersion,
+                    retiredLastSequence: retirement.expectedLastSequence,
+                    failedSystemUpdateIds,
+                  }
+                : {}),
               ...(input.admissionFailure ? { admissionFailure: input.admissionFailure } : {}),
               ...(!turn ? { failedSystemUpdateIds } : {}),
             },
@@ -74961,10 +75321,12 @@ export async function failSessionWorkBeforeAttemptClaim(
             terminalEvent: {
               id: failedEvent.id,
               type: "turn.failed",
-              payload: sessionEventPayloadRecord(
-                failedEvent.payload,
-                failedEvent.payloadCodecVersion,
-              ),
+              // Operator fences and retirement reasons are human audit, not
+              // new model-facing error text. Maintenance uses the existing
+              // generic failure projection without rewriting prior context.
+              payload: retirement
+                ? { status: "failed" }
+                : sessionEventPayloadRecord(failedEvent.payload, failedEvent.payloadCodecVersion),
             },
             now,
           });
@@ -74984,12 +75346,13 @@ export async function failSessionWorkBeforeAttemptClaim(
                 eq(schema.sessionTurns.id, turn.id),
               ),
             );
-          await enqueueFailedChildOutboxForTurnTx(
-            tx as unknown as Database,
-            workspaceId,
-            session,
-            turn,
-          );
+          if (!retirement)
+            await enqueueFailedChildOutboxForTurnTx(
+              tx as unknown as Database,
+              workspaceId,
+              session,
+              turn,
+            );
         } else {
           await enqueueFailedChildOutboxWithoutTurnTx(
             tx as unknown as Database,
@@ -75004,6 +75367,14 @@ export async function failSessionWorkBeforeAttemptClaim(
             status: "failed",
             activeTurnId: null,
             compactRequested: false,
+            ...(retirement
+              ? {
+                  inputWaitTurnId: null,
+                  inputWaitUntil: null,
+                  inputWaitReason: null,
+                  inputWaitSetAt: null,
+                }
+              : {}),
             lastSequence: sequence,
             queueVersion: session.queueVersion + 1,
             updatedAt: now,
@@ -80516,6 +80887,37 @@ export async function markSessionWorkflowWakeDelivered(
             )
             .limit(1);
           if (currentWake?.wakeRevision === input.wakeRevision) {
+            if (session.activeTurnId !== null) {
+              const [recovering] = await tx
+                .select({ id: schema.sessionTurns.id })
+                .from(schema.sessionTurns)
+                .where(
+                  and(
+                    eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                    eq(schema.sessionTurns.sessionId, input.sessionId),
+                    eq(schema.sessionTurns.id, session.activeTurnId),
+                    eq(schema.sessionTurns.status, "recovering"),
+                    isNull(schema.sessionTurns.activeAttemptId),
+                  ),
+                )
+                .limit(1);
+              // The receipt proves the previous writer is gone, not that a
+              // closing workflow consumed the recovery. Keep transport debt
+              // until the exact logical turn is reclaimed. Use the ordinary
+              // peek so setup/capacity/lifecycle blockers remain authoritative.
+              if (
+                recovering &&
+                (
+                  await peekSessionWork(
+                    tx as unknown as Database,
+                    input.workspaceId,
+                    input.sessionId,
+                  )
+                ).kind === "runnable"
+              ) {
+                return { action: "pending_admission", blocker: "pending_prompt_turn" } as const;
+              }
+            }
             // A transport ACK is not consumption. The workflow may have already
             // taken its closing snapshot when a timeout or child result arrives.
             // Keep the current revision retryable until claim consumes the input.
@@ -81119,8 +81521,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // work still in progress (or awaiting a person) overlaps a new run.
         if (
           options.requireIdleSession &&
-          session.status !== "idle" &&
-          session.status !== "failed"
+          ((session.status !== "idle" && session.status !== "failed") ||
+            session.activeTurnId !== null ||
+            effectiveControl.state !== "active")
         ) {
           const replayed = await replayExistingUpdate([]);
           if (replayed) {

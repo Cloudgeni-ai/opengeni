@@ -7,7 +7,8 @@
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /sessions/:sessionId                     → authorized compatibility redirect
-//   /workspaces/:id/secrets                  → vaults (?view=new|connect-1password)
+//   /workspaces/:id/secrets                  → vaults (?view=new|connect-1password,
+//                                               ?connection=<id>[&view=choose-vaults|replace-token])
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
 //   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
@@ -76,6 +77,7 @@ import {
   type DeveloperView,
 } from "@/lib/developer-route";
 import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
+import { parseSecretsIndexSearch, type SecretsIndexSearch } from "@/lib/secrets-route";
 import {
   workspaceSettingsSectionFromSearch,
   type WorkspaceSettingsSection,
@@ -419,8 +421,8 @@ const workspaceSecretsRoute = createRoute({
 const workspaceSecretsIndexRoute = createRoute({
   getParentRoute: () => workspaceSecretsRoute,
   path: "/",
-  validateSearch: (search: Record<string, unknown>): { view?: "new" | "connect-1password" } =>
-    search.view === "new" || search.view === "connect-1password" ? { view: search.view } : {},
+  validateSearch: (search: Record<string, unknown>): SecretsIndexSearch =>
+    parseSecretsIndexSearch(search),
 });
 const workspaceSecretsVaultRoute = createRoute({
   getParentRoute: () => workspaceSecretsRoute,
@@ -934,7 +936,7 @@ function SessionDeepLink() {
 function Secrets() {
   const { workspaceId } = workspaceSecretsRoute.useParams();
   const { vaultId, itemId } = useParams({ strict: false });
-  const { view, type } = useSearch({ strict: false });
+  const { view, type, connection, owner } = useSearch({ strict: false });
   return (
     <LazySecretsRoute
       workspaceId={workspaceId}
@@ -942,6 +944,8 @@ function Secrets() {
       itemId={itemId}
       view={view}
       type={type}
+      connectionId={connection}
+      owner={owner}
     />
   );
 }

@@ -5,8 +5,9 @@ import { createRoot } from "react-dom/client";
 import type { ModelAccountSettingsOverview, ModelAccountPreferences } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
-   Account rules against a mocked client: the organization's locks, every
-   workspace's sources, and a workspace's one-step return to the organization.
+   How accounts are used, against a mocked client: the organization's rules,
+   which of them workspaces can change, and a workspace's one-step return to
+   the organization.
    -------------------------------------------------------------------------- */
 
 const VALUES = {
@@ -34,14 +35,14 @@ const OVERRIDES = {
   providers: null,
   crossProviderFailover: null,
   fallbackOrder: null,
-  personalConnectionsAllowed: false,
+  personalConnectionsAllowed: true,
   personalFallbackAllowed: null,
 };
 
 let canEdit = true;
 const workspaceSettings = () => ({
   workspaceId: "design",
-  values: { ...VALUES, personalConnectionsAllowed: false },
+  values: VALUES,
   sources: SOURCES,
   entrySources: { rotation: {}, providers: {}, fallbackOrder: {} },
   locked: ["personalFallbackAllowed"],
@@ -103,10 +104,11 @@ GlobalRegistrator.register();
   true;
 
 const {
-  AccountRulesOverviewSection,
+  AccountRuleLocksPage,
   OrganizationAccountRulesSection,
   WorkspaceAccountRulesSection,
-  rotationSummary,
+  accountRuleChanges,
+  changeableRulesSummary,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
 } = await import("./model-account-settings");
@@ -148,23 +150,45 @@ const buttons = (container: HTMLElement, text: string) =>
     (candidate) => candidate.textContent?.trim() === text,
   );
 
+const editLocks = mock(() => undefined);
+const closeLocks = mock(() => undefined);
+
 function Organization() {
   const state = useModelAccountSettingsOverview("acme", true);
   return (
-    <>
-      <OrganizationAccountRulesSection
-        organizationName="Acme"
-        state={state}
-        modelLabel={(id) => (id === "claude/opus" ? "Opus" : "Sonnet")}
-      />
-      <AccountRulesOverviewSection
-        organizationName="Acme"
-        state={state}
-        onOpenWorkspace={() => {}}
-      />
-    </>
+    <OrganizationAccountRulesSection
+      organizationName="Acme"
+      state={state}
+      modelLabel={(id) => (id === "claude/opus" ? "Opus" : "Sonnet")}
+      onEditLocks={editLocks}
+    />
   );
 }
+
+function Locks() {
+  const state = useModelAccountSettingsOverview("acme", true);
+  return <AccountRuleLocksPage organizationName="Acme" state={state} onClose={closeLocks} />;
+}
+
+/** The option of the segmented control in the row labelled `row`. */
+function rowOption(container: HTMLElement, row: string, option: string) {
+  const group = [...container.querySelectorAll<HTMLElement>("[role='radiogroup']")].find(
+    (candidate) =>
+      document.getElementById(candidate.getAttribute("aria-labelledby") ?? "")?.textContent === row,
+  );
+  return [...(group?.querySelectorAll("button") ?? [])].find(
+    (candidate) => candidate.textContent?.trim() === option,
+  ) as HTMLButtonElement | undefined;
+}
+
+const checkbox = (container: HTMLElement, label: string) =>
+  [...container.querySelectorAll("label")]
+    .find((candidate) => candidate.textContent === label)
+    ?.ownerDocument.getElementById(
+      [...container.querySelectorAll("label")]
+        .find((candidate) => candidate.textContent === label)!
+        .getAttribute("for")!,
+    ) as HTMLInputElement;
 
 function Workspace() {
   const state = useWorkspaceModelAccountSettings("design", true);
@@ -185,10 +209,11 @@ test("fallback mappings save exact order and support an explicit empty override"
       fallbackOrder: { "claude/opus": [] },
       expectedVersion: 7,
     });
-    // A completed save releases the writer; locking still works without remounting.
-    await act(async () => buttons(view.container, "Lock for every workspace").at(-1)!.click());
+    // A completed save releases the writer; another rule still saves without remounting.
+    const failover = view.container.querySelectorAll("[role='switch']")[2] as HTMLButtonElement;
+    await act(async () => failover.click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenLastCalledWith("acme", {
-      locked: ["personalFallbackAllowed", "fallbackOrder"],
+      crossProviderFailover: false,
       expectedVersion: 7,
     });
   } finally {
@@ -205,64 +230,6 @@ test("workspace fallback reset inherits only the selected model mapping", async 
       fallbackOrder: { "claude/opus": null },
       expectedVersion: 3,
     });
-  } finally {
-    await view.cleanup();
-  }
-});
-
-test("overview loads subsequent pages once and deduplicates workspace identities", async () => {
-  const first = await client.getModelAccountSettingsOverview("acme");
-  client.getModelAccountSettingsOverview.mockResolvedValueOnce({ ...first, nextCursor: "next" });
-  const view = await render(<Organization />);
-  try {
-    client.getModelAccountSettingsOverview.mockResolvedValueOnce({
-      ...first,
-      workspaces: [
-        first.workspaces[0]!,
-        { ...first.workspaces[0]!, workspaceId: "research", name: "Research" },
-      ],
-      nextCursor: null,
-    });
-    await act(async () => buttons(view.container, "Show more workspaces")[0]!.click());
-    expect(client.getModelAccountSettingsOverview).toHaveBeenLastCalledWith("acme", {
-      after: "next",
-    });
-    expect(
-      view.container.querySelectorAll('ul[aria-label="Account rules by workspace"] li'),
-    ).toHaveLength(2);
-    expect(buttons(view.container, "Show more workspaces")).toHaveLength(0);
-  } finally {
-    await view.cleanup();
-  }
-});
-
-test("late overview pages cannot replace another organization's rules", async () => {
-  const first = await client.getModelAccountSettingsOverview("acme");
-  client.getModelAccountSettingsOverview.mockResolvedValueOnce({ ...first, nextCursor: "next" });
-  function Page({ id }: { id: string }) {
-    const state = useModelAccountSettingsOverview(id, true);
-    return (
-      <AccountRulesOverviewSection state={state} organizationName={id} onOpenWorkspace={() => {}} />
-    );
-  }
-  const view = await render(<Page id="acme" />);
-  try {
-    let settle!: (value: ModelAccountSettingsOverview) => void;
-    client.getModelAccountSettingsOverview.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          settle = resolve;
-        }),
-    );
-    await act(async () => buttons(view.container, "Show more workspaces")[0]!.click());
-    client.getModelAccountSettingsOverview.mockResolvedValueOnce({
-      ...first,
-      workspaces: [],
-      nextCursor: null,
-    });
-    await view.rerender(<Page id="other" />);
-    await act(async () => settle({ ...first, nextCursor: null }));
-    expect(view.container.textContent).not.toContain("Design");
   } finally {
     await view.cleanup();
   }
@@ -310,13 +277,9 @@ test("a late personal preference save cannot overwrite the newly selected organi
 test("rotation saves the selected provider without guessing another provider's policy", async () => {
   const view = await render(<Organization />);
   try {
-    const select = view.container.querySelector(
-      'select[aria-label="Claude account rotation"]',
-    ) as HTMLSelectElement;
-    await act(async () => {
-      select.value = "primary_first";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    const option = rowOption(view.container, "Claude accounts", "Primary only");
+    expect(option).toBeDefined();
+    await act(async () => option!.click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenCalledWith("acme", {
       rotation: { claude: { mode: "primary_first" } },
       expectedVersion: 7,
@@ -357,39 +320,117 @@ test("a person can withdraw a saved fallback opt-in even while its use is disall
   }
 });
 
-test("rotation summary reads the modes across providers", () => {
-  expect(rotationSummary({})).toBe("Spread work");
-  expect(rotationSummary({ codex: { mode: "primary_first" } })).toBe("Primary only");
-  expect(rotationSummary({ codex: { mode: "spread" }, claude: { mode: "primary_first" } })).toBe(
-    "Mixed",
-  );
+test("the summary says how many rules workspaces can change", () => {
+  expect(changeableRulesSummary([])).toBe("Every rule");
+  expect(changeableRulesSummary(["providers", "rotation"])).toBe("4 of 5 rules");
+  expect(
+    changeableRulesSummary([
+      "rotation",
+      "personalConnectionsAllowed",
+      "personalFallbackAllowed",
+      "crossProviderFailover",
+      "fallbackOrder",
+    ]),
+  ).toBe("Nothing");
 });
 
-test("the organization locks a rule with the version it read", async () => {
+test("a workspace's changes read as words, and locked rules are never its changes", () => {
+  expect(
+    accountRuleChanges({
+      values: {
+        ...VALUES,
+        rotation: { ...VALUES.rotation, claude: { mode: "primary_first" } },
+        crossProviderFailover: false,
+      },
+      sources: {
+        ...SOURCES,
+        rotation: "workspace",
+        crossProviderFailover: "workspace",
+        fallbackOrder: "workspace",
+      },
+      entrySources: {
+        rotation: { claude: "workspace" },
+        providers: {},
+        fallbackOrder: { "claude/opus": "workspace" },
+      },
+    }),
+  ).toEqual([
+    "Claude: Primary only",
+    "Personal subscriptions: On",
+    "Switch models: Off",
+    "Own fallback order",
+  ]);
+  expect(
+    accountRuleChanges({
+      values: VALUES,
+      sources: { ...SOURCES, personalConnectionsAllowed: "organization" },
+      entrySources: { rotation: {}, providers: {}, fallbackOrder: {} },
+    }),
+  ).toEqual([]);
+});
+
+test("dependent rules show only while their rule is on", async () => {
+  client.getModelAccountSettingsOverview.mockImplementationOnce(async () => ({
+    organization: {
+      organizationId: "acme",
+      values: { ...VALUES, personalConnectionsAllowed: false, crossProviderFailover: false },
+      locked: [],
+      version: 7,
+      updatedAt: null,
+    },
+    workspaces: [],
+    nextCursor: null,
+  }));
   const view = await render(<Organization />);
   try {
-    expect(view.container.textContent).toContain("Opus → Sonnet");
-    expect(buttons(view.container, "Locked · Unlock")).toHaveLength(1);
-    // Rotation is the first rule; lock it.
-    await act(async () => buttons(view.container, "Lock for every workspace")[0]!.click());
-    expect(client.updateOrganizationModelAccountSettings).toHaveBeenCalledWith("acme", {
-      locked: ["personalFallbackAllowed", "rotation"],
-      expectedVersion: 7,
-    });
-    // Locking clears overrides on the server, so every workspace is read again.
-    expect(client.getModelAccountSettingsOverview).toHaveBeenCalledTimes(2);
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Personal subscriptions");
+    expect(text).not.toContain("Fall back to personal subscriptions");
+    expect(text).not.toContain("Fallback order");
+    expect(text).toContain("Every rule");
   } finally {
     await view.cleanup();
   }
 });
 
-test("the overview names each rule's source", async () => {
+test("the organization keeps a rule the same everywhere with the version it read", async () => {
+  closeLocks.mockClear();
+  const view = await render(<Locks />);
+  try {
+    // Personal fallback is already kept the same; Design changed personal subscriptions.
+    expect(checkbox(view.container, "Fall back to personal subscriptions").checked).toBe(false);
+    expect(view.container.textContent).toContain("Changed in Design.");
+    await act(async () => checkbox(view.container, "Personal subscriptions").click());
+    expect(view.container.textContent).toContain("Design will go back to Acme’s setting.");
+    await act(async () => checkbox(view.container, "Personal subscriptions").click());
+    await act(async () => checkbox(view.container, "Sharing work between accounts").click());
+    const form = view.container.querySelector("form")!;
+    await act(async () =>
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(client.updateOrganizationModelAccountSettings).toHaveBeenCalledWith("acme", {
+      locked: ["rotation", "personalFallbackAllowed"],
+      expectedVersion: 7,
+    });
+    // Locking clears overrides on the server, so every workspace is read again.
+    expect(client.getModelAccountSettingsOverview).toHaveBeenCalledTimes(2);
+    expect(closeLocks).toHaveBeenCalled();
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("the organization's rules say which ones every workspace keeps", async () => {
   const view = await render(<Organization />);
   try {
-    const row = view.container.querySelector("ul[aria-label='Account rules by workspace'] li");
-    expect(row?.textContent).toContain("Design");
-    expect(row?.textContent).toContain(", set by this workspace");
-    expect(row?.textContent).toContain(", locked by Acme");
+    expect(view.container.textContent).toContain("Opus → Sonnet");
+    expect(view.container.textContent).toContain("Same in every workspace");
+    expect(view.container.textContent).toContain("4 of 5 rules");
+    const row = [...view.container.querySelectorAll("button")].find((candidate) =>
+      candidate.textContent?.includes("What workspaces can change"),
+    );
+    await act(async () => row!.click());
+    expect(editLocks).toHaveBeenCalled();
   } finally {
     await view.cleanup();
   }
@@ -400,7 +441,8 @@ test("a workspace admin goes back to the organization's value in one step", asyn
   try {
     const fallback = view.container.querySelectorAll("[role='switch']")[1]!;
     expect(fallback.getAttribute("aria-disabled")).toBe("true");
-    expect(view.container.textContent).toContain("Locked by Acme.");
+    expect(view.container.textContent).toContain("Acme keeps this the same in every workspace.");
+    expect(view.container.textContent).toContain("1 rule changed here. The rest follow Acme.");
     const reset = buttons(view.container, "Use Acme’s setting");
     expect(reset).toHaveLength(1);
     await act(async () => reset[0]!.click());

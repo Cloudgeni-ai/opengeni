@@ -193,20 +193,15 @@ describe("Only-me sessions on a shared sandbox", () => {
     const { parent, child, groupId } = await sharedBox(org);
     await seedCommand(org, parent.id);
 
-    // Access to this session's own box surface still has to settle first.
+    // Neither this session's own open terminal nor a sibling's blocks (0769):
+    // a viewer's stream is re-authorized against the session authority epoch
+    // when its short-lived token is refreshed, and box files are as shared as
+    // the box.
     const releaseOwnAccess = await holdBox(org, groupId, parent.id);
-    await expect(makePrivate(org, parent.id)).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "active_sandbox_access",
-    });
-    await releaseOwnAccess();
-
-    // A sibling's open terminal is use of the shared box, not of this
-    // conversation, so it does not block.
     const releaseSiblingAccess = await holdBox(org, groupId, child.id);
     const transitioned = await makePrivate(org, parent.id);
     expect(transitioned.visibility).toBe("user_private");
+    await releaseOwnAccess();
     await releaseSiblingAccess();
 
     // The member can no longer read the private session or anything it owns.

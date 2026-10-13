@@ -66,7 +66,7 @@ try {
 
     // The organization's own defaults.
     await open("view=organization");
-    await page.getByText("Defaults for every workspace").waitFor();
+    await page.getByText("Models for every workspace").waitFor();
     await page.getByText("3 models").waitFor();
     await page.getByText("1 limit").waitFor();
     await page.getByRole("button", { name: "Make automatic" }).waitFor();

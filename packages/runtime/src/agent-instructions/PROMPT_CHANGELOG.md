@@ -1,5 +1,12 @@
 # Modular prompt changelog
 
+The secrets doctrine now states one rule for every tool: a secret reference
+resolves wherever it is written, including Opengeni's own tools, and an escaped
+reference is passed on unresolved for later work such as schedule prompts,
+messages to other agents, goals and notes. It replaces the sentence that said
+references stay references outside executing surfaces. Interaction tools and
+the secret tools themselves keep references unchanged.
+
 Product identity and generated guidance now spell the brand Opengeni in both
 legacy and modular compositions. Only capitalization changes; instruction
 behavior and layer order are preserved. Legacy prompt digests are refreshed
@@ -246,7 +253,8 @@ so "never request credentials in chat" comes with the supported alternative.
 
 ```diff
 + Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).
-+ Write them directly in shell commands, browser typing, files and tool calls; they resolve only where they execute and stay references everywhere else, so use them freely.
++ A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call.
++ To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.
 + Find saved items and their ready references with `secret_search`.
 + Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.
 + Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.

@@ -2,10 +2,14 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   CreateManagedProviderVaultRequest,
+  DisconnectOnePasswordResponse,
   InstallOnePasswordRequest,
   InstallOnePasswordResponse,
   LinkProviderVaultRequest,
+  ListOnePasswordConnectionsResponse,
+  OnePasswordConnectionSummary,
   ProviderVaultMeta,
+  ReplaceOnePasswordTokenRequest,
   VAULT_ERROR_HTTP_STATUS,
   type VaultApiError,
   type VaultSummary,
@@ -15,6 +19,7 @@ import {
   ONEPASSWORD_PROVIDER_DOMAIN,
   createWorkspaceVaultProviderRegistry,
   externalActorContinuationForAuthorization,
+  hasPermission,
   isVaultError,
   providerSecretName,
   requirePermission,
@@ -24,6 +29,7 @@ import {
   isOnePasswordConnection,
   loadOnePasswordConnectionToken,
   onePasswordCredentialBundle,
+  onePasswordConnectionMetadata,
   requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
   vaultErrorCodeForProvider,
@@ -34,12 +40,17 @@ import {
 } from "@opengeni/core";
 import {
   createConnection,
+  deleteVault,
   encryptEnvironmentValue,
   getConnectionMetadata,
   getVault,
   linkProviderVault,
+  listConnectionsMetadata,
   listVaultsForSubject,
+  revokeConnection,
+  updateConnection,
   type VaultDbContext,
+  type VaultRow,
 } from "@opengeni/db";
 import {
   isVaultProviderError,
@@ -148,6 +159,77 @@ function vaultContextFor(
 
 function isAccountAdmin(authorization: AccessGrantAuthorization): boolean {
   return authorization.accountGrant?.permissions.includes("account:admin") === true;
+}
+
+type OnePasswordConnectionRow = NonNullable<Awaited<ReturnType<typeof getConnectionMetadata>>>;
+
+/**
+ * Whether the caller may link vaults through a 1Password connection, replace
+ * its token or disconnect it: the same authority that could have installed it.
+ */
+function canManageOnePasswordConnection(
+  authorization: AccessGrantAuthorization,
+  connection: OnePasswordConnectionRow,
+  metadata: OnePasswordConnectionMetadata,
+): boolean {
+  const { grant } = authorization;
+  if (!hasPermission(grant.permissions, "connections:write", grant.permissionMode)) return false;
+  if (!hasPermission(grant.permissions, "secrets:write", grant.permissionMode)) return false;
+  if (connection.subjectId !== null) return connection.subjectId === grant.subjectId;
+  if (metadata.ownership === "organization") return isAccountAdmin(authorization);
+  return true;
+}
+
+function onePasswordConnectionSummary(
+  authorization: AccessGrantAuthorization,
+  connection: OnePasswordConnectionRow,
+): OnePasswordConnectionSummary {
+  const metadata = onePasswordConnectionMetadata(connection.metadata)!;
+  return OnePasswordConnectionSummary.parse({
+    id: connection.id,
+    ownership: connection.subjectId !== null ? "user" : metadata.ownership,
+    accountName: metadata.accountName,
+    label: metadata.label,
+    planTier: metadata.planTier,
+    verifiedAt: metadata.verifiedAt || connection.createdAt,
+    createdAt: connection.createdAt,
+    createdBySubjectId: connection.createdBySubjectId,
+    canManage: canManageOnePasswordConnection(authorization, connection, metadata),
+  });
+}
+
+/** A live (not revoked) 1Password connection the caller can see, or 404. */
+async function requireOnePasswordConnection(
+  deps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+  connectionId: string,
+): Promise<{ connection: OnePasswordConnectionRow; metadata: OnePasswordConnectionMetadata }> {
+  const connection = await getConnectionMetadata(
+    deps.db,
+    workspaceId,
+    connectionId,
+    authorization.grant.subjectId,
+  );
+  if (!connection || !isOnePasswordConnection(connection) || connection.status === "revoked") {
+    throw new HTTPException(404, { message: "1Password connection not found" });
+  }
+  return { connection, metadata: onePasswordConnectionMetadata(connection.metadata)! };
+}
+
+function requireManageOnePasswordConnection(
+  authorization: AccessGrantAuthorization,
+  connection: OnePasswordConnectionRow,
+  metadata: OnePasswordConnectionMetadata,
+): void {
+  if (!canManageOnePasswordConnection(authorization, connection, metadata)) {
+    throw new HTTPException(403, {
+      message:
+        metadata.ownership === "organization"
+          ? "Only an organization admin can change this 1Password connection"
+          : "You can't change this 1Password connection",
+    });
+  }
 }
 
 async function vaultSummaryFor(
@@ -501,4 +583,200 @@ export function registerVaultProviderRoutes(
       return vaultRouteError(c, error, true);
     }
   });
+
+  /** The 1Password connections the caller can see, without their tokens. */
+  app.get("/v1/workspaces/:workspaceId/connections/1password/service-accounts", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "secrets:list",
+    );
+    const rows = await listConnectionsMetadata(db, workspaceId, authorization.grant.subjectId);
+    return c.json(
+      ListOnePasswordConnectionsResponse.parse({
+        connections: rows
+          .filter((row) => isOnePasswordConnection(row) && row.status !== "revoked")
+          .map((row) => onePasswordConnectionSummary(authorization, row)),
+      }),
+    );
+  });
+
+  // A new token for an existing connection (rotation, or after it expired).
+  // Checked like an install, then stored on the same connection, so every
+  // vault linked through it keeps its links and syncs again.
+  app.put("/v1/workspaces/:workspaceId/connections/:connectionId/1password/token", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const connectionId = c.req.param("connectionId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const grant = authorization.grant;
+    const { connection, metadata } = await requireOnePasswordConnection(
+      deps,
+      authorization,
+      workspaceId,
+      connectionId,
+    );
+    requireManageOnePasswordConnection(authorization, connection, metadata);
+    if (connection.subjectId !== null && !isPersonalConnectionOwnerPrincipal(authorization)) {
+      throw new HTTPException(403, {
+        message: "Only a signed-in person can change a personal 1Password connection",
+      });
+    }
+    const payload = await parseRequestJson(c, ReplaceOnePasswordTokenRequest);
+    const key = requireEnvironmentEncryption(settings);
+    const token = payload.token.trim();
+    const planTier = payload.planTier ?? metadata.planTier;
+    let accountName: string | null;
+    let vaults;
+    try {
+      const onePassword = await loadOnePasswordModule();
+      accountName = onePassword.describeOnePasswordToken(token, {
+        allowFakeTokens: settings.onePasswordFakeTokens,
+      }).accountName;
+      if (metadata.accountName && accountName && accountName !== metadata.accountName) {
+        return c.json(
+          {
+            error: "provider_conflict",
+            message: `This token is for ${accountName}, not ${metadata.accountName}. Connect it as another 1Password account instead.`,
+          },
+          409,
+        );
+      }
+      const provider = await onePasswordFactoryFor(deps)({
+        token,
+        planTier,
+        allowFakeTokens: settings.onePasswordFakeTokens,
+      });
+      vaults = await provider.listVaults(routeProviderContext(connectionId));
+    } catch (error) {
+      return providerErrorResponse(c, error);
+    }
+    const nextMetadata: OnePasswordConnectionMetadata = {
+      ...metadata,
+      planTier,
+      accountName: accountName ?? metadata.accountName,
+      verifiedAt: new Date().toISOString(),
+    };
+    const credentialEncrypted = encryptEnvironmentValue(
+      key,
+      JSON.stringify(onePasswordCredentialBundle(token)),
+    );
+    const continuation = externalActorContinuationForAuthorization(authorization);
+    const updated = await db.transaction(async (tx) => {
+      await requireConnectOwnerAuthority(tx, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
+        ...(continuation ? { externalContinuation: continuation } : {}),
+      });
+      return await updateConnection(tx, {
+        workspaceId,
+        connectionId,
+        visibleToSubjectId: grant.subjectId,
+        expectedVersion: connection.version,
+        status: "active",
+        credentialEncrypted,
+        metadata: { ...connection.metadata, ...nextMetadata },
+        updatedBySubjectId: grant.subjectId,
+      });
+    });
+    if (!updated) {
+      throw new HTTPException(409, {
+        message: "This 1Password connection changed while you were editing it. Try again.",
+      });
+    }
+    // Linked vaults sync with the new token now; each records its own outcome.
+    const context = vaultContextFor(authorization, workspaceId);
+    const linked = await linkedVaultRows(context, workspaceId, connectionId);
+    const providers = vaultProviderRegistryFor(deps, { workspaceId, subjectId: grant.subjectId });
+    for (const row of linked) {
+      await syncLinkedProviderVault({ db, context, vaultId: row.id, providers, force: true }).catch(
+        () => undefined,
+      );
+    }
+    const linkedByRef = new Map(linked.map((row) => [row.providerVaultRef, row.id]));
+    return c.json(
+      InstallOnePasswordResponse.parse({
+        connectionId,
+        accountName: nextMetadata.accountName,
+        vaults: vaults.map((vault) => ({
+          externalVaultId: vault.externalVaultId,
+          name: vault.name,
+          itemCount: vault.itemCount,
+          linkedVaultId: linkedByRef.get(vault.externalVaultId) ?? null,
+        })),
+      }),
+    );
+  });
+
+  // Disconnect: unlink every vault linked through the connection (nothing is
+  // deleted in 1Password), then revoke the stored token. Vault removal runs
+  // first, so a refusal leaves the connection intact and the request can be
+  // retried.
+  app.delete("/v1/workspaces/:workspaceId/connections/:connectionId/1password", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const connectionId = c.req.param("connectionId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const grant = authorization.grant;
+    const { connection, metadata } = await requireOnePasswordConnection(
+      deps,
+      authorization,
+      workspaceId,
+      connectionId,
+    );
+    requireManageOnePasswordConnection(authorization, connection, metadata);
+    const context = vaultContextFor(authorization, workspaceId);
+    const unlinkedVaultIds: string[] = [];
+    try {
+      for (const row of await linkedVaultRows(context, workspaceId, connectionId)) {
+        await deleteVault(db, context, {
+          vaultId: row.id,
+          confirmName: row.name,
+          allowOrganization: isAccountAdmin(authorization),
+        });
+        unlinkedVaultIds.push(row.id);
+      }
+    } catch (error) {
+      return vaultRouteError(c, error);
+    }
+    const revoked = await revokeConnection(
+      db,
+      workspaceId,
+      connectionId,
+      grant.subjectId,
+      connection.version,
+    );
+    if (!revoked) {
+      throw new HTTPException(409, {
+        message: "This 1Password connection changed while you were disconnecting it. Try again.",
+      });
+    }
+    return c.json(DisconnectOnePasswordResponse.parse({ unlinkedVaultIds }));
+  });
+
+  async function linkedVaultRows(
+    context: VaultDbContext,
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<(VaultRow & { providerVaultRef: string })[]> {
+    const rows = await listVaultsForSubject(db, context, { workspaceId });
+    return rows.filter(
+      (row): row is VaultRow & { providerVaultRef: string } =>
+        row.source === "onepassword" &&
+        row.providerConnectionId === connectionId &&
+        row.providerVaultRef !== null,
+    );
+  }
 }

@@ -84,6 +84,52 @@ function machine(
   };
 }
 
+function runtimeWith(
+  overrides: Pick<
+    NonNullable<MachineView["runtime"]>,
+    "installedVersion" | "desiredVersion" | "versionState" | "update"
+  >,
+): NonNullable<MachineView["runtime"]> {
+  return {
+    binarySha256: "ab".repeat(32),
+    updateChannel: "stable",
+    macPermissions: null,
+    capabilities: {
+      exec: true,
+      filesystem: true,
+      git: true,
+      pty: true,
+      desktop: true,
+      credentialRenew: false,
+      screenControl: false,
+      opStream: true,
+      browserBridge: true,
+      operationResourcePolicy: true,
+      operationCpuQuota: true,
+      transactionalFsWrite: true,
+    },
+    ...overrides,
+  };
+}
+
+function failedUpdate(
+  targetVersion: string,
+  errorCode: string,
+): NonNullable<NonNullable<MachineView["runtime"]>["update"]> {
+  return {
+    operationId: "00000000-0000-4000-8000-000000000002",
+    status: "failed",
+    targetVersion,
+    expectedBinarySha256: null,
+    errorCode,
+    retryable: true,
+    rolledBack: false,
+    requestedAt: "2026-06-26T09:00:00.000Z",
+    updatedAt: "2026-06-26T09:00:05.000Z",
+    completedAt: "2026-06-26T09:00:05.000Z",
+  };
+}
+
 const ALL_STATES: MachineState[] = [
   "online",
   "reconnecting",
@@ -241,7 +287,7 @@ describe("MachineCard — attach/swap affordance", () => {
     );
     await flush();
     expect(r.container.textContent).toContain("Agent v0.1.15");
-    expect(r.container.textContent).toContain("Promoted v0.1.16");
+    expect(r.container.textContent).toContain("v0.1.16 available");
     const button = r.container.querySelector("[data-update-agent]") as HTMLButtonElement;
     button.click();
     await flush();
@@ -335,7 +381,7 @@ describe("MachineCard — attach/swap affordance", () => {
     });
     const r = await renderComponent(<MachineCard machine={m} onUpdateAgent={() => {}} />);
     await flush();
-    expect(r.container.textContent).toContain("Waiting for current work");
+    expect(r.container.textContent).toContain("Updates to v0.1.16 when current work finishes");
     expect(r.container.querySelector("[data-update-agent]")).toBeNull();
     await r.unmount();
   });
@@ -388,9 +434,9 @@ describe("MachineCard — attach/swap affordance", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Agent confirmation delayed");
+    expect(r.container.textContent).toContain("hasn't confirmed the update to v0.1.16");
     const button = r.container.querySelector("[data-update-agent]") as HTMLButtonElement;
-    expect(button.textContent).toContain("Retry delivery");
+    expect(button.textContent).toContain("Send again");
     button.click();
     await flush();
     expect(retried.map((value) => value.sandboxId)).toEqual(["sh-awaiting-confirmation"]);
@@ -437,10 +483,11 @@ describe("MachineCard — attach/swap affordance", () => {
     await r.unmount();
   });
 
-  test("a blocked competing runner is visible from the fleet card", async () => {
+  test("a competing runner kept out right now is a calm heads-up on the card", async () => {
     const m = machine({
       sandboxId: "sh-conflict",
       state: "online",
+      metrics: { ...idle, sampledAt: "2026-06-26T09:15:38.000Z" },
       connectionAuthority: {
         state: "active",
         generation: 3,
@@ -450,16 +497,116 @@ describe("MachineCard — attach/swap affordance", () => {
         duplicateRunnerDeniedAt: "2026-06-26T09:15:30.000Z",
       },
     });
-    const r = await renderComponent(<MachineCard machine={m} />);
+    const r = await renderComponent(
+      <MachineCard machine={m} now={new Date("2026-06-26T09:15:40.000Z").getTime()} />,
+    );
     await flush();
     expect(r.container.querySelector("[data-runner-conflict]")).not.toBeNull();
-    expect(r.container.textContent).toContain("Competing agent process blocked");
+    expect(r.container.textContent).toContain("second copy of the agent");
+    expect(r.container.textContent).toContain("Healthy");
     await r.unmount();
+  });
+
+  test("a competing runner refused days ago is not shown on the card", async () => {
+    const m = machine({
+      sandboxId: "sh-old-conflict",
+      state: "online",
+      connectionAuthority: {
+        state: "active",
+        generation: 4,
+        supersededCount: 3,
+        leaseExpiresAt: "2026-06-26T09:16:00.000Z",
+        duplicateRunnerDeniedCount: 8,
+        duplicateRunnerDeniedAt: "2026-06-23T09:15:30.000Z",
+      },
+    });
+    const r = await renderComponent(
+      <MachineCard machine={m} now={new Date("2026-06-26T09:15:40.000Z").getTime()} />,
+    );
+    await flush();
+    expect(r.container.querySelector("[data-runner-conflict]")).toBeNull();
+    await r.unmount();
+  });
+
+  test("an update postponed by busy work reads as postponed, not failed", async () => {
+    const m = machine({
+      sandboxId: "sh-postponed",
+      state: "online",
+      runtime: runtimeWith({
+        installedVersion: "0.1.53",
+        desiredVersion: "0.1.54",
+        versionState: "outdated",
+        update: failedUpdate("0.1.54", "update_busy_work"),
+      }),
+    });
+    const r = await renderComponent(<MachineCard machine={m} onUpdateAgent={() => {}} />);
+    await flush();
+    expect(r.container.textContent).toContain("postponed while the machine was busy");
+    expect(r.container.textContent).not.toContain("failed");
+    expect(
+      r.container.querySelector("[data-agent-status]")?.getAttribute("data-agent-status"),
+    ).toBe("waiting");
+    expect(r.container.querySelector("[data-update-agent]")?.textContent).toBe("Update now");
+    await r.unmount();
+  });
+
+  test("a failed update to the version already installed is not a failure", async () => {
+    const m = machine({
+      sandboxId: "sh-noop",
+      state: "online",
+      runtime: runtimeWith({
+        installedVersion: "0.1.54",
+        desiredVersion: "0.1.54",
+        // An older server still reports the moot failure; the card must not.
+        versionState: "update_failed",
+        update: failedUpdate("0.1.54", "update_busy_work"),
+      }),
+    });
+    const r = await renderComponent(<MachineCard machine={m} onUpdateAgent={() => {}} />);
+    await flush();
+    expect(r.container.textContent).toContain("Up to date");
+    expect(r.container.textContent).not.toContain("failed");
+    expect(r.container.querySelector("[data-update-agent]")).toBeNull();
+    await r.unmount();
+  });
+
+  test("a real update failure says so and offers a retry only when it can help", async () => {
+    const retryable = machine({
+      sandboxId: "sh-failed",
+      state: "online",
+      runtime: runtimeWith({
+        installedVersion: "0.1.53",
+        desiredVersion: "0.1.54",
+        versionState: "update_failed",
+        update: failedUpdate("0.1.54", "agent_offline"),
+      }),
+    });
+    const r = await renderComponent(<MachineCard machine={retryable} onUpdateAgent={() => {}} />);
+    await flush();
+    expect(r.container.textContent).toContain("Update to v0.1.54 failed");
+    expect(r.container.textContent).toContain("the machine was offline");
+    expect(r.container.querySelector("[data-update-agent]")?.textContent).toBe("Try again");
+    await r.unmount();
+
+    const final = machine({
+      sandboxId: "sh-failed-final",
+      state: "online",
+      runtime: runtimeWith({
+        installedVersion: "0.1.53",
+        desiredVersion: "0.1.54",
+        versionState: "update_failed",
+        update: { ...failedUpdate("0.1.54", "signature_invalid"), retryable: false },
+      }),
+    });
+    const f = await renderComponent(<MachineCard machine={final} onUpdateAgent={() => {}} />);
+    await flush();
+    expect(f.container.querySelector("[data-update-agent]")).toBeNull();
+    await f.unmount();
   });
 });
 
-describe("MachineDetail — runner authority diagnostics", () => {
-  test("shows the live generation, fenced predecessors, and blocked competing runners", async () => {
+describe("MachineDetail — agent and connection", () => {
+  test("describes the connection plainly and keeps old refusals as quiet history", async () => {
     const m = machine({
       sandboxId: "sh-authority-detail",
       state: "online",
@@ -468,8 +615,8 @@ describe("MachineDetail — runner authority diagnostics", () => {
         generation: 4,
         supersededCount: 3,
         leaseExpiresAt: "2026-06-26T09:16:00.000Z",
-        duplicateRunnerDeniedCount: 2,
-        duplicateRunnerDeniedAt: "2026-06-26T09:15:30.000Z",
+        duplicateRunnerDeniedCount: 8,
+        duplicateRunnerDeniedAt: "2026-06-23T09:15:30.000Z",
       },
     });
     const r = await renderComponent(
@@ -483,9 +630,53 @@ describe("MachineDetail — runner authority diagnostics", () => {
     );
     await flush();
     expect(r.container.querySelector('[data-connection-authority="active"]')).not.toBeNull();
-    expect(r.container.textContent).toContain("generation 4");
-    expect(r.container.textContent).toContain("3 earlier runners fenced");
-    expect(r.container.textContent).toContain("Blocked 2 competing runners");
+    expect(r.container.textContent).toContain("Agent connected");
+    expect(r.container.textContent).toContain("Reconnected 3 times since setup");
+    expect(r.container.querySelector('[data-runner-conflict="past"]')?.textContent).toContain(
+      "Kept out 8 extra copies of the agent",
+    );
+    expect(r.container.querySelector('[data-runner-conflict="active"]')).toBeNull();
+    expect(r.container.textContent).not.toContain("generation");
+    await r.unmount();
+  });
+
+  test("shows a live competing runner and the agent update with its action", async () => {
+    const updated: MachineView[] = [];
+    const m = machine({
+      sandboxId: "sh-detail-live",
+      state: "online",
+      connectionAuthority: {
+        state: "active",
+        generation: 2,
+        supersededCount: 1,
+        leaseExpiresAt: "2026-06-26T09:16:00.000Z",
+        duplicateRunnerDeniedCount: 2,
+        duplicateRunnerDeniedAt: "2026-06-26T09:15:30.000Z",
+      },
+      runtime: runtimeWith({
+        installedVersion: "0.1.53",
+        desiredVersion: "0.1.54",
+        versionState: "outdated",
+        update: null,
+      }),
+    });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        onUpdateAgent={(value) => updated.push(value)}
+        now={new Date("2026-06-26T09:15:40.000Z").getTime()}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[data-runner-conflict="active"]')).not.toBeNull();
+    expect(r.container.textContent).toContain("Agent v0.1.53");
+    expect(r.container.textContent).toContain("v0.1.54 available");
+    (r.container.querySelector("[data-update-agent]") as HTMLButtonElement).click();
+    await flush();
+    expect(updated.map((value) => value.sandboxId)).toEqual(["sh-detail-live"]);
     await r.unmount();
   });
 

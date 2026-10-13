@@ -2209,6 +2209,47 @@ describe("workspace environments encryption key", () => {
   });
 });
 
+describe("managed email delivery", () => {
+  const managedEnv = {
+    OPENGENI_ENVIRONMENT: "production",
+    OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+    OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+    OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+    OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+  };
+
+  test("defaults to Resend and requires its key outside local/test", () => {
+    expect(() => withEnv(managedEnv, () => getSettings())).toThrow(
+      "OPENGENI_RESEND_API_KEY is required for managed mode outside local/test",
+    );
+    const settings = withEnv({ ...managedEnv, OPENGENI_RESEND_API_KEY: "re_test" }, () =>
+      getSettings(),
+    );
+    expect(settings.managedEmailDelivery).toBe("resend");
+  });
+
+  test("disabled delivery boots without a provider key and refuses one", () => {
+    const settings = withEnv({ ...managedEnv, OPENGENI_MANAGED_EMAIL_DELIVERY: "disabled" }, () =>
+      getSettings(),
+    );
+    expect(settings.managedEmailDelivery).toBe("disabled");
+    expect(settings.resendApiKey).toBeUndefined();
+    expect(() =>
+      withEnv(
+        {
+          ...managedEnv,
+          OPENGENI_MANAGED_EMAIL_DELIVERY: "disabled",
+          OPENGENI_RESEND_API_KEY: "re_test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_RESEND_API_KEY must be unset when OPENGENI_MANAGED_EMAIL_DELIVERY=disabled",
+    );
+  });
+});
+
 describe("provider item id policy", () => {
   test("defaults to stripping provider item ids with encrypted reasoning round-trip", () => {
     const settings = withEnv({}, () => getSettings());

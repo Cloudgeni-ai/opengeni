@@ -22,6 +22,14 @@ import { join } from "node:path";
 
 const repo = join(import.meta.dir, "..");
 
+/** Owner-only preview reads, named by the visibility-work reader instead of the adapter. */
+const OWNER_PREVIEW_ROUTINES = [
+  // 0768's preview of a standing block; since 0769 it always answers NULL and
+  // stays granted only for older releases.
+  "session_visibility_change_blocker",
+  // Owner-only counts of other people's access a private change drops (0769).
+  "session_visibility_foreign_authority_items",
+] as const;
 const SQL_ENTRY_POINTS = [
   "transition_session_visibility",
   "fork_session_content",
@@ -31,11 +39,14 @@ const SQL_ENTRY_POINTS = [
   // functions: it is granted to `opengeni_app`, so any new importer would
   // otherwise pass every guard in the tree.
   "replay_applied_session_fork",
+  ...OWNER_PREVIEW_ROUTINES,
 ] as const;
 const ADAPTER_ENTRY_POINTS = [
   "transitionSessionVisibility",
   "forkSessionContent",
   "replayAppliedSessionFork",
+  "inspectSessionVisibilityChange",
+  "stopSessionWorkForVisibilityChange",
 ] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
 const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
@@ -69,7 +80,15 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   // Lets an Only-me session keep its shared sandbox group: flips only the
   // singleton-group assertion in the visibility transition and fork bodies.
   "packages/db/drizzle/0738_private_sessions_share_sandboxes.sql",
+  // Settles leftovers inside the private transition and adds the owner-only
+  // blocker preview; same owner-only boundary and locks.
+  "packages/db/drizzle/0768_private_visibility_ignores_leftovers.sql",
+  // Never refuses the private transition: drops other people's pending
+  // updates and account choices inside it; same owner-only boundary and locks.
+  "packages/db/drizzle/0769_private_visibility_never_blocks.sql",
   "packages/db/src/session-tenancy.ts",
+  // Reads the owner-only foreign-authority counts for the preview and consent.
+  "packages/db/src/session-visibility-work.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",
 ]);
@@ -127,9 +146,15 @@ describe("session visibility and fork product activation stays on its exact publ
 
   test("the adapter still exists so the db test lane keeps proving the fenced behaviour", async () => {
     const adapter = await readFile(join(repo, "packages/db/src/session-tenancy.ts"), "utf8");
+    const previews = new Set<string>(OWNER_PREVIEW_ROUTINES);
     for (const marker of [...SQL_ENTRY_POINTS, ...ADAPTER_ENTRY_POINTS]) {
-      expect(adapter).toContain(marker);
+      if (!previews.has(marker)) expect(adapter).toContain(marker);
     }
+    const workReader = await readFile(
+      join(repo, "packages/db/src/session-visibility-work.ts"),
+      "utf8",
+    );
+    expect(workReader).toContain("session_visibility_foreign_authority_items");
     const posture = await readFile(join(repo, "packages/db/src/runtime-posture.ts"), "utf8");
     for (const marker of SQL_ENTRY_POINTS) {
       expect(posture).toContain(marker);

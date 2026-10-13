@@ -269,7 +269,10 @@ describe("organization Codex subscriptions", () => {
       await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
       await flush();
       expect(container.textContent).toContain("Extra credits");
-      expect(container.textContent).toContain("120.50");
+      // The balance is formatted for reading (#4307), not shown as the raw decimal string.
+      expect(container.textContent).toContain(
+        new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(120.5),
+      );
       expect(container.textContent).toContain("Paused");
       expect(requestJson.mock.calls.slice(before).every(([method]) => method === "GET")).toBe(true);
       expect(

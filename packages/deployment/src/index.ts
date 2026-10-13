@@ -1593,8 +1593,9 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_BETTER_AUTH_SECRET",
       "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
-      "OPENGENI_RESEND_API_KEY",
-      "OPENGENI_EMAIL_FROM",
+      ...(env.OPENGENI_MANAGED_EMAIL_DELIVERY === "disabled"
+        ? ["OPENGENI_MANAGED_EMAIL_DELIVERY"]
+        : ["OPENGENI_RESEND_API_KEY", "OPENGENI_EMAIL_FROM"]),
       "OPENGENI_GITHUB_APP_ID",
       "OPENGENI_GITHUB_CLIENT_ID",
       "OPENGENI_GITHUB_CLIENT_SECRET",
@@ -2740,11 +2741,15 @@ function runtimeEnvValues(
             "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
             env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
           ),
-          requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
-          valueEnv(
-            "OPENGENI_EMAIL_FROM",
-            env.OPENGENI_EMAIL_FROM ?? "Opengeni <auth@mail.opengeni.ai>",
-          ),
+          ...(env.OPENGENI_MANAGED_EMAIL_DELIVERY === "disabled"
+            ? [valueEnv("OPENGENI_MANAGED_EMAIL_DELIVERY", "disabled")]
+            : [
+                requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
+                valueEnv(
+                  "OPENGENI_EMAIL_FROM",
+                  env.OPENGENI_EMAIL_FROM ?? "Opengeni <auth@mail.opengeni.ai>",
+                ),
+              ]),
           valueEnv(
             "OPENGENI_GITHUB_APP_MANIFEST_BASE_URL",
             env.OPENGENI_GITHUB_APP_MANIFEST_BASE_URL ?? publicBaseUrl,

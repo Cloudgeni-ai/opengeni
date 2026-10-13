@@ -1,4 +1,5 @@
 import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -46,7 +47,25 @@ export async function acquirePreKnowledgeTestDatabase(
     // fixture never runs that maintenance step or the ones after it (the
     // Claude cutover and the retirement), so they stay recorded.
     await admin`INSERT INTO schema_migrations(name) VALUES('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql')`;
+    // The queue Steer admission repair is a one-time data repair that also
+    // reads the withheld 0560 import column; it changes no schema.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0763_queue_steer_admission_recheck_repair.sql')`;
+    // 0768 and 0769 rewrite the quiescence check and the visibility transition
+    // that the withheld 0501/0738 migrations shape differently here. Their
+    // standalone routines are installed after the replay below.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0768_private_visibility_ignores_leftovers.sql'), ('0769_private_visibility_never_blocks.sql')`;
     await migrate(blank.databaseUrl);
+    // The current visibility transition reads the routines 0768 and 0769 add,
+    // so install everything before their exact-text rewrite blocks.
+    for (const name of [
+      "0768_private_visibility_ignores_leftovers.sql",
+      "0769_private_visibility_never_blocks.sql",
+    ]) {
+      const migration = await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8");
+      const rewrite = migration.indexOf("\nDO $migration$");
+      if (rewrite < 0) throw new Error(`${name} has no rewrite block`);
+      await admin.begin((tx) => tx.unsafe(migration.slice(0, rewrite)));
+    }
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.
     await admin`ALTER TABLE sessions

@@ -1717,7 +1717,14 @@ export async function steerQueuedTurnInTransaction(
     .update(schema.sessions)
     .set({
       activeTurnId: liveCurrentTurnId,
-      status: liveCurrentTurnId ? session.status : "queued",
+      status: liveCurrentTurnId
+        ? (session.admissionBlock?.previousStatus ?? session.status)
+        : "queued",
+      // Queue-row Steer is the same explicit admission recheck as a fresh
+      // Send/Steer or Resume. Keeping the old block would let delivery ACK
+      // the wake while peek and claim permanently refuse this direction.
+      // Receipt replay returns above, so it cannot clear a later rejection.
+      admissionBlock: null,
       queueVersion,
       queueHeadPosition: 0,
       queueTailPosition: ordered.length,

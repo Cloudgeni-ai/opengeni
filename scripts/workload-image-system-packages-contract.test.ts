@@ -48,7 +48,7 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
     api.includes("TESSDATA_PREFIX=/opt/opengeni/tessdata") &&
     api.includes("apt-get install -y --no-install-recommends docker-ce-cli") &&
     api.includes("docker --version") &&
-    worker.startsWith("FROM source-base AS worker") &&
+    worker.startsWith("FROM oven/bun:${BUN_VERSION}-slim AS worker") &&
     aptTransactions(worker) === 1 &&
     worker.includes(
       "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client python3 tesseract-ocr-eng",
@@ -58,7 +58,7 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
     worker.includes("/usr/bin/python3 -c 'import pty'") &&
     aptTransactions(materializer) === 1 &&
     materializer.includes(
-      "apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux",
+      "apt-get install -y --no-install-recommends bubblewrap ca-certificates util-linux",
     )
   );
 }
@@ -111,14 +111,14 @@ describe("workload image system package contract", () => {
     expect(keepsSpecializedWorkloadPackagesCoalesced(missingApiDockerCli)).toBe(false);
 
     const duplicateApiTransaction = dockerfile.replace(
-      "FROM artifact-runtime-base AS api\n",
-      "FROM artifact-runtime-base AS api\nRUN apt-get update && rm -rf /var/lib/apt/lists/*\n",
+      "FROM oven/bun:${BUN_VERSION}-slim AS api\n",
+      "FROM oven/bun:${BUN_VERSION}-slim AS api\nRUN apt-get update && rm -rf /var/lib/apt/lists/*\n",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(duplicateApiTransaction)).toBe(false);
 
     const inheritedWorkerCommonInstall = dockerfile.replace(
-      "FROM source-base AS worker",
-      "FROM base AS worker",
+      "FROM oven/bun:${BUN_VERSION}-slim AS worker\n",
+      "FROM base AS worker\n",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(inheritedWorkerCommonInstall)).toBe(false);
 
@@ -129,8 +129,8 @@ describe("workload image system package contract", () => {
     expect(keepsSpecializedWorkloadPackagesCoalesced(missingWorkerSourceControlTools)).toBe(false);
 
     const duplicateWorkerTransaction = dockerfile.replace(
-      "FROM source-base AS worker\n",
-      "FROM source-base AS worker\nRUN apt-get update && rm -rf /var/lib/apt/lists/*\n",
+      "FROM oven/bun:${BUN_VERSION}-slim AS worker\n",
+      "FROM oven/bun:${BUN_VERSION}-slim AS worker\nRUN apt-get update && rm -rf /var/lib/apt/lists/*\n",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(duplicateWorkerTransaction)).toBe(false);
   });

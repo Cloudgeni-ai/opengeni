@@ -517,6 +517,7 @@ function SessionCapabilitySetup({
         </Notice>
       ) : (
         <DetailBody
+          workspaceId={workspaceId}
           setupOnly
           showIdentity={false}
           onCancel={ownsActionRow ? onClose : undefined}

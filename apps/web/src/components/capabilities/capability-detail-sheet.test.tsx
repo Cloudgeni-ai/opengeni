@@ -117,6 +117,40 @@ function installedCuratedSkill(): CapabilityCatalogItem {
 }
 
 describe("connection ownership UI", () => {
+  test("1Password chat setup opens the protected service-account flow", async () => {
+    const view = await render(
+      <DetailBody
+        workspaceId="ws"
+        setupOnly
+        inline
+        showIdentity={false}
+        item={CapabilityCatalogItemSchema.parse({
+          id: "api:1password",
+          kind: "api",
+          source: "built_in",
+          name: "1Password",
+          surfaceType: "first_party_onepassword",
+          runtime: { available: true },
+        })}
+        health={{ state: "none" }}
+        logoSrc={null}
+        busy={false}
+        errorMessage={null}
+        canManageSocial={false}
+        onAction={() => {
+          throw new Error("Must not use generic setup");
+        }}
+      />,
+    );
+    try {
+      const link = view.container.querySelector<HTMLAnchorElement>('a[href*="/secrets"]');
+      expect(link?.getAttribute("href")).toBe("/workspaces/ws/secrets?view=connect-1password");
+      expect(link?.textContent).toContain("Connect 1Password");
+      expect(view.container.querySelector('input[type="password"]')).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
   test("a personal connector enabled by another member waits for this viewer's account before reading permissions", async () => {
     const capability = CapabilityCatalogItemSchema.parse({
       id: "mcp:slack",

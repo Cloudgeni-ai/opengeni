@@ -22,16 +22,17 @@ it resolves where it runs.
 | `{{secretfile:Item}}` | a temporary file path holding the value (shell commands) |
 | `\{{secret:Item}}` | the literal text, left unresolved |
 
-References resolve where something executes: shell commands, browser and
-desktop typing, file writes, and tool calls (MCP, connectors, Codemode). They
-stay references in chat, messages, schedule prompts, goals, Knowledge and
-artifacts, so write them anywhere, including prompts for schedules and child
-sessions.
+A reference resolves wherever it is used: shell commands, typing, file writes
+and every tool call, including Opengeni's own tools. To hand one on for later
+work (a schedule prompt, a message to another session, a goal, a note or
+comment), escape it as `\{{secret:Item}}`; it arrives as `{{secret:Item}}`.
+The `secret_*` tools take references as names and never resolve them.
 
 ## Tools
 
-- `secret_search {query?, website?, type?, vault?}`: items with ready
-  references, never values. Search before asking or creating.
+- `secret_search {query?, website?, type?, vault?, cursor?}`: items and
+  references, never values; no filters lists all, page one lists vaults.
+  Repeat with `cursor` while `nextCursor` is set.
 - `secret_save {item, vault?, saveTo?, type?, websites?, username?, fields?, mode?}`:
   each field takes one of `value`, `generate`, `fromReference` or
   `restoreVersion`. Use `generate` for new passwords.

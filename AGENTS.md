@@ -415,6 +415,11 @@ authorized Resume or new Send/Steer requests recheck. Never repair missing
 membership/grants or invent a principal to make admission succeed. See
 `docs/run-lifecycle.md` for snapshot fencing and mixed-worker rollout limits.
 
+Queue-row Steer is an explicit admission recheck, like Send/Steer and Resume:
+clear the retained pre-claim block atomically with its queue transition and wake,
+but never on receipt replay. Paused recovering turns and subscription capacity
+waits stay resumable; idle projection or age alone is not abandonment proof.
+
 Ordinary same-human agent input uses the receiving session's last started
 user/API execution context. Advance its server-owned pointer only on the first
 durable `turn.started`, never queue/claim or recovery. Preserve exact receipt

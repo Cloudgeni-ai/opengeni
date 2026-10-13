@@ -3,7 +3,11 @@ import {
   canonicalSessionAuthorizationOperation,
   SessionAuthorizationOperation,
 } from "@opengeni/contracts";
-import { SessionTenancyConflictError, SessionTenancyNotActivatedError } from "@opengeni/db";
+import {
+  SessionTenancyConflictError,
+  SessionTenancyNotActivatedError,
+  SessionVisibilityWorkConflictError,
+} from "@opengeni/db";
 import { SessionTenancyPersistenceOutcomeUnknownError } from "@opengeni/core";
 import { ApiHttpError } from "../src/http/api-error";
 import {
@@ -23,6 +27,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["PUT", "/attention", "session.attention.write"],
   ["PUT", "/archive", "session.archive.write"],
   ["PUT", "/visibility", "session.visibility.write"],
+  ["GET", "/visibility/preview", "session.visibility.write"],
   ["POST", "/forks", "session.fork.create"],
   ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
@@ -114,6 +119,27 @@ describe("session HTTP authorization classification", () => {
       retryable: false,
       details: { reason: "not_quiescent", blocker: "shared_sandbox_group" },
     });
+    const work = {
+      runningTurnCount: 1,
+      queuedTurnCount: 2,
+      activeGoal: true,
+      liveVoice: false,
+      otherPeoplePendingUpdateCount: 1,
+      otherPeopleAccountChoiceCount: 0,
+    };
+    expect(
+      sessionTenancyHttpError(new SessionVisibilityWorkConflictError("active_work", work, 1)),
+    ).toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: false,
+      details: { reason: "active_work", ...work },
+    });
+    expect(
+      sessionTenancyHttpError(
+        new SessionVisibilityWorkConflictError("stopping_active_work", work, 1),
+      ),
+    ).toMatchObject({ status: 409, retryable: true, details: { reason: "stopping_active_work" } });
     expect(sessionTenancyHttpError(new SessionTenancyNotActivatedError())).toMatchObject({
       status: 409,
       code: "conflict",

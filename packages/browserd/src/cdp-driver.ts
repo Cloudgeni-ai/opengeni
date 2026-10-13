@@ -364,7 +364,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
   private readonly tabControl: boolean;
-  private readonly focusEmulation: boolean;
+  /** Cleared once the browser refuses focus emulation, so later targets keep
+   * working without it instead of each paying the refusal. */
+  private focusEmulation: boolean;
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
@@ -2137,8 +2139,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Hidden pages otherwise pause animation callbacks when no viewer is
       // capturing them. This target-local DevTools override keeps them active
       // without activating a tab or taking the desktop's foreground seat.
+      // Chrome also holds each mouse event sent to a hidden page for about
+      // five seconds before acknowledging it.
       // Chromium clears the override when this attachment disconnects.
-      await connection.send("Emulation.setFocusEmulationEnabled", { enabled: true }, { sessionId });
+      try {
+        await connection.send(
+          "Emulation.setFocusEmulationEnabled",
+          { enabled: true },
+          { sessionId },
+        );
+      } catch (error) {
+        // A connected Chrome extension released before it admitted this
+        // method rejects it; the page still works, only slower.
+        if (!(error instanceof CdpProtocolError)) throw error;
+        this.focusEmulation = false;
+      }
     }
     if (!this.emulation) return;
     if (this.emulation.locale) {
@@ -4853,7 +4868,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 /** Retrying can't help a tab whose page process died; say what will. */
 function tabCrashedError(): InteractionDefiniteDriverError {
   return new InteractionDefiniteDriverError(
-    "resource_unavailable",
+    "tab_crashed",
     "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
     false,
   );

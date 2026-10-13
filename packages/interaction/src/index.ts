@@ -207,6 +207,10 @@ export class BrowserInteractionController {
     return this.core.journalSnapshot();
   }
 
+  isIdle(): boolean {
+    return this.core.isIdle();
+  }
+
   waitForIdle(): Promise<void> {
     return this.core.waitForIdle();
   }
@@ -476,6 +480,10 @@ export class ComputerInteractionController {
 
   journalSnapshot(): ComputerOperationJournalRecord[] {
     return this.core.journalSnapshot();
+  }
+
+  isIdle(): boolean {
+    return this.core.isIdle();
   }
 
   waitForIdle(): Promise<void> {
