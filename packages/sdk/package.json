@@ -58,6 +58,10 @@
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
     },
+    "./session-usage-limits": {
+      "types": "./src/session-usage-limits.ts",
+      "default": "./src/session-usage-limits.ts"
+    },
     "./insights-usage": {
       "types": "./src/insights-usage.ts",
       "default": "./src/insights-usage.ts"

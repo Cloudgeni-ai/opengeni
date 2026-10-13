@@ -1,4 +1,12 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+import type { SessionUsageLimit } from "@opengeni/contracts/session-usage-limits";
+export type {
+  SessionUsageLimit,
+  SessionUsageLimitHistory,
+  SessionUsageLimitReachedRefusal,
+  SessionUsageLimitStatus,
+  SetSessionUsageLimitRequest,
+} from "@opengeni/contracts/session-usage-limits";
 export type {
   InsightsUsageRange,
   InsightsUsageGroupBy,
@@ -1669,6 +1677,12 @@ export type Session = {
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
   rootSessionId: string;
+  /**
+   * The task root's usage limit and recorded API-equivalent model usage, on
+   * detail reads and create responses. Omitted by older servers and list
+   * reads: omission never means "no limit".
+   */
+  usageLimit?: SessionUsageLimit | undefined;
   nestedAgentDepth: number;
   maxNestedAgentDepthOverride: number | null;
   effectiveMaxNestedAgentDepth: number;
@@ -3480,6 +3494,14 @@ export type CreateSessionRequest = {
   // projection before Opengeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
+  /**
+   * Optional usage limit for a new root task in USD micros of API-equivalent
+   * model usage (null/omitted: no limit; 0: stop before the first model
+   * request). Person or trusted host only. Servers without usage limits ignore
+   * the field; `OpenGeniClient.createSession` rejects a response that does not
+   * echo a requested limit.
+   */
+  usageLimitMicros?: number | null | undefined;
   visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
@@ -5000,6 +5022,12 @@ export type ClientConfig = {
    * without activity a session (unless kept live) becomes read-only.
    */
   sessionArchive?: { enabled: true; idleDays: number } | undefined;
+  /**
+   * Present when the server records and enforces per-task usage limits.
+   * `enabled: false` refuses new limits but still enforces and clears existing
+   * ones. Omitted by older servers, which ignore `usageLimitMicros`.
+   */
+  sessionUsageLimits?: { enabled: boolean } | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;

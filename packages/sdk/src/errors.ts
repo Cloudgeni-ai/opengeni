@@ -1,3 +1,8 @@
+import {
+  parseSessionUsageLimitReachedRefusal,
+  type ParsedSessionUsageLimitReachedRefusal,
+} from "@opengeni/contracts/session-usage-limit-refusal";
+
 /** Error for a non-2xx Opengeni API response. */
 export class OpenGeniApiError extends Error {
   readonly status: number;
@@ -90,6 +95,53 @@ export class OpenGeniAllowanceExhaustedError extends OpenGeniApiError {
     this.scope = refusal?.scope ?? "workspace";
     this.resetsAt = refusal?.resetsAt ?? null;
     this.subjectId = refusal?.subjectId;
+  }
+}
+
+/**
+ * The task's root usage limit is reached: recorded API-equivalent model usage
+ * is at or above the limit. Not a credit or billing failure and not retryable
+ * by waiting; a person can raise or remove the limit, then send again.
+ */
+export class OpenGeniSessionUsageLimitReachedError extends OpenGeniApiError {
+  readonly rootSessionId: string | undefined;
+  readonly limitMicros: number | undefined;
+  readonly usedMicros: number | undefined;
+
+  constructor(
+    status: number,
+    body: string,
+    options: ConstructorParameters<typeof OpenGeniApiError>[2] = {},
+  ) {
+    super(status, body, {
+      ...options,
+      code: "session_usage_limit_reached",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    this.name = "OpenGeniSessionUsageLimitReachedError";
+    const refusal = sessionUsageLimitReachedFields(body);
+    this.rootSessionId = refusal?.rootSessionId;
+    this.limitMicros = refusal?.limitMicros;
+    this.usedMicros = refusal?.usedMicros;
+  }
+}
+
+/** Parse a session usage limit refusal from an API error envelope body. */
+export function sessionUsageLimitReachedFields(
+  body: string,
+): ParsedSessionUsageLimitReachedRefusal | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    return parseSessionUsageLimitReachedRefusal(
+      root.error && typeof root.error === "object" && !Array.isArray(root.error)
+        ? root.error
+        : root,
+    );
+  } catch {
+    return null;
   }
 }
 

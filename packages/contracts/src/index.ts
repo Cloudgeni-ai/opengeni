@@ -19942,6 +19942,13 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     sessionArchive: z
       .object({ enabled: z.literal(true), idleDays: z.number().int().positive() })
       .optional(),
+    /**
+     * Present when this server records and enforces per-task usage limits.
+     * `enabled` is the producer gate: when false, new non-null limits are
+     * refused while existing limits are still enforced and can be cleared.
+     * Omitted by older servers, which ignore `usageLimitMicros` on create.
+     */
+    sessionUsageLimits: z.object({ enabled: z.boolean() }).strict().optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z
