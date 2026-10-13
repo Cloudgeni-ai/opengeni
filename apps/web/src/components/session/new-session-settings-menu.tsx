@@ -23,6 +23,7 @@ import {
   type MenuBodyPresentation,
 } from "./composer-menu-radio";
 export type { MenuBodyPresentation } from "./composer-menu-radio";
+import { HelpTip } from "@/components/ui/inline-help";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
 import {
@@ -473,9 +474,14 @@ export function VisibilityMenuBody(props: {
  * The new chat's usage limit: none (the default), or pause at a dollar amount
  * of API-equivalent model usage. Local to this composer, never remembered
  * across chats; sent on create only when the server offers limits.
+ *
+ * It holds a text field, so "+" always opens it as a dialog (a menu may only
+ * contain menu items): a radio group and a labelled input with ordinary Tab
+ * order, Escape to close and focus back on "+".
  */
 export function UsageLimitMenuBody(props: {
   leading?: ReactNode;
+  /** Accepted for the shared drill-in contract; this body is always a dialog. */
   presentation?: MenuBodyPresentation;
   value: SessionUsageLimitDraft;
   disabled: boolean;
@@ -483,16 +489,21 @@ export function UsageLimitMenuBody(props: {
   showRequiredError?: boolean;
   onChange: (value: SessionUsageLimitDraft) => void;
 }) {
-  const presentation = props.presentation ?? "menu";
   const bodyRef = useRef<HTMLDivElement>(null);
-  useFocusCheckedRow(bodyRef, presentation);
-  const limitRowRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const focusInput = useRef(false);
   const inputId = useId();
   const errorId = `${inputId}-error`;
   const helpId = `${inputId}-help`;
   const value = props.value;
+  // Open on the checked choice (the dialog would otherwise focus Back).
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body || body.contains(document.activeElement)) return;
+    body
+      .querySelector<HTMLElement>('[role="radio"][aria-checked="true"]:not(:disabled)')
+      ?.focus({ preventScroll: true });
+  }, []);
   useEffect(() => {
     if (focusInput.current && inputRef.current) {
       focusInput.current = false;
@@ -513,7 +524,7 @@ export function UsageLimitMenuBody(props: {
         data-usage-limit-menu
         className="min-h-0 overflow-y-auto overscroll-contain pb-1"
       >
-        <RadioGroup presentation={presentation} label={labels.title} value={value.kind}>
+        <RadioGroup presentation="dialog" label={labels.title} value={value.kind}>
           <RadioRow
             value="none"
             disabled={props.disabled}
@@ -523,9 +534,6 @@ export function UsageLimitMenuBody(props: {
           />
           <RadioRow
             value="limit"
-            ref={(node) => {
-              limitRowRef.current = node;
-            }}
             disabled={props.disabled}
             icon={<GaugeIcon />}
             label="Pause at an amount"
@@ -563,18 +571,12 @@ export function UsageLimitMenuBody(props: {
                 aria-describedby={error ? `${errorId} ${helpId}` : helpId}
                 onChange={(event) => props.onChange({ kind: "limit", text: event.target.value })}
                 onKeyDown={(event) => {
-                  // Text editing must not trigger menu typeahead or roving focus.
-                  event.stopPropagation();
-                  if (
-                    presentation === "menu" &&
-                    !event.nativeEvent.isComposing &&
-                    (event.key === "Tab" || event.key === "Enter")
-                  ) {
+                  // The value applies as typed; Enter must not submit anything.
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
                     event.preventDefault();
-                    limitRowRef.current?.focus({ preventScroll: true });
                   }
                 }}
-                className="h-8 pl-6 text-sm"
+                className="h-8 pl-6 text-sm pointer-coarse:h-11"
               />
             </div>
             {error ? (
@@ -584,8 +586,12 @@ export function UsageLimitMenuBody(props: {
             ) : null}
           </div>
         ) : null}
-        <p id={helpId} className={cn(MENU_NOTE_CLASS, "text-xs leading-4.5")}>
-          {labels.explanation} {labels.notYourBill}
+        <p
+          id={helpId}
+          className={cn(MENU_NOTE_CLASS, "flex items-start gap-1.5 text-xs leading-4.5")}
+        >
+          <span className="min-w-0 flex-1">{labels.explanation}</span>
+          <HelpTip label="About usage limits">{labels.notYourBill}</HelpTip>
         </p>
       </div>
     </>
