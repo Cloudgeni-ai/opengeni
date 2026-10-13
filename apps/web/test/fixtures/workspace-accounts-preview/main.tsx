@@ -4,6 +4,9 @@ import { Toaster } from "sonner";
 
 import type { ModelsView } from "../../../src/lib/models-route";
 import { WorkspaceModelsPage } from "../../../src/components/models/workspace-models-page";
+import { organizationSettingsDescription } from "../../../src/components/settings/organization-settings-pages";
+import { PageHeader, PageHeaderStyleProvider } from "../../../src/components/ui/page-header";
+import { SectionVariantProvider } from "../../../src/components/ui/section-variant";
 import "../../../src/styles.css";
 import { ORGANIZATION_ID, WORKSPACES } from "./context";
 import { setNavigate } from "./router";
@@ -55,14 +58,33 @@ function Harness() {
   );
 }
 
+// `mix=full` renders in the settings content width (960px).
+const width = params.get("mix") === "full" ? "max-w-[960px]" : "max-w-3xl";
+
 createRoot(document.getElementById("root")!).render(
   <main className="min-h-screen bg-bg px-4 py-6 text-fg sm:px-8">
-    <p className="mx-auto mb-4 max-w-3xl text-xs text-fg-subtle">
+    <p className={`mx-auto mb-4 ${width} text-xs text-fg-subtle`}>
       PREVIEW WITH SAMPLE DATA · Organization settings › Models, as an organization admin. No real
       accounts.
     </p>
-    <div className="mx-auto max-w-3xl">
-      <Harness />
+    <div className={`mx-auto ${width}`}>
+      {params.get("mix") === "full" ? (
+        // As the settings shell frames it: the page header, then grouped cards.
+        <PageHeaderStyleProvider icon="hide">
+          <SectionVariantProvider variant="group">
+            {params.get("account") || params.get("view") || params.get("workspace") ? null : (
+              <PageHeader
+                title="Models"
+                description={organizationSettingsDescription("models", "Acme")}
+                className="mb-8"
+              />
+            )}
+            <Harness />
+          </SectionVariantProvider>
+        </PageHeaderStyleProvider>
+      ) : (
+        <Harness />
+      )}
     </div>
     <Toaster />
   </main>,

@@ -66,7 +66,7 @@ export function organizationSettingsDescription(
     case "workspaces":
       return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
     case "models":
-      return `What pays for models in ${organizationName}, and what each workspace starts with and allows.`;
+      return `The models people in ${organizationName} can use, and the subscriptions and keys that pay for them.`;
     case "integrations":
       // "Allowed integrations" and its one row say it all.
       return undefined;

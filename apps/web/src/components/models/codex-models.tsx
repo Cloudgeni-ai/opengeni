@@ -69,7 +69,7 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /** The one fact column account rows line up in: the usage readout, against the chevron. */
 export const ACCOUNT_COLUMNS: RowListColumn[] = [
-  { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end" },
+  { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end", leadsWhenFolded: true },
 ];
 
 export interface CodexPlaces {

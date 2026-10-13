@@ -54,9 +54,10 @@ function needsReconnect(account: SuperGrokAccount): boolean {
 
 export function planOf(account: SuperGrokAccount): string {
   const plan = account.plan ?? account.quota?.subscriptionTier;
-  return plan
-    ? `SuperGrok ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`
-    : "SuperGrok plan";
+  if (!plan) return "SuperGrok plan";
+  // The tier may already carry the product name ("SuperGrok", "SuperGrok Heavy").
+  const tier = plan.replace(/^super\s*grok[\s_-]*/i, "").trim();
+  return tier ? `SuperGrok ${tier.charAt(0).toLocaleUpperCase()}${tier.slice(1)}` : "SuperGrok";
 }
 
 export function percentLeft(account: SuperGrokAccount): number | null {

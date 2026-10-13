@@ -1,31 +1,44 @@
 import type {
-  ModelAccountSettingSource,
+  ModelAccountRotationMode,
+  ModelAccountSettingKey,
   ModelAccountSettingValues,
   ModelAccountSettingsOverview,
   UpdateOrganizationModelAccountSettingsRequest,
   UpdateWorkspaceModelAccountSettingsRequest,
   WorkspaceModelAccountSettings,
 } from "@opengeni/sdk";
-import { ChevronRightIcon, LockIcon } from "lucide-react";
+import { LockIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
 import { ErrorMessage } from "@/components/ui/error-message";
+import { CheckboxField, FieldStack } from "@/components/ui/field";
 import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup, SettingRowLink } from "@/components/ui/setting-row";
+import { SegmentedControl } from "@/components/ui/segmented-control";
+import {
+  SettingNavRow,
+  SettingRow,
+  SettingRowGroup,
+  SettingRowLink,
+} from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
-import { FallbackOrderControl, RotationControl } from "./model-account-policy-controls";
+import { FallbackOrderControl } from "./model-account-policy-controls";
+import { ModelsFormPage } from "./models-ui";
 
 /* ----------------------------------------------------------------------------
-   Account rules: how the organization's model accounts are used. The
-   organization sets each rule; a shared workspace can change a rule for
-   itself unless the organization locked it. Every value is resolved by the
-   server (`subscription_effective_settings`); this file only shows what it
-   returns and where each value comes from.
+   How accounts are used: the organization's rules for its model accounts.
+   The organization sets each rule; a shared workspace can change a rule for
+   itself unless the organization keeps it the same everywhere ("What
+   workspaces can change"). Every value is resolved by the server
+   (`subscription_effective_settings`); this file only shows what it returns
+   and where each value comes from.
+
+   One row per provider says how new chats share that provider's accounts.
+   A rule that only matters while another is on (personal fallback, the
+   fallback order) is indented under it and shown only then.
    -------------------------------------------------------------------------- */
 
 /** The rules on these pages, in order. `providers` is changed on each provider's own page. */
@@ -33,50 +46,74 @@ export type AccountRule =
   | "rotation"
   | "personalConnectionsAllowed"
   | "personalFallbackAllowed"
+  | "crossProviderFailover"
+  | "fallbackOrder";
+
+type SwitchRule =
+  | "personalConnectionsAllowed"
+  | "personalFallbackAllowed"
   | "crossProviderFailover";
 
-type SwitchRule = Exclude<AccountRule, "rotation">;
-
-const RULES: Record<AccountRule, { label: string; column: string; description: string }> = {
-  rotation: {
-    label: "Sharing work between accounts",
-    column: "Sharing work",
-    description: "Keep work on a primary account or share it across eligible accounts.",
-  },
-  personalConnectionsAllowed: {
-    label: "Personal accounts",
-    column: "Personal accounts",
-    description: "People can connect their own subscriptions for their own chats.",
-  },
-  personalFallbackAllowed: {
-    label: "Fall back to personal accounts",
-    column: "Personal fallback",
-    description: "Allow people to opt in to using their own account when shared accounts run out.",
-  },
-  crossProviderFailover: {
-    label: "Switch provider when accounts run out",
-    column: "Failover",
-    description: "Continue on the next model in the fallback order.",
-  },
-};
-
-const ORDER: AccountRule[] = [
+export const ACCOUNT_RULES: readonly AccountRule[] = [
   "rotation",
   "personalConnectionsAllowed",
   "personalFallbackAllowed",
   "crossProviderFailover",
+  "fallbackOrder",
 ];
 
-/** "Spread work", "Primary only" or "Mixed" across providers. */
-export function rotationSummary(rotation: ModelAccountSettingValues["rotation"]): string {
-  const modes = new Set(Object.values(rotation).map((entry) => entry.mode));
-  if (modes.size > 1) return "Mixed";
-  return modes.has("primary_first") ? "Primary only" : "Spread work";
+const RULES: Record<AccountRule, { label: string; description: string }> = {
+  rotation: {
+    label: "Sharing work between accounts",
+    description: "Spread new chats across a provider’s accounts, or keep them on its primary one.",
+  },
+  personalConnectionsAllowed: {
+    label: "Personal subscriptions",
+    description: "People can connect their own subscriptions and use them in their own chats.",
+  },
+  personalFallbackAllowed: {
+    label: "Fall back to personal subscriptions",
+    description: "When shared accounts run out, people who opt in continue on their own.",
+  },
+  crossProviderFailover: {
+    label: "Switch models when accounts run out",
+    description: "Continue on the next model in the fallback order instead of waiting.",
+  },
+  fallbackOrder: {
+    label: "Fallback order",
+    description: "The models to try next, in order.",
+  },
+};
+
+const PROVIDER_NAMES: Record<string, string> = {
+  codex: "Codex",
+  claude: "Claude",
+  xai: "SuperGrok",
+};
+const PROVIDER_ORDER = ["codex", "claude", "xai"];
+
+function providerName(provider: string): string {
+  return PROVIDER_NAMES[provider] ?? provider;
 }
 
-function ruleValue(rule: AccountRule, values: ModelAccountSettingValues): string {
-  if (rule === "rotation") return rotationSummary(values.rotation);
-  return values[rule] ? "On" : "Off";
+/** Providers with a rotation rule, Codex, Claude, SuperGrok first. */
+function rotationProviders(rotation: ModelAccountSettingValues["rotation"]): string[] {
+  const rank = (provider: string) => {
+    const index = PROVIDER_ORDER.indexOf(provider);
+    return index === -1 ? PROVIDER_ORDER.length : index;
+  };
+  return Object.keys(rotation).sort(
+    (left, right) => rank(left) - rank(right) || left.localeCompare(right),
+  );
+}
+
+/** "3 connected. Each new chat goes to the account with the most usage left." */
+function rotationDescription(mode: ModelAccountRotationMode, count: number | undefined): string {
+  const outcome =
+    mode === "primary_first"
+      ? "New chats use the primary account."
+      : "Each new chat goes to the account with the most usage left.";
+  return count === undefined ? outcome : `${count} connected. ${outcome}`;
 }
 
 const modelId = (id: string) => id;
@@ -91,6 +128,19 @@ function fallbackLines(
   );
 }
 
+function FallbackSummary({ lines }: { lines: string[] }) {
+  if (lines.length === 0) return <>No fallback models yet, so work waits for an account.</>;
+  return (
+    <>
+      {lines.map((line) => (
+        <span key={line} className="block break-words">
+          {line}
+        </span>
+      ))}
+    </>
+  );
+}
+
 function failureMessage(caught: unknown): string {
   const details = (caught as { details?: { reason?: unknown } } | null)?.details;
   if (details?.reason === "setting_locked") return "Your organization locked this setting.";
@@ -99,8 +149,127 @@ function failureMessage(caught: unknown): string {
   return caught instanceof Error ? caught.message : "Couldn’t save the change.";
 }
 
+/** A change to the rules shown here, for the organization or one workspace. */
+type RuleChange = {
+  rotation?: Record<string, { mode: ModelAccountRotationMode }>;
+  personalConnectionsAllowed?: boolean;
+  personalFallbackAllowed?: boolean;
+  crossProviderFailover?: boolean;
+};
+
+const NO_HINTS: Readonly<Record<string, ReactNode>> = {};
+
+/**
+ * The rule rows, shared by the organization's page and a workspace's. The
+ * caller says which rules can't change here and why, and adds the quiet
+ * line under each (locked, or a way back to the organization's setting).
+ */
+function AccountRuleRows({
+  values,
+  saving,
+  accountCounts,
+  blocked,
+  hints = NO_HINTS,
+  providerHints = NO_HINTS,
+  onChange,
+  fallbackOrder,
+  modelLabel,
+}: {
+  values: ModelAccountSettingValues;
+  saving: string | null;
+  /** How many accounts each provider has, when known; a provider with fewer than two has no row. */
+  accountCounts?: Readonly<Record<string, number>> | undefined;
+  /** Why a rule can't change here, or undefined when it can. */
+  blocked: (rule: AccountRule) => string | undefined;
+  /** The quiet line under a rule: locked, or a way back to the organization's setting. */
+  hints?: Partial<Record<AccountRule, ReactNode>> | undefined;
+  /** The same for one provider's row; falls back to the rotation rule's. */
+  providerHints?: Readonly<Record<string, ReactNode>> | undefined;
+  onChange: (key: string, change: RuleChange) => void;
+  /** The fallback order editor. */
+  fallbackOrder: ReactNode;
+  modelLabel: (id: string) => string;
+}) {
+  const providers = rotationProviders(values.rotation).filter(
+    (provider) => accountCounts === undefined || (accountCounts[provider] ?? 0) >= 2,
+  );
+  const rotationBlocked = blocked("rotation");
+  const switchRow = (rule: SwitchRule, children?: ReactNode) => {
+    const reason = blocked(rule);
+    return (
+      <SettingRow
+        key={rule}
+        label={RULES[rule].label}
+        description={RULES[rule].description}
+        hint={hints[rule]}
+        controlWidth="compact"
+        control={
+          <Switch
+            checked={values[rule]}
+            pending={saving === rule}
+            disabled={reason !== undefined || (saving !== null && saving !== rule)}
+            disabledReason={reason}
+            onCheckedChange={(checked) => onChange(rule, { [rule]: checked })}
+          />
+        }
+      >
+        {children}
+      </SettingRow>
+    );
+  };
+  return (
+    <>
+      {providers.map((provider) => {
+        const mode = values.rotation[provider]?.mode ?? "spread";
+        const key = `rotation:${provider}`;
+        return (
+          <SettingRow
+            key={key}
+            label={`${providerName(provider)} accounts`}
+            description={rotationDescription(mode, accountCounts?.[provider])}
+            hint={providerHints[provider] ?? hints.rotation}
+            controlWidth="auto"
+            control={
+              <SegmentedControl<ModelAccountRotationMode>
+                size="sm"
+                value={mode}
+                pending={saving === key}
+                disabled={rotationBlocked !== undefined || (saving !== null && saving !== key)}
+                onValueChange={(next) =>
+                  onChange(key, { rotation: { [provider]: { mode: next } } })
+                }
+                options={[
+                  { value: "spread", label: "Spread work" },
+                  { value: "primary_first", label: "Primary only" },
+                ]}
+              />
+            }
+          />
+        );
+      })}
+      {switchRow(
+        "personalConnectionsAllowed",
+        values.personalConnectionsAllowed ? switchRow("personalFallbackAllowed") : null,
+      )}
+      {switchRow(
+        "crossProviderFailover",
+        values.crossProviderFailover ? (
+          <SettingRow
+            label={RULES.fallbackOrder.label}
+            description={
+              <FallbackSummary lines={fallbackLines(values.fallbackOrder, modelLabel)} />
+            }
+            hint={hints.fallbackOrder}
+            control={fallbackOrder}
+          />
+        ) : null,
+      )}
+    </>
+  );
+}
+
 /* ----------------------------------------------------------------------------
-   Organization: its rules with locks, and every workspace's effective rules.
+   Organization: its rules, and which of them workspaces can change.
    -------------------------------------------------------------------------- */
 
 export type ModelAccountSettingsOverviewState = {
@@ -110,9 +279,8 @@ export type ModelAccountSettingsOverviewState = {
   /** The rule being saved, if any. */
   saving: string | null;
   reload: () => Promise<void>;
-  update: (key: string, request: UpdateOrganizationModelAccountSettingsRequest) => Promise<void>;
-  loadingMore?: boolean;
-  loadMore?: () => Promise<void>;
+  /** Saves a change; true once it's saved and read again. */
+  update: (key: string, request: UpdateOrganizationModelAccountSettingsRequest) => Promise<boolean>;
 };
 
 /** The organization's rules and the first page of its workspaces. Owners and admins only. */
@@ -128,13 +296,9 @@ export function useModelAccountSettingsOverview(
   const generation = useRef(0);
   const contextGeneration = useRef(0);
   const savingRef = useRef(false);
-  const pagingRef = useRef(false);
-  const [loadingMore, setLoadingMore] = useState(false);
 
   const reload = useCallback(async () => {
     const current = ++generation.current;
-    pagingRef.current = false;
-    setLoadingMore(false);
     if (!enabled || !organizationId) {
       setOverview(null);
       setLoading(false);
@@ -167,48 +331,9 @@ export function useModelAccountSettingsOverview(
     };
   }, [reload]);
 
-  const loadMore = useCallback(async () => {
-    const after = overview?.nextCursor;
-    if (!enabled || !organizationId || !after || pagingRef.current || savingRef.current) return;
-    const current = generation.current;
-    pagingRef.current = true;
-    setLoadingMore(true);
-    setError(null);
-    try {
-      const page = await client.getModelAccountSettingsOverview(organizationId, { after });
-      if (current !== generation.current) return;
-      // An organization policy change invalidates the whole mixed-page view.
-      if (page.organization.version !== overview.organization.version) {
-        await reload();
-        return;
-      }
-      setOverview((previous) =>
-        previous?.nextCursor === after
-          ? {
-              ...previous,
-              workspaces: [
-                ...new Map(
-                  [...previous.workspaces, ...page.workspaces].map((row) => [row.workspaceId, row]),
-                ).values(),
-              ],
-              nextCursor: page.nextCursor,
-            }
-          : previous,
-      );
-    } catch (caught) {
-      if (current === generation.current)
-        setError(caught instanceof Error ? caught : new Error(String(caught)));
-    } finally {
-      if (current === generation.current) {
-        pagingRef.current = false;
-        setLoadingMore(false);
-      }
-    }
-  }, [client, enabled, organizationId, overview, reload]);
-
   const update = useCallback(
     async (key: string, request: UpdateOrganizationModelAccountSettingsRequest) => {
-      if (!enabled || !organizationId || !overview || savingRef.current) return;
+      if (!enabled || !organizationId || !overview || savingRef.current) return false;
       const current = generation.current;
       const context = contextGeneration.current;
       savingRef.current = true;
@@ -220,8 +345,10 @@ export function useModelAccountSettingsOverview(
         });
         // Locking clears workspace overrides: re-read every workspace.
         if (current === generation.current) await reload();
+        return true;
       } catch (caught) {
         if (current === generation.current) toast.error(failureMessage(caught));
+        return false;
       } finally {
         if (context === contextGeneration.current) {
           savingRef.current = false;
@@ -232,155 +359,87 @@ export function useModelAccountSettingsOverview(
     [client, enabled, organizationId, overview, reload],
   );
 
-  return { overview, loading, error, saving, reload, update, loadingMore, loadMore };
+  return { overview, loading, error, saving, reload, update };
 }
 
-/** The organization's rules, each with its lock. */
+/** "Every rule", "3 of 5 rules" or "Nothing": what workspaces can change for themselves. */
+export function changeableRulesSummary(locked: readonly string[]): string {
+  const open = ACCOUNT_RULES.filter((rule) => !locked.includes(rule)).length;
+  if (open === ACCOUNT_RULES.length) return "Every rule";
+  if (open === 0) return "Nothing";
+  return `${open} of ${ACCOUNT_RULES.length} rules`;
+}
+
+/** The organization's rules, and a row to the page that says which ones workspaces can change. */
 export function OrganizationAccountRulesSection({
   organizationName,
   state,
+  accountCounts,
   modelLabel = modelId,
+  onEditLocks,
 }: {
   organizationName: string;
   state: ModelAccountSettingsOverviewState;
+  /** How many accounts the organization has per provider, once they're read. */
+  accountCounts?: Readonly<Record<string, number>> | undefined;
   /** A model's name, for the fallback order. */
   modelLabel?: (id: string) => string;
+  /** Opens "What workspaces can change". */
+  onEditLocks: () => void;
 }) {
   const organization = state.overview?.organization;
   return (
     <Section
-      title="Account rules"
-      description="Workspaces follow these unless their admins change them. Locked rules can’t be changed."
+      title="How accounts are used"
+      description="Every workspace follows these unless its admins change them."
     >
       {state.error && !organization ? (
         <ErrorMessage
-          title={`Couldn’t load ${organizationName}’s account rules.`}
+          title={`Couldn’t load how ${organizationName} uses its accounts.`}
           action={<RowButton onClick={() => void state.reload()}>Try again</RowButton>}
         >
           Nothing was changed.
         </ErrorMessage>
       ) : !organization ? (
-        <RowList label="Account rules" flush>
+        <RowList label="How accounts are used" flush>
           <ListRowSkeleton count={3} />
         </RowList>
       ) : (
         <SettingRowGroup>
-          {ORDER.map((rule) => {
-            const locked = organization.locked.includes(rule);
-            const toggleLock = () =>
-              void state.update(`lock:${rule}`, {
-                locked: locked
-                  ? organization.locked.filter((key) => key !== rule)
-                  : [...organization.locked, rule],
-              });
-            const lockHint = (
-              <SettingRowLink disabled={state.saving !== null} onClick={toggleLock}>
-                {locked ? <LockIcon aria-hidden="true" className="size-3" /> : null}
-                {locked ? "Locked · Unlock" : "Lock for every workspace"}
-              </SettingRowLink>
-            );
-            if (rule === "rotation") {
-              return (
-                <SettingRow
-                  key={rule}
-                  label={RULES.rotation.label}
-                  description={RULES.rotation.description}
-                  hint={lockHint}
-                  control={
-                    <RotationControl
-                      rotation={organization.values.rotation}
-                      disabled={state.saving !== null}
-                      onSave={(provider, mode) =>
-                        state.update("rotation", { rotation: { [provider]: { mode } } })
-                      }
-                    />
-                  }
-                />
-              );
-            }
-            const row = (
-              <SettingRow
-                key={rule}
-                label={RULES[rule].label}
-                description={RULES[rule].description}
-                hint={lockHint}
-                controlWidth="compact"
-                control={
-                  <Switch
-                    checked={organization.values[rule]}
-                    pending={state.saving === rule}
-                    disabled={state.saving !== null && state.saving !== rule}
-                    onCheckedChange={(checked) => void state.update(rule, { [rule]: checked })}
-                  />
-                }
-              />
-            );
-            if (rule !== "crossProviderFailover") return row;
-            const lines = fallbackLines(organization.values.fallbackOrder, modelLabel);
-            return (
-              <SettingRow
-                key={rule}
-                label={RULES[rule].label}
-                description={
-                  lines.length > 0 ? (
-                    <>
-                      {RULES[rule].description}
-                      {lines.map((line) => (
-                        <span key={line} className="block text-fg-subtle">
-                          {line}
-                        </span>
-                      ))}
-                    </>
-                  ) : (
-                    "No fallback order yet, so work waits for an account of the same provider."
-                  )
-                }
-                hint={lockHint}
-                controlWidth="compact"
-                control={
-                  <Switch
-                    checked={organization.values.crossProviderFailover}
-                    pending={state.saving === rule}
-                    disabled={state.saving !== null && state.saving !== rule}
-                    onCheckedChange={(checked) =>
-                      void state.update(rule, { crossProviderFailover: checked })
-                    }
-                  />
-                }
-              />
-            );
-          })}
-          <SettingRow
-            label="Fallback order"
-            description="Choose the exact models to try, in order."
-            hint={
-              <SettingRowLink
-                disabled={state.saving !== null}
-                onClick={() =>
-                  void state.update("lock:fallbackOrder", {
-                    locked: organization.locked.includes("fallbackOrder")
-                      ? organization.locked.filter((key) => key !== "fallbackOrder")
-                      : [...organization.locked, "fallbackOrder"],
-                  })
-                }
-              >
-                {organization.locked.includes("fallbackOrder")
-                  ? "Locked · Unlock"
-                  : "Lock for every workspace"}
-              </SettingRowLink>
-            }
-            control={
+          <AccountRuleRows
+            values={organization.values}
+            saving={state.saving}
+            accountCounts={accountCounts}
+            blocked={() => undefined}
+            hints={Object.fromEntries(
+              ACCOUNT_RULES.filter((rule) => organization.locked.includes(rule)).map((rule) => [
+                rule,
+                <span key={rule} className="inline-flex items-center gap-1 text-xs text-fg-subtle">
+                  <LockIcon aria-hidden="true" className="size-3" />
+                  Same in every workspace
+                </span>,
+              ]),
+            )}
+            onChange={(key, change) => void state.update(key, change)}
+            modelLabel={modelLabel}
+            fallbackOrder={
               <FallbackOrderControl
                 order={organization.values.fallbackOrder}
                 modelLabel={modelLabel}
                 saving={state.saving !== null}
-                onSave={(model, fallbacks) =>
-                  state.update("fallbackOrder", {
+                onSave={async (model, fallbacks) => {
+                  await state.update("fallbackOrder", {
                     fallbackOrder: { ...organization.values.fallbackOrder, [model]: fallbacks },
-                  })
-                }
+                  });
+                }}
               />
             }
+          />
+          <SettingNavRow
+            label="What workspaces can change"
+            description="Rules a workspace’s admins can set differently for their workspace."
+            value={changeableRulesSummary(organization.locked)}
+            onOpen={onEditLocks}
           />
         </SettingRowGroup>
       )}
@@ -388,163 +447,82 @@ export function OrganizationAccountRulesSection({
   );
 }
 
-/** Wide lists: name, one column per rule, then the chevron. Narrow lists stack the rules two by two. */
-const OVERVIEW_GRID =
-  "grid grid-cols-2 gap-x-3 gap-y-2 @[640px]/rules:grid-cols-[minmax(0,1fr)_repeat(4,7.5rem)_1rem] @[640px]/rules:items-center";
-
-function SourcedValue({
-  value,
-  source,
-  organizationName,
-}: {
-  value: string;
-  source: ModelAccountSettingSource;
-  organizationName: string;
-}) {
-  if (source === "locked") {
-    return (
-      <span className="inline-flex items-center gap-1">
-        {value}
-        <LockIcon aria-hidden="true" className="size-3 text-fg-subtle" />
-        <span className="sr-only">{`, locked by ${organizationName}`}</span>
-      </span>
-    );
-  }
-  if (source === "workspace") {
-    return (
-      <span className="inline-flex items-center gap-1 font-medium text-fg">
-        {value}
-        <span aria-hidden="true" className="size-1.5 rounded-full bg-brand" />
-        <span className="sr-only">, set by this workspace</span>
-      </span>
-    );
-  }
-  return (
-    <span className="text-fg-muted">
-      {value}
-      <span className="sr-only">{`, follows ${organizationName}`}</span>
-    </span>
-  );
-}
-
-/** Every shared workspace with each effective rule and where it comes from. */
-export function AccountRulesOverviewSection({
+/**
+ * Which rules workspaces can change. Turning one off keeps the
+ * organization's setting in every workspace and replaces their changes.
+ */
+export function AccountRuleLocksPage({
   organizationName,
   state,
-  onOpenWorkspace,
-  modelLabel = modelId,
+  onClose,
 }: {
   organizationName: string;
   state: ModelAccountSettingsOverviewState;
-  onOpenWorkspace: (workspaceId: string) => void;
-  modelLabel?: (id: string) => string;
+  onClose: () => void;
 }) {
-  const overview = state.overview;
-  if (!overview) return null;
+  const organization = state.overview?.organization;
+  const saved = organization?.locked ?? [];
+  const [draft, setDraft] = useState<readonly string[] | null>(null);
+  const locked = draft ?? saved;
+  const changed =
+    draft !== null && ACCOUNT_RULES.some((rule) => draft.includes(rule) !== saved.includes(rule));
+  // Which workspaces changed each rule, when every workspace is on the first page.
+  const workspaces = state.overview?.nextCursor === null ? state.overview.workspaces : null;
+  const changedIn = (rule: AccountRule) =>
+    workspaces?.filter((workspace) => workspace.sources[rule] === "workspace").map((w) => w.name) ??
+    [];
   return (
-    <Section title="Account rules by workspace">
-      <div className="@container/rules -mx-3 min-w-0">
-        <div
-          aria-hidden="true"
-          className={cn(
-            OVERVIEW_GRID,
-            "hidden border-b border-border px-3 pb-2 text-xs leading-4 font-medium text-fg-subtle @[640px]/rules:grid",
-          )}
-        >
-          <span>Workspace</span>
-          {ORDER.map((rule) => (
-            <span key={rule}>{RULES[rule].column}</span>
-          ))}
-          <span />
-        </div>
-        <ul
-          aria-label="Account rules by workspace"
-          className="m-0 list-none divide-y divide-border p-0"
-        >
-          {overview.workspaces.map((workspace) => (
-            <li key={workspace.workspaceId}>
-              <button
-                type="button"
-                onClick={() => onOpenWorkspace(workspace.workspaceId)}
-                className={cn(
-                  OVERVIEW_GRID,
-                  "w-full cursor-pointer rounded-[10px] px-3 py-3 text-left text-sm leading-5 transition-colors duration-[120ms] hover:bg-hover focus-visible:outline-2 focus-visible:outline-brand/55",
-                )}
-              >
-                <span className="col-span-2 min-w-0 truncate font-medium text-fg @[640px]/rules:col-span-1">
-                  {workspace.name}
-                </span>
-                {ORDER.map((rule) => (
-                  <span key={rule} className="flex min-w-0 flex-col">
-                    <span className="text-xs leading-4 text-fg-subtle @[640px]/rules:sr-only">
-                      {RULES[rule].column}
-                    </span>
-                    <SourcedValue
-                      value={ruleValue(rule, workspace.values)}
-                      source={workspace.sources[rule]}
-                      organizationName={organizationName}
-                    />
-                  </span>
-                ))}
-                <ChevronRightIcon
-                  aria-hidden="true"
-                  className="hidden size-4 text-fg-subtle @[640px]/rules:block"
-                />
-                <span className="col-span-full grid min-w-0 gap-1 text-xs leading-5">
-                  {(["rotation", "providers", "fallbackOrder"] as const).flatMap((key) =>
-                    Object.entries(workspace.values[key]).map(([id, value]) => {
-                      const description =
-                        key === "fallbackOrder"
-                          ? `${modelLabel(id)}: ${(value as string[]).map(modelLabel).join(" → ") || "No fallback"}`
-                          : key === "rotation"
-                            ? `${id}: ${(value as { mode: string }).mode === "primary_first" ? "Primary only" : "Spread work"}`
-                            : `${id}: ${(value as { enabled: boolean }).enabled ? "On" : "Off"}, ${(value as { useOrganizationAccounts: boolean }).useOrganizationAccounts ? "organization accounts allowed" : "organization accounts off"}${(value as { inferenceSource?: string }).inferenceSource ? `, ${(value as { inferenceSource: string }).inferenceSource}` : ""}`;
-                      return (
-                        <span key={`${key}:${id}`} className="break-words">
-                          <SourcedValue
-                            value={description}
-                            source={
-                              workspace.sources[key] === "locked"
-                                ? "locked"
-                                : (workspace.entrySources[key][id] ?? workspace.sources[key])
-                            }
-                            organizationName={organizationName}
-                          />
-                        </span>
-                      );
-                    }),
-                  )}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-      {state.error ? (
-        <p role="alert" className="text-sm text-fg-muted">
-          Couldn’t load more workspaces. Try again.
-        </p>
-      ) : null}
-      {overview.nextCursor && state.loadMore ? (
-        <RowButton
-          disabled={state.loadingMore || state.saving !== null}
-          onClick={() => void state.loadMore?.()}
-        >
-          {state.loadingMore ? "Loading…" : "Show more workspaces"}
-        </RowButton>
-      ) : null}
-      <p className="m-0 flex flex-wrap items-center gap-x-3 gap-y-1 pt-2 pb-3 text-xs leading-5 text-fg-muted">
-        <span className="inline-flex items-center gap-1">
-          <span aria-hidden="true" className="size-1.5 rounded-full bg-brand" />
-          Changed by the workspace
-        </span>
-        <span className="inline-flex items-center gap-1">
-          <LockIcon aria-hidden="true" className="size-3" />
-          Locked
-        </span>
-        <span>{`Others follow ${organizationName}`}</span>
-      </p>
-    </Section>
+    <ModelsFormPage
+      title="What workspaces can change"
+      description={`Workspace admins can set these rules differently for their workspace. Anything you turn off stays as ${organizationName} sets it, everywhere.`}
+      submitLabel="Save"
+      pendingLabel="Saving…"
+      loading={!organization && !state.error}
+      loadingFields={5}
+      submitDisabled={!changed}
+      error={
+        state.error && !organization
+          ? `Couldn’t load ${organizationName}’s rules. Reload the page.`
+          : null
+      }
+      onClose={onClose}
+      onSubmit={async () => {
+        const next = [
+          ...saved.filter((key) => !ACCOUNT_RULES.includes(key as AccountRule)),
+          ...ACCOUNT_RULES.filter((rule) => locked.includes(rule)),
+        ] as ModelAccountSettingKey[];
+        return state.update("locks", { locked: next });
+      }}
+      onSubmitted={onClose}
+    >
+      <FieldStack>
+        {ACCOUNT_RULES.map((rule) => {
+          const names = changedIn(rule);
+          const replacing = names.length > 0 && locked.includes(rule) && !saved.includes(rule);
+          return (
+            <CheckboxField
+              key={rule}
+              label={RULES[rule].label}
+              description={
+                replacing
+                  ? `${names.join(", ")} will go back to ${organizationName}’s setting.`
+                  : names.length > 0
+                    ? `Changed in ${names.join(", ")}.`
+                    : RULES[rule].description
+              }
+              checked={!locked.includes(rule)}
+              onCheckedChange={(open) =>
+                setDraft(
+                  open
+                    ? locked.filter((key) => key !== rule)
+                    : [...locked.filter((key) => key !== rule), rule],
+                )
+              }
+            />
+          );
+        })}
+      </FieldStack>
+    </ModelsFormPage>
   );
 }
 
@@ -636,6 +614,11 @@ export function useWorkspaceModelAccountSettings(
   return { settings, error, saving, reload, update };
 }
 
+/** True when the workspace sets any of these rules itself. */
+export function changesAccountRules(settings: Pick<WorkspaceModelAccountSettings, "sources">) {
+  return ACCOUNT_RULES.some((rule) => settings.sources[rule] === "workspace");
+}
+
 export function WorkspaceAccountRulesSection({
   organizationName,
   state,
@@ -648,9 +631,9 @@ export function WorkspaceAccountRulesSection({
   const settings = state.settings;
   if (!settings) {
     return state.error ? (
-      <Section title="Account rules">
+      <Section title="How accounts are used">
         <ErrorMessage
-          title="Couldn’t load this workspace’s account rules."
+          title="Couldn’t load how this workspace uses its accounts."
           action={<RowButton onClick={() => void state.reload()}>Try again</RowButton>}
         >
           Nothing was changed.
@@ -658,11 +641,28 @@ export function WorkspaceAccountRulesSection({
       </Section>
     ) : null;
   }
-  const lockedReason = `Locked by ${organizationName}.`;
+  const lockedReason = `${organizationName} keeps this the same in every workspace.`;
   const readOnlyReason = `Only admins of this workspace or ${organizationName} can change this.`;
+  const lockHint = (
+    <span className="inline-flex items-center gap-1 text-xs text-fg-subtle">
+      <LockIcon aria-hidden="true" className="size-3" />
+      {lockedReason}
+    </span>
+  );
+  const resetLink = (key: string, request: UpdateWorkspaceModelAccountSettingsRequest) =>
+    settings.canEdit ? (
+      <SettingRowLink
+        disabled={state.saving !== null}
+        onClick={() => void state.update(key, request)}
+      >
+        {`Use ${organizationName}’s setting`}
+      </SettingRowLink>
+    ) : (
+      <span className="text-xs text-fg-subtle">Set for this workspace.</span>
+    );
   return (
     <Section
-      title="Account rules"
+      title="How accounts are used"
       description={
         settings.canEdit
           ? `This workspace follows ${organizationName} unless you change a rule here.`
@@ -670,89 +670,41 @@ export function WorkspaceAccountRulesSection({
       }
     >
       <SettingRowGroup>
-        {ORDER.map((rule) => {
-          const source = settings.sources[rule];
-          const reset =
-            source !== "workspace" ? null : settings.canEdit ? (
-              <SettingRowLink
-                disabled={state.saving !== null}
-                onClick={() =>
-                  void state.update(`reset:${rule}`, {
-                    [rule]: null,
-                  } as UpdateWorkspaceModelAccountSettingsRequest)
-                }
-              >
-                {`Use ${organizationName}’s setting`}
-              </SettingRowLink>
-            ) : (
-              <span className="text-xs text-fg-subtle">Set for this workspace.</span>
-            );
-          const hint: ReactNode =
-            source === "locked" ? (
-              <span className="inline-flex items-center gap-1 text-xs text-fg-subtle">
-                <LockIcon aria-hidden="true" className="size-3" />
-                {lockedReason}
-              </span>
-            ) : (
-              reset
-            );
-          if (rule === "rotation") {
-            return (
-              <SettingRow
-                key={rule}
-                label={RULES.rotation.label}
-                description={RULES.rotation.description}
-                hint={hint}
-                control={
-                  <RotationControl
-                    rotation={settings.values.rotation}
-                    disabled={!settings.canEdit || source === "locked" || state.saving !== null}
-                    onSave={(provider, mode) =>
-                      state.update("rotation", { rotation: { [provider]: { mode } } })
-                    }
-                  />
-                }
-              />
-            );
-          }
-          const switchRule: SwitchRule = rule;
-          const disabledReason =
-            source === "locked" ? lockedReason : settings.canEdit ? undefined : readOnlyReason;
-          return (
-            <SettingRow
-              key={rule}
-              label={RULES[switchRule].label}
-              description={RULES[switchRule].description}
-              hint={hint}
-              controlWidth="compact"
-              control={
-                <Switch
-                  checked={settings.values[switchRule]}
-                  pending={state.saving === switchRule}
-                  disabled={disabledReason !== undefined || state.saving !== null}
-                  disabledReason={disabledReason}
-                  onCheckedChange={(checked) =>
-                    void state.update(switchRule, { [switchRule]: checked })
-                  }
-                />
-              }
-            />
-          );
-        })}
-        <SettingRow
-          label="Fallback order"
-          description={
-            fallbackLines(settings.values.fallbackOrder, modelLabel).join("; ") ||
-            "No fallback order set."
-          }
-          hint={
-            settings.sources.fallbackOrder === "locked"
+        <AccountRuleRows
+          values={settings.values}
+          saving={state.saving}
+          blocked={(rule) =>
+            settings.sources[rule] === "locked"
               ? lockedReason
-              : settings.sources.fallbackOrder === "workspace"
-                ? "Set by this workspace."
-                : `Follows ${organizationName}.`
+              : settings.canEdit
+                ? undefined
+                : readOnlyReason
           }
-          control={
+          hints={Object.fromEntries(
+            ACCOUNT_RULES.map((rule) => [
+              rule,
+              settings.sources[rule] === "locked"
+                ? lockHint
+                : settings.sources[rule] === "workspace" && rule !== "rotation"
+                  ? resetLink(`reset:${rule}`, {
+                      [rule]: null,
+                    } as UpdateWorkspaceModelAccountSettingsRequest)
+                  : null,
+            ]),
+          )}
+          providerHints={Object.fromEntries(
+            Object.keys(settings.values.rotation).map((provider) => [
+              provider,
+              settings.sources.rotation === "locked"
+                ? lockHint
+                : settings.entrySources.rotation[provider] === "workspace"
+                  ? resetLink(`reset:rotation:${provider}`, { rotation: { [provider]: null } })
+                  : null,
+            ]),
+          )}
+          onChange={(key, change) => void state.update(key, change)}
+          modelLabel={modelLabel}
+          fallbackOrder={
             <FallbackOrderControl
               order={settings.values.fallbackOrder}
               modelLabel={modelLabel}

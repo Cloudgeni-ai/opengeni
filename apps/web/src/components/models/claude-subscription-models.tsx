@@ -19,6 +19,7 @@ import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { organizationReachLabel } from "./models-ui";
 import {
   ProviderCustomModels,
   type ProviderConnection,
@@ -63,19 +64,29 @@ export function ClaudeRow({
   onOpen: () => void;
   scopeLabel?: string;
 }) {
+  // An organization's own account says where it's available, like Codex and SuperGrok.
+  const access = useConnectionAccess({
+    client: claude.client,
+    organizationId: claude.organizationId,
+    kind: "claude_subscription",
+    connectionId: account.id,
+    enabled: Boolean(claude.organizationId) && scopeLabel === undefined,
+  });
   return (
     <SubscriptionAccountRow
       provider="claude_subscription"
       title={subscriptionAccountName(account)}
       email={account.email}
-      primary={account.id === claude.activeAccountId}
+      primary={claude.accounts.length > 1 && account.id === claude.activeAccountId}
       meta={[
         scopeLabel ??
-          (claude.organizationId || claude.inherited
-            ? places.scope.organization
-            : account.scope === "user"
-              ? places.scope.user
-              : places.scope.workspace),
+          (claude.organizationId
+            ? organizationReachLabel(places.scope, access.data)
+            : claude.inherited
+              ? places.scope.organization
+              : account.scope === "user"
+                ? places.scope.user
+                : places.scope.workspace),
         claudePlan(account),
       ]}
       cells={{ usage: claudeUsageCell(account) }}

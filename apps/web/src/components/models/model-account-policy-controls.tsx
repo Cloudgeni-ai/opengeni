@@ -1,8 +1,4 @@
-import type {
-  ModelAccountPreferences,
-  ModelAccountSettingValues,
-  ModelAccountRotationMode,
-} from "@opengeni/sdk";
+import type { ModelAccountPreferences } from "@opengeni/sdk";
 import { ArrowDownIcon, ArrowUpIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -12,45 +8,9 @@ import { Button } from "@/components/ui/button";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { RowButton } from "@/components/ui/page-actions";
 import { ModelPicker } from "@/components/pickers";
-import { Select } from "@/components/ui/select";
 import { Section } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
-
-export function RotationControl({
-  rotation,
-  disabled,
-  onSave,
-}: {
-  rotation: ModelAccountSettingValues["rotation"];
-  disabled: boolean;
-  onSave: (provider: string, mode: ModelAccountRotationMode) => Promise<void>;
-}) {
-  const names: Record<string, string> = { codex: "Codex", claude: "Claude", xai: "SuperGrok" };
-  return (
-    <div className="flex min-w-0 flex-col gap-2">
-      {Object.keys(rotation).map((provider) => (
-        <label
-          key={provider}
-          className="flex flex-wrap items-center justify-between gap-2 text-xs text-fg-muted"
-        >
-          {names[provider] ?? provider}
-          <Select
-            aria-label={`${names[provider] ?? provider} account rotation`}
-            value={rotation[provider]?.mode ?? "spread"}
-            disabled={disabled}
-            onChange={(event) =>
-              void onSave(provider, event.target.value as ModelAccountRotationMode)
-            }
-          >
-            <option value="spread">Spread work</option>
-            <option value="primary_first">Primary only</option>
-          </Select>
-        </label>
-      ))}
-    </div>
-  );
-}
 
 /** Edit one exact preferred-model mapping. Never infer model equivalence. */
 export function FallbackOrderControl({

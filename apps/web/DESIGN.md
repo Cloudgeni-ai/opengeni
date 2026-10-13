@@ -395,13 +395,20 @@ Learned on Settings > Models, 27 Sep 2026.
   value or none.
 - **One row per provider.** A provider with several connection modes is one row; its page lists
   the modes as outcomes ("Pay with your ChatGPT plan", "Pay per use with an API key").
-- **Every model setting in one place: Organization > Models.** Decided 1 Oct 2026. The page is
-  three parts: **Accounts** (one list of everything that pays: credits, the organization's
-  accounts tagged by where they're available, "Everyone in Acme" or "Selected workspaces", and
-  each workspace's own accounts tagged "Design preview only"), **Workspaces** (one row per
-  workspace with its default model and payer plus its Allowed models, "GPT-6 Astra · Codex · All
-  models", and the person's own Personal workspace last), then the organization-wide Codex and
-  SuperGrok settings. A workspace row opens that workspace's model page (`?workspace=`): Default
+- **Every model setting in one place: Organization > Models.** Decided 1 Oct 2026, reordered 13
+  Oct 2026. For owners and admins the page is four sections, in this order: **Accounts** first
+  (one list of everything that pays: credits, the organization's accounts tagged by where they're
+  available, "Everyone in Acme", "Selected workspaces" or "Design preview only", each workspace's
+  own accounts tagged "Belongs to Design preview", and a person's own "Only you"; the section
+  description says how many need reconnecting), **Models for every workspace** (Default model,
+  Allowed models, Context & compaction), **How accounts are used** (one row per provider with
+  two or more accounts, "Codex accounts" with Spread work / Primary only; Personal subscriptions
+  with its fallback nested under it; Switch models when accounts run out with the fallback order
+  nested under it; and a "What workspaces can change" row opening its own page of checkboxes,
+  never a lock link on each rule), then **Workspaces** (one row per workspace saying only what it
+  sets itself, "Own account rules", "3 models allowed", or "Follows Acme", and the person's own
+  Personal workspace last). Never show a table of every workspace's rules or raw setting keys. A
+  workspace row opens that workspace's model page (`?workspace=`): Default
   model (with who pays and the one can't-run warning), Allowed models, the accounts it uses
   (muted "Not in use" with the reason when one is set aside), its Codex and SuperGrok settings and
   the Codex Apps row. Pages opened from it go back to it, named ("← Design preview").
