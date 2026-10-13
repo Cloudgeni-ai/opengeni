@@ -212,6 +212,18 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const featureUnavailable =
     machines.error instanceof OpenGeniApiError && machines.error.status === 404;
 
+  const requestAgentUpdate = (machine: MachineView) => {
+    if (!machine.enrollmentId) return;
+    void machines.updateAgent(machine.enrollmentId).then((result) => {
+      if (result?.accepted) {
+        toast.success(`Updating ${machine.name} to v${result.targetVersion}`, {
+          description:
+            "The agent installs it once the machine is idle. If work is running, the update is postponed and you can start it again later.",
+        });
+      }
+    });
+  };
+
   return (
     <ContentPage width="standard">
       <PageHeader
@@ -244,6 +256,14 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             }}
             {...(machines.canManage && subjectId
               ? { onChangeAudience: () => setAudienceOpen(true) }
+              : {})}
+            {...(machines.canUpdateAgent
+              ? {
+                  onUpdateAgent: requestAgentUpdate,
+                  updatingAgent:
+                    selectedMachine.enrollmentId !== null &&
+                    machines.updatingEnrollmentId === selectedMachine.enrollmentId,
+                }
               : {})}
             {...(machines.canRemove
               ? {
@@ -286,16 +306,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onEnroll={machines.canManage ? () => setEnrollOpen(true) : undefined}
             {...(machines.canUpdateAgent
               ? {
-                  onUpdateAgent: (machine: MachineView) => {
-                    if (!machine.enrollmentId) return;
-                    void machines.updateAgent(machine.enrollmentId).then((result) => {
-                      if (result?.accepted) {
-                        toast.success(`Update requested for ${machine.name}`, {
-                          description: `Installing v${result.targetVersion} requires an idle machine. If it is busy, retry after its work finishes.`,
-                        });
-                      }
-                    });
-                  },
+                  onUpdateAgent: requestAgentUpdate,
                   updatingEnrollmentId: machines.updatingEnrollmentId,
                 }
               : {})}
