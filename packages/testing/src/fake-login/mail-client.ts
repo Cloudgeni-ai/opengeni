@@ -9,12 +9,7 @@ export async function withFakeMailMcp<T>(
   mcpUrl: string,
   run: (mail: {
     toolNames: string[];
-    search: (args: {
-      to?: string;
-      from?: string;
-      query?: string;
-      limit?: number;
-    }) => Promise<
+    search: (args: { to?: string; from?: string; query?: string; limit?: number }) => Promise<
       {
         id: string;
         to: string;

@@ -186,11 +186,10 @@ export async function resolveInteractionSecretValues(input: {
         failures: SecretReferenceFailure[];
         askCard?: SecretReferenceError["askCard"];
       };
-      const failures = foreign.failures;
       throw secretReferenceHttpError(
         new SecretReferenceError(
-          failures,
-          foreign.askCard ?? buildMissingSecretAskCard(failures, { hasActingHuman: false }),
+          foreign.failures,
+          foreign.askCard ?? buildMissingSecretAskCard(foreign.failures, { hasActingHuman: false }),
         ),
       );
     }

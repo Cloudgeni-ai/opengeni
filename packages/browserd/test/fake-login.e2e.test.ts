@@ -15,10 +15,7 @@ import {
   BrowserPasskeyManager,
   resolvePinnedAgentBrowserBinary,
 } from "../src";
-import {
-  startFakeLoginServer,
-  type FakeLoginServer,
-} from "../../testing/src/fake-login/server";
+import { startFakeLoginServer, type FakeLoginServer } from "../../testing/src/fake-login/server";
 
 // Fake-login suite through the real browserd driver and Chrome: passkeys
 // (register, sync-only reload, every tab), a cross-origin CAPTCHA iframe and a
@@ -47,7 +44,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await site?.close();
   if (evidenceDirectory && enabled) {
-    await writeFile(join(evidenceDirectory, `fake-login-${mode}-site.log`), `${siteLog.join("\n")}\n`);
+    await writeFile(
+      join(evidenceDirectory, `fake-login-${mode}-site.log`),
+      `${siteLog.join("\n")}\n`,
+    );
     await writeFile(
       join(evidenceDirectory, `fake-login-${mode}-summary.json`),
       `${JSON.stringify({ ...evidence, state: site?.state() }, null, 2)}\n`,
@@ -71,10 +71,14 @@ e2e(
       page = await act(page, fillByRef(page, "textbox", "Password", password));
       page = await act(page, fillByRef(page, "textbox", "Confirm password", password));
       page = await act(page, clickByRef(page, "button", "Create account"));
-      page = await until(first.driver, page.target.id, (o) => hasName(o, `Logged in as ${username}`));
+      page = await until(first.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
       page = await act(page, { type: "navigate", url: `${site.url}/passkey/register` });
       page = await act(page, clickByRef(page, "button", "Create a passkey"));
-      page = await until(first.driver, page.target.id, (o) => hasName(o, `Passkey saved for ${username}`));
+      page = await until(first.driver, page.target.id, (o) =>
+        hasName(o, `Passkey saved for ${username}`),
+      );
       await shot(first.driver, page.target.id, "passkey-registered");
       const registered = await first.sync(null);
       expect(registered.authenticators).toBeGreaterThanOrEqual(1);
@@ -90,7 +94,9 @@ e2e(
       expect(hasName(page, "Not signed in")).toBe(true);
       page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
       page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
-      page = await until(first.driver, page.target.id, (o) => hasName(o, `Logged in as ${username}`));
+      page = await until(first.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
       signCounts.push(await assertedSignCount(first, itemId));
     } finally {
       await first.close();
@@ -106,21 +112,27 @@ e2e(
       let page = await second.driver.start(`${site.url}/passkey/login`);
       expect(hasName(page, "Not signed in")).toBe(true);
       page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
-      page = await until(second.driver, page.target.id, (o) => hasName(o, `Logged in as ${username}`));
+      page = await until(second.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
       await shot(second.driver, page.target.id, "passkey-login-after-sync");
       signCounts.push(await assertedSignCount(second, itemId));
 
       // A second tab gets its own authenticator with the current counter.
       let tab = await second.driver.openTarget(`${site.url}/passkey/login`);
       tab = await act(tab, clickByRef(tab, "button", "Sign in with a passkey"));
-      tab = await until(second.driver, tab.target.id, (o) => hasName(o, `Logged in as ${username}`));
+      tab = await until(second.driver, tab.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
       signCounts.push(await assertedSignCount(second, itemId));
       expect((await second.sync(null)).authenticators).toBeGreaterThanOrEqual(2);
 
       // Back in the first tab, whose copy must have received the newer counter.
       page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
       page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
-      page = await until(second.driver, page.target.id, (o) => hasName(o, `Logged in as ${username}`));
+      page = await until(second.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
       signCounts.push(await assertedSignCount(second, itemId));
     } finally {
       await second.close();
@@ -172,7 +184,9 @@ e2e(
       await shot(browser.driver, page.target.id, "captcha-logged-in");
       expect(page.target.url).toBe(`${site.url}/welcome`);
       expect(
-        site.state().successes.some((success) => success.flow === "captcha" && success.username === "alice"),
+        site
+          .state()
+          .successes.some((success) => success.flow === "captcha" && success.username === "alice"),
       ).toBe(true);
     } finally {
       await browser.close();
@@ -203,15 +217,22 @@ e2e(
       );
       await shot(browser.driver, popup.target.id, "popup-idp");
       popup = await act(popup, fillByRef(popup, "textbox", "Username", "alice"));
-      popup = await act(popup, fillByRef(popup, "textbox", "Password", "Fake-Login-Alice-Password-1"));
+      popup = await act(
+        popup,
+        fillByRef(popup, "textbox", "Password", "Fake-Login-Alice-Password-1"),
+      );
       await browser.driver
         .dispatch(command(popup, clickByRef(popup, "button", "Sign in")))
         .catch(() => null); // The popup closes itself right after posting the token.
-      opener = await until(browser.driver, opener.target.id, (o) => hasName(o, "Logged in as alice"));
+      opener = await until(browser.driver, opener.target.id, (o) =>
+        hasName(o, "Logged in as alice"),
+      );
       await shot(browser.driver, opener.target.id, "popup-opener-logged-in");
       expect(opener.target.url).toBe(`${site.url}/welcome`);
       expect(
-        site.state().successes.some((success) => success.flow === "popup" && success.username === "alice"),
+        site
+          .state()
+          .successes.some((success) => success.flow === "popup" && success.username === "alice"),
       ).toBe(true);
     } finally {
       await browser.close();

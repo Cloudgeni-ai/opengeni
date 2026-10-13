@@ -58,11 +58,11 @@ const { apiKey, token } = await adminClient.createOrganizationApiKey(organizatio
 // Store token on the server; it is returned only at creation.
 ```
 
-| Policy preset | Permissions                                                                                        |
-| ------------- | -------------------------------------------------------------------------------------------------- |
-| `read_only`   | Every read/list/view/search permission except secret values (`secrets:read`)                       |
-| `full`        | Every non-deprecated permission                                                                    |
-| `custom`      | Only the permissions you choose                                                                    |
+| Policy preset | Permissions                                                                  |
+| ------------- | ---------------------------------------------------------------------------- |
+| `read_only`   | Every read/list/view/search permission except secret values (`secrets:read`) |
+| `full`        | Every non-deprecated permission                                              |
+| `custom`      | Only the permissions you choose                                              |
 
 The preset is a label. The server grants only the permissions you send and
 recomputes the label from them. Each permission, including `workspace:admin`,

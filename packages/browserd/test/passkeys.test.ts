@@ -10,7 +10,10 @@ type StoredCredential = { credentialId: string; signCount: number; privateKey: s
 class FakeCdp {
   readonly calls: Call[] = [];
   readonly authenticators = new Map<string, Map<string, StoredCredential>>();
-  private readonly listeners = new Map<string, Set<(event: { params: Record<string, unknown> }) => void>>();
+  private readonly listeners = new Map<
+    string,
+    Set<(event: { params: Record<string, unknown> }) => void>
+  >();
   url = "https://login.example.test/account/passkeys";
 
   async send<T>(
@@ -95,7 +98,9 @@ function setup() {
 const STANDARD_ID = "Y3JlZC0x+/8=";
 const URL_ID = "Y3JlZC0x-_8";
 
-function vaultCredential(overrides: Partial<BrowserPasskeyCredential> = {}): BrowserPasskeyCredential {
+function vaultCredential(
+  overrides: Partial<BrowserPasskeyCredential> = {},
+): BrowserPasskeyCredential {
   return {
     itemId: randomUUID(),
     rpId: "login.example.test",
@@ -185,7 +190,12 @@ test("reports a page registration, shares it with every tab and keeps it until a
   // Our own installs echo as additions; they are never new registrations.
   cdp.emit("b", "WebAuthn.credentialAdded", {
     authenticatorId: "authenticator-b",
-    credential: { credentialId: "bmV3LWNyZWQ=", rpId: "login.example.test", privateKey: "x", signCount: 0 },
+    credential: {
+      credentialId: "bmV3LWNyZWQ=",
+      rpId: "login.example.test",
+      privateKey: "x",
+      signCount: 0,
+    },
   });
   // A replacement that does not (yet) include it keeps an unacknowledged registration.
   const other = vaultCredential();
