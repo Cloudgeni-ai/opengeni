@@ -102,6 +102,7 @@ const withheldMigrations = [
   // Reads session_system_updates columns that withheld migrations add.
   "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
   "0760_terminal_turn_run_state_cleanup.sql",
+  "0761_exhausted_scheduled_tasks.sql",
   "0746_subscription_failover_readiness_and_request_fence.sql",
   "0749_subscription_shared_personal_choice.sql",
   "0750_subscription_waiter_candidates.sql",

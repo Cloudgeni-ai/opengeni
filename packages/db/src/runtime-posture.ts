@@ -1338,6 +1338,7 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "scheduled_task_is_exhausted(uuid)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   ...SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES,
@@ -1429,6 +1430,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "scheduled_task_is_exhausted(uuid)",
   "set_credit_promotion_policy(jsonb, text, text)",
   CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
@@ -1728,6 +1730,7 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_run_personal_resource_once_receipts",
   "scheduled_task_run_personal_resource_snapshots",
   "scheduled_task_runs",
+  "scheduled_task_schedule_outbox",
   "scheduled_tasks",
   "self_service_organization_setup_receipts",
   "session_admin_access",
@@ -2021,6 +2024,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sandbox_session_envelopes",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
+  "scheduled_task_schedule_outbox",
   "session_admin_access",
   "session_attempt_interruptions",
   "session_background_commands",
@@ -4018,6 +4022,15 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
         );
       }
+    } else if (routine.name === "scheduled_task_is_exhausted(uuid)") {
+      // This scoped invoker predicate cannot mint authority or bypass RLS.
+      // Public-schema installations may have a different schema owner.
+      const taskOwner = tableByName.get("scheduled_tasks")?.owner;
+      if (taskOwner && routine.owner !== taskOwner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match scheduled task owner ${taskOwner}`,
+        );
+      }
     } else if (
       routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE ||
       routine.name === CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE
@@ -5372,6 +5385,8 @@ export function evaluateRuntimeDatabasePosture(
     }
     if (
       routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||
+      routine.name === "list_exhausted_scheduled_tasks(integer)" ||
+      routine.name === "list_scheduled_task_schedule_reconciliations(integer)" ||
       routine.name === "list_quiescence_receipt_wake_repairs_v1(integer, uuid, uuid)"
     ) {
       const dispatcher = posture.privateRoutines.find(

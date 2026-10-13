@@ -51,6 +51,7 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
@@ -517,6 +518,11 @@ export async function startApi(
     },
     observability,
   });
+  const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
+    db: dbClient.db,
+    sync: (task) => workflowClient.client.syncScheduledTask({ task }),
+    observability,
+  });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -582,6 +588,7 @@ export async function startApi(
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
+      await stopScheduledTaskLifecyclePump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.
