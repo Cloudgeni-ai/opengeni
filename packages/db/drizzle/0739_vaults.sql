@@ -3292,9 +3292,11 @@ BEGIN
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', routine);
   END LOOP;
   -- vault_policy_is_valid backs the sessions and scheduled_tasks CHECK
-  -- constraints, so every role that inserts those rows must run it. It is pure.
-  GRANT EXECUTE ON FUNCTION opengeni_private.vault_policy_is_valid(jsonb) TO PUBLIC;
+  -- constraints, so the application role that inserts those rows must run it.
+  -- It is pure; no other role (and not PUBLIC) gets it.
+  EXECUTE 'REVOKE ALL ON FUNCTION opengeni_private.vault_policy_is_valid(jsonb) FROM PUBLIC';
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.vault_policy_is_valid(jsonb) TO opengeni_app;
     FOREACH routine IN ARRAY ARRAY[
       format('%I.list_vaults_for_subject(uuid,jsonb)', target_schema),
       format('%I.get_vault_for_subject(uuid,jsonb)', target_schema),
