@@ -39,11 +39,11 @@ Pages read data when they load; there are no live updates.
 
 ## Agents and schedules
 
-Agents use `site_data_describe`, `site_data_query`, `site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset` and `site_files_*`. A scheduled task runs them with the schedule's access, which makes a Site a dashboard that refreshes itself. A conversation started from a Site page acts like the page: it reaches only that Site's data, with viewer rights.
+Agents use `site_data_describe`, `site_data_query`, `site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset` and `site_files_*`. A scheduled task runs them with the schedule's access, which makes a Site a dashboard that refreshes itself. A conversation started from a Site page acts like the page for its whole life: it reaches only that Site's data, with viewer rights, even when its owner later continues it from the console.
 
 ## Limits and usage
 
-By default a Site can hold 100 MB of records (256 KB each, each charged an extra 512 bytes), 100,000 records per collection, 50 collections and 1 GB of files (10 MB each), and a workspace 1 GB of Site data in total. Self-hosted deployments change these with the `OPENGENI_SITE_DATA_*` settings. Writes are rate limited per person and per Site, and reads from a Site page per person. Usage is recorded for the workspace, which pays for what viewers do; it is not charged yet.
+By default a Site can hold 100 MB of records (256 KB each, each charged an extra 512 bytes), 100,000 records per collection, 50 collections and 1 GB of files (10 MB each), and a workspace 1 GB of Site data in total. One request carries at most 4 MB of records. Self-hosted deployments change these with the `OPENGENI_SITE_DATA_*` settings. Writes are rate limited per person and per Site (managers and agents share a generous per-Site limit), and reads from a Site page per person. Usage is recorded for the workspace, which pays for what viewers do; it is not charged yet.
 
 ## Managing data
 

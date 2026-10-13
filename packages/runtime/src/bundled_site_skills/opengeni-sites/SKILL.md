@@ -315,7 +315,8 @@ schema), `enum` (up to 100 scalars), `const`, numeric and length bounds
 `minLength`, `maxLength`, `minItems`, `maxItems`, `minProperties`,
 `maxProperties`), `format`, `title`, `description`, `allOf`/`anyOf`/`oneOf`,
 and `uniqueItems` when `items` has a scalar `type`; no `$ref`, `$defs`,
-`pattern`, `default` or conditionals, at most 500 nodes and 16 levels. Field
+`pattern`, `default` or conditionals; at most 100 nodes, 16 levels, 16
+branches per `anyOf`/`oneOf`/`allOf` and 500 `enum` values in total. Field
 paths cannot use `__proto__`, `prototype` or `constructor`. An Only me Site's data is reachable only by its owner.
 
 In the Site, use the same client:
@@ -360,7 +361,8 @@ Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
 schema), `conflict` (stale `expectedVersion` or a duplicate unique value),
 `not_found`, `forbidden` (the access mode does not allow it),
 `quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
-and 100,000 per collection; files 10 MB each and 1 GB per Site, by default), `rate_limited` (retry later), and
+and 100,000 per collection; at most 4 MB of records per request; files 10 MB
+each and 1 GB per Site, by default), `rate_limited` (retry later), and
 `site_data_unsupported` (a host or local preview without Site Data). Local
 sandbox previews have no Site Data; test the published Site.
 
@@ -373,8 +375,9 @@ collection, then have the scheduled task upsert records with `put` keyed by a
 stable id, so reruns replace instead of duplicating. A person-less scheduled
 task owns `per_viewer` records as the schedule, so each run sees the last
 run's. An agent session started from the Site page acts like the page: only
-that Site's data with viewer rights, and no managing collections, so do
-management from your authoring session or a schedule. The Site page's Data tab
+that Site's data with viewer rights, and no managing collections, for the
+session's whole life (even when its owner later chats in it from the
+console), so do management from your authoring session or a schedule. The Site page's Data tab
 lets the Site's managers browse, export and delete records.
 
 ## Authoring, preview, and viewer access
