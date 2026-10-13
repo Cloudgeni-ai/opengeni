@@ -94,6 +94,10 @@ export type AgentBrowserRunnerOptions = {
   /** Private completed launch receipt, checked again before attaching/launching. */
   recoverOwnedProcess?: OwnedManagedBrowserProcess;
   allowOwnedProcessLaunch?: boolean;
+  /** Launch a managed Linux browser in its own transient systemd user scope
+   * when a user service manager is reachable. Defaults to on; tests disable it
+   * to exercise the plain launch. */
+  systemdScope?: boolean;
 };
 
 export type OwnedManagedBrowserProcess = {
@@ -133,6 +137,7 @@ export class AgentBrowserJsonRunner {
   private readonly profileDirectory: string;
   private readonly managedBrowserExecutable: string | null;
   private readonly chromeStderrDrainPaths: readonly string[];
+  private readonly browserScope: LinuxBrowserScope | null;
   private readonly recoveredProcess: OwnedManagedBrowserProcess | null;
   private readonly headlessManaged: boolean;
   private readonly daemonRunDirectory: string;
@@ -167,6 +172,7 @@ export class AgentBrowserJsonRunner {
         ? (browserLaunch.actualExecutablePath ?? null)
         : (options.browserExecutablePath ?? null));
     this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
+    this.browserScope = browserLaunch?.scope ?? null;
     this.recoveredProcess = options.recoverOwnedProcess ?? null;
     this.headlessManaged = !options.headed && !options.provider;
     this.daemonRunDirectory = dirname(this.daemonPidFile);
@@ -506,6 +512,7 @@ export class AgentBrowserJsonRunner {
     };
     if ((await inspectOwnedManagedBrowserProcess(receipt)) !== "live") return null;
     if (needsHeadlessWitness) await this.headlessDaemonIdentity(receipt, this.daemonPidFile);
+    if (this.browserScope) await collectBrowserIntoScope(this.browserScope, pid);
     return receipt;
   }
 
@@ -665,7 +672,18 @@ type ManagedBrowserLaunch = {
   actualExecutablePath?: string | null;
   backgroundBrowserExecutable?: string;
   cleanupPaths?: readonly string[];
+  scope?: LinuxBrowserScope | null;
 };
+
+/** One transient systemd user scope per managed Linux browser launch. All
+ * scopes share one slice that sets no resource limits; it only keeps browsers
+ * out of the agent service, so stopping or replacing the agent never takes
+ * running browsers with it, and makes their usage visible per browser. */
+type LinuxBrowserScope = { unit: string; busctl: string };
+
+const BROWSER_SCOPE_SLICE = "opengeni-browsers.slice";
+const BROWSER_SCOPE_MARKER = "OPENGENI_BROWSER_SCOPE";
+const SYSTEMD_PROBE_TIMEOUT_MS = 2_000;
 
 async function managedBrowserLaunch(
   options: AgentBrowserRunnerOptions,
@@ -676,7 +694,11 @@ async function managedBrowserLaunch(
   if (process.platform === "linux" && !options.provider) {
     const executable = configured ?? (await linuxChromeExecutable());
     if (executable) {
-      return await linuxChromeStderrDrainWrapper(options.profileDirectory, executable);
+      return await linuxChromeStderrDrainWrapper(
+        options.profileDirectory,
+        executable,
+        options.systemdScope === false ? null : await linuxUserScopeLauncher(),
+      );
     }
   }
   if (process.platform !== "darwin" || !options.headed || options.provider) {
@@ -705,10 +727,16 @@ async function managedBrowserLaunch(
  * DevToolsActivePort appears but does not consume it. A noisy managed Chrome
  * fills that pipe and then stops answering even browser-level CDP requests.
  * Keep Chrome's PID/process group unchanged with shell exec, while a private
- * reader consumes stderr and retains only the last bounded diagnostic bytes. */
+ * reader consumes stderr and retains only the last bounded diagnostic bytes.
+ *
+ * With a reachable systemd user manager the wrapper first re-executes itself
+ * through `systemd-run --scope`, which execs in place: the PID agent-browser
+ * spawned stays Chrome's PID, and the stderr reader plus every Chrome child
+ * start inside the browser's own scope. */
 async function linuxChromeStderrDrainWrapper(
   profileDirectory: string,
   executable: string,
+  scopeLauncher: LinuxUserScopeLauncher | null,
 ): Promise<ManagedBrowserLaunch> {
   await access(executable, constants.X_OK);
   const actualExecutablePath = (await isScriptExecutable(executable)) ? null : executable;
@@ -726,11 +754,18 @@ async function linuxChromeStderrDrainWrapper(
   const fifo = join(directory, `${id}.stderr.fifo`);
   const log = join(directory, "chrome-stderr.log");
   const wrapper = join(directory, `${id}.sh`);
+  const scope = scopeLauncher
+    ? { unit: `opengeni-browser-${id}.scope`, busctl: scopeLauncher.busctl }
+    : null;
+  const scopeEntry =
+    scope && scopeLauncher
+      ? `if [ "\${${BROWSER_SCOPE_MARKER}:-}" != ${shellQuote(scope.unit)} ]; then\n  ${BROWSER_SCOPE_MARKER}=${shellQuote(scope.unit)} exec ${shellQuote(scopeLauncher.systemdRun)} --user --scope --quiet --collect --property=Delegate=yes --slice=${BROWSER_SCOPE_SLICE} --unit=${shellQuote(scope.unit)} -- ${shellQuote(wrapper)} "$@"\nfi\nunset ${BROWSER_SCOPE_MARKER}\n`
+      : "";
   try {
     await runProcess(mkfifo, ["-m", "600", fifo]);
     await writeFile(
       wrapper,
-      `#!/bin/sh\numask 077\n${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)} "$@" 2>${shellQuote(fifo)}\n`,
+      `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)} "$@" 2>${shellQuote(fifo)}\n`,
       { mode: 0o700, flag: "wx" },
     );
     await chmod(wrapper, 0o700);
@@ -738,10 +773,91 @@ async function linuxChromeStderrDrainWrapper(
       executablePath: wrapper,
       actualExecutablePath,
       cleanupPaths: [wrapper, fifo],
+      scope,
     };
   } catch (error) {
     await Promise.allSettled([rm(wrapper, { force: true }), rm(fifo, { force: true })]);
     throw error;
+  }
+}
+
+type LinuxUserScopeLauncher = { systemdRun: string; busctl: string };
+
+/** A transient scope is used only when this process can reach its own user
+ * service manager; otherwise the browser launches exactly as before. */
+async function linuxUserScopeLauncher(): Promise<LinuxUserScopeLauncher | null> {
+  if (!process.env.XDG_RUNTIME_DIR && !process.env.DBUS_SESSION_BUS_ADDRESS) return null;
+  const systemdRun = await firstExecutableInPath(["systemd-run"]);
+  const busctl = await firstExecutableInPath(["busctl"]);
+  if (!systemdRun || !busctl) return null;
+  const reachable = await processSucceeds(
+    busctl,
+    [
+      "--user",
+      "call",
+      "org.freedesktop.systemd1",
+      "/org/freedesktop/systemd1",
+      "org.freedesktop.DBus.Peer",
+      "Ping",
+    ],
+    SYSTEMD_PROBE_TIMEOUT_MS,
+  );
+  return reachable ? { systemdRun, busctl } : null;
+}
+
+/** Chromium moves its own browser process into an `app-<id>-<pid>.scope` at
+ * startup for desktop-portal identification, leaving only its children in the
+ * launch scope. Once the launch is proven, bring the browser process back so
+ * the browser's whole process tree is one unit. Best effort: the browser is
+ * already outside the agent service either way. */
+async function collectBrowserIntoScope(scope: LinuxBrowserScope, pid: number): Promise<void> {
+  if (await processInScope(pid, scope.unit)) return;
+  await processSucceeds(
+    scope.busctl,
+    [
+      "--user",
+      "call",
+      "org.freedesktop.systemd1",
+      "/org/freedesktop/systemd1",
+      "org.freedesktop.systemd1.Manager",
+      "AttachProcessesToUnit",
+      "ssau",
+      scope.unit,
+      "/",
+      "1",
+      String(pid),
+    ],
+    SYSTEMD_PROBE_TIMEOUT_MS,
+  );
+}
+
+async function processInScope(pid: number, unit: string): Promise<boolean> {
+  try {
+    const cgroup = await readFile(`/proc/${pid}/cgroup`, "utf8");
+    return cgroup
+      .split("\n")
+      .some((line) => line.startsWith("0::") && line.split("/").includes(unit));
+  } catch {
+    return false;
+  }
+}
+
+async function processSucceeds(
+  command: string,
+  args: readonly string[],
+  timeoutMs: number,
+): Promise<boolean> {
+  const child = spawn(command, args, { stdio: "ignore", windowsHide: true });
+  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+  timer.unref?.();
+  try {
+    const code = await new Promise<number | null>((resolveExit) => {
+      child.once("error", () => resolveExit(null));
+      child.once("close", resolveExit);
+    });
+    return code === 0;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
