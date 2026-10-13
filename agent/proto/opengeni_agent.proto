@@ -253,6 +253,36 @@ message AttachedBrowserInventorySnapshot {
   string bridge_generation = 1;
   uint64 revision = 2;
   repeated AttachedBrowserDeviceAnnouncement devices = 3;
+  // The bridge's most recent ended extension connections (bounded, newest
+  // last). Repeated on every snapshot of this bridge generation so the
+  // control plane can record why a connection generation ended.
+  repeated AttachedBrowserConnectionEnd connection_ends = 4;
+}
+
+// Why one browser extension connection to the local bridge ended.
+enum AttachedBrowserConnectionEndReason {
+  ATTACHED_BROWSER_CONNECTION_END_REASON_UNSPECIFIED = 0;
+  // The native host saw Chrome close its input: the extension disconnected
+  // its port, its service worker stopped, or Chrome exited.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_CLOSED_PORT = 1;
+  // The native host received a message from Chrome it could not relay.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_MESSAGE_INVALID = 2;
+  // The native host could no longer write to Chrome.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_OUTPUT_FAILED = 3;
+  // The native host disappeared without reporting why (crash or kill).
+  ATTACHED_BROWSER_CONNECTION_END_REASON_NATIVE_HOST_LOST = 4;
+  // The agent rejected a message on the connection and closed it.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_AGENT_REJECTED = 5;
+}
+
+message AttachedBrowserConnectionEnd {
+  string device_id = 1;
+  string connection_generation = 2;
+  AttachedBrowserConnectionEndReason reason = 3;
+  // Bounded, secret-free error text; empty when the reason says it all.
+  string detail = 4;
+  int64 ended_at_unix_ms = 5;
+  uint64 connected_ms = 6;
 }
 
 // Detail about the agent's graphical display, when one is present.
