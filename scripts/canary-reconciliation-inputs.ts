@@ -8,6 +8,8 @@ export const PUBLISHER_PATH = ".github/workflows/publish-canary.yml";
 export const RECOVERY_PATH = ".github/workflows/reconcile-canary-publication.yml";
 export const SLSA = "https://slsa.dev/provenance/v1";
 export const MiB = 1024 * 1024;
+/** Receipt files a publisher may retain; equal to `CANARY_RECEIPT_FILES`. */
+export const PUBLISHER_RECEIPT_FILES = 6144;
 export type JsonObject = Record<string, unknown>;
 export type Origin = { source: string; tree: string; runId: string; attempt: string };
 export type PlanPackage = {
@@ -152,7 +154,7 @@ export function publisherZip(bytes: Buffer): Map<string, Buffer> {
       bytes.readUInt16LE(end + 6) === 0 &&
       bytes.readUInt16LE(end + 8) === count &&
       count > 0 &&
-      count <= 2048 &&
+      count <= PUBLISHER_RECEIPT_FILES &&
       central + bytes.readUInt32LE(end + 12) === end,
     "Unsupported ZIP directory",
   );

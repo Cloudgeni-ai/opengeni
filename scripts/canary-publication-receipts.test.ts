@@ -6,10 +6,14 @@ import { join } from "node:path";
 import libnpmpublish from "libnpmpublish";
 import {
   CanaryReceiptStore,
+  CANARY_RECEIPT_FILES,
   CANARY_RESPONSE_BYTES,
   type CanaryCustody,
 } from "./canary-publication-receipts";
+import { PUBLISHER_RECEIPT_FILES } from "./canary-reconciliation-inputs";
 import {
+  CANARY_RECEIPT_MAX_COHORT,
+  CANARY_RECEIPT_MAX_READS,
   confirmCanaryCohort,
   freezeCanaryCohort,
   publishAndVerifyCanaryCohort,
@@ -533,6 +537,29 @@ describe("strict raw receipt acceptance", () => {
           workflowSource: "b".repeat(40),
         }),
     ).toThrow("source identity");
+  });
+
+  test("the file bound covers the largest read budget, and reconciliation admits it", () => {
+    // Per GET: selection, response, body and body record. Per receipt (two
+    // GETs): one observation. Per package: write intent and acknowledgement.
+    const terminalRecords = 16;
+    const worstCase =
+      CANARY_RECEIPT_MAX_READS * 4 +
+      CANARY_RECEIPT_MAX_READS / 2 +
+      CANARY_RECEIPT_MAX_COHORT * 2 +
+      terminalRecords;
+    expect(CANARY_RECEIPT_FILES).toBeGreaterThanOrEqual(worstCase);
+    expect(PUBLISHER_RECEIPT_FILES).toBe(CANARY_RECEIPT_FILES);
+  });
+
+  test("a long registry lag can retain more than the former 2048 files", () => {
+    const f = fixture();
+    for (let index = 0; index < 2100; index++) {
+      f.store.record("READ_OBSERVATION", { package: names[0], observation: "version_pending" });
+    }
+    expect(f.store.record("PUBLICATION_FAILED", { phase: "receipt", noReplay: true }).file).toBe(
+      "2100.json",
+    );
   });
 });
 
