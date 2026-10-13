@@ -33,6 +33,7 @@ import { startTestServices, waitFor, type TestServices } from "@opengeni/testing
 
 const RELAY: SelfhostedRelayConfig = { host: "relay.test", port: 443, tls: true };
 const CONNECTION_INSTANCE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const RECOVERY_MS = 1_000;
 
 /** Bridge a `MockAgentResponder` (the agent's op semantics) onto NATS: decode the
  *  request bytes, run the mock, encode its `ControlResponse`. This is the "enrolled
@@ -54,7 +55,10 @@ function buildClient(bus: EventBus, workspaceId: string): SelfhostedSandboxClien
     connectionInstanceId: CONNECTION_INSTANCE_ID,
     relay: RELAY,
     // The control transport over the SAME connection the bus owns — no second dial.
-    controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
+    // A short transport recovery allowance keeps "no responder" tests within their
+    // budget; the production default (two minutes) rides out NATS rotations.
+    controlRpcFactory: () =>
+      new NatsControlRpc(async () => bus.getRequestConnection(), { recoveryMs: RECOVERY_MS }),
     timeoutMs: 2_000,
   });
 }
@@ -222,10 +226,13 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
     const unsub = bus.subscribeRequests(subject, responderFor(mock));
     let attempts = 0;
-    const rpc = new NatsControlRpc(async () => {
-      attempts += 1;
-      return attempts === 1 ? null : bus.getRequestConnection();
-    });
+    const rpc = new NatsControlRpc(
+      async () => {
+        attempts += 1;
+        return attempts === 1 ? null : bus.getRequestConnection();
+      },
+      { recoveryMs: RECOVERY_MS },
+    );
     const client = new SelfhostedSandboxClient({
       workspaceId: WS_A,
       workspaceRoot: "/srv/project",
