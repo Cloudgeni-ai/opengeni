@@ -89,7 +89,7 @@ const subscriptionCoreMigrations = [
   // Uses the shared connection row type and post-0715 owner routines.
   "0752_subscription_personal_sharing.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
-  "0756_subscription_people_picker_reads.sql",
+  "0757_subscription_people_picker_reads.sql",
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.
