@@ -38,11 +38,18 @@ export type MoveChatToMachineResult =
  * message also carries their consent to use it in this chat. Only the owner can
  * move a chat onto a personal machine, so choosing it is the approval; without
  * it the chat would point at the machine while every turn is refused.
+ *
+ * A personal machine is therefore never left attached without that consent: a
+ * chat that can't carry it right now (waiting on an answer, no permission to
+ * send, unknown authority) is not moved, and a consent message that fails moves
+ * the chat back to where it was.
  */
 export async function moveChatToMachine(input: {
   machine: MachineView;
   chat: ChatSendContext;
   canMessage: boolean;
+  /** Where the chat runs now, to move back to if a personal machine's consent fails. */
+  previousSandboxId?: string | null | undefined;
   attach: (sandboxId: string) => Promise<boolean>;
   sendMessage: (message: SendMessageInput) => Promise<{ payload?: unknown }>;
 }): Promise<MoveChatToMachineResult> {
@@ -50,13 +57,25 @@ export async function moveChatToMachine(input: {
   const name = machineDisplayName(machine);
   // Like a composer Send: a chat that can't take input isn't moved either.
   if (chat.blocked) return { moved: false, reason: chat.blocked };
+  const personal = isPersonalMachine(machine);
+  const consent = personal ? chat.personalMachineIntent : undefined;
+  if (personal) {
+    if (chat.awaitingHuman) {
+      return {
+        moved: false,
+        reason: `Answer the question above first, then move this chat to ${name}.`,
+      };
+    }
+    if (!input.canMessage || !consent) {
+      return { moved: false, reason: `This chat can't be approved for ${name} right now.` };
+    }
+  }
   if (!(await input.attach(machine.sandboxId))) return { moved: false, reason: null };
   // Tell the agent where it now runs. A chat waiting on a question keeps
   // that question; the person's answer continues it on the new machine.
   let told = false;
   let routing: unknown = null;
   if (input.canMessage && !chat.awaitingHuman) {
-    const consent = isPersonalMachine(machine) ? chat.personalMachineIntent : undefined;
     try {
       const accepted = await input.sendMessage({
         text: machineUseMessage(name),
@@ -69,6 +88,21 @@ export async function moveChatToMachine(input: {
     } catch {
       told = false;
     }
+  }
+  if (personal && !told) {
+    // Without the consent every turn on the machine is refused; don't leave
+    // the chat there.
+    const previous = input.previousSandboxId;
+    const restored =
+      previous && previous !== machine.sandboxId
+        ? await input.attach(previous).catch(() => false)
+        : false;
+    return {
+      moved: false,
+      reason: restored
+        ? `Couldn't approve ${name} for this chat, so it stayed where it was. Try again.`
+        : `Couldn't approve ${name} for this chat. Try again, or move it back.`,
+    };
   }
   const text = chat.awaitingHuman
     ? `This chat now runs on ${name}. Answer the question above to continue.`

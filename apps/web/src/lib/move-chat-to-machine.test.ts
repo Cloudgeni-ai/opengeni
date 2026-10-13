@@ -107,4 +107,52 @@ describe("moveChatToMachine (Runs on and the machine card)", () => {
     });
     expect(sendMessage.mock.calls[0]![0].personalResourceAttachment).toBeUndefined();
   });
+
+  test("my machine is not attached while the chat waits on an answer", async () => {
+    const attach = mock(async () => true);
+    const result = await moveChatToMachine({
+      machine: machine(),
+      chat: { ...chat, awaitingHuman: true },
+      canMessage: true,
+      attach,
+      sendMessage: async () => ({}),
+    });
+    expect(result).toEqual({
+      moved: false,
+      reason: "Answer the question above first, then move this chat to Studio Mac.",
+    });
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  test("my machine is not attached when the chat's authority is unknown", async () => {
+    const attach = mock(async () => true);
+    const result = await moveChatToMachine({
+      machine: machine(),
+      chat: { ...chat, personalMachineIntent: undefined },
+      canMessage: true,
+      attach,
+      sendMessage: async () => ({}),
+    });
+    expect(result.moved).toBe(false);
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  test("a failed consent message moves the chat back", async () => {
+    const attach = mock(async (_sandboxId: string) => true);
+    const result = await moveChatToMachine({
+      machine: machine(),
+      chat,
+      canMessage: true,
+      previousSandboxId: "home",
+      attach,
+      sendMessage: async () => {
+        throw new Error("network");
+      },
+    });
+    expect(attach.mock.calls.map((call) => call[0])).toEqual(["mac", "home"]);
+    expect(result).toEqual({
+      moved: false,
+      reason: "Couldn't approve Studio Mac for this chat, so it stayed where it was. Try again.",
+    });
+  });
 });

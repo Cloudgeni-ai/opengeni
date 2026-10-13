@@ -190,6 +190,7 @@ export function SessionMachineCapabilityCard({
         machine,
         chat,
         canMessage,
+        previousSandboxId: fleet.machines.find((candidate) => candidate.active)?.sandboxId ?? null,
         attach: fleet.attach,
         sendMessage: (message) => context.client.sendMessage(workspaceId, sessionId, message),
       });

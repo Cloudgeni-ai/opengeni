@@ -247,7 +247,18 @@ async function click(element: HTMLElement | null) {
 
 describe("Connected Machine conversation card", () => {
   test("mints a command on demand, notices the new machine and moves the chat onto it", async () => {
-    const h = await render();
+    const consent = {
+      mode: "session",
+      expectedAuthorityEpoch: 1,
+      workspaceSharedAcknowledged: false,
+      sharedOutputWarningVersion: 1,
+    };
+    const h = await render(() => ({
+      blocked: null,
+      awaitingHuman: false,
+      personalMachineIntent: consent,
+      extras: {},
+    }));
     try {
       expect(h.text()).toContain("Connect your Mac so I can run the iOS build there.");
       // Nothing is minted until the person asks for a command.
@@ -306,6 +317,7 @@ describe("Connected Machine conversation card", () => {
       const [workspaceId, sessionId, input] = sendMessage.mock.calls[0]!;
       expect([workspaceId, sessionId]).toEqual(["workspace", "session"]);
       expect((input as { text: string }).text).toBe("Use the machine “Studio Mac” for this chat.");
+      expect((input as Record<string, unknown>).personalResourceAttachment).toEqual(consent);
       expect(h.onConfigured).toHaveBeenCalledTimes(1);
 
       // The chat now runs there; the card completes and offers Chrome.

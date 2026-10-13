@@ -2176,6 +2176,7 @@ function SessionChatPane(props: {
   // it here, so it goes through the same move as the machine card (repoint, then
   // a message that carries that consent). Other machines only repoint.
   const runsOnAttach = runsOn.fleet.attach;
+  const runsOnPreviousSandboxId = runsOn.activeMachine?.sandboxId ?? null;
   const runsOnCanMessage =
     context.accessContext === null ||
     context.accessContext === undefined ||
@@ -2190,6 +2191,7 @@ function SessionChatPane(props: {
         machine,
         chat: readChatSendContext(),
         canMessage: runsOnCanMessage,
+        previousSandboxId: runsOnPreviousSandboxId,
         attach: runsOnAttach,
         sendMessage: (message) =>
           context.client.sendMessage(props.session.workspaceId, props.session.id, message),
@@ -2203,6 +2205,7 @@ function SessionChatPane(props: {
       readChatSendContext,
       runsOnAttach,
       runsOnCanMessage,
+      runsOnPreviousSandboxId,
     ],
   );
   // Session reads return a new resources array; keep the identity while the
