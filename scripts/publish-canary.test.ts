@@ -253,7 +253,7 @@ describe("Bun canary publication boundary", () => {
     ).rejects.toThrow("Canary registry read failed");
   });
 
-  test("admits a new package and preserves an absent latest tag", async () => {
+  test("admits a new package whose first publication npm also tags latest", async () => {
     const absent = await readRegistryPackage(
       "@example/new-package",
       async () => new Response(null, { status: 404 }),
@@ -307,6 +307,19 @@ describe("Bun canary publication boundary", () => {
       packed,
       async () => receipt,
     );
+    // npm points `latest` at a package's first version whatever tag the
+    // publish asked for, so a first canary may carry it.
+    await confirmCanaryPublication(
+      packages[0]!.name,
+      "1.0.1-canary.4",
+      undefined,
+      packed,
+      async () => ({
+        ...receipt,
+        "dist-tags": { latest: "1.0.1-canary.4", canary: "1.0.1-canary.4" },
+      }),
+    );
+    // Any other version under `latest` is still a moved stable tag.
     await expect(
       confirmCanaryPublication(
         packages[0]!.name,
@@ -315,7 +328,7 @@ describe("Bun canary publication boundary", () => {
         packed,
         async () => ({
           ...receipt,
-          "dist-tags": { latest: "1.0.1-canary.4", canary: "1.0.1-canary.4" },
+          "dist-tags": { latest: "1.0.0", canary: "1.0.1-canary.4" },
         }),
       ),
     ).rejects.toThrow("Stable tag changed");
