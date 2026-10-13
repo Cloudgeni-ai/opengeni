@@ -160,6 +160,7 @@
     "test:sdk-compat": "bun scripts/public-api/sdk-compat.ts",
     "migration:renumber": "bun scripts/renumber-migration.ts",
     "check:rename": "bun scripts/check-variable-set-rename.ts",
+    "check:variable-set-removal": "bun scripts/check-variable-set-removal.ts",
     "check:workspace-billing": "bun run typecheck && bun run test:unit && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",
     "prep": "bun run check:full",
     "catalog:refresh-plugins": "bun scripts/refresh-plugin-catalog.ts"

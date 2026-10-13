@@ -1,5 +1,5 @@
 /**
- * The SuperGrok (0740) and Claude (0741) drained cutovers in one maintenance
+ * The SuperGrok (0747) and Claude (0748) drained cutovers in one maintenance
  * window or in two (design 5.3 "Cutover protocol", ordering decision). The
  * ledger orders SuperGrok first; each cutover commits in its own transaction
  * and touches only its own provider, so:
@@ -76,7 +76,7 @@ test("the drained retirement follows Claude and the reader-first shared-choice m
   expect(retirement).toBeGreaterThan(claude);
   const first = (await readFile(new URL(RETIREMENT, drizzle), "utf8")).split("\n", 1)[0];
   expect(first).toBe("-- deployment-mode: maintenance");
-  const sharedChoice = "0742_subscription_shared_personal_choice.sql";
+  const sharedChoice = "0749_subscription_shared_personal_choice.sql";
   expect(files.indexOf(sharedChoice)).toBeGreaterThan(claude);
   expect(files.indexOf(sharedChoice)).toBeLessThan(retirement);
   for (const name of files.slice(claude + 1, retirement)) {
@@ -255,7 +255,7 @@ describe.skipIf(!realDb)("a Claude abort in a combined window", () => {
   }, 60_000);
 
   test("leaves SuperGrok cut over and the retirement unapplied; the rerun after the fix completes Claude and the retirement", async () => {
-    // A legacy Claude model connection that is not revoked aborts 0741 only.
+    // A legacy Claude model connection that is not revoked aborts 0748 only.
     await owned.admin`ALTER TABLE connections DISABLE TRIGGER USER`;
     await owned.admin`UPDATE connections SET status = 'active' WHERE id = ${fixture.legacy}`;
     await owned.admin`ALTER TABLE connections ENABLE TRIGGER USER`;

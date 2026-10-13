@@ -669,6 +669,16 @@ function digestJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
 }
 
+/** Digest of every command field except the controller-private `secretValues`
+ * side map: replays with fresh values (a new TOTP code) stay idempotent and
+ * the journal never binds plaintext. Equals the default digest of the same
+ * command without the map. */
+export function secretFreeCommandDigest(command: object): string {
+  if (!("secretValues" in command)) return digestJson(command);
+  const { secretValues: _private, ...rest } = command as { secretValues?: unknown };
+  return digestJson(rest);
+}
+
 function canonicalJson(value: unknown): string {
   return JSON.stringify(canonicalJsonValue(value));
 }

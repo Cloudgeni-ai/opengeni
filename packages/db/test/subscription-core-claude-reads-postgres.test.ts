@@ -477,8 +477,8 @@ describe("before the Claude cutover receipt (legacy route)", () => {
     current = { shared, client };
     const legacy = await acquireSharedTestDatabase("claude-reads-before-cutover", {
       withheldMigrations: [
-        "0741_subscription_core_claude_cutover.sql",
-        "0744_subscription_core_legacy_retirement.sql",
+        "0748_subscription_core_claude_cutover.sql",
+        "0751_subscription_core_legacy_retirement.sql",
       ],
     });
     if (!legacy) throw new Error("Real PostgreSQL is required");

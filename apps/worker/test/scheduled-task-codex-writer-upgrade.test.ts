@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { acquireOwnerMigratedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
 import {
   createDb,
-  createVariableSet,
   ensureManagedAccessForUser,
   updateScheduledTask,
   withSessionRlsActorContext,
 } from "@opengeni/db";
+import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "../../../packages/db/src/provision-roles";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
@@ -52,10 +52,10 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const acceptanceReads = "0726_subscription_personal_acceptance_reads.sql";
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
   const personalConnectionVersions = "0730_subscription_core_personal_connection_versions.sql";
-  const xaiCutover = "0740_subscription_core_xai_cutover.sql";
-  const claudeCutover = "0741_subscription_core_claude_cutover.sql";
+  const xaiCutover = "0747_subscription_core_xai_cutover.sql";
+  const claudeCutover = "0748_subscription_core_claude_cutover.sql";
   // The drained retirement requires both cutovers; held back with them.
-  const retirement = "0744_subscription_core_legacy_retirement.sql";
+  const retirement = "0751_subscription_core_legacy_retirement.sql";
   try {
     // Stage the actual pre-writer ledger, including on the stacked cutover
     // branch. This is a rolling/gate-off regression, not cutover activation.
@@ -66,7 +66,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
       (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}),
-      (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql')`;
+      (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -89,7 +89,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await database.admin`insert into workspace_inference_controls (account_id, workspace_id)
       values (${accountId}::uuid, ${workspaceId}::uuid)`;
     const variableSet = await withSessionRlsActorContext({ subjectId }, () =>
-      createVariableSet(client!.db, {
+      createLegacyVariableSet(client!.db, {
         accountId,
         workspaceId,
         subjectId,

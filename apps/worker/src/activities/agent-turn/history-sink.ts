@@ -1,6 +1,6 @@
 import { appendSessionHistoryItems, upsertSandboxSessionEnvelope } from "@opengeni/db";
 import { sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
-import type { Settings } from "@opengeni/config";
+import { sandboxManifestEnvironmentNamePredicate, type Settings } from "@opengeni/config";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type { SharedActivityServices } from "../types";
 import { compactGeneratedImageHistory } from "../generated-images";
@@ -154,7 +154,15 @@ export class TurnHistorySink {
           "SDK conversation history is unavailable at a mandatory persistence boundary",
         );
       }
-      const envelope = sandboxStateEntryFromRunState(stream.state);
+      // W1 defensive strip: persist deployment-constant env names only. Built
+      // lazily: only an envelope that carries env needs the settings lookup.
+      let keepEnvironmentName: ((name: string) => boolean) | undefined;
+      const envelope = sandboxStateEntryFromRunState(stream.state, {
+        keepEnvironmentName: (name) =>
+          (keepEnvironmentName ??= sandboxManifestEnvironmentNamePredicate(
+            this.deps.getModelRunSettings(),
+          ))(name),
+      });
       if (envelope) {
         await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
           upsertSandboxSessionEnvelope(this.deps.db, {

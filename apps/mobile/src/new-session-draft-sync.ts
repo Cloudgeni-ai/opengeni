@@ -50,7 +50,6 @@ export function useHomeDraftSync(input: {
     options: {
       ...(choices.visibility === "private" ? { visibility: "private" as const } : {}),
       ...(choices.targetSandboxId ? { targetSandboxId: choices.targetSandboxId } : {}),
-      ...(choices.variableSetIds.length > 0 ? { variableSetIds: choices.variableSetIds } : {}),
       ...(choices.excludedConnectorIds.length > 0
         ? { excludedMcpServerIds: choices.excludedConnectorIds }
         : {}),
@@ -72,7 +71,6 @@ export function useHomeDraftSync(input: {
         visibility: remote.options.visibility ?? "workspace",
         targetSandboxId: remote.options.targetSandboxId ?? null,
         channelId: remote.selectedProjectChannelId ?? null,
-        variableSetIds: remote.options.variableSetIds ?? [],
         excludedConnectorIds: remote.options.excludedMcpServerIds ?? [],
         repositoryIds: remote.resources.flatMap((resource: ResourceRef) =>
           resource.kind === "repository" && resource.githubRepositoryId

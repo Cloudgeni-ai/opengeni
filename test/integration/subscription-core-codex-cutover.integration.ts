@@ -57,15 +57,15 @@ const FENCES = "0717_subscription_authority_fences.sql";
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
 // Readiness compiles against the kind-aware registry introduced by withheld 0715.
-const FAILOVER_READINESS = "0739_subscription_failover_readiness_and_request_fence.sql";
+const FAILOVER_READINESS = "0746_subscription_failover_readiness_and_request_fence.sql";
 // Shared-personal acceptance is a later cutover, outside this historical seam.
-const SHARED_PERSONAL_CHOICE = "0742_subscription_shared_personal_choice.sql";
+const SHARED_PERSONAL_CHOICE = "0749_subscription_shared_personal_choice.sql";
 // Install after the older neutral-routine rewrite and its historical assertions.
-const PERSONAL_SHARING = "0745_subscription_personal_sharing.sql";
-const XAI_CUTOVER = "0740_subscription_core_xai_cutover.sql";
-const CLAUDE_CUTOVER = "0741_subscription_core_claude_cutover.sql";
+const PERSONAL_SHARING = "0752_subscription_personal_sharing.sql";
+const XAI_CUTOVER = "0747_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0748_subscription_core_claude_cutover.sql";
 // The drained retirement requires every receipt; recorded and never applied.
-const RETIREMENT = "0744_subscription_core_legacy_retirement.sql";
+const RETIREMENT = "0751_subscription_core_legacy_retirement.sql";
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 77);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;

@@ -114,7 +114,7 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("api-supergrok-core-routes", {
-    withheldMigrations: ["0740_subscription_core_xai_cutover.sql"],
+    withheldMigrations: ["0747_subscription_core_xai_cutover.sql"],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = opengeniDb.createDb(shared.appUrl);

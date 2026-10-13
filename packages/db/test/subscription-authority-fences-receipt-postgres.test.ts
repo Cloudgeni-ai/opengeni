@@ -498,7 +498,7 @@ beforeAll(async () => {
     await owner`insert into schema_migrations(name) values
       (${SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!}),
       (${SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!}),
-      ('0744_subscription_core_legacy_retirement.sql')`;
+      ('0751_subscription_core_legacy_retirement.sql')`;
   } finally {
     await owner.end();
   }

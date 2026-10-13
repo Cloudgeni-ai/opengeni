@@ -2748,7 +2748,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
-- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for hosted vault values (and other encrypted connection material); required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (hosted vault writes and reference resolution fail with `encryption_key_missing` until it is set). See `docs/secrets.md`.
 - Workspace-owned Vercel AI Gateway, OpenRouter, and Opper keys are entered by workspace
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
@@ -4361,7 +4361,7 @@ secret already does).
   The new routines read them through the owner-only view
   `opengeni_private.subscription_core_auto_assignments`; the table keeps its
   name, and the column its `codex` default for older binaries' reach writes,
-  until the retirement migration (0744, "Subscription legacy retirement"
+  until the retirement migration (0751, "Subscription legacy retirement"
   below), which renames the table to the view's name.
 - Applying reach on workspace and Personal-workspace creation, reading and
   setting reach, plan-change history and the organization workspace inventory
@@ -5016,7 +5016,7 @@ triggers, the policy `subscription_settings_lock_guard_read`, the four
 routines and the two CHECKs; the stored locks stay and the resolver keeps
 ignoring locked workspace overrides.
 
-### Shared-chat explicit personal choice (0742)
+### Shared-chat explicit personal choice (0749)
 
 This is a **maintenance**, one-way runtime protocol upgrade. Stop all API,
 control-worker and turn-worker processes using this database, including old
@@ -5156,9 +5156,9 @@ unchanged on 0729. An opt-in a person turned on stays in effect after a
 rollback (placement already read it); dropping the four policies and two
 routines removes only the person's own access.
 
-### SuperGrok on the shared subscription core (0740)
+### SuperGrok on the shared subscription core (0747)
 
-Migration `0740_subscription_core_xai_cutover.sql` is a one-way maintenance
+Migration `0747_subscription_core_xai_cutover.sql` is a one-way maintenance
 cutover, the SuperGrok counterpart of 0689. It moves every organization's
 SuperGrok (`xai`) subscription state onto the shared subscription core,
 records the `xai` receipt and registry row, and enables the SuperGrok cutover
@@ -5318,7 +5318,7 @@ ownership ambiguity, named by content-free classes such as
 `personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
 session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
 waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
-pre-existing core SuperGrok state; or any parity mismatch (`0740 parity
+pre-existing core SuperGrok state; or any parity mismatch (`0747 parity
 mismatch (<metrics>)`). A database error while writing the core surfaces only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
 statement parameter, token, label or email leaves the migration. Fix the named
@@ -5421,27 +5421,27 @@ legacy tables and only their own provider's keys in shared relations, and
 each commits in its own transaction with its own parity. Either order of
 releases works:
 
-- Separately: deploy the release that carries 0740, run steps 1 to 6 in one
+- Separately: deploy the release that carries 0747, run steps 1 to 6 in one
   window, and run the Claude cutover's window with its later release.
 - In one window: deploy a release that carries both. Drain and back up once,
   take both inventories, and run the migrator once with the same roles and
-  key; it applies 0740 and then the Claude cutover in ledger order. If the
-  Claude cutover aborts, 0740 stays committed: fix the named Claude rows and
+  key; it applies 0747 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0747 stays committed: fix the named Claude rows and
   run the migrator again (it resumes at the Claude cutover). Start binaries
   only after both receipts exist; readiness refuses a database missing
-  either. Validate each provider's report rows separately. While only 0740
+  either. Validate each provider's report rows separately. While only 0747
   is committed no binary can start: this release needs both receipts and
-  the old release must not run after 0740. If the Claude rows cannot be
+  the old release must not run after 0747. If the Claude rows cannot be
   fixed within the window, restore the step 3 backup and use the separate
-  path, or deploy a release that carries 0740 but not the Claude cutover.
+  path, or deploy a release that carries 0747 but not the Claude cutover.
   The Claude steps are in
-  [Claude on the shared subscription core (0741)](#claude-on-the-shared-subscription-core-0741).
+  [Claude on the shared subscription core (0748)](#claude-on-the-shared-subscription-core-0748).
 
-### Claude on the shared subscription core (0741)
+### Claude on the shared subscription core (0748)
 
-Migration `0741_subscription_core_claude_cutover.sql` is a one-way
-maintenance cutover, the Claude counterpart of 0689 and 0740, and shares
-0740's receipt, readiness, report, compatibility-record and stage machinery.
+Migration `0748_subscription_core_claude_cutover.sql` is a one-way
+maintenance cutover, the Claude counterpart of 0689 and 0747, and shares
+0747's receipt, readiness, report, compatibility-record and stage machinery.
 It moves every organization's Claude (`claude`) subscription state onto the
 shared subscription core, records the `claude` receipt and registry row, and
 enables the Claude cutover row for every organization, in one transaction.
@@ -5470,7 +5470,7 @@ authority generation per owner. Legacy rows stay for forensics. The six
 legacy Claude tables (`claude_subscription_credentials`,
 `claude_rotation_settings`, `claude_credential_leases`,
 `claude_session_account_pins`, `claude_capacity_waiters`,
-`claude_subscription_account_usage`) become read-only as 0740 does for
+`claude_subscription_account_usage`) become read-only as 0747 does for
 SuperGrok: the runtime role keeps only `SELECT`, restrictive policies refuse
 every insert or update once the receipt exists, the legacy disconnect
 refuses, and no role can add a legacy Claude personal authority.
@@ -5510,7 +5510,7 @@ session with this guard, which stops otherwise:
 DO $$ BEGIN
   IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
       WHERE rolname = current_user) THEN
-    RAISE EXCEPTION 'run the 0741 inventory as a superuser or BYPASSRLS role';
+    RAISE EXCEPTION 'run the 0748 inventory as a superuser or BYPASSRLS role';
   END IF;
 END $$;
 ```
@@ -5592,11 +5592,11 @@ advisory locks: waiting on one after a table lock would invert the runtime
 writers' lock order. `READ COMMITTED` is still required, and locked keys,
 Personal-workspace fallback handling and their parity assertions are unchanged.
 
-**2. Stop and drain. 3. Back up.** As for 0740. Do not cancel turns.
+**2. Stop and drain. 3. Back up.** As for 0747. Do not cancel turns.
 
 **4. Migrate.** Run the TypeScript migrator as the schema owner with
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` and
-`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, as for 0740. Plain `psql` is refused.
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, as for 0747. Plain `psql` is refused.
 Each credential is decrypted, checked, re-encrypted and read back before the
 legacy copy is blanked. An installation without legacy Claude credentials
 needs no key.
@@ -5612,7 +5612,7 @@ account id is neither the token's Claude account nor its `oauth:` or
 `session_owner_ambiguous`, `personal_generation_ambiguous` or
 `pin_pool_ambiguous`; `lease_conflict`, `waiter_conflict` or
 `waiter_workflow_mismatch`; pre-existing core Claude state; or a parity
-mismatch (`0741 parity mismatch (<metrics>)`). Database errors surface only
+mismatch (`0748 parity mismatch (<metrics>)`). Database errors surface only
 as `could not write the shared core (SQLSTATE <code>, <constraint>)`. Fix the
 named legacy rows and run the migrator again; nothing was committed.
 
@@ -5625,9 +5625,9 @@ an older binary must never be restarted after it.
 **6. Validate after start.**
 
 - Runtime posture is ready on every API and worker.
-- The 0740 report query with `provider = 'claude'` returns no rows, and
+- The 0747 report query with `provider = 'claude'` returns no rows, and
   `compat:dependent_sources_without_record` is zero. Claude adds these
-  `disposition:*` rows to 0740's: `auth_recovery_unmapped` (a live
+  `disposition:*` rows to 0747's: `auth_recovery_unmapped` (a live
   `claudeAuthRecovery` value naming no moved credential; nothing to bound),
   `auth_recovery_not_current` (a live value naming a duplicate login, now an
   alias, or an older credential version; no receipt),
@@ -5676,20 +5676,20 @@ an older binary must never be restarted after it.
   it is the primary or a session's explicit choice) until a request or the
   next refresh shows it still needs signing in, which then marks it.
 
-**Containment and fix forward.** As for 0740, with the Claude cutover row.
+**Containment and fix forward.** As for 0747, with the Claude cutover row.
 
-**With the SuperGrok cutover.** 0740 and 0741 touch disjoint legacy tables
+**With the SuperGrok cutover.** 0747 and 0748 touch disjoint legacy tables
 and only their own provider's keys, each with its own parity report and
 readiness gate. Run them in separate windows (each release carries one) or
 together as described in "With the Claude cutover" above. A release that
-carries 0741 also carries 0740, so the SuperGrok window comes first or
+carries 0748 also carries 0747, so the SuperGrok window comes first or
 shares the Claude window.
 
-### Subscription legacy retirement (0744)
+### Subscription legacy retirement (0751)
 
-Migration `0744_subscription_core_legacy_retirement.sql` is a one-way
+Migration `0751_subscription_core_legacy_retirement.sql` is a one-way
 **maintenance** migration: drained, never rolling. It retires what the
-SuperGrok (0740) and Claude (0741) cutovers left unused:
+SuperGrok (0747) and Claude (0748) cutovers left unused:
 
 - the legacy SuperGrok and Claude pool routines: account writers, pool
   resolvers, revalidators, liveness and visibility predicates, and their
@@ -5713,16 +5713,16 @@ Design record:
 [subscription core, R](design/subscription-core-2026-10-07.md#r-retirement-of-the-legacy-pool-routines-and-the-codex-twins).
 
 **When.** Run it after the `xai` and `claude` cutover receipts are
-committed: in the Claude window right after 0741, or in a later window.
+committed: in the Claude window right after 0748, or in a later window.
 Only the release that carries it, or a later one, starts on a retired
 database. Older releases refuse it because their runtime posture requires
 the dropped routines. This release refuses a database without it
 (`retired subscription <object> is present; apply the drained retirement
-migration 0744_subscription_core_legacy_retirement.sql`). Stop everything
+migration 0751_subscription_core_legacy_retirement.sql`). Stop everything
 before migrating, and start only this release afterwards.
 
 **1. Check (before the window).** Run these queries as a superuser or
-another `BYPASSRLS` role, behind the guard from 0741 step 1. Every row of
+another `BYPASSRLS` role, behind the guard from 0748 step 1. Every row of
 the first query must read `committed = true`, and the second must return no
 rows:
 
@@ -5742,7 +5742,7 @@ connection's provider, so investigate any such row before the window.
 Deleting it removes only that connection's reach to workspaces created
 later; an administrator can set the reach again in the access editor.
 
-**2. Stop and drain. 3. Back up.** As for 0740. Include idle pooled
+**2. Stop and drain. 3. Back up.** As for 0747. Include idle pooled
 connections: the migration refuses while any application login is
 connected.
 
@@ -5754,13 +5754,13 @@ Every refusal rolls back the whole migration, and nothing is committed:
 
 | SQLSTATE | Message | Meaning and fix |
 |---|---|---|
-| `55000` | `0744 requires explicit application database roles` or `received invalid application roles` | The role list is missing or malformed. Pass it and run again. |
-| `55000` | `0744 requires drained application sessions` | A listed login, or another non-superuser login that could execute a retired routine or write an affected table, is connected. This includes transitive `SET ROLE` access by `NOINHERIT` logins, before or after switching roles. Stop it and run again. |
-| `55000` | `0744 requires the provider cutover receipts (0712)` or `the committed cutover receipt of every provider; missing: <providers>` | A cutover has not committed. Complete 0740 or 0741 first. |
-| `55000` | `0744 found a retired routine missing or changed`, `an unexpected overload of a retired routine`, `a retired policy missing`, `a retired trigger missing or changed`, `the reach table, its view, its default or the connection key changed`, or `a reach routine` (or `reach trigger`, `reach policy`) `missing, changed or already renamed` | The schema differs from what 0740 and 0741 leave. Something changed it out of band, so do not edit around it: restore the step 3 backup or escalate. |
-| `2BP01` | `0744 found a kept object that depends on a retired routine`, `names a retired object` or `names a Codex-named reach object` | Something that stays still calls or names a retired object: a routine (SQL-standard bodies included), a policy, a trigger's `WHEN` clause or arguments, a view, a default or a `CHECK` constraint. Matching is case-insensitive and covers `format()` patterns and ordinary or dollar-quoted fragments concatenated around the provider. Escalate; never drop it by hand. |
-| `55000` | `0744 received an invalid retired name` | A defect in the migration's own lists. Escalate. |
-| `23503` | `0744 found a reach row whose provider is not its connection's` | Fix it as in step 1 and run again. |
+| `55000` | `0751 requires explicit application database roles` or `received invalid application roles` | The role list is missing or malformed. Pass it and run again. |
+| `55000` | `0751 requires drained application sessions` | A listed login, or another non-superuser login that could execute a retired routine or write an affected table, is connected. This includes transitive `SET ROLE` access by `NOINHERIT` logins, before or after switching roles. Stop it and run again. |
+| `55000` | `0751 requires the provider cutover receipts (0712)` or `the committed cutover receipt of every provider; missing: <providers>` | A cutover has not committed. Complete 0747 or 0748 first. |
+| `55000` | `0751 found a retired routine missing or changed`, `an unexpected overload of a retired routine`, `a retired policy missing`, `a retired trigger missing or changed`, `the reach table, its view, its default or the connection key changed`, or `a reach routine` (or `reach trigger`, `reach policy`) `missing, changed or already renamed` | The schema differs from what 0747 and 0748 leave. Something changed it out of band, so do not edit around it: restore the step 3 backup or escalate. |
+| `2BP01` | `0751 found a kept object that depends on a retired routine`, `names a retired object` or `names a Codex-named reach object` | Something that stays still calls or names a retired object: a routine (SQL-standard bodies included), a policy, a trigger's `WHEN` clause or arguments, a view, a default or a `CHECK` constraint. Matching is case-insensitive and covers `format()` patterns and ordinary or dollar-quoted fragments concatenated around the provider. Escalate; never drop it by hand. |
+| `55000` | `0751 received an invalid retired name` | A defect in the migration's own lists. Escalate. |
+| `23503` | `0751 found a reach row whose provider is not its connection's` | Fix it as in step 1 and run again. |
 | `55P03` | lock timeout | A session still holds a table. Drain it and run again. |
 
 The FK validation temporarily removes FORCE RLS from

@@ -19,6 +19,7 @@ for (const help of [
   "builtin:opengeni-help",
   "builtin:opengeni-client",
   "builtin:opengeni-schedules",
+  "builtin:opengeni-secrets",
 ] as const)
   test(`${help} is addressable and cannot escape a host's empty selection`, () => {
     expect(

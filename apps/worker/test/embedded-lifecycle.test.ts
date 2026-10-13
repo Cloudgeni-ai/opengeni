@@ -485,7 +485,7 @@ describe("embedded worker lifecycle contract", () => {
         },
       ],
       [{ present: true }],
-      // Migration 0744: no retired subscription object remains.
+      // Migration 0751: no retired subscription object remains.
       [],
       [{ present: true }],
       // Migration 0712: the cutover receipt reader exists and every provider holds
@@ -931,7 +931,7 @@ describe("embedded worker lifecycle contract", () => {
         options,
       )(),
     ).rejects.toThrow(
-      /retired subscription routine embedded\.resolve_claude_authority_pool\(uuid, uuid, text, jsonb\) is present; apply the drained retirement migration 0744_subscription_core_legacy_retirement\.sql/,
+      /retired subscription routine embedded\.resolve_claude_authority_pool\(uuid, uuid, text, jsonb\) is present; apply the drained retirement migration 0751_subscription_core_legacy_retirement\.sql/,
     );
     await expect(dbReadyCheck(embeddedDb(true, [], false), options)()).rejects.toThrow(
       /missing the 0689 Codex subscription-core cutover receipt/,

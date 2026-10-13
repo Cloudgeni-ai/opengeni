@@ -238,7 +238,7 @@ describe.skipIf(!realDb)("shared personal choice with a FORCE-RLS-bound schema o
   test("maintenance activation rejects missing role inventory and live old/new application sessions before changes", async () => {
     await rawRows(client!.db, sql`select current_user`);
     const migration = await readFile(
-      new URL("../drizzle/0742_subscription_shared_personal_choice.sql", import.meta.url),
+      new URL("../drizzle/0749_subscription_shared_personal_choice.sql", import.meta.url),
       "utf8",
     );
     const owner = postgres(database!.ownerUrl, { max: 1, onnotice: () => undefined });

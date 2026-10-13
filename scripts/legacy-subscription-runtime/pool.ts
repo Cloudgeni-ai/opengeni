@@ -25,7 +25,7 @@ const PROVIDER_NAMED = SUBSCRIPTION_RETIRED_ROUTINE_NAMES.filter((name) =>
  * The shared legacy pool runtime retired by the M4 retirement step (R), once
  * every provider runs on the shared subscription core: the synthetic
  * pool-worker subjects that owned shared legacy pool rows, and every routine,
- * policy and trigger the drained retirement migration 0744 drops (the
+ * policy and trigger the drained retirement migration 0751 drops (the
  * SuperGrok and Claude pool writers, resolvers, revalidators, policy
  * predicates and trigger functions, the Codex twins of the 0707 neutral
  * routines and their owner-only internals), plus the Codex names its reach
@@ -111,7 +111,7 @@ export const LEGACY_POOL_RUNTIME: LegacySubscriptionRetirement = {
         "SUBSCRIPTION_RENAMED_RELATIONS",
       ],
       reason:
-        "The retired-object inventory (dropped objects and the Codex names of renamed ones) the runtime posture requires absent after migration 0744; never a call.",
+        "The retired-object inventory (dropped objects and the Codex names of renamed ones) the runtime posture requires absent after migration 0751; never a call.",
     },
     "packages/db/src/codex-subscription-core-cutover.ts": {
       declarations: ["moveCodexCredentials"],

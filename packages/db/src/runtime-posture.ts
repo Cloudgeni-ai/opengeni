@@ -197,7 +197,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 0598's Claude pool activation receipt. Readiness no longer
-  // requires it (the retirement migration 0744 dropped the pool routines);
+  // requires it (the retirement migration 0751 dropped the pool routines);
   // it stays as a receipt the runtime need not execute.
   "claude_subscription_pool_protocol_v1_active()",
   // M3 PR 2b: run only by the Codex Apps routines as their owner.
@@ -252,7 +252,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "seed_subscription_codex_cutover()",
   "keep_subscription_codex_cutover_identity()",
   // 0689's plan-change and auto-assignment trigger functions, under the
-  // provider-free names migration 0744 gives them.
+  // provider-free names migration 0751 gives them.
   "record_subscription_core_plan_change()",
   "auto_assign_subscription_core_workspace()",
   "auto_assign_subscription_core_personal_workspace()",
@@ -540,6 +540,50 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
 ] as const;
+const VAULT_CAPABILITY_PREDICATE_ROUTINE = "vault_authority_capability_active(text)";
+const VAULT_CAPABILITY_TABLE = "vault_authority_capabilities";
+/** Vault routines (0739): the application role's only way into the vault tables. */
+export const VAULT_RUNTIME_ROUTINES = [
+  "list_vaults_for_subject(uuid, jsonb)",
+  "get_vault_for_subject(uuid, jsonb)",
+  "create_vault(jsonb, jsonb)",
+  "update_vault(uuid, bigint, jsonb, jsonb)",
+  "delete_vault(uuid, text, boolean, jsonb)",
+  "ensure_default_vault(uuid, text, jsonb)",
+  "ensure_task_vault(uuid, uuid, jsonb)",
+  "list_vault_items(uuid, text, text, boolean, text, integer, jsonb)",
+  "get_vault_item(uuid, jsonb)",
+  "upsert_vault_item(jsonb, jsonb)",
+  "archive_vault_item(uuid, jsonb)",
+  "restore_vault_item(uuid, jsonb)",
+  "delete_vault_item_permanently(uuid, jsonb)",
+  "move_vault_item(uuid, uuid, text, text, jsonb)",
+  "read_vault_field_ciphertext(uuid, integer, text, jsonb, jsonb)",
+  "list_vault_field_versions(uuid, jsonb)",
+  "resolve_secret_reference_candidates(jsonb, jsonb)",
+  "record_vault_secret_use(jsonb, jsonb, jsonb)",
+  "set_session_vault_policy(uuid, jsonb, jsonb)",
+  "session_secrets_view(uuid, jsonb)",
+  "update_passkey_sign_count(uuid, bigint, jsonb)",
+  "lease_vault_passkeys(jsonb, text, integer)",
+  "release_vault_passkey_leases(text, jsonb)",
+  "upsert_provider_vault_items(uuid, text, jsonb, jsonb)",
+  "set_vault_sync_status(uuid, jsonb, jsonb)",
+  "apply_secret_answers(uuid, uuid, jsonb, jsonb)",
+  "link_provider_vault(jsonb, jsonb)",
+  "provider_vault_sync_target(uuid, jsonb)",
+  "provider_vault_item_ref(uuid, uuid, text, jsonb)",
+] as const;
+/** Vault tables (0739): FORCE row security, no application-role privileges. */
+export const VAULT_TABLES = [
+  "vaults",
+  "vault_items",
+  "vault_item_fields",
+  "vault_field_versions",
+  "vault_item_name_aliases",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+] as const;
 const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
 const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
 const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE = "connection_tenancy_backfill_capabilities";
@@ -775,7 +819,7 @@ const CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE =
   "claude_provider_account_authority_snapshot_v1_valid(jsonb)";
 /**
  * The immutable v1 snapshot CHECK validators. They outlive the retired pool
- * routines (migration 0744): the v1 columns and their constraints stay until
+ * routines (migration 0751): the v1 columns and their constraints stay until
  * M6, so the runtime role keeps EXECUTE and PUBLIC does not.
  */
 export const SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES = [
@@ -841,7 +885,7 @@ export const SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES = [
 /**
  * The Codex-named twins of the migration 0707 neutral routines. Migration
  * 0707 kept them for binaries that still called them; the retirement
- * migration 0744 drops them (with the owner-only writer context and
+ * migration 0751 drops them (with the owner-only writer context and
  * connection target only they called), and the runtime posture requires them
  * absent through SUBSCRIPTION_RETIRED_ROUTINES.
  */
@@ -874,7 +918,7 @@ export type RetiredSubscriptionRoutineSchema =
   | "opengeni_subscription_internal";
 
 /**
- * M4 retirement (migration 0744, design 5.3 "R. Retirement"): every routine
+ * M4 retirement (migration 0751, design 5.3 "R. Retirement"): every routine
  * the drained retirement migration drops, by exact signature in
  * `oidvectortypes` form. The SuperGrok and Claude pool writers, resolvers,
  * revalidators, policy predicates and trigger functions, the Codex twins and
@@ -915,7 +959,7 @@ export const SUBSCRIPTION_RETIRED_ROUTINES: readonly {
 ];
 
 /**
- * Migration 0744: the policies the retirement drops, all in the data schema.
+ * Migration 0751: the policies the retirement drops, all in the data schema.
  * The pool and credential scopes on the legacy factory tables, the Claude
  * usage scope, and the legacy routines' runtime-capability policies on the
  * shared membership and authority tables.
@@ -949,7 +993,7 @@ export const SUBSCRIPTION_RETIRED_POLICIES: readonly { table: string; policy: st
   ]),
 ];
 
-/** Migration 0744: the legacy factory triggers the retirement drops (data schema). */
+/** Migration 0751: the legacy factory triggers the retirement drops (data schema). */
 export const SUBSCRIPTION_RETIRED_TRIGGERS: readonly { table: string; trigger: string }[] = (
   ["xai", "claude"] as const
 ).flatMap((provider) => [
@@ -975,7 +1019,7 @@ export const SUBSCRIPTION_RETIRED_TRIGGERS: readonly { table: string; trigger: s
 ]);
 
 /**
- * Migration 0744's reach finalization (design 0713 note "Kept until
+ * Migration 0751's reach finalization (design 0713 note "Kept until
  * retirement"): 0689's trigger functions in opengeni_private that take
  * provider-free names. Their Codex names are retired with the dropped
  * objects.
@@ -993,7 +1037,7 @@ export const SUBSCRIPTION_RENAMED_ROUTINES: readonly {
   ["record_subscription_codex_plan_change()", "record_subscription_core_plan_change()"],
 ].map(([from, to]) => ({ schema: "opengeni_private" as const, from: from!, to: to! }));
 
-/** Migration 0744: 0689's triggers that take provider-free names (data schema). */
+/** Migration 0751: 0689's triggers that take provider-free names (data schema). */
 export const SUBSCRIPTION_RENAMED_TRIGGERS: readonly { table: string; from: string; to: string }[] =
   [
     {
@@ -1014,7 +1058,7 @@ export const SUBSCRIPTION_RENAMED_TRIGGERS: readonly { table: string; from: stri
   ];
 
 /**
- * Migration 0744: 0689's two owner-only auto-assignment policies (data
+ * Migration 0751: 0689's two owner-only auto-assignment policies (data
  * schema), which take provider-free names and read the provider-free
  * setting SUBSCRIPTION_AUTO_ASSIGN_SETTING.
  */
@@ -1032,7 +1076,7 @@ export const SUBSCRIPTION_RENAMED_POLICIES: readonly { table: string; from: stri
     },
   ];
 
-/** Migration 0744: the reach table takes the name of 0713's view over it. */
+/** Migration 0751: the reach table takes the name of 0713's view over it. */
 export const SUBSCRIPTION_RENAMED_RELATIONS: readonly {
   schema: "opengeni_private";
   from: string;
@@ -1049,12 +1093,12 @@ export const SUBSCRIPTION_RENAMED_RELATIONS: readonly {
  * The setting the auto-assignment trigger functions set to the organization
  * around each provider's apply, admitting their owner-only writes through the
  * renamed policies (0689's `opengeni.subscription_codex_auto_assign` before
- * migration 0744).
+ * migration 0751).
  */
 export const SUBSCRIPTION_AUTO_ASSIGN_SETTING = "opengeni.subscription_core_auto_assign";
 
 /**
- * Every retired routine: dropped by migration 0744, or renamed by it (the
+ * Every retired routine: dropped by migration 0751, or renamed by it (the
  * Codex name is retired). What the runtime posture requires absent.
  */
 const RETIRED_ROUTINE_ENTRIES: readonly {
@@ -1135,8 +1179,8 @@ export const SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES = [
  */
 export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, string>> = {
   codex: "0689_subscription_core_codex_cutover.sql",
-  xai: "0740_subscription_core_xai_cutover.sql",
-  claude: "0741_subscription_core_claude_cutover.sql",
+  xai: "0747_subscription_core_xai_cutover.sql",
+  claude: "0748_subscription_core_claude_cutover.sql",
 };
 
 /**
@@ -1146,7 +1190,7 @@ export const SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS: Readonly<Record<string, s
  * withholds a provider cutover to characterize a legacy runtime withholds
  * this migration too.
  */
-export const SUBSCRIPTION_RETIREMENT_MIGRATION = "0744_subscription_core_legacy_retirement.sql";
+export const SUBSCRIPTION_RETIREMENT_MIGRATION = "0751_subscription_core_legacy_retirement.sql";
 
 /**
  * Migration 0716 (M4 PR 0b): accepted authority across a provider's cutover.
@@ -1234,14 +1278,14 @@ export const SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES = [
   "subscription_codex_apps_designation_target(uuid, uuid)",
   // M3 PR 3b: the capability internals and the revision-authority trigger
   // function (the writers' caller check and the connection-seam target went
-  // with the Codex twins in migration 0744).
+  // with the Codex twins in migration 0751).
   "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
   "drop_subscription_codex_owner_capabilities(uuid)",
   "derive_scheduled_revision_subscription_authority()",
   // Migration 0689: the cutover receipt and the two owner-run trigger
   // functions. Readiness only looks the receipt up; triggers fire without
   // the caller holding EXECUTE. The plan-change and auto-assignment trigger
-  // functions carry the provider-free names migration 0744 gives them.
+  // functions carry the provider-free names migration 0751 gives them.
   "subscription_codex_cutover_v1_active()",
   "seed_subscription_codex_cutover()",
   "record_subscription_core_plan_change()",
@@ -1325,6 +1369,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
+  ...VAULT_RUNTIME_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES,
   ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
@@ -1790,6 +1835,13 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
   "usage_events",
+  "vault_field_versions",
+  "vault_item_fields",
+  "vault_item_name_aliases",
+  "vault_items",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+  "vaults",
   "video_generation_operations",
   "video_generation_references",
   "workspace_artifact_events",
@@ -2340,6 +2392,13 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "vault_field_versions",
+  "vault_item_fields",
+  "vault_item_name_aliases",
+  "vault_items",
+  "vault_name_aliases",
+  "vault_passkey_leases",
+  "vaults",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
 ] as const;
@@ -2481,7 +2540,7 @@ export type RuntimeDatabasePosture = {
   /**
    * Retired subscription objects (SUBSCRIPTION_RETIRED_ROUTINES, _POLICIES and
    * _TRIGGERS, and the Codex names of SUBSCRIPTION_RENAMED_*) the database
-   * still holds; empty once migration 0744 applied.
+   * still holds; empty once migration 0751 applied.
    */
   retiredSubscriptionObjects: string[];
   /** Migration 0689: Codex runs on the shared subscription core. */
@@ -2623,7 +2682,7 @@ export async function inspectRuntimeDatabasePosture(
       );
       const sessionVariableSetAttachmentsCutoverPresent =
         variableSetCutoverRows[0]?.present === true;
-      // Migration 0744: any retired subscription object still present (a
+      // Migration 0751: any retired subscription object still present (a
       // dropped one, or the Codex name of a renamed one) means the drained
       // retirement migration has not run. Read from the catalogs by name (no
       // schema privilege needed); a routine counts by name, so an unexpected
@@ -2897,6 +2956,7 @@ export async function inspectRuntimeDatabasePosture(
               ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${VARIABLE_SET_CAPABILITY_TABLE},
+              ${VAULT_CAPABILITY_TABLE},
               ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
@@ -3917,6 +3977,23 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if ((VAULT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = VAULT_TABLES.map((tableName) => tableByName.get(tableName)).filter(
+        (table): table is RuntimeTablePosture => table !== undefined,
+      );
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} vault table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match vault authority owner ${authorityOwner}`,
+          );
+        }
+      }
     } else if ((SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = ["rigs", "rig_versions", "enrollments", "sandboxes"]
         .map((tableName) => tableByName.get(tableName))
@@ -4524,6 +4601,49 @@ export function evaluateRuntimeDatabasePosture(
       }
       if (routine.publicExecute) {
         violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
+      }
+      const directPrivileges = [
+        ["SELECT", table.select],
+        ["INSERT", table.insert],
+        ["UPDATE", table.update],
+        ["DELETE", table.delete],
+      ].filter(([, granted]) => granted);
+      if (directPrivileges.length > 0) {
+        violations.push(
+          `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+        );
+      }
+    }
+    const vaultCapabilityTables = posture.privateTables.filter(
+      (table) => table.name === VAULT_CAPABILITY_TABLE,
+    );
+    const vaultCapabilityRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name === VAULT_CAPABILITY_PREDICATE_ROUTINE,
+    );
+    if (vaultCapabilityTables.length !== 1) {
+      violations.push(`vault capability table ${VAULT_CAPABILITY_TABLE} is missing or ambiguous`);
+    }
+    if (vaultCapabilityRoutines.length !== 1) {
+      violations.push(
+        `vault capability predicate ${VAULT_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+      );
+    }
+    if (vaultCapabilityTables.length === 1 && vaultCapabilityRoutines.length === 1) {
+      const table = vaultCapabilityTables[0]!;
+      const routine = vaultCapabilityRoutines[0]!;
+      if (routine.owner !== table.owner) {
+        violations.push(
+          `vault capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+        );
+      }
+      if (!routine.securityDefiner) {
+        violations.push(`vault capability predicate ${routine.name} is not SECURITY DEFINER`);
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks vault capability predicate ${routine.name}`);
+      }
+      if (routine.publicExecute) {
+        violations.push(`PUBLIC has forbidden vault capability predicate ${routine.name}`);
       }
       const directPrivileges = [
         ["SELECT", table.select],

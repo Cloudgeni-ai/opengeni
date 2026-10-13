@@ -27,6 +27,7 @@ import type {
   CreateScheduledTaskRequest,
   McpConnectionAccountSelection,
   UpdateScheduledTaskRequest,
+  VaultPolicy,
 } from "@opengeni/sdk";
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
@@ -222,10 +223,16 @@ export const NAME_MAX_LENGTH = 80;
 export interface ScheduleDraft extends ScheduledTaskFormState {
   /** Null for a schedule that only runs with Run now. */
   cadence: CadenceValue | null;
-  variableSetId: string | null;
   rigId: string | null;
   /** Who can see the schedule and the chats it creates. */
   visibility: "private" | "workspace";
+  /** Vaults every run may use. Undefined: all the owner can reach. */
+  vaultPolicy?: VaultPolicy;
+}
+
+/** A selected policy, or undefined for "all" (the server default). */
+export function narrowedVaultPolicy(policy: VaultPolicy | undefined): VaultPolicy | undefined {
+  return policy?.mode === "selected" ? policy : undefined;
 }
 
 export interface DraftDefaults {
@@ -251,7 +258,6 @@ export function newScheduleDraft(defaults: DraftDefaults, timeZone?: string): Sc
   return {
     ...newScheduledTaskFormState(defaults.includeOpenGeniTool, [], formDefaults(defaults)),
     cadence: defaultCadence(timeZone),
-    variableSetId: null,
     rigId: null,
     visibility: "workspace",
   };
@@ -452,8 +458,8 @@ export function createRequestFromDraft(
     metadata: taskMetadataFromFormState(draft),
     connectionAccounts: draft.connectionAccounts ?? [],
     agentConfig: agentConfigFromFormState(draft),
-    ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
+    ...(narrowedVaultPolicy(draft.vaultPolicy) ? { vaultPolicy: draft.vaultPolicy } : {}),
   };
 }
 
@@ -462,9 +468,9 @@ function sameCadence(left: CadenceValue | null, right: CadenceValue | null): boo
 }
 
 /**
- * The PATCH for an edited schedule. The schedule spec, variable set and
+ * The PATCH for an edited schedule. The schedule spec, vault policy and
  * Sandbox Environment are sent only when they changed, so an untouched field
- * the editor can't fully express (an interval end, a set this viewer can't
+ * the editor can't fully express (an interval end, a vault this viewer can't
  * list) is never rewritten.
  */
 export function updateRequestFromDraft(
@@ -541,10 +547,11 @@ export function updateRequestFromDraft(
       : same(oldConfig, nextConfig)
         ? {}
         : { agentConfig: nextConfig }),
-    ...(inheritsChatSettings || initial.variableSetId === draft.variableSetId
-      ? {}
-      : { variableSetId: draft.variableSetId }),
     ...(inheritsChatSettings || initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
+    ...(inheritsChatSettings ||
+    same(narrowedVaultPolicy(initial.vaultPolicy), narrowedVaultPolicy(draft.vaultPolicy))
+      ? {}
+      : { vaultPolicy: narrowedVaultPolicy(draft.vaultPolicy) ?? { mode: "all" } }),
   };
 }
 

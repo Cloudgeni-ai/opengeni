@@ -34,7 +34,7 @@ dropped occurrence. The run carries `admissionRefusal`
 | --- | --- | --- | --- |
 | `scheduled_authority_unavailable` | no | `failed` | The frozen owner/causal-human authority cannot be proven (owner without revision authority, user-scoped personal resource or xAI without a causal human, disagreeing humans, source schedule without its owner). |
 | `machine_target_unavailable` | no | `failed` | The Connected Machine target or its enrollment is gone, or a self-hosted task names no machine. |
-| `variable_set_unavailable` | no | `failed` | The task's (or its Sandbox Environment's default) Variable Set is not visible to the task's authority. |
+| `variable_set_unavailable` | no | `failed` | Legacy only: a task created before the vault migration still names a Variable Set that is no longer visible to its authority. Clear the task's set (vaults need no attachment). |
 | `rig_version_unavailable` | no | `failed` | The Sandbox Environment has no active version. |
 | `machine_enrollment_inactive` | yes | `skipped` | The machine's enrollment is not active right now. |
 | `insufficient_credits`, `monthly_model_cost_limit`, `monthly_agent_run_limit` | yes | `skipped` | Billing admission refused this occurrence. |

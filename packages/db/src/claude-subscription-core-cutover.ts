@@ -59,7 +59,7 @@ import {
 export const CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MARKER =
   "-- opengeni:claude-subscription-core-cutover-v1";
 export const CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MIGRATION =
-  "0741_subscription_core_claude_cutover.sql";
+  "0748_subscription_core_claude_cutover.sql";
 const ORDINAL = CLAUDE_SUBSCRIPTION_CORE_CUTOVER_MIGRATION.slice(0, 4);
 /** The legacy Claude resource kind of a `user` credential's personal authority. */
 const LEGACY_RESOURCE_KIND = "claude_subscription";

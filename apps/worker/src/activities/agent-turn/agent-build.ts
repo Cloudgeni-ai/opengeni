@@ -67,10 +67,7 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
 import type { runtimeResourcesForTurn } from "./file-resources";
 import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
-import type {
-  loadWorkspaceEnvironmentForRunWithCredentials,
-  sandboxEnvironmentForRun,
-} from "../environment";
+import type { sandboxEnvironmentForRun } from "../environment";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -81,8 +78,16 @@ import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
+import {
+  attemptQuestionVaultValidator,
+  createAttemptSecretResolver,
+  secretsCapabilityEnabled,
+  type AttemptVaultAccess,
+} from "./secret-resolver";
 
 export type BuildTurnAgentDeps = {
+  /** Connected-vault providers and the shared read budget for this attempt. */
+  vaultAccess: AttemptVaultAccess;
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
@@ -123,7 +128,6 @@ export type BuildTurnAgentDeps = {
   rigName: GovernanceModelOk["rigName"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
-  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
   runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
   sandboxEnvironment: Record<string, string>;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -191,7 +195,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     rigName,
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
-    workspaceVariableSet,
     runtimeResources,
     sandboxEnvironment,
     sandboxArtifactRuntime,
@@ -237,23 +240,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // resolved ONCE at turn start (above) via resolveActiveSandboxBackend (the
   // tested gate) and is reused here — resolving once is correct because the
   // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
-  // buildAgent's option key is `workspaceEnvironment` (internal runtime
-  // symbol; the product concept is a variable set). Built as a TYPED const —
-  // a direct literal assignment to Pick<BuildAgentOptions,...> IS excess-
-  // property-checked, so a wrong key fails tsc. A bare conditional spread
-  // inside the options literal is NOT checked, which is exactly how the M1
-  // key regression (workspaceVariableSet vs workspaceEnvironment) slipped
-  // through and silently dropped the variable-set instructions block.
-  const workspaceEnvironmentOption: Pick<BuildAgentOptions, "workspaceEnvironment"> =
-    workspaceVariableSet
-      ? {
-          workspaceEnvironment: {
-            name: workspaceVariableSet.name,
-            description: workspaceVariableSet.description,
-            variableNames: Object.keys(workspaceVariableSet.values),
-          },
-        }
-      : {};
   // Fallback mode (the default) keeps hosted search exactly as resolved; the
   // operator's `replace` mode withholds it in favour of provider tools.
   const hostedWebSearch = turnWebSearchPlan(
@@ -704,6 +690,24 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        secrets: {
+          referencesEnabled: secretsCapabilityEnabled(session.agent),
+          // Same rule as the vault context (0739) and session authorization:
+          // the initiating human, else a subject initiator.
+          hasActingHuman: Boolean(
+            turn.initiatingHumanSubjectId ??
+            (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null),
+          ),
+          validateQuestionVault: attemptQuestionVaultValidator({
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+          }),
+        },
         missingSessionTitleHint,
         sandboxEnvironment,
         ...(preparedTools.attemptToolCatalog
@@ -711,6 +715,19 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        // W1: `{{secret:…}}` references resolve at the exec boundary.
+        secretResolver: createAttemptSecretResolver({
+          db,
+          settings: eventing.modelRunSettings,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: turn.executionGeneration,
+          agent: session.agent,
+          vaultAccess: deps.vaultAccess,
+        }),
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },
@@ -822,7 +839,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
         ...(sessionInstructions ? { sessionInstructions } : {}),
-        ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
         // hooks. All absent for a rig-less turn (byte-for-byte today).

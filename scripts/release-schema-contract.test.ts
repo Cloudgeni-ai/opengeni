@@ -2276,11 +2276,11 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0745_subscription_personal_sharing.sql",
+      "0752_subscription_personal_sharing.sql",
       "0734_connected_output_reachable_due.sql",
-      "0739_subscription_failover_readiness_and_request_fence.sql",
-      "0742_subscription_shared_personal_choice.sql",
-      "0743_subscription_waiter_candidates.sql",
+      "0746_subscription_failover_readiness_and_request_fence.sql",
+      "0749_subscription_shared_personal_choice.sql",
+      "0750_subscription_waiter_candidates.sql",
       "0738_private_sessions_share_sandboxes.sql",
       "0737_site_audience.sql",
       "0734_connected_output_reachable_due.sql",
@@ -2290,9 +2290,9 @@ describe("release schema contract", () => {
       "0730_maintenance_work_probes.sql",
       "0735_subscription_core_owned_connection_usage.sql",
       "0730_subscription_core_personal_connection_versions.sql",
-      "0744_subscription_core_legacy_retirement.sql",
-      "0740_subscription_core_xai_cutover.sql",
-      "0741_subscription_core_claude_cutover.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+      "0747_subscription_core_xai_cutover.sql",
+      "0748_subscription_core_claude_cutover.sql",
       "0729_subscription_person_preferences_owner.sql",
       "0728_subscription_core_personal_connect_format.sql",
       "0727_subscription_core_ownerless_video_operations.sql",
@@ -2722,6 +2722,7 @@ describe("release schema contract", () => {
       "0685_sandbox_capture_around_supervised_commands.sql",
       "0687_human_wait_command_containment.sql",
       "0736_notification_webhook_content.sql",
+      "0739_vaults.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

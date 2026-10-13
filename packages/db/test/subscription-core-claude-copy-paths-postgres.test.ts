@@ -438,8 +438,8 @@ beforeAll(async () => {
     // This suite constructs pre-cutover carriers, then installs its own
     // receipt. Neither provider cutover may pre-mark those source rows.
     withheldMigrations: [
-      "0740_subscription_core_xai_cutover.sql",
-      "0741_subscription_core_claude_cutover.sql",
+      "0747_subscription_core_xai_cutover.sql",
+      "0748_subscription_core_claude_cutover.sql",
     ],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");

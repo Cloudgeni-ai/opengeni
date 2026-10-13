@@ -97,7 +97,7 @@ snapshot. Private work additionally requires the exact initiating human.
 
 > Retired runtime: the next paragraph describes the legacy pool. SuperGrok
 > runs on the shared subscription core since 0719. The drained retirement
-> migration 0744 drops the legacy pool's routines, triggers and row
+> migration 0751 drops the legacy pool's routines, triggers and row
 > policies, and the runtime role reads no row of the legacy pool tables. The
 > synthetic pool-worker subjects and `withSubscriptionPoolSessionAccess`
 > remain only in legacy callers that the SuperGrok and Claude deletion

@@ -245,6 +245,22 @@ async function finalizeTurnAttemptSteps(
       codemodeTokenRenewal: codemodeRenewalToStop,
       runCredentialRenewal: runRenewalToStop,
     });
+    // W1 / SEC-4: remove this attempt's secret files (`secretfile` paths and
+    // any leftover env file) once every writer has drained. Best effort: the
+    // files are 0600 under a 0700 attempt directory and a later attempt never
+    // reads them, so a failure is logged rather than holding the receipt.
+    if (toolCancellationFence?.clearSecretFiles) {
+      monitor.enter("credential_cleanup");
+      try {
+        await toolCancellationFence.clearSecretFiles();
+      } catch (error) {
+        observability.warn("attempt secret file cleanup failed", {
+          "opengeni.session_id": input.sessionId,
+          "opengeni.attempt_id": input.attemptId,
+          "error.type": error instanceof Error ? error.name : "unknown",
+        });
+      }
+    }
     // Attempt-qualified credential deletion is also a real workspace write,
     // but it must not be submitted behind the very command being cancelled.
     // Drain tool processes and credential renewals first, then delete only this

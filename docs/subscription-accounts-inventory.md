@@ -33,7 +33,7 @@
 > with exact foreign-row parity. It requires the D-32 binding precursor and
 > its provider-fixed trigger; source preparation is not cutover activation.
 > See design §5.3 and the Claude deployment runbook for the drain/index order.
-> M4 R: the drained migration `0744_subscription_core_legacy_retirement.sql`
+> M4 R: the drained migration `0751_subscription_core_legacy_retirement.sql`
 > drops the SuperGrok and Claude pool routines Part 4 lists, their trigger
 > functions, the triggers and policies that call them, and the Codex-named
 > twins of the neutral routines. Those are the `create_*`, `disconnect_*`,

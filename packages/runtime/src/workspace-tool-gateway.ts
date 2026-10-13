@@ -13,3 +13,10 @@ export {
   // gateway must derive it exactly as model execution does.
   sessionMcpApprovalConnectionId,
 } from "./index";
+// Execution-time `{{secret:…}}` argument resolution for gateway tool calls;
+// the same resolver model execution applies after approval.
+export {
+  createSecretArgumentResolver,
+  secretArgumentMode,
+  type SecretArgumentMode,
+} from "./secret-argument-resolution";

@@ -7,6 +7,8 @@ import {
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
+  type HumanInputSecretAnswerResult,
+  type HumanInputSecretSpec,
   type SessionEvent,
   type SessionStatus,
   type TimelineAnnotation,
@@ -1768,10 +1770,13 @@ function humanInputQuestions(value: unknown): HumanInputQuestion[] {
     if (
       !id ||
       !prompt ||
-      (kind !== "text" && kind !== "single_select" && kind !== "multi_select")
+      (kind !== "text" && kind !== "single_select" && kind !== "multi_select" && kind !== "secret")
     ) {
       return [];
     }
+    // Secret questions keep their spec (names and hints only; never a value).
+    const secret = kind === "secret" ? humanInputSecretSpec(question.secret) : null;
+    if (kind === "secret" && !secret) return [];
     const options = Array.isArray(question.options)
       ? question.options.map(asRecord).flatMap((option) => {
           const optionId = stringValue(option.id);
@@ -1791,20 +1796,54 @@ function humanInputQuestions(value: unknown): HumanInputQuestion[] {
         options,
         required: question.required === true,
         allowOther: question.allowOther === true,
+        ...(secret ? { secret } : {}),
       },
     ];
   });
 }
 
+function humanInputSecretSpec(value: unknown): HumanInputSecretSpec | null {
+  const spec = asRecord(value);
+  const item = stringValue(spec.item);
+  if (!item) return null;
+  return spec as unknown as HumanInputSecretSpec;
+}
+
+function humanInputSecretResult(value: unknown): HumanInputSecretAnswerResult | null {
+  if (value === undefined || value === null) return null;
+  const result = asRecord(value);
+  const reference = stringValue(result.reference);
+  const vaultName = stringValue(result.vaultName);
+  const itemName = stringValue(result.itemName);
+  const saveTo = result.saveTo;
+  if (
+    !reference ||
+    !vaultName ||
+    !itemName ||
+    (saveTo !== "user" && saveTo !== "task" && saveTo !== "workspace")
+  ) {
+    return null;
+  }
+  return {
+    reference,
+    username: stringValue(result.username) || null,
+    vaultName,
+    itemName,
+    saveTo,
+  };
+}
+
 function humanInputAnswer(value: Record<string, unknown>): HumanInputAnswer | null {
   const questionId = stringValue(value.questionId);
   if (!questionId) return null;
+  const secret = humanInputSecretResult(value.secret);
   return {
     questionId,
     values: Array.isArray(value.values)
       ? value.values.filter((answer): answer is string => typeof answer === "string")
       : [],
     ...(typeof value.other === "string" && value.other ? { other: value.other } : {}),
+    ...(secret ? { secret } : {}),
   };
 }
 
@@ -1823,6 +1862,7 @@ function humanInputAnswerSummary(
     label: question?.label || question?.prompt || fallbackLabel,
     prompt: question?.prompt || fallbackLabel,
     values,
+    ...(answer.secret ? { secret: answer.secret } : {}),
   };
 }
 

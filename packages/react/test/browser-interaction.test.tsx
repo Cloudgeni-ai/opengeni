@@ -248,13 +248,22 @@ function siteAuthConnection(
     origins: ["https://accounts.google.com"],
     loginUrl: "https://accounts.google.com/",
     verificationUrlPrefixes: ["https://myaccount.google.com/"],
-    authorities: [{ id: "human", kind: "human", label: "Human", fields: [] }],
+    authorities: [
+      {
+        id: "kernel-managed",
+        kind: "external_provider",
+        label: "Kernel",
+        adapterId: "kernel",
+        connectionId: "managed-auth-1",
+        credential: null,
+      },
+    ],
     methods: [
       {
         id: "passkey",
         kind: "passkey",
         label: "Passkey",
-        authorityIds: ["human"],
+        authorityIds: ["kernel-managed"],
       },
     ],
     preferredIdentityId: identity.id,

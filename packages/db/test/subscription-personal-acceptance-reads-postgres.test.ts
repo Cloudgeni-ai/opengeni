@@ -42,6 +42,7 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
+import { stageVaultPolicyColumns, withoutAbsentVaultPosture } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
 
@@ -482,6 +483,7 @@ beforeAll(async () => {
     for (const name of heldBack)
       await staging`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
+    await stageVaultPolicyColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -537,10 +539,13 @@ beforeAll(async () => {
     targetSchema: "public",
     requiredRuntimeRoutines: [],
   };
+  // Stopped before 0739: the absent vault objects are expected.
   const evaluate = async () =>
-    evaluateRuntimeDatabasePosture(
-      await inspectRuntimeDatabasePosture(client!.db, options),
-      options,
+    withoutAbsentVaultPosture(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      ),
     );
   const unprovisioned = await evaluate();
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
@@ -591,8 +596,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     const expected = [
       ...heldBack,
       ...PENDING_RETIREMENT,
-      "database is missing the xai subscription-core cutover receipt (0740_subscription_core_xai_cutover.sql); apply the pending migrations first",
-      "database is missing the claude subscription-core cutover receipt (0741_subscription_core_claude_cutover.sql); apply the pending migrations first",
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
     ].sort();
     if (!posture) throw new Error("Expected the staged database posture");
     expect([...posture.unprovisioned].sort()).toEqual(expected);

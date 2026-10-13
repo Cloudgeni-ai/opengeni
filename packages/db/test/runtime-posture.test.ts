@@ -677,7 +677,7 @@ describe("runtime database posture evaluator", () => {
     }
   });
 
-  test("requires every retired subscription object absent (migration 0744)", () => {
+  test("requires every retired subscription object absent (migration 0751)", () => {
     const retiredRoutines = runtimePosture.SUBSCRIPTION_RETIRED_ROUTINES;
     // The exact inventory the retirement migration drops.
     expect(retiredRoutines).toHaveLength(42);
@@ -708,9 +708,9 @@ describe("runtime database posture evaluator", () => {
     ]) {
       const posture = safePosture();
       posture.retiredSubscriptionObjects = [object];
-      const violation = `retired subscription ${object} is present; apply the drained retirement migration 0744_subscription_core_legacy_retirement.sql`;
+      const violation = `retired subscription ${object} is present; apply the drained retirement migration 0751_subscription_core_legacy_retirement.sql`;
       expect(runtimePosture.SUBSCRIPTION_RETIREMENT_MIGRATION).toBe(
-        "0744_subscription_core_legacy_retirement.sql",
+        "0751_subscription_core_legacy_retirement.sql",
       );
       expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([violation]);
       // The embedded (scoped) topology holds the same exact schema contract.
@@ -864,10 +864,10 @@ describe("runtime database posture evaluator", () => {
       "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
     );
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the xai subscription-core cutover receipt (0740_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
     );
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the claude subscription-core cutover receipt (0741_subscription_core_claude_cutover.sql); apply the pending migrations first",
+      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
     );
     // Each listed cutover migration is in this binary's ledger.
     for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
@@ -901,7 +901,7 @@ describe("runtime database posture evaluator", () => {
       before.filter((violation) => violation.includes("xai_subscription_credentials")),
     ).toEqual([]);
     expect(before).toContain(
-      "database is missing the xai subscription-core cutover receipt (0740_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
     );
   });
 
@@ -1654,9 +1654,9 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) -
-          // 0740: the five legacy SuperGrok tables become read-only forensics.
+          // 0747: the five legacy SuperGrok tables become read-only forensics.
           (tables === RUNTIME_FULL_DML_TABLES ? 5 : 0) -
-          // 0741: the five legacy Claude pool tables and its usage table too.
+          // 0748: the five legacy Claude pool tables and its usage table too.
           (tables === RUNTIME_FULL_DML_TABLES ? 6 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
@@ -1664,6 +1664,8 @@ describe("runtime database posture evaluator", () => {
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
               organizationRecoveryProtectedTableCount +
+              // 0739 vault tables: FORCE RLS, reached only through vault routines.
+              runtimePosture.VAULT_TABLES.length +
               2 // Protected MCP and managed sign-in operation ledgers; no runtime DML.
             : length);
         expect(tables).toHaveLength(expectedLength);
@@ -1753,6 +1755,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
+          runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -1763,6 +1766,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
+          runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
@@ -2348,7 +2352,8 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("personal_machine") ||
         routine.name.includes("subscription_codex_refresh") ||
         routine.name.includes("authorize_subscription_ownerless_session_access") ||
-        routine.name.includes("authorize_subscription_personal_placement_access")
+        routine.name.includes("authorize_subscription_personal_placement_access") ||
+        (runtimePosture.VAULT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)
       ) {
         routine.owner = "pg_database_owner";
       }

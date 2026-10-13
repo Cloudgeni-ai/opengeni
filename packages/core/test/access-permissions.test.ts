@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
+import {
+  normalizePermission,
+  signDelegatedAccessToken,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import {
@@ -124,7 +128,10 @@ describe("literal high-trust permissions", () => {
     for (const permission of exact) {
       expect(hasPermission([permission], permission)).toBe(true);
       for (const other of exact) {
-        if (other !== permission) expect(hasPermission([permission], other)).toBe(false);
+        if (other === permission) continue;
+        // A legacy name grants its canonical secrets permission (Q-16, AX-6).
+        const aliased = normalizePermission(permission) === other;
+        expect(hasPermission([permission], other)).toBe(aliased);
       }
     }
     expect(hasPermission(["variable-sets:manage"], "variable-sets:write")).toBe(false);
@@ -178,5 +185,50 @@ describe("literal high-trust permissions", () => {
         effectiveMaxNestedAgentDepth: 3,
       },
     });
+  });
+});
+
+describe("secret permission aliases (AX-6)", () => {
+  test("legacy variable-set names grant their canonical secrets permission", () => {
+    const stored = Object.freeze([
+      "variable-sets:read",
+      "variable-sets:manage",
+      "environments:use",
+    ]) as unknown as AccessGrant["permissions"];
+    const before = JSON.stringify(stored);
+    for (const mode of [undefined, "explicit"] as const) {
+      expect(hasPermission(stored, "secrets:list", mode)).toBe(true);
+      expect(hasPermission(stored, "secrets:write", mode)).toBe(true);
+      expect(hasPermission(stored, "secrets:use", mode)).toBe(true);
+      // Plaintext read is never aliased, and legacy requirements stay exact.
+      expect(hasPermission(stored, "secrets:read", mode)).toBe(false);
+      expect(hasPermission(stored, "variable-sets:use", mode)).toBe(false);
+      expect(hasPermission(stored, "variable-sets:read", mode)).toBe(true);
+    }
+    // Aliases are read-time only: the stored array is untouched.
+    expect(JSON.stringify(stored)).toBe(before);
+  });
+
+  test("each alias maps to exactly one canonical permission", () => {
+    const cases: Array<[AccessGrant["permissions"][number], AccessGrant["permissions"][number]]> = [
+      ["variable-sets:list", "secrets:list"],
+      ["variable-sets:read", "secrets:list"],
+      ["variable-sets:write", "secrets:write"],
+      ["variable-sets:manage", "secrets:write"],
+      ["environments:manage", "secrets:write"],
+      ["variable-sets:attach", "secrets:use"],
+      ["variable-sets:use", "secrets:use"],
+      ["environments:use", "secrets:use"],
+    ];
+    for (const [legacy, canonical] of cases) {
+      expect(hasPermission([legacy], canonical, "explicit")).toBe(true);
+      for (const other of ["secrets:list", "secrets:write", "secrets:use"] as const) {
+        if (other !== canonical) expect(hasPermission([legacy], other, "explicit")).toBe(false);
+      }
+    }
+    expect(hasPermission(["secrets:use"], "secrets:use", "explicit")).toBe(true);
+    expect(hasPermission(["secrets:read"], "secrets:read")).toBe(true);
+    expect(hasPermission(["workspace:admin"], "secrets:read")).toBe(false);
+    expect(hasPermission(["workspace:admin"], "secrets:use")).toBe(true);
   });
 });

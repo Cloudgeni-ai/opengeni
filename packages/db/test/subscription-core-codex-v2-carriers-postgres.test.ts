@@ -41,7 +41,7 @@ beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1", {
     // A Codex-only world: the drained SuperGrok cutover would write a receipt.
-    withheldMigrations: ["0740_subscription_core_xai_cutover.sql"],
+    withheldMigrations: ["0747_subscription_core_xai_cutover.sql"],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });

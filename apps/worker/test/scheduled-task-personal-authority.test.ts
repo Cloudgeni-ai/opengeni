@@ -39,9 +39,7 @@ import {
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
   createSession,
-  createVariableSet,
   getScheduledTaskRunAcceptedExecution,
-  getScheduledVariableSetExpectedGenerationForAttempt,
   getScheduledTask,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTaskRevisionAuthority,
@@ -51,10 +49,10 @@ import {
   persistSlackBotInstallationWithSuccessAudit,
   requestSessionTurnRecovery,
   requireSession,
-  setVariableSetVariable,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
+import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import {
   acquireSharedTestDatabase,
   acquireBlankTestDatabase,
@@ -66,7 +64,6 @@ import postgres from "postgres";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import { MockAgentResponder, subjectFor } from "@opengeni/runtime";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
-import { loadWorkspaceEnvironmentForRunWithCredentials } from "../src/activities/environment";
 import type { ActivityServices } from "../src/activities/types";
 import {
   SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
@@ -308,43 +305,6 @@ async function scheduledRuntimeMcpIds(
       : [...currentIds],
     defaultMcpServerIds: acceptedIds ?? defaultSessionMcpServerIds(runtimeSettings.mcpServers),
   }).toolRefs.map((tool) => tool.id);
-}
-
-async function claimedCommonVariableSetRun(
-  workspace: Awaited<ReturnType<typeof workspaceFixture>>,
-  variableSetId: string,
-) {
-  const task = await createScheduledTask(client.db, {
-    ...workspace,
-    createdBy: { kind: "subject", subjectId: workspace.subjectId },
-    name: `materialize-exact-generation-${crypto.randomUUID()}`,
-    status: "active",
-    schedule: { type: "manual" },
-    temporalScheduleId: `scheduled-vs-${crypto.randomUUID()}`,
-    runMode: "new_session_per_run",
-    overlapPolicy: "allow_concurrent",
-    agentConfig: { prompt: "materialize exact generation", resources: [], tools: [], metadata: {} },
-    variableSetId,
-    metadata: {},
-  });
-  const dispatched = await activities().dispatchScheduledTaskRun({
-    workspaceId: workspace.workspaceId,
-    taskId: task.id,
-    triggerType: "scheduled",
-    producerKey: `scheduled-vs-${crypto.randomUUID()}`,
-  });
-  if (dispatched.action !== "start") throw new Error(`dispatch ${JSON.stringify(dispatched)}`);
-  const attemptId = crypto.randomUUID();
-  const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
-    sessionId: dispatched.sessionId,
-    workflowId: dispatched.workflowId,
-    workflowRunId: crypto.randomUUID(),
-    attemptId,
-    dispatchId: crypto.randomUUID(),
-    trigger: { kind: "next" },
-  });
-  if (claimed.action !== "claimed") throw new Error(`claim ${JSON.stringify(claimed)}`);
-  return { dispatched, claimed, attemptId };
 }
 
 describe("scheduled task personal MCP authority", () => {
@@ -726,12 +686,12 @@ describe("scheduled task personal MCP authority", () => {
   test("generated sessions resolve workspace and organization Variable Sets without personal authority", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const workspaceSet = await createVariableSet(client.db, {
+    const workspaceSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "scheduled workspace variables",
     });
-    const organizationSet = await createVariableSet(client.db, {
+    const organizationSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "organization",
       allowOrganization: true,
@@ -1116,170 +1076,6 @@ describe("scheduled task personal MCP authority", () => {
     expect(accepted?.targetSessionExecution?.effectiveMcpServerIds).not.toContain(latentServerId);
   });
 
-  test("fences post-claim Variable Set drift before local or host secret reads", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: `scheduled-materialization-${crypto.randomUUID()}`,
-    });
-    const settings = testSettings({
-      databaseUrl: shared!.appUrl,
-      sandboxBackend: "none",
-      environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
-    });
-
-    // The worker resolves the exact accepted generation from the run snapshot
-    // before it asks a host credential provider for values.
-    const hostOptions = async (claimed: {
-      dispatched: { sessionId: string };
-      claimed: { turn: { id: string; executionGeneration: number } };
-      attemptId: string;
-    }) => ({
-      expectedGeneration: await getScheduledVariableSetExpectedGenerationForAttempt(client.db, {
-        accountId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        subjectId: workspace.subjectId,
-        initiatingHumanSubjectId: workspace.subjectId,
-        sessionId: claimed.dispatched.sessionId,
-        turnId: claimed.claimed.turn.id,
-        attemptId: claimed.attemptId,
-        executionGeneration: claimed.claimed.turn.executionGeneration,
-        variableSetId: variableSet.id,
-      }),
-    });
-
-    const unchangedLocal = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    const local = await loadWorkspaceEnvironmentForRunWithCredentials(
-      client.db,
-      settings,
-      workspace,
-      variableSet.id,
-      {
-        sessionId: unchangedLocal.dispatched.sessionId,
-        turnId: unchangedLocal.claimed.turn.id,
-        attemptId: unchangedLocal.attemptId,
-        executionGeneration: unchangedLocal.claimed.turn.executionGeneration,
-        initiatingHumanSubjectId: workspace.subjectId,
-      },
-    );
-    expect(local?.generation).toBe(variableSet.generation);
-
-    const unchangedHost = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    let unchangedHostCalls = 0;
-    const hosted = await loadWorkspaceEnvironmentForRunWithCredentials(
-      client.db,
-      settings,
-      workspace,
-      variableSet.id,
-      {
-        sessionId: unchangedHost.dispatched.sessionId,
-        turnId: unchangedHost.claimed.turn.id,
-        attemptId: unchangedHost.attemptId,
-        executionGeneration: unchangedHost.claimed.turn.executionGeneration,
-        initiatingHumanSubjectId: workspace.subjectId,
-      },
-      async (request) => {
-        unchangedHostCalls += 1;
-        return {
-          ...request,
-          id: request.variableSetId,
-          name: "hosted",
-          description: null,
-          scope: "workspace",
-          generation: request.expectedGeneration!,
-          values: {},
-        };
-      },
-      await hostOptions(unchangedHost),
-    );
-    expect(unchangedHostCalls).toBe(1);
-    expect(hosted?.generation).toBe(variableSet.generation);
-
-    const changedLocal = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    await setVariableSetVariable(client.db, {
-      ...workspace,
-      variableSetId: variableSet.id,
-      name: "CHANGED_LOCAL",
-      valueEncrypted: "not-read",
-    });
-    const errorChainIncludes = (error: unknown, expected: string) => {
-      let current: unknown = error;
-      for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
-        const candidate = current as { message?: string; cause?: unknown };
-        if (candidate.message?.includes(expected)) return true;
-        current = candidate.cause;
-      }
-      return false;
-    };
-    let localError: unknown;
-    try {
-      await loadWorkspaceEnvironmentForRunWithCredentials(
-        client.db,
-        settings,
-        workspace,
-        variableSet.id,
-        {
-          sessionId: changedLocal.dispatched.sessionId,
-          turnId: changedLocal.claimed.turn.id,
-          attemptId: changedLocal.attemptId,
-          executionGeneration: changedLocal.claimed.turn.executionGeneration,
-          initiatingHumanSubjectId: workspace.subjectId,
-        },
-      );
-    } catch (error) {
-      localError = error;
-    }
-    expect(
-      errorChainIncludes(localError, "scheduled Variable Set generation changed after claim"),
-    ).toBe(true);
-
-    const changedHost = await claimedCommonVariableSetRun(workspace, variableSet.id);
-    await setVariableSetVariable(client.db, {
-      ...workspace,
-      variableSetId: variableSet.id,
-      name: "CHANGED_HOST",
-      valueEncrypted: "not-read",
-    });
-    let changedHostCalls = 0;
-    let hostError: unknown;
-    try {
-      await loadWorkspaceEnvironmentForRunWithCredentials(
-        client.db,
-        settings,
-        workspace,
-        variableSet.id,
-        {
-          sessionId: changedHost.dispatched.sessionId,
-          turnId: changedHost.claimed.turn.id,
-          attemptId: changedHost.attemptId,
-          executionGeneration: changedHost.claimed.turn.executionGeneration,
-          initiatingHumanSubjectId: workspace.subjectId,
-        },
-        async (request) => {
-          changedHostCalls += 1;
-          return {
-            ...request,
-            id: request.variableSetId,
-            name: "must-not-run",
-            description: null,
-            scope: "workspace",
-            generation: request.expectedGeneration!,
-            values: {},
-          };
-        },
-        await hostOptions(changedHost),
-      );
-    } catch (error) {
-      hostError = error;
-    }
-    expect(
-      errorChainIncludes(hostError, "scheduled Variable Set generation changed after claim"),
-    ).toBe(true);
-    expect(changedHostCalls).toBe(0);
-  }, 30_000);
-
   test("revoking accepted user-scoped xAI authority rejects before claim", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -1625,7 +1421,7 @@ describe("scheduled task personal MCP authority", () => {
   test("suspending the revision authorizer after dispatch rejects common resource work", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "claim-time suspended authorizer",
@@ -1847,7 +1643,7 @@ describe("scheduled task personal MCP authority", () => {
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0738_private_sessions_share_sandboxes.sql')`;
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0740_subscription_core_xai_cutover.sql'), ('0741_subscription_core_claude_cutover.sql'), ('0744_subscription_core_legacy_retirement.sql'), ('0739_subscription_failover_readiness_and_request_fence.sql'), ('0742_subscription_shared_personal_choice.sql'), ('0743_subscription_waiter_candidates.sql')`;
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql'), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
       // Allowance policy/attribution compiles against the same withheld
       // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
       for (const name of allowanceMigrationTail)
@@ -2535,7 +2331,7 @@ describe("scheduled task personal MCP authority", () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const originalDelegations = delegation(workspace.subjectId, "linear", "linear.app");
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       name: "scheduled restore variables",
     });
@@ -2640,7 +2436,7 @@ describe("scheduled task personal MCP authority", () => {
   test("a materialized reusable workspace Variable Set task keeps its causal human on the next occurrence", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "reusable workspace variables",
@@ -2760,7 +2556,7 @@ describe("scheduled task personal MCP authority", () => {
 
     // A workspace Variable Set is ordinary workspace authority: a non-human
     // writer may keep automating with it, exactly as before the cutover.
-    const variableSet = await createVariableSet(client.db, {
+    const variableSet = await createLegacyVariableSet(client.db, {
       ...workspace,
       scope: "workspace",
       name: "service writer workspace variables",

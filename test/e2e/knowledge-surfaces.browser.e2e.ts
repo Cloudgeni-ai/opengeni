@@ -36,17 +36,6 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "knowledge-surfaces-owner" };
-const secretSentinel = "KNOWLEDGE-SECRET-MUST-NEVER-RENDER-7d9d5d";
-const longVariableNames = Array.from({ length: 18 }, (_, index) =>
-  `KNOWLEDGE_KEY_${String(index + 1).padStart(2, "0")}_${"RESPONSIVE_INSPECTABLE_VARIABLE_".repeat(4)}`.slice(
-    0,
-    128,
-  ),
-);
-const longVariableName = longVariableNames[0]!;
-const lastVariableName = longVariableNames[longVariableNames.length - 1]!;
-const longVariableSetName =
-  `Responsive production variable set ${"with long context ".repeat(6)}`.slice(0, 120);
 const longBaseName = `Long document base ${"inspectable-title-".repeat(7)}`;
 const activeKnowledgeText =
   "Saved knowledge: keep responsive knowledge surfaces compact, deeply inspectable, and keyboard operable. " +
@@ -84,7 +73,7 @@ const knowledgeTexts = knowledgeTopics.map(
 // Entry 20 holds the unbroken overflow sentinel.
 const tailKnowledgeText = unbrokenKnowledgeText;
 /**
- * The page frame that owns vertical scroll. Settings pages (Variable sets)
+ * The page frame that owns vertical scroll. Settings pages (Secrets)
  * render their own frame inside the settings column, where it is made
  * non-scrolling, so only the outermost frame is the scroll owner.
  */
@@ -183,7 +172,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await shared?.release();
   }, 60_000);
 
-  test("ships responsive, accessible variable sets, files, and unified Knowledge", async () => {
+  test("ships responsive, accessible files and unified Knowledge", async () => {
     const bootstrap = await configuredContext(
       browser,
       apiBaseUrl,
@@ -225,7 +214,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         viewport: { width: 375, height: 812 },
         isMobile: true,
         hasTouch: true,
-        screenshotSurface: "variable-sets",
+        screenshotSurface: "documents",
       },
       {
         label: "768",
@@ -256,7 +245,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       try {
         const page = await context.newPage();
         for (const theme of ["light", "dark"] as const) {
-          for (const surface of ["variable-sets", "documents", "memory"] as const) {
+          for (const surface of ["documents", "memory"] as const) {
             await openSurface(page, webBaseUrl, workspaceId, fixtures, surface, {
               focusMemory: false,
             });
@@ -269,23 +258,11 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
             if (matrixCase.hasTouch) {
               await expectOwnedTouchTargets(page, surface);
             }
-            if (matrixCase.label === "desktop" && surface !== "variable-sets") {
+            if (matrixCase.label === "desktop") {
               for (const name of ["Library", "Instructions"])
                 await page.getByRole("tab", { name, exact: true }).waitFor();
             }
-            if (surface === "variable-sets") {
-              // The list is audited above; the set's own page holds the variables.
-              await openVariableSet(page, fixtures);
-              await expectNoPageOverflow(page);
-              await expectNoAxeViolations(page, contentPageSelector, `${audit}/detail`);
-              if (matrixCase.hasTouch) {
-                await expectOwnedTouchTargets(page, "variable-set");
-              }
-              await expectContentPageScrollAndFocus(
-                page,
-                page.getByRole("button", { name: `Actions for ${lastVariableName}`, exact: true }),
-              );
-            } else if (surface === "memory") {
+            if (surface === "memory") {
               await expectContentPageScrollAndFocus(page, lastLibraryRow(page));
             }
             if (surface === matrixCase.screenshotSurface) {
@@ -1156,55 +1133,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     // Historical URLs still open the same Knowledge page.
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/memory`);
     await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
-    await page.goto(surfaceUrl(webBaseUrl, workspaceId, "variable-sets", fixtures));
-    // The whole row opens the set's own page from the keyboard.
-    const setRow = page.getByRole("button", { name: longVariableSetName, exact: true });
-    await setRow.focus();
-    await page.keyboard.press("Enter");
-    await page.getByRole("heading", { level: 1, name: longVariableSetName, exact: true }).waitFor();
-    expect(new URL(page.url()).pathname).toBe(
-      `/workspaces/${workspaceId}/variable-sets/${fixtures.variableSetId}`,
-    );
-    await page.getByText(longVariableName, { exact: true }).waitFor();
-    await expectContentPageScrollAndFocus(
-      page,
-      page.getByRole("button", { name: `Actions for ${lastVariableName}`, exact: true }),
-    );
-    // Values are write-only: every variable shows only that it is a secret.
-    const hiddenValues = page
-      .locator("[data-slot='secret-value'][data-kind='secret']")
-      .filter({ visible: true });
-    expect(await hiddenValues.count()).toBe(longVariableNames.length);
-    expect(await hiddenValues.first().textContent()).toBe("Secret");
-    await expectSecretNeverRendered(page);
-
-    // Replacing a value never prefills or reveals the old one.
-    await page
-      .getByRole("button", { name: `Actions for ${longVariableName}`, exact: true })
-      .click();
-    expect(await page.getByRole("menuitem", { name: /^(Reveal|Copy|Rotate)/ }).count()).toBe(0);
-    await page.getByRole("menuitem", { name: "Replace value", exact: true }).click();
-    const replace = page.getByRole("dialog");
-    await replace.waitFor();
-    await expectSecretNeverRendered(page);
-    await page.keyboard.press("Escape");
-    await replace.waitFor({ state: "hidden" });
-
-    // Add a variable inline at the bottom of the list.
-    const addForm = page.getByRole("form", {
-      name: `Add a variable to ${longVariableSetName}`,
-      exact: true,
-    });
-    await addForm.getByRole("textbox", { name: "Name", exact: true }).fill("BROWSER_ADDED_KEY");
-    await addForm.getByLabel("Value", { exact: true }).fill(secretSentinel);
-    await addForm.getByRole("button", { name: "Add", exact: true }).click();
-    await page.getByText("BROWSER_ADDED_KEY", { exact: true }).waitFor();
-    await page
-      .getByRole("button", { name: "Actions for BROWSER_ADDED_KEY", exact: true })
-      .waitFor();
-    await waitFor(async () => (await hiddenValues.count()) === longVariableNames.length + 1);
-    await expectSecretNeverRendered(page);
-
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "memory", fixtures));
     const card = page.getByRole("button", { name: "Retained entry 20", exact: true });
     await card.focus();
@@ -1236,7 +1164,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
 type SeededFixtures = {
   proposedMemoryId: string;
   tailMemoryId: string;
-  variableSetId: string;
 };
 
 type SeededScheduledTask = {
@@ -1244,7 +1171,7 @@ type SeededScheduledTask = {
   name: string;
 };
 
-type Surface = "variable-sets" | "documents" | "memory";
+type Surface = "documents" | "memory";
 
 type MatrixCase = {
   label: "320" | "375" | "768" | "desktop";
@@ -1400,21 +1327,6 @@ async function seedKnowledgeSurfaces(
         return (await response.json()) as T;
       }
 
-      const variableSet = await request<{ id: string }>(
-        `/v1/workspaces/${targetWorkspaceId}/variable-sets`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            name: fixture.longVariableSetName,
-            description:
-              "A deliberately long description that remains fully inspectable on compact viewports without widening the page.",
-            variables: fixture.longVariableNames.map((name) => ({
-              name,
-              value: fixture.secretSentinel,
-            })),
-          }),
-        },
-      );
       const memoryIds: string[] = [];
       for (const text of [
         ...fixture.knowledgeTexts,
@@ -1442,16 +1354,12 @@ async function seedKnowledgeSurfaces(
       return {
         proposedMemoryId: proposed.id,
         tailMemoryId: memoryIds[0]!,
-        variableSetId: variableSet.id,
       };
     },
     {
       apiBaseUrl,
       workspaceId,
       fixture: {
-        secretSentinel,
-        longVariableNames,
-        longVariableSetName,
         longBaseName,
         activeKnowledgeText,
         unbrokenKnowledgeText,
@@ -1542,12 +1450,7 @@ function surfaceUrl(
   fixtures: SeededFixtures,
 ): string {
   void fixtures;
-  const suffix =
-    surface === "variable-sets"
-      ? "variable-sets"
-      : surface === "documents"
-        ? "state?view=files"
-        : "state";
+  const suffix = surface === "documents" ? "state?view=files" : "state";
   return `${baseUrl}/workspaces/${workspaceId}/${suffix}`;
 }
 
@@ -1564,11 +1467,8 @@ async function openSurface(
       ? `${baseUrl}/workspaces/${workspaceId}/memory`
       : surfaceUrl(baseUrl, workspaceId, surface, fixtures);
   await page.goto(url);
-  const heading = surface === "variable-sets" ? "Variable sets" : "Knowledge";
-  await page.getByRole("heading", { level: 1, name: heading, exact: true }).waitFor();
-  if (surface === "variable-sets") {
-    await page.getByRole("button", { name: longVariableSetName, exact: true }).waitFor();
-  } else if (surface === "documents") {
+  await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
+  if (surface === "documents") {
     // Old Files links open the Library filtered to files. This fixture has
     // no object store, so file uploads are correctly unavailable.
     await page.getByRole("button", { name: "Remove filter Type: Files", exact: true }).waitFor();
@@ -1598,22 +1498,6 @@ function lastLibraryRow(page: Page): Locator {
     .locator("[data-row-action]");
 }
 
-/** Opens the fixture set's own page from its row in the list. */
-async function openVariableSet(page: Page, fixtures: SeededFixtures): Promise<void> {
-  await page.getByRole("button", { name: longVariableSetName, exact: true }).click();
-  await page.getByRole("heading", { level: 1, name: longVariableSetName, exact: true }).waitFor();
-  expect(new URL(page.url()).pathname.endsWith(`/variable-sets/${fixtures.variableSetId}`)).toBe(
-    true,
-  );
-  await page.getByText(longVariableName, { exact: true }).waitFor();
-  expect(
-    await page
-      .getByRole("button", { name: `Actions for ${lastVariableName}`, exact: true })
-      .count(),
-  ).toBe(1);
-  await expectSecretNeverRendered(page);
-}
-
 /** An entry or collection returns to its Library tab, not a page named Knowledge. */
 async function returnToLibraryFromEntry(page: Page): Promise<void> {
   const detailUrl = new URL(page.url());
@@ -1641,19 +1525,6 @@ async function applyLibraryFilter(page: Page, option: string): Promise<void> {
   await page.getByRole("menuitemcheckbox", { name: option, exact: true }).click();
   await page.keyboard.press("Escape");
   await page.getByRole("menu").waitFor({ state: "hidden" });
-}
-
-async function expectSecretNeverRendered(page: Page): Promise<void> {
-  expect(
-    await page.evaluate(
-      (sentinel) =>
-        (document.body.textContent ?? "").includes(sentinel) ||
-        [...document.querySelectorAll("input, textarea")].some((input) =>
-          (input as HTMLInputElement).value.includes(sentinel),
-        ),
-      secretSentinel,
-    ),
-  ).toBe(false);
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
@@ -1800,34 +1671,16 @@ async function expectNoAxeViolations(
   ).toEqual([]);
 }
 
-async function expectOwnedTouchTargets(
-  page: Page,
-  surface: Surface | "variable-set",
-): Promise<void> {
+async function expectOwnedTouchTargets(page: Page, surface: Surface): Promise<void> {
   const targets =
-    surface === "variable-sets"
-      ? [
-          page.getByRole("button", { name: "New variable set", exact: true }),
-          page
-            .getByRole("listitem")
-            .filter({ has: page.getByRole("button", { name: longVariableSetName, exact: true }) }),
-        ]
-      : surface === "variable-set"
-        ? [
-            page.getByRole("button", { name: "Variable sets", exact: true }),
-            page.getByRole("button", { name: `Actions for ${longVariableName}`, exact: true }),
-            page
-              .getByRole("form", { name: `Add a variable to ${longVariableSetName}`, exact: true })
-              .getByRole("button", { name: "Add", exact: true }),
-          ]
-        : surface === "documents"
-          ? [page.getByRole("button", { name: /^Filter/ })]
-          : [
-              page.getByRole("button", { name: "Add knowledge", exact: true }),
-              page.getByRole("button", { name: "More knowledge actions", exact: true }),
-              page.getByRole("button", { name: /^Filter/ }),
-              page.getByRole("button", { name: "More actions for Retained entry 20", exact: true }),
-            ];
+    surface === "documents"
+      ? [page.getByRole("button", { name: /^Filter/ })]
+      : [
+          page.getByRole("button", { name: "Add knowledge", exact: true }),
+          page.getByRole("button", { name: "More knowledge actions", exact: true }),
+          page.getByRole("button", { name: /^Filter/ }),
+          page.getByRole("button", { name: "More actions for Retained entry 20", exact: true }),
+        ];
   for (const target of targets) {
     const box = await target.boundingBox();
     expect(box).not.toBeNull();

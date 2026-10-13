@@ -40,6 +40,9 @@ Credentials: `--env-file <path>` (or `OPENGENI_EVAL_ENV_FILE`), otherwise
 `./.env`, then the main checkout's `.env`. Only `OPENGENI_OPENAI_*` and
 `OPENGENI_AZURE_OPENAI_*` keys are read; values are never logged. Defaults:
 agent `gpt-5.6-luna` (reasoning `medium`), judge `gpt-5.6-sol` (reasoning `low`).
+An env file exporting `F598_AZURE_OPENAI_API_KEY` / `F598_AZURE_OPENAI_BASE_URL`
+(the secrets-overhaul localstack `keys/cloud.env`) maps onto the built-in Azure
+provider; pass the deployment names, for example `--model gpt-6-sol --judge-model gpt-6-sol`.
 
 Behind a TLS-intercepting proxy, run with the proxy variables unset
 (`env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy …`) or make sure

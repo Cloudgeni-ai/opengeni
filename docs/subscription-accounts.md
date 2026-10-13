@@ -414,7 +414,7 @@ for it until the matching requirement below is implemented:
   `test/integration/subscription-core-xai-cutover.integration.ts`.
 - **SUB-COMPAT-02** Existing per-provider API and SDK shapes keep working as
   aliases that delegate to the core until they are versioned out.
-  Verification: `packages/db/test/migration-0740-subscription-core-xai-cutover.test.ts`, `packages/db/test/migration-0741-subscription-core-claude-cutover.test.ts`.
+  Verification: `packages/db/test/migration-0747-subscription-core-xai-cutover.test.ts`, `packages/db/test/migration-0748-subscription-core-claude-cutover.test.ts`.
 - **SUB-COMPAT-03** Historical shadow comparison precedes one drained move
   per provider, with no dual writes. Preflight failure rolls back the migration
   transaction; after activation, recovery is forward-only and an old binary

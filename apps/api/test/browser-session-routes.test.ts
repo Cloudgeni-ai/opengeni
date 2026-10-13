@@ -705,7 +705,7 @@ describe("BrowserSession route discipline", () => {
       new Error("unexpected"),
       new BrowserControlRequestError(403, {
         code: "permission_denied",
-        message: "protected authentication",
+        message: "browser action denied",
         retryable: false,
       }),
       new BrowserControlRequestError(409, {
@@ -843,7 +843,6 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report"',
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
@@ -859,7 +858,7 @@ describe("BrowserSession route discipline", () => {
       expect(source).toContain(route);
     }
     expect(await readFile(appUrl, "utf8")).toContain(
-      "registerBrowserSessionRoutes(app, routeDeps)",
+      "registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets })",
     );
   });
 
@@ -947,28 +946,10 @@ describe("BrowserSession route discipline", () => {
     );
   });
 
-  test("brokers protected auth outside model-visible browser actions", async () => {
+  test("serves no brokered credential fill route; logins use secret references in actions", async () => {
     const source = await readFile(routeUrl, "utf8");
-    const start = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
-    );
-    const end = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
-      start,
-    );
-    const route = source.slice(start, end);
-    expect(route.indexOf("if (replay?.response)")).toBeLessThan(
-      route.indexOf("withActiveBrowserController"),
-    );
-    expect(route.indexOf("getProtectedAuthFillPreparation")).toBeLessThan(
-      route.indexOf("loadBoundBrowserCredential"),
-    );
-    expect(route.indexOf("dispatchProtectedAuthFill")).toBeLessThan(
-      route.indexOf("sessionClient.protectedAuthFill"),
-    );
-    expect(route).toContain("resolveProtectedAuthFieldValues");
-    expect(route).toContain("protectedAuthReceipt");
-    expect(route).not.toContain("BrowserActionCommand.parse");
+    expect(source).not.toContain("/protected-fill");
+    expect(source).not.toContain("protectedAuth");
   });
 
   test("keeps provider auth durable while gating its hosted flow to humans", async () => {
@@ -1029,9 +1010,41 @@ describe("BrowserSession route discipline", () => {
       route.indexOf("sessionClient.stageWorkspaceFiles"),
     );
     expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
-      route.indexOf("sessionClient.action(command)"),
+      route.indexOf("sessionClient.action("),
     );
     expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
+  test("resolves agent secret references last, right before the canonical action", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      start,
+    );
+    const route = source.slice(start, end);
+    // The public command is validated before any reference is resolved.
+    expect(route.indexOf("BrowserActionCommand.parse(commandFields)")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("resolveInteractionSecretValues")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
+    expect(route).toContain("texts: browserActionSecretTexts(request.action)");
+    expect(route).toContain('surface: "browser"');
+    // Passkeys sync before (taking over the principal's lease) and after the
+    // action, never instead of it.
+    expect(route.match(/await passkeySync\((?:true|false)\)/g)?.length).toBe(2);
+    expect(route.indexOf("await passkeySync(true)")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
+    // The response is the controller receipt; the side map is never echoed.
+    expect(route).not.toContain("secretValues: request");
   });
 
   test("binds agent uploads to the frozen initiating human, not the worker subject", () => {

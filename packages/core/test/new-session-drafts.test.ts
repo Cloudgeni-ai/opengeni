@@ -9,7 +9,6 @@ import {
   bindAuthorizedGitHubInstallationRepositories,
   createDb,
   createRig,
-  createVariableSet,
   saveNewSessionDraftInTransaction,
   setWorkspaceDefaultRig,
   type Database,
@@ -633,26 +632,17 @@ describe("workspace default Sandbox Environment in the composer flow", () => {
 
   async function environmentFixture(withWorkspaceDefault: boolean) {
     const { grant: baseGrant } = await fixture();
-    const grant: AccessGrant = {
-      ...baseGrant,
-      permissions: [...baseGrant.permissions, "variable-sets:attach"],
-    };
+    const grant: AccessGrant = baseGrant;
     const workspaceId = grant.workspaceId!;
-    const credentials = await createVariableSet(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      scope: "workspace",
-      name: "shared credentials",
-    });
-    const rig = (name: string, defaultVariableSetIds: string[] = []) =>
+    const rig = (name: string) =>
       createRig(db, {
         accountId: grant.accountId,
         workspaceId,
         name,
         createdBy: "user:test",
-        initialVersion: { changelog: "v1", defaultVariableSetIds },
+        initialVersion: { changelog: "v1" },
       });
-    const workspaceDefault = await rig("analytics", [credentials.id]);
+    const workspaceDefault = await rig("analytics");
     const other = await rig("build tools");
     if (withWorkspaceDefault) await setWorkspaceDefaultRig(db, workspaceId, workspaceDefault.id);
     return { grant, workspaceDefault, other };

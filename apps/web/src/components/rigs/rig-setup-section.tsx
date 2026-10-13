@@ -1,5 +1,5 @@
-// Edit setup: a page that proposes a change to the active version's setup,
-// checks and default variable sets. Versions never change in place; the edit
+// Edit setup: a page that proposes a change to the active version's setup and
+// checks. Versions never change in place; the edit
 // becomes a `definition_edit` change that is verified in a clean sandbox
 // before someone promotes it into a new version.
 import { useState } from "react";
@@ -11,25 +11,16 @@ import {
 } from "@/components/rigs/rig-definition-fields";
 import { Field, FieldStack, TextInput } from "@/components/ui/field";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
-import type {
-  ProposeRigChangeRequest,
-  ResourceAuthorityScope,
-  RigVersion,
-  VariableSet,
-} from "@/types";
+import type { ProposeRigChangeRequest, RigVersion } from "@/types";
 
 export function RigSetupEditPage({
   rigName,
   activeVersion,
-  rigScope,
-  variableSets,
   onClose,
   onPropose,
 }: {
   rigName: string;
   activeVersion: RigVersion;
-  rigScope: ResourceAuthorityScope;
-  variableSets: VariableSet[];
   onClose: () => void;
   /** Proposes the change. Throws a user-facing error. */
   onPropose: (request: ProposeRigChangeRequest) => Promise<void>;
@@ -37,7 +28,6 @@ export function RigSetupEditPage({
   const [draft, setDraft] = useState<RigDefinitionDraft>({
     setupScript: activeVersion.setupScript ?? "",
     checks: activeVersion.checks.map((check) => ({ ...check })),
-    defaultVariableSetIds: [...activeVersion.defaultVariableSetIds],
   });
   const [changelog, setChangelog] = useState("");
 
@@ -55,7 +45,6 @@ export function RigSetupEditPage({
           payload: {
             setupScript: draft.setupScript.trim() ? draft.setupScript : null,
             checks: cleanRigChecks(draft.checks),
-            defaultVariableSetIds: draft.defaultVariableSetIds,
             ...(changelog.trim() ? { changelog: changelog.trim() } : {}),
           },
         });
@@ -63,13 +52,7 @@ export function RigSetupEditPage({
       }}
     >
       <FieldStack>
-        <RigDefinitionFields
-          value={draft}
-          onChange={setDraft}
-          variableSets={variableSets}
-          rigScope={rigScope}
-          idPrefix="edit-rig"
-        />
+        <RigDefinitionFields value={draft} onChange={setDraft} idPrefix="edit-rig" />
         <Field label="What changed" optional hint="A line for the version history.">
           <TextInput
             value={changelog}
