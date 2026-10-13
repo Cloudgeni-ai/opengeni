@@ -1763,4 +1763,70 @@ export async function getSiteDataSite(
   });
 }
 
+/** What Site Data needs to know about the session an agent acts in. */
+export type SiteDataAgentSession = {
+  /** Distinct Site origins on the session and its spawning ancestors. */
+  originSiteIds: string[];
+  /** Whether the current turn or a spawning ancestor turn arrived from a Site page. */
+  siteTurn: boolean;
+  /** The scheduled task whose run created this exact session, if any. */
+  scheduledTaskId: string | null;
+};
+
+/**
+ * Walk an agent's session up its spawning lineage (parent session and the
+ * exact parent turn), collecting Site origins and Site-surface turns, and
+ * find the scheduled task that created the session (from the server-written
+ * run row, never from session metadata a caller could set).
+ */
+export async function getSiteDataAgentSession(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+  sessionId: string,
+  turnId: string | null,
+): Promise<SiteDataAgentSession | null> {
+  if (!UUID.test(sessionId)) return null;
+  const turn = turnId && UUID.test(turnId) ? turnId : null;
+  return withRlsContext(db, scope, async (tx) => {
+    const rows = await rawRows<{
+      depth: number;
+      found: boolean;
+      origin_site_id: string | null;
+      turn_surface: string | null;
+    }>(
+      tx,
+      sql`with recursive chain(session_id, turn_id, depth) as (
+            select ${sessionId}::uuid, ${turn}::uuid, 0
+            union all
+            select s.parent_session_id, s.parent_turn_id, chain.depth + 1
+              from chain
+              join sessions s on s.workspace_id = ${scope.workspaceId} and s.id = chain.session_id
+             where s.parent_session_id is not null and chain.depth < 32
+          )
+          select chain.depth, s.id is not null as found,
+                 s.metadata->'_opengeniSiteOrigin'->>'siteId' as origin_site_id,
+                 t.surface as turn_surface
+            from chain
+            left join sessions s on s.workspace_id = ${scope.workspaceId} and s.id = chain.session_id
+            left join session_turns t on t.workspace_id = ${scope.workspaceId}
+              and t.session_id = chain.session_id and t.id = chain.turn_id
+           order by chain.depth`,
+    );
+    if (!rows[0]?.found) return null;
+    const [run] = await rawRows<{ task_id: string }>(
+      tx,
+      sql`select task_id from scheduled_task_runs
+           where workspace_id = ${scope.workspaceId} and session_id = ${sessionId}
+           limit 1`,
+    );
+    return {
+      originSiteIds: [
+        ...new Set(rows.flatMap((row) => (row.origin_site_id ? [row.origin_site_id] : []))),
+      ],
+      siteTurn: rows.some((row) => row.turn_surface === "site"),
+      scheduledTaskId: run?.task_id ?? null,
+    };
+  });
+}
+
 export const SITE_DATA_MAX_BATCH_OPERATIONS = SITE_DATA_MAX_BATCH;
