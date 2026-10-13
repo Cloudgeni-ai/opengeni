@@ -1075,9 +1075,14 @@ describe("core Codex failure settlement", () => {
     personal: false,
   };
 
-  test.each([false, true])(
-    "streamed overload recovers after delayed request settlement (settlementFails=%s)",
-    async (settlementFails) => {
+  test.each([
+    [false, true],
+    [true, true],
+    [false, false],
+    [true, false],
+  ])(
+    "streamed overload recovers after delayed request settlement (settlementFails=%s, blankSeparator=%s)",
+    async (settlementFails, blankSeparator) => {
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       const requests = createCoreCodexRequests({
@@ -1105,12 +1110,16 @@ describe("core Codex failure settlement", () => {
           nextRequestId: () => "overload-request",
           beforeProviderDispatch: (request) => requests.reserve(request!),
           onProviderRequestSettled: requests.observe,
+          onModelRequestEvent: (event) => {
+            if (event.phase === "failed") throw new Error("terminal audit unavailable");
+          },
         },
         () =>
           codexSubscriptionFetch(
             async () =>
               new Response(
-                'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}\n\n',
+                'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}' +
+                  (blankSeparator ? "\n\n" : ""),
                 { headers: { "content-type": "text/event-stream" } },
               ),
           )("https://fixture.invalid/responses", {
@@ -1134,6 +1143,10 @@ describe("core Codex failure settlement", () => {
       release.resolve();
       expect(await result).toMatchObject({ status: settlementFails ? "failed" : "recovering" });
       expect(failure).toBeDefined();
+      expect(failure!.deps.error).toMatchObject({
+        name: "CodexStreamingTerminalError",
+        message: "Our servers are currently overloaded. Please try again later.",
+      });
       if (settlementFails) {
         expect(recovery).not.toHaveBeenCalled();
         expect(requests.canRecover()).toBe(false);

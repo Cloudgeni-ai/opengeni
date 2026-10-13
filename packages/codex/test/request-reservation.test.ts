@@ -35,9 +35,14 @@ const dispatch = (ctx: CodexRequestContext, base: FetchLike, init: RequestInit =
   );
 
 describe("one-shot Codex physical request admission", () => {
-  test.each([false, true])(
-    "stream failure waits for durable custody before rejecting the reader (output=%s)",
-    async (withOutput) => {
+  test.each([
+    [false, true],
+    [true, true],
+    [false, false],
+    [true, false],
+  ])(
+    "stream failure waits for durable custody before rejecting the reader (output=%s, blankSeparator=%s)",
+    async (withOutput, blankSeparator) => {
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       let settled = false;
@@ -61,7 +66,8 @@ describe("one-shot Codex physical request admission", () => {
         async () =>
           new Response(
             prefix +
-              'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}\n\n',
+              'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}' +
+              (blankSeparator ? "\n\n" : ""),
             { headers: { "content-type": "text/event-stream" } },
           ),
       );
@@ -83,6 +89,50 @@ describe("one-shot Codex physical request admission", () => {
       expect(settled).toBe(true);
     },
   );
+
+  test("successful EOF parsing still propagates a rejected terminal observer", async () => {
+    const observerError = new Error("terminal observer unavailable");
+    const outcomes: string[] = [];
+    const response = await dispatch(
+      context({
+        beforeProviderDispatch: () => undefined,
+        onProviderRequestSettled: (value) => {
+          outcomes.push(value.outcome);
+        },
+        onModelRequestEvent: (event) => {
+          if (event.phase === "completed") throw observerError;
+        },
+      }),
+      async () =>
+        new Response(terminal.trimEnd(), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    await expect(response.text()).rejects.toBe(observerError);
+    expect(outcomes).toEqual(["response_received"]);
+  });
+
+  test("missing EOF terminal preserves malformed-stream evidence when custody rejects", async () => {
+    const outcomes: string[] = [];
+    const response = await dispatch(
+      context({
+        beforeProviderDispatch: () => undefined,
+        onProviderRequestSettled: (value) => {
+          outcomes.push(value.outcome);
+          throw new Error("custody unavailable");
+        },
+      }),
+      async () =>
+        new Response('data: {"type":"response.output_text.delta","delta":"hi"}', {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    await expect(response.text()).rejects.toMatchObject({
+      name: "CodexStreamingTerminalError",
+      code: "invalid_sse_terminal",
+    });
+    expect(outcomes).toEqual(["unknown"]);
+  });
 
   test("a concurrent abort retains unknown custody and joins its pending terminal settlement", async () => {
     const controller = new AbortController();

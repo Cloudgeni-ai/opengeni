@@ -1613,12 +1613,17 @@ function validateCodexStream(
             "The Codex response stream ended without a terminal response",
           );
         }
-      } finally {
-        // Raw transport EOF can precede parsing a final block without a blank
-        // separator. Settle only after that parse; the audit fence deduplicates
-        // an earlier terminal already observed from a complete block.
-        await onParsedEof?.();
+      } catch (error) {
+        // A final buffered failure has the same diagnostic and custody rules
+        // as a failure parsed from a complete chunk. Finalization must not
+        // replace that failure with an audit or settlement rejection.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
       }
+      // Raw transport EOF can precede parsing a final block without a blank
+      // separator. Settle only after that parse; successful parsing still
+      // propagates a failed custody/audit write to the caller.
+      await onParsedEof?.();
     },
   });
   const headers = new Headers(res.headers);
