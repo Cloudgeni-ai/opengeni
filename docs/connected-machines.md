@@ -434,17 +434,24 @@ machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
 means a verified self-update is draining accepted work; `queue_breaker` and
 `wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
 detail remains an unspecified admission refusal. The same distinction survives
-retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
-`update_busy_uploads`) and immediately reopens admission. It does not wait for
-long-lived servers, cancel accepted work, or restart the host. Open browser and
-computer controllers also keep the host busy, including pending creation and
-shutdown. The agent checks every owned browserd scope through its private
-admin-only idle proof after fencing new routed work; unavailable, crashed, or
-older incompatible controllers return retryable `update_state_unavailable`.
-An empty controller may remain running without blocking an update. Request an update
-again at a safe idle point. Older runners can remain draining indefinitely;
-inspect their accepted operations and coordinate a safe stop/restart with their
-owners instead of killing useful work or increasing concurrency limits.
+retry exhaustion and structured tool-error rendering. A self-update on a busy
+host is accepted and waits for idle: the agent reports `waiting_for_idle` with
+the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
+unreadable controller as `update_state_unavailable`), keeps admitting new work,
+and every few seconds re-attempts a short fenced idle proof, reopening
+admission whenever it is still busy. It never cancels accepted work, stops
+long-lived servers, or restarts the host early; an update behind a long-lived
+command simply keeps waiting. Only lost physical settlement, which can never
+become provable in that process, ends the update with retryable
+`update_state_unavailable`. The agent checks every owned browserd scope through
+its private admin-only idle proof. Open sessions block only when a restart
+would lose something: admitted commands, pending creation or shutdown,
+attached browser sessions, browsers without a durable working runtime, and
+isolated virtual desktops. A quiescent managed browser whose owned process
+survives graceful shutdown (reattached on its next request), a session whose
+browser already ended, and a computer session on the machine's own physical
+seat do not keep the host busy. Older agents still end a busy update with
+retryable `update_busy_work`; request it again at a safe idle point.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production

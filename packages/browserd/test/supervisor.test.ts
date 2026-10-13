@@ -1879,6 +1879,49 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("update idle proof admits quiescent preserved sessions and blocks in-flight or unrecoverable ones", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const dispatched = deferred(),
+        release = deferred();
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => ({
+          ...fakeDriver(context, {
+            dispatch: async () => {
+              dispatched.resolve();
+              await release.promise;
+            },
+          }),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+        }),
+      });
+      try {
+        const created = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        // A quiescent session whose owned browser shutdown preserves is no
+        // reason to refuse a restart.
+        expect(supervisor.isIdle()).toBe(true);
+        const running = supervisor.action(command(created.observation));
+        await dispatched.promise;
+        expect(supervisor.isIdle()).toBe(false);
+        release.resolve();
+        await running;
+        await Bun.sleep(1);
+        expect(supervisor.isIdle()).toBe(true);
+        // A launch without a durable working runtime cannot be reattached.
+        await supervisor.createSession({ ...reference(46), headed: false });
+        expect(supervisor.isIdle()).toBe(false);
+      } finally {
+        release.resolve();
+        await supervisor.close();
+      }
+    });
+  });
+
   test("graceful shutdown preserves exact profile recovery without replaying uncertain input", async () => {
     await withWorkingCrashFixture(
       async ({ options, action, rootDirectory, socketRootDirectory }) => {

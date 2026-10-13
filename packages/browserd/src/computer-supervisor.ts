@@ -200,14 +200,22 @@ export class ComputerSupervisor {
     return await this.installSession(options);
   }
 
-  /** A queued shared-seat create owns work before its runtime exists. */
+  /** A queued shared-seat create owns work before its runtime exists. An open
+   * session on the machine's own physical seat holds no state of its own: a
+   * restart only drops the controller, which the next request recreates. An
+   * isolated virtual seat owns its display and apps, so it still blocks. */
   isIdle(): boolean {
     return (
       !this.cleanupUncertain &&
       this.displaceGate === null &&
-      this.sessions.size === 0 &&
       this.creating.size === 0 &&
-      this.ending.size === 0
+      this.ending.size === 0 &&
+      [...this.sessions.values()].every(
+        (runtime) =>
+          runtime.lifecycle === "active" &&
+          runtime.environmentLease.rfbPort === null &&
+          runtime.controller.isIdle(),
+      )
     );
   }
 
