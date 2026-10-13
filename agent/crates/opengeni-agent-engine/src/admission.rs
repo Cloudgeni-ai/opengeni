@@ -337,6 +337,13 @@ impl AdmissionState {
         }
     }
 
+    /// Accounts a job that is already running because a predecessor process
+    /// admitted it. It bypasses breakers and queues: refusing it could not stop
+    /// the work, only hide it from the running count.
+    pub fn adopt_running(&mut self, class: JobClass) {
+        *self.running_mut(class) += 1;
+    }
+
     /// Currently-queued count for a class.
     #[must_use]
     pub fn queued(&self, class: JobClass) -> usize {

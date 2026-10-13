@@ -82,6 +82,119 @@ const BULK_CHANNEL_DEPTH: usize = 1024;
 /// pairs toward the bulk publisher task. `None` between generations.
 type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
 
+/// A link's frame scope: its connection and process subject prefix.
+type LaneKey = (String, String);
+
+/// Where the frames of jobs continued after an in-place update go.
+#[derive(Default)]
+struct FrameLanes {
+    /// The lane of every link created so far, by frame scope.
+    links: HashMap<LaneKey, BulkLane>,
+    /// Lanes of adopted jobs whose link does not exist yet; the first link
+    /// created for that exact scope takes it.
+    adopted: HashMap<LaneKey, BulkLane>,
+}
+
+impl FrameLanes {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn lane_for(&mut self, key: LaneKey) -> BulkLane {
+        if let Some(lane) = self.links.get(&key) {
+            return lane.clone();
+        }
+        self.adopted
+            .entry(key)
+            .or_insert_with(|| Arc::new(std::sync::RwLock::new(None)))
+            .clone()
+    }
+}
+
+/// Builds the frame sink of one op on a link's bulk lane.
+fn bulk_frame_sink(lane: BulkLane, subject: String, engine: Arc<Engine>) -> crate::ops::FrameSink {
+    Arc::new(move |bytes: Vec<u8>| {
+        let delivered = match lane.read().expect("bulk lock").as_ref() {
+            Some(tx) => tx.try_send((subject.clone(), bytes)).is_ok(),
+            None => false,
+        };
+        if !delivered {
+            // Protocol-healed (gap-detect + OpAttach replay), but RECORDED:
+            // a rising counter means the bulk lane is down or undersized.
+            engine.note_frame_dropped();
+            debug!("bulk lane full/closed; op frame dropped (replay heals)");
+        }
+    })
+}
+
+/// How long a verified update keeps asking running jobs to hand themselves
+/// over before giving up for this attempt. Refusals are transient (a job
+/// already being killed, a pipe hiccup).
+#[cfg(unix)]
+const HANDOVER_ATTEMPTS: Duration = Duration::from_secs(60);
+#[cfg(unix)]
+const HANDOVER_RETRY: Duration = Duration::from_millis(250);
+
+/// Continuing running commands across an in-place update (unix): where the
+/// manifest goes and what the successor image keeps.
+#[cfg(unix)]
+pub struct UpdateHandover {
+    manifest: std::path::PathBuf,
+    connection_instance_id: String,
+    pending: std::sync::Mutex<Option<PendingHandover>>,
+}
+
+/// A written handover the process must carry into its successor image.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct PendingHandover {
+    /// Value for [`crate::handover::HANDOVER_ENV`].
+    pub env_value: String,
+    /// The carried processes; their descriptors must survive `exec`.
+    pub execs: Vec<opengeni_agent_platform::ExecHandover>,
+}
+
+#[cfg(unix)]
+impl UpdateHandover {
+    fn is_pending(&self) -> bool {
+        self.pending.lock().expect("pending handover").is_some()
+    }
+}
+
+/// Continues handed-over jobs in this process image, each publishing on its
+/// link's lane. A job whose process cannot be adopted ends as a typed failure.
+#[cfg(unix)]
+fn adopt_ops<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &P,
+    lanes: &std::sync::Mutex<FrameLanes>,
+    ops: Vec<crate::engine::HandedOverOp>,
+) {
+    for op in ops {
+        let suffix = format!(".op.{}", op.tag.request_id);
+        let prefix = op
+            .tag
+            .subject
+            .strip_suffix(&suffix)
+            .unwrap_or(&op.tag.subject)
+            .to_string();
+        let lane = lanes
+            .lock()
+            .expect("frame lanes")
+            .lane_for((op.tag.scope.clone(), prefix));
+        let sink = bulk_frame_sink(lane, op.tag.subject.clone(), engine.clone());
+        let emit = crate::ops::frame_publisher(sink, op.tag.request_id.clone());
+        let child = match op.job.exec.as_ref() {
+            None => Ok(None),
+            Some(exec) => platform
+                .adopt_exec(exec)
+                .map(Some)
+                .map_err(|error| format!("could not adopt the command's process: {error}")),
+        };
+        info!(op = %op.tag.request_id, running = op.job.exec.is_some(), "continuing a handed-over command");
+        engine.adopt_job(op, child, emit, |exit| {
+            crate::ops::wire_exit(exit).encode_to_vec()
+        });
+    }
+}
+
 /// Errors that abort the supervisor's *current connection* (it then backs off and
 /// retries). Both variants are transient — a deliberate stop is a clean shutdown,
 /// not an error.
@@ -508,6 +621,12 @@ pub struct Supervisor<P: Platform> {
     /// Keep exact-scope receipts even if a credential file temporarily disappears.
     /// Re-adding that same process subject must never re-admit an old delivery.
     reply_journals: std::sync::Mutex<HashMap<ReplyScope, ReplyJournal>>,
+    /// Frame lanes for jobs continued across an in-place update.
+    frame_lanes: Arc<std::sync::Mutex<FrameLanes>>,
+    /// Set when running commands may be handed to the successor image of an
+    /// in-place update instead of making the update wait for them.
+    #[cfg(unix)]
+    handover: Option<Arc<UpdateHandover>>,
 }
 
 type ReplyScope = (Option<String>, String, String);
@@ -557,6 +676,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             shutdown: ShutdownSignal::default(),
             update_drain: Arc::new(UpdateDrain::default()),
             reply_journals: std::sync::Mutex::new(HashMap::new()),
+            frame_lanes: Arc::new(std::sync::Mutex::new(FrameLanes::default())),
+            #[cfg(unix)]
+            handover: None,
         }
     }
 
@@ -585,6 +707,39 @@ impl<P: Platform + 'static> Supervisor<P> {
         self
     }
 
+    /// Lets a verified in-place update hand running commands to its successor
+    /// image through a private manifest at `manifest`, keeping this process's
+    /// connection instance so their op subjects stay valid.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn with_update_handover(
+        mut self,
+        manifest: std::path::PathBuf,
+        connection_instance_id: impl Into<String>,
+    ) -> Self {
+        self.handover = Some(Arc::new(UpdateHandover {
+            manifest,
+            connection_instance_id: connection_instance_id.into(),
+            pending: std::sync::Mutex::new(None),
+        }));
+        self
+    }
+
+    /// The handover a finished update run must carry into its successor.
+    #[cfg(unix)]
+    pub fn take_pending_handover(&self) -> Option<PendingHandover> {
+        self.handover
+            .as_ref()
+            .and_then(|handover| handover.pending.lock().expect("pending handover").take())
+    }
+
+    /// Continues the jobs a predecessor image handed over. Call before
+    /// running: their frames flow once their links connect.
+    #[cfg(unix)]
+    pub fn adopt_handed_over(&self, platform: &P, ops: Vec<crate::engine::HandedOverOp>) {
+        adopt_ops(&self.engine, platform, &self.frame_lanes, ops);
+    }
+
     /// A handle that, when [`request`](ShutdownSignal::request)ed, drives a clean
     /// shutdown of the run loop. Wired to SIGINT/SIGTERM by [`crate::run`].
     #[must_use]
@@ -605,6 +760,14 @@ impl<P: Platform + 'static> Supervisor<P> {
             .entry(key)
             .or_insert_with(|| link.replies.clone())
             .clone();
+        let lane_key = (link.connection_id.clone(), link.subject_prefix());
+        let mut lanes = self.frame_lanes.lock().expect("frame lanes");
+        if let Some(adopted) = lanes.adopted.remove(&lane_key) {
+            // Jobs continued from the predecessor image publish here.
+            link.bulk_tx = adopted;
+        }
+        lanes.links.insert(lane_key, link.bulk_tx.clone());
+        drop(lanes);
         Arc::new(link)
     }
 
@@ -1454,6 +1617,18 @@ impl<P: Platform + 'static> Supervisor<P> {
         let update_drain = self.update_drain.clone();
         let browser_control = link.platform.browser_control_backend();
         let shutdown = self.shutdown.clone();
+        #[cfg(unix)]
+        let handover = self.handover.clone();
+        #[cfg(unix)]
+        let handing_over = handover.is_some();
+        #[cfg(not(unix))]
+        let handing_over = false;
+        #[cfg(unix)]
+        let (adoption_platform, frame_lanes, from_version) = (
+            link.platform.clone(),
+            self.frame_lanes.clone(),
+            self.agent_version.clone(),
+        );
         // Process-global ownership is intentional. Credential rotation or one
         // transport generation ending must not cancel a verified binary swap.
         tokio::spawn(async move {
@@ -1499,7 +1674,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
                 let mut busy_code = match update_drain.fence_update(&update.operation_id) {
                     UpdateReservation::Started | UpdateReservation::AlreadyAccepted => {
-                        update_busy_code(&update_drain, &engine)
+                        update_busy_code(&update_drain, &engine, handing_over)
                     }
                     // Acceptance was finished while this attempt was pending.
                     UpdateReservation::Busy if !update_drain.is_accepted(&update.operation_id) => {
@@ -1520,8 +1695,13 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // Controller fencing awaits external IO. Recheck the shared fence:
                 // an admitted control on any link may have arrived during that proof.
                 if busy_code.is_none() {
-                    busy_code = update_busy_code(&update_drain, &engine);
-                    if busy_code.is_none() && !update_drain.seal_update(&update.operation_id) {
+                    busy_code = update_busy_code(&update_drain, &engine, handing_over);
+                    let sealed = if handing_over {
+                        update_drain.seal_update_with_handover(&update.operation_id)
+                    } else {
+                        update_drain.seal_update(&update.operation_id)
+                    };
+                    if busy_code.is_none() && !sealed {
                         busy_code = Some("update_busy_work");
                     }
                 }
@@ -1602,6 +1782,26 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
             };
 
+            #[cfg(unix)]
+            let result = match (result, handover.as_ref()) {
+                (Ok(Ok(applied)), Some(handover)) => {
+                    match hand_over_for_update(
+                        &engine,
+                        handover,
+                        adoption_platform.as_ref(),
+                        &frame_lanes,
+                        &from_version,
+                    )
+                    .await
+                    {
+                        Ok(()) => Ok(Ok(applied)),
+                        // Everything keeps running here; the next attempt
+                        // re-applies the same verified version.
+                        Err(code) => Ok(Err(code.to_string())),
+                    }
+                }
+                (result, _) => result,
+            };
             match result {
                 Ok(Ok(applied)) => {
                     publish_agent_update_progress(
@@ -1745,20 +1945,9 @@ impl<P: Platform + 'static> Supervisor<P> {
         let request_id = request.request_id.clone();
         let (request_epoch, held_epoch) = (request.epoch, ctx.epoch);
         let subject = link.op_subject(&request_id);
-        let bulk = link.bulk_tx.clone();
-        let sink_engine = self.engine.clone();
-        let sink: crate::ops::FrameSink = Arc::new(move |bytes: Vec<u8>| {
-            let delivered = match bulk.read().expect("bulk lock").as_ref() {
-                Some(tx) => tx.try_send((subject.clone(), bytes)).is_ok(),
-                None => false,
-            };
-            if !delivered {
-                // Protocol-healed (gap-detect + OpAttach replay), but RECORDED:
-                // a rising counter means the bulk lane is down or undersized.
-                sink_engine.note_frame_dropped();
-                debug!("bulk lane full/closed; op frame dropped (replay heals)");
-            }
-        });
+        // Only a link that can continue jobs across an update tags them.
+        let frame_subject = self.handover_enabled().then(|| subject.clone());
+        let sink = bulk_frame_sink(link.bulk_tx.clone(), subject, self.engine.clone());
         spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
@@ -1771,11 +1960,23 @@ impl<P: Platform + 'static> Supervisor<P> {
                     request_id,
                     start,
                     resource_policy,
+                    frame_subject,
                 )
                 .await
             };
             publish_response(&client, reply, response, label, max_payload).await;
         });
+    }
+
+    fn handover_enabled(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.handover.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
@@ -2048,6 +2249,20 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// immediately (§23.0), then flushes so the message leaves before we close.
     async fn announce_going_offline(&self, link: &WorkspaceLink<P>, client: &async_nats::Client) {
         let updating = self.shutdown.is_update();
+        #[cfg(unix)]
+        if updating
+            && self
+                .handover
+                .as_ref()
+                .is_some_and(|handover| handover.is_pending())
+        {
+            // Running commands continue in the successor image on this same
+            // connection instance: to the server this is a short reconnect,
+            // not a machine going offline.
+            let _ = client.flush().await;
+            info!("handing running commands to the updated agent; reconnecting shortly");
+            return;
+        }
         let event = AgentEvent {
             agent_id: link.creds.agent_id.clone(),
             event: Some(Event::GoingOffline(GoingOffline {
@@ -2470,19 +2685,84 @@ fn running_binary_sha256() -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn update_busy_code(update_drain: &UpdateDrain, engine: &Engine) -> Option<&'static str> {
+/// Hands every running job to the successor image of a verified update and
+/// records the manifest it will read. Refusals are retried for a while; on
+/// failure every job continues in this process and nothing is written.
+#[cfg(unix)]
+async fn hand_over_for_update<P: Platform>(
+    engine: &Arc<Engine>,
+    handover: &UpdateHandover,
+    platform: &P,
+    lanes: &std::sync::Mutex<FrameLanes>,
+    from_version: &str,
+) -> Result<(), &'static str> {
+    let deadline = Instant::now() + HANDOVER_ATTEMPTS;
+    let ops = loop {
+        match engine.handover_all().await {
+            Ok(ops) => break ops,
+            Err(partial) => {
+                adopt_ops(engine, platform, lanes, partial);
+                if Instant::now() >= deadline {
+                    warn!(
+                        "running commands could not be handed to the updated agent; not restarting"
+                    );
+                    return Err("update_handover_failed");
+                }
+                tokio::time::sleep(HANDOVER_RETRY).await;
+            }
+        }
+    };
+    let manifest = crate::handover::HandoverManifest {
+        nonce: uuid::Uuid::new_v4().to_string(),
+        from_version: from_version.to_string(),
+        connection_instance_id: handover.connection_instance_id.clone(),
+        ops,
+    };
+    if let Err(error) = crate::handover::write_manifest(&handover.manifest, &manifest) {
+        warn!(%error, "could not record the update handover; commands keep running here");
+        adopt_ops(engine, platform, lanes, manifest.ops);
+        return Err("update_handover_failed");
+    }
+    info!(
+        commands = manifest.ops.len(),
+        "handing running commands to the updated agent"
+    );
+    let pending = PendingHandover {
+        env_value: manifest.env_value(&handover.manifest),
+        execs: manifest
+            .ops
+            .into_iter()
+            .filter_map(|op| op.job.exec)
+            .collect(),
+    };
+    *handover.pending.lock().expect("pending handover") = Some(pending);
+    Ok(())
+}
+
+/// Why an update cannot proceed yet. With `handover`, jobs the update will
+/// hand to its successor image do not count; anything else still does.
+fn update_busy_code(
+    update_drain: &UpdateDrain,
+    engine: &Engine,
+    handover: bool,
+) -> Option<&'static str> {
     let pending = update_drain.snapshot();
     let admission = engine.admission_snapshot();
+    let (handed_live, handed_running) = if handover {
+        engine.handover_counts()
+    } else {
+        (0, 0)
+    };
     match pending {
         None => Some("update_state_unavailable"),
         Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
         Some(pending)
-            if pending.routed > 0
+            if pending.routed > if handover { pending.handover } else { 0 }
                 // A completed child may still own an unconsumed terminal result.
-                || engine.live_ops() > 0
+                || engine.live_ops() > handed_live
                 || admission.light_running > 0
                 || admission.light_queued > 0
-                || admission.heavy_running > 0
+                || admission.heavy_running > handed_running
                 || admission.heavy_queued > 0 =>
         {
             Some("update_busy_work")
@@ -2864,6 +3144,109 @@ mod tests {
         .expect("accepted final ack releases its route");
     }
 
+    /// A running command an update can carry into its successor no longer
+    /// holds that update back; work it cannot carry still does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_handover_update_waits_only_for_work_it_cannot_carry() {
+        use crate::engine::{scoped_op_id, OpHandoverTag, StartOutcome};
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let drain = Arc::new(UpdateDrain::default());
+        let start = |name: &'static str| {
+            let engine = engine.clone();
+            let drain = drain.clone();
+            async move {
+                let reservation = drain.reserve_work(None).expect("routed work admitted");
+                let operation = scoped_op_id("scope-a", name);
+                let ticket = engine
+                    .admit(&operation, JobClass::Heavy, "scope-a")
+                    .await
+                    .expect("admitted");
+                let started = opengeni_agent_platform::with_work_reservation(
+                    Some(reservation.clone()),
+                    async {
+                        engine.start_job(
+                            &operation,
+                            ticket,
+                            Vec::new(),
+                            None,
+                            || {
+                                let mut command = tokio::process::Command::new("/bin/sh");
+                                command.arg("-c").arg("sleep 30");
+                                opengeni_agent_platform::spawn_contained(command, None)
+                            },
+                            |_| {},
+                            |exit| format!("{exit:?}").into_bytes(),
+                            |_, _| {},
+                        )
+                    },
+                )
+                .await;
+                let StartOutcome::Started(started) = started else {
+                    panic!("fresh child must start");
+                };
+                (operation, started, reservation)
+            }
+        };
+        let (carried_op, carried, carried_reservation) = start("carried").await;
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        // Before the job is handover-capable both kinds of update wait.
+        assert_eq!(
+            update_busy_code(&drain, &engine, true),
+            Some("update_busy_work")
+        );
+        carried_reservation.mark_handover();
+        drop(carried_reservation);
+        engine.mark_handover_capable(
+            &carried_op,
+            &carried.handles,
+            OpHandoverTag {
+                scope: "scope-a".into(),
+                request_id: "carried".into(),
+                subject: "agent.w.a.connection.i.op.carried".into(),
+                window_bytes: 0,
+            },
+        );
+        assert_eq!(engine.handover_counts(), (1, 1));
+        assert_eq!(
+            update_busy_code(&drain, &engine, false),
+            Some("update_busy_work")
+        );
+        assert_eq!(update_busy_code(&drain, &engine, true), None);
+        assert!(!drain.seal_update("synthetic-update"));
+        assert!(drain.seal_update_with_handover("synthetic-update"));
+        drain.release_update("synthetic-update");
+
+        // A command that cannot be carried still holds the update back.
+        let (_, other, other_reservation) = start("other").await;
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        assert_eq!(
+            update_busy_code(&drain, &engine, true),
+            Some("update_busy_work")
+        );
+        assert!(!drain.seal_update_with_handover("synthetic-update"));
+        drain.release_update("synthetic-update");
+        drop(other_reservation);
+        for started in [carried, other] {
+            started
+                .mailbox
+                .send(crate::job::JobCommand::Cancel)
+                .await
+                .ok();
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn update_retained_result_requires_current_terminal_ack() {
@@ -2893,7 +3276,10 @@ mod tests {
             UpdateReservation::Started
         );
         assert!(drain.reserve_work(None).is_none());
-        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        assert_eq!(
+            update_busy_code(&drain, &engine, false),
+            Some("update_busy_work")
+        );
         for generation in [1, 2] {
             started
                 .mailbox
@@ -2927,10 +3313,13 @@ mod tests {
             .unwrap();
         update_result_barrier(&started).await;
         assert_eq!(engine.live_ops(), 1);
-        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        assert_eq!(
+            update_busy_code(&drain, &engine, false),
+            Some("update_busy_work")
+        );
         acknowledge_update_result(&engine, &operation, &started, sequence).await;
         assert_eq!(engine.live_ops(), 0);
-        assert_eq!(update_busy_code(&drain, &engine), None);
+        assert_eq!(update_busy_code(&drain, &engine, false), None);
         drain.release_update("synthetic-update");
         assert!(drain.reserve_work(None).is_some());
     }
@@ -2963,14 +3352,20 @@ mod tests {
             UpdateReservation::Started
         );
         assert_eq!(engine.live_ops(), 2);
-        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        assert_eq!(
+            update_busy_code(&drain, &engine, false),
+            Some("update_busy_work")
+        );
         acknowledge_update_result(&engine, &first, &first_job, first_sequence).await;
         assert_eq!(engine.live_ops(), 1);
-        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        assert_eq!(
+            update_busy_code(&drain, &engine, false),
+            Some("update_busy_work")
+        );
         assert!(drain.reserve_work(None).is_none());
         acknowledge_update_result(&engine, &second, &second_job, second_sequence).await;
         assert_eq!(engine.live_ops(), 0);
-        assert_eq!(update_busy_code(&drain, &engine), None);
+        assert_eq!(update_busy_code(&drain, &engine, false), None);
         drain.release_update("synthetic-update");
         assert!(drain.reserve_work(None).is_some());
     }
@@ -3023,7 +3418,7 @@ mod tests {
             drain.reserve_update("synthetic-update"),
             UpdateReservation::Started
         );
-        assert_eq!(update_busy_code(&drain, &engine), None);
+        assert_eq!(update_busy_code(&drain, &engine, false), None);
         drain.release_update("synthetic-update");
         assert!(drain.reserve_work(None).is_some());
     }
@@ -5109,6 +5504,368 @@ mod tests {
             .unwrap()
             .unwrap();
         drop(server);
+    }
+
+    /// Role of a re-executed test process in the in-place update handover test.
+    #[cfg(unix)]
+    const HANDOVER_ROLE_ENV: &str = "OPENGENI_TEST_HANDOVER_ROLE";
+    #[cfg(unix)]
+    const HANDOVER_CHILD_TEST: &str = "supervisor::tests::handover_exec_child";
+
+    #[cfg(unix)]
+    fn handover_test_supervisor(
+        directory: &std::path::Path,
+        url: &str,
+        instance: &str,
+    ) -> (
+        Arc<Supervisor<opengeni_agent_platform::NativePlatform>>,
+        Arc<opengeni_agent_platform::NativePlatform>,
+    ) {
+        use opengeni_agent_platform::NativePlatform;
+        let platform = Arc::new(NativePlatform::with_root(directory));
+        let definition =
+            SupervisorLink::new("handover-test", platform.clone(), it::test_credentials(url))
+                .with_connection_instance_id(instance);
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0")
+            .with_spool_root(directory.join("spool"))
+            .with_update_handover(directory.join("handover.json"), instance);
+        (Arc::new(supervisor), platform)
+    }
+
+    /// The agent side of [`a_running_command_continues_across_an_in_place_exec`]:
+    /// the predecessor serves, hands its running command over, and `exec`s
+    /// this same test binary as its successor, which continues it. A no-op in
+    /// an ordinary test run.
+    #[cfg(unix)]
+    #[test]
+    fn handover_exec_child() {
+        let Ok(role) = std::env::var(HANDOVER_ROLE_ENV) else {
+            return;
+        };
+        let directory =
+            std::path::PathBuf::from(std::env::var("OPENGENI_TEST_HANDOVER_DIR").unwrap());
+        let url = std::env::var("OPENGENI_TEST_HANDOVER_NATS").unwrap();
+        let inherited = (role == "successor").then(|| {
+            assert!(
+                crate::handover::inherit_from_env().unwrap(),
+                "a handover is inherited"
+            );
+            crate::handover::take_inherited().expect("inherited manifest")
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let handover = runtime.block_on(async move {
+            let instance = inherited
+                .as_ref()
+                .map_or(TEST_CONNECTION_INSTANCE_ID.to_string(), |manifest| {
+                    manifest.connection_instance_id.clone()
+                });
+            assert_eq!(instance, TEST_CONNECTION_INSTANCE_ID);
+            let (supervisor, platform) = handover_test_supervisor(&directory, &url, &instance);
+            if let Some(manifest) = inherited {
+                assert_eq!(manifest.ops.len(), 1, "one running command handed over");
+                supervisor.adopt_handed_over(&platform, manifest.ops);
+                std::fs::write(
+                    directory.join("successor-online"),
+                    std::process::id().to_string(),
+                )
+                .unwrap();
+            }
+            let runner = supervisor.clone();
+            let run = tokio::spawn(async move { runner.run().await });
+            if role == "predecessor" {
+                while !directory.join("hand-over-now").exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                hand_over_for_update(
+                    &supervisor.engine,
+                    supervisor.handover.as_ref().unwrap(),
+                    platform.as_ref(),
+                    &supervisor.frame_lanes,
+                    "test-0.0.0",
+                )
+                .await
+                .expect("running command handed over");
+                supervisor.shutdown.request_update();
+            } else {
+                // Never outlive an abandoned test.
+                let deadline = Instant::now() + Duration::from_secs(120);
+                while !directory.join("stop").exists() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                supervisor.shutdown.request();
+            }
+            run.await.unwrap().unwrap();
+            supervisor.take_pending_handover()
+        });
+        drop(runtime);
+        if let Some(handover) = handover {
+            use std::os::unix::process::CommandExt as _;
+            for exec in &handover.execs {
+                exec.prepare_exec().unwrap();
+            }
+            let error = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    HANDOVER_CHILD_TEST,
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HANDOVER_ROLE_ENV, "successor")
+                .env(crate::handover::HANDOVER_ENV, &handover.env_value)
+                .exec();
+            panic!("exec failed: {error}");
+        }
+    }
+
+    /// A test agent process, killed if the test fails before it stops.
+    #[cfg(unix)]
+    struct KillOnDrop(std::process::Child);
+
+    #[cfg(unix)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    async fn next_frame(frames: &mut async_nats::Subscriber) -> v1::OpFrame {
+        let message = tokio::time::timeout(Duration::from_secs(20), frames.next())
+            .await
+            .expect("frame within timeout")
+            .expect("op subject open");
+        v1::OpFrame::decode(message.payload.as_ref()).unwrap()
+    }
+
+    /// An in-place agent update keeps a running command: the agent process
+    /// `exec`s its successor image, which continues the same command (same
+    /// PID, same pipes), on the same op subject, with a byte-exact stream and
+    /// its real exit code. The server sees a reconnect, not a machine going
+    /// offline.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one linear cross-exec scenario
+    async fn a_running_command_continues_across_an_in_place_exec() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP a_running_command_continues_across_an_in_place_exec: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let directory = tempfile::tempdir().unwrap();
+        let link = WorkspaceLink::from_definition(
+            SupervisorLink::new(
+                "handover-test",
+                Arc::new(NativePlatform::with_root(directory.path())),
+                it::test_credentials(&url),
+            )
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID),
+        );
+        let op_id = "handover-op-1";
+        let mut op_frames = client.subscribe(link.op_subject(op_id)).await.unwrap();
+        let mut events = client.subscribe(link.events_subject()).await.unwrap();
+
+        let mut agent = KillOnDrop(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    HANDOVER_CHILD_TEST,
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HANDOVER_ROLE_ENV, "predecessor")
+                .env("OPENGENI_TEST_HANDOVER_DIR", directory.path())
+                .env("OPENGENI_TEST_HANDOVER_NATS", &url)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(15), |e| matches!(
+                e.event,
+                Some(Event::Heartbeat(_))
+            ))
+            .await,
+            "predecessor online"
+        );
+
+        let go = directory.path().join("go");
+        let start = ControlRequest {
+            request_id: op_id.to_string(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec![
+                        "echo before; while [ ! -e \"$GO\" ]; do sleep 0.05; done; echo after >&2; echo after; exit 7"
+                            .to_string(),
+                    ],
+                    shell: true,
+                    env: [("GO".to_string(), go.display().to_string())].into(),
+                    ..Default::default()
+                })),
+                window_bytes: 0,
+                deadline_ms: 0,
+                origin_id: "session-handover".to_string(),
+            })),
+        };
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(link.rpc_subject(), start.encode_to_vec().into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let started = v1::ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(
+            matches!(started.result, Some(v1::control_response::Result::OpStart(ref s)) if s.accepted),
+            "{started:?}"
+        );
+
+        let mut stdout = Vec::new();
+        let mut frames = std::collections::BTreeMap::new();
+        // The command is mid-run when the update hands it over.
+        loop {
+            let frame = next_frame(&mut op_frames).await;
+            if let Some(v1::op_frame::Body::Data(data)) = &frame.body {
+                if data.channel == v1::OpChannel::Stdout as i32 {
+                    stdout.extend_from_slice(&data.bytes);
+                }
+            }
+            frames.insert(frame.seq, frame);
+            if stdout == b"before\n" {
+                break;
+            }
+        }
+        std::fs::write(directory.path().join("hand-over-now"), b"").unwrap();
+        let online = directory.path().join("successor-online");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !online.exists() {
+            assert!(Instant::now() < deadline, "successor never came online");
+            assert!(
+                agent.0.try_wait().unwrap().is_none(),
+                "agent process exited"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&online).unwrap(),
+            agent.0.id().to_string(),
+            "the successor is the same process, replaced in place"
+        );
+        // Everything the predecessor published has arrived by now; none of
+        // it may announce the machine going offline.
+        while let Ok(Some(message)) =
+            tokio::time::timeout(Duration::from_millis(300), events.next()).await
+        {
+            let event = AgentEvent::decode(message.payload.as_ref()).unwrap();
+            assert!(
+                !matches!(event.event, Some(Event::GoingOffline(_))),
+                "a handover is a reconnect, not going offline"
+            );
+        }
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(15), |e| {
+                assert!(!matches!(e.event, Some(Event::GoingOffline(_))));
+                matches!(e.event, Some(Event::Heartbeat(_)))
+            })
+            .await,
+            "successor online"
+        );
+        // As after any reconnect, the server re-attaches the op; the
+        // continued job replays what it retained (seq-idempotent).
+        let attach = ControlRequest {
+            request_id: "handover-attach".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpAttach(v1::OpAttach {
+                op_id: op_id.into(),
+                from_seq: 0,
+                attach_generation: 2,
+                window_bytes: 1 << 20,
+            })),
+        };
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(link.rpc_subject(), attach.encode_to_vec().into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let attached = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(attached.error.is_none(), "{attached:?}");
+        std::fs::write(&go, b"").unwrap();
+
+        let (exit, exit_seq) = loop {
+            let frame = next_frame(&mut op_frames).await;
+            let seq = frame.seq;
+            let exit = match &frame.body {
+                Some(v1::op_frame::Body::Exit(exit)) => Some(exit.clone()),
+                _ => None,
+            };
+            if let Some(previous) = frames.get(&seq) {
+                assert_eq!(previous, &frame, "a replayed frame is identical");
+            }
+            frames.insert(seq, frame);
+            if let Some(exit) = exit {
+                break (exit, seq);
+            }
+        };
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        for frame in frames.values() {
+            if let Some(v1::op_frame::Body::Data(data)) = &frame.body {
+                if data.channel == v1::OpChannel::Stdout as i32 {
+                    stdout.extend_from_slice(&data.bytes);
+                } else {
+                    stderr.extend_from_slice(&data.bytes);
+                }
+            }
+        }
+        assert_eq!(stdout, b"before\nafter\n");
+        assert_eq!(stderr, b"after\n");
+        assert_eq!(exit.exit_code, 7, "the command's own exit status: {exit:?}");
+        assert_eq!(
+            exit.digests.get("stdout").map(String::as_str),
+            Some(blake3::hash(b"before\nafter\n").to_hex().as_str()),
+            "the digest spans both process images"
+        );
+        let seqs: Vec<u64> = frames.keys().copied().collect();
+        let expected: Vec<u64> = (seqs[0]..=exit_seq).collect();
+        assert_eq!(seqs, expected, "one contiguous stream across the update");
+
+        client
+            .publish(
+                link.ack_subject(),
+                v1::OpAck {
+                    op_id: op_id.to_string(),
+                    acked_seq: exit_seq,
+                    credit_bytes: 1 << 20,
+                    r#final: true,
+                    attach_generation: 2,
+                }
+                .encode_to_vec()
+                .into(),
+            )
+            .await
+            .unwrap();
+        std::fs::write(directory.path().join("stop"), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            if let Some(status) = agent.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "successor did not stop");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert!(status.success(), "successor exited cleanly: {status:?}");
     }
 
     /// Test-only integration helpers (a throwaway local nats-server + event

@@ -510,8 +510,19 @@ the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
 unreadable controller as `update_state_unavailable`), keeps admitting new work,
 and every few seconds re-attempts a short fenced idle proof, reopening
 admission whenever it is still busy. It never cancels accepted work, stops
-long-lived servers, or restarts the host early; an update behind a long-lived
-command simply keeps waiting. Only lost physical settlement, which can never
+long-lived servers, or restarts the host early. On Linux and macOS a running
+streamed command (an `OpStart` exec) does not hold the update back: after the
+verified binary is installed, the agent hands each such command to its
+successor and `exec`s the new binary in the same process. The command keeps
+running as the same process with the same pipes, process group and operation
+cgroup; the successor keeps the connection instance, so the server sees a
+short reconnect on the same op subjects (no `GoingOffline`), re-attaches as
+after any reconnect, and the stream continues byte-exact with one digest.
+Every failure is fail-closed: a command that cannot be continued ends as a
+typed failure, and if the successor never starts, the command's anchor ends it
+as for a crashed runner. Other admitted work, such as a request still being
+answered, a git operation or a pending upload, still makes the update wait,
+and Windows keeps waiting for every command. Only lost physical settlement, which can never
 become provable in that process, ends the update with retryable
 `update_state_unavailable`. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart

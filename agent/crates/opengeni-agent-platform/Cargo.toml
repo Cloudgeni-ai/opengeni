@@ -24,11 +24,13 @@ opengeni-agent-engine = { path = "../opengeni-agent-engine" }
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = { workspace = true }
 prost = { workspace = true }
 blake3 = { workspace = true }
 uuid = { workspace = true }
+# The serializable record of a running command handed to a successor process.
+serde = { workspace = true }
 
 # Interactive terminal: a real PTY (openpty / ConPTY) via the safe portable-pty
 # crate — no unsafe, cross-platform (the M8 terminal seam).
@@ -41,12 +43,13 @@ image = { workspace = true }
 # (RANDR), all via the SAFE pure-Rust x11rb binding so unsafe_code stays forbidden.
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+# Claims the descriptors a running command's handover carried across exec.
+opengeni-agent-linux-ffi = { path = "../opengeni-agent-linux-ffi" }
 
 [target.'cfg(windows)'.dependencies]
 command-group = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-opengeni-agent-linux-ffi = { path = "../opengeni-agent-linux-ffi" }
 x11rb = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
@@ -63,5 +66,6 @@ opengeni-agent-files-ffi = { path = "../opengeni-agent-files-ffi" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "net", "sync"] }
 tempfile = { workspace = true }
+serde_json = { workspace = true }
 # The wire types the cgroup-placement integration test builds an ExecRequest with.
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
