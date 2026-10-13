@@ -10,7 +10,7 @@ import { onePasswordTokenFingerprint } from "../src/token";
 import { runVaultProviderContractSuite } from "@opengeni/vaults/testing";
 
 /**
- * Live 1Password run (dossier §16.5, OP-1..OP-3). Never runs in CI:
+ * Live 1Password run (design §16.5, OP-1..OP-3). Never runs in CI:
  *
  *   (set -a; . keys/op.env; set +a; OPENGENI_ONEPASSWORD_LIVE=1 \
  *     bun test ./packages/vaults-onepassword/test/live.test.ts)
@@ -24,7 +24,7 @@ const token = process.env.ONEPASSWORD_TEST_SERVICE_ACCOUNT_TOKEN ?? "";
 const RW = process.env.ONEPASSWORD_TEST_RW_VAULT_ID ?? "dfictlxpjayo7rjac24euezsk4";
 const RO = process.env.ONEPASSWORD_TEST_RO_VAULT_ID ?? "dhvjy5lcnvojzbqumrr5awihg4";
 const PREFIX = "ogtest-";
-/** dossier OP-1: at most 60 calls per run (counted as HTTP requests, the stricter unit). */
+/** design OP-1: at most 60 calls per run (counted as HTTP requests, the stricter unit). */
 const MAX_CALLS_PER_RUN = 60;
 const evidenceDir = process.env.OPENGENI_ONEPASSWORD_EVIDENCE_DIR ?? null;
 

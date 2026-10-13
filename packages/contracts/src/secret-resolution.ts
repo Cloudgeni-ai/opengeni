@@ -1,5 +1,5 @@
 /**
- * Secret resolver contract (dossier §10B.1.3). Types live here; the hosted
+ * Secret resolver contract (design §10B.1.3). Types live here; the hosted
  * implementation is `createSecretResolver` in `@opengeni/core` and a static
  * stub is `createStaticSecretResolver` in `@opengeni/vaults/testing`.
  *

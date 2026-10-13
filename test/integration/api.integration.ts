@@ -46,7 +46,6 @@ import {
   setSessionGoalStatus,
   sumUsageQuantity,
   synchronizeCanonicalHumanLoginBindings,
-  updateScheduledTask,
   upsertCapabilityCatalogItem,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
@@ -57,7 +56,6 @@ import { appendAndPublishEvents } from "@opengeni/events";
 import {
   signDelegatedAccessToken,
   type AccessContext,
-  type AuthorizeSessionInput,
   type McpMutationReceiptType,
   type Permission,
   type SessionEvent,
@@ -108,23 +106,6 @@ async function setSessionStatus(
       update sessions
       set status = ${status}, active_turn_id = ${activeTurnId}, updated_at = now()
       where workspace_id = ${workspaceId} and id = ${sessionId}
-    `);
-  });
-}
-
-async function settleSessionTurnsForVariableSetDetach(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<void> {
-  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.execute(dbSql`
-      update session_turns
-      set status = 'cancelled', active_attempt_id = null,
-        cancelled_by = 'integration-test', cancel_reason = 'explicit_variable_set_detach',
-        finished_at = coalesce(finished_at, now()), updated_at = now()
-      where workspace_id = ${workspaceId} and session_id = ${sessionId}
-        and status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
     `);
   });
 }
@@ -1554,20 +1535,40 @@ describe("API component integration", () => {
     const exactSecret =
       `ordinary source: const fakeToken = "ghp_not_a_credential";\n` +
       `shell: printf '%s\\n' "$VALUE"`;
-    const variableSetResponse = await app.request(workspacePath(workspaceId, "/variable-sets"), {
+    const vaultResponse = await app.request(workspacePath(workspaceId, "/vaults"), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookie! },
       body: JSON.stringify({
-        name: `permissioned-read-${crypto.randomUUID()}`,
-        variables: [{ name: "EXACT_VALUE", value: exactSecret }],
+        name: `permissioned-read-${crypto.randomUUID().slice(0, 8)}`,
+        ownerKind: "workspace",
       }),
     });
-    expect(variableSetResponse.status).toBe(201);
-    const variableSet = (await variableSetResponse.json()) as { id: string };
+    expect(vaultResponse.status).toBe(201);
+    const vault = (await vaultResponse.json()) as { id: string };
+    const itemResponse = await app.request(
+      workspacePath(workspaceId, `/vaults/${vault.id}/items`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: cookie! },
+        body: JSON.stringify({
+          type: "api_key",
+          name: "EXACT_VALUE",
+          fields: [{ name: "value", kind: "concealed", value: exactSecret }],
+        }),
+      },
+    );
+    expect(itemResponse.status).toBe(201);
+    const item = (await itemResponse.json()) as { id: string; fields: { id: string }[] };
     const secretPath = workspacePath(
       workspaceId,
-      `/variable-sets/${variableSet.id}/variables/EXACT_VALUE`,
+      `/vaults/${vault.id}/items/${item.id}/fields/${item.fields[0]!.id}/reveal`,
     );
+    const reveal = (token: string) =>
+      app.request(secretPath, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: "{}",
+      });
     const createPermissionKey = async (name: string, permissions: Permission[]) => {
       const response = await app.request(workspacePath(workspaceId, "/api-keys"), {
         method: "POST",
@@ -1578,9 +1579,7 @@ describe("API component integration", () => {
       return ((await response.json()) as { token: string }).token;
     };
     const wildcardToken = await createPermissionKey("Legacy wildcard", ["workspace:admin"]);
-    const wildcardRead = await app.request(secretPath, {
-      headers: { authorization: `Bearer ${wildcardToken}` },
-    });
+    const wildcardRead = await reveal(wildcardToken);
     expect(wildcardRead.status).toBe(403);
     expect(await wildcardRead.text()).not.toContain(exactSecret);
 
@@ -1592,44 +1591,25 @@ describe("API component integration", () => {
       },
       body: JSON.stringify({
         name: "Forbidden plaintext escalation",
-        permissions: ["variable-sets:read", "secrets:read"],
+        permissions: ["secrets:list", "secrets:read"],
       }),
     });
     expect(wildcardEscalation.status).toBe(403);
 
-    const resourceOnlyToken = await createPermissionKey("Resource read only", [
+    const listOnlyToken = await createPermissionKey("Secret list only", ["secrets:list"]);
+    expect((await reveal(listOnlyToken)).status).toBe(403);
+    const legacyReadToken = await createPermissionKey("Legacy resource read", [
       "variable-sets:read",
     ]);
-    expect(
-      (
-        await app.request(secretPath, {
-          headers: { authorization: `Bearer ${resourceOnlyToken}` },
-        })
-      ).status,
-    ).toBe(403);
-    const secretOnlyToken = await createPermissionKey("Secret read only", ["secrets:read"]);
-    expect(
-      (
-        await app.request(secretPath, {
-          headers: { authorization: `Bearer ${secretOnlyToken}` },
-        })
-      ).status,
-    ).toBe(403);
+    expect((await reveal(legacyReadToken)).status).toBe(403);
 
     const explicitReadToken = await createPermissionKey("Explicit plaintext read", [
-      "variable-sets:read",
+      "secrets:list",
       "secrets:read",
     ]);
-    const explicitRead = await app.request(secretPath, {
-      headers: { authorization: `Bearer ${explicitReadToken}` },
-    });
+    const explicitRead = await reveal(explicitReadToken);
     expect(explicitRead.status).toBe(200);
-    expect(await explicitRead.json()).toMatchObject({
-      variableSetId: variableSet.id,
-      name: "EXACT_VALUE",
-      version: 1,
-      value: exactSecret,
-    });
+    expect(await explicitRead.json()).toMatchObject({ value: exactSecret });
 
     const otherAccount = await bootstrapWorkspace(dbClient.db, {
       accountExternalSource: "test:managed-key-other",
@@ -6324,566 +6304,6 @@ describe("API component integration", () => {
     expect(JSON.stringify(await history.json())).toContain("Update the network policy.");
   });
 
-  test("manages workspace environments with write-only values", async () => {
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const name = `staging-${crypto.randomUUID()}`;
-    const createdResponse = await app.request(workspacePath(workspaceId, "/environments"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name,
-        description: "staging secrets",
-        variables: [
-          { name: "API_TOKEN", value: "tok-write-only-123456" },
-          { name: "DB_PASSWORD", value: "p4ssw0rd-write-only" },
-        ],
-      }),
-    });
-    expect(createdResponse.status).toBe(201);
-    const created = (await createdResponse.json()) as {
-      id: string;
-      name: string;
-      variables: Array<{ name: string; version: number }>;
-    };
-    expect(created.name).toBe(name);
-    expect(created.variables.map((variable) => variable.name).sort()).toEqual([
-      "API_TOKEN",
-      "DB_PASSWORD",
-    ]);
-    expect(created.variables.every((variable) => variable.version === 1)).toBe(true);
-    expect(JSON.stringify(created)).not.toContain("tok-write-only-123456");
-    expect(JSON.stringify(created)).not.toContain("p4ssw0rd-write-only");
-
-    const reserved = await app.request(workspacePath(workspaceId, "/environments"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: `reserved-${crypto.randomUUID()}`,
-        variables: [{ name: "GH_TOKEN", value: "stolen-platform-token" }],
-      }),
-    });
-    expect(reserved.status).toBe(422);
-    expect(await reserved.text()).toContain("reserved environment variable name: GH_TOKEN");
-
-    const duplicate = await app.request(workspacePath(workspaceId, "/environments"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    expect(duplicate.status).toBe(409);
-
-    const listed = await app.request(workspacePath(workspaceId, "/environments"));
-    expect(listed.status).toBe(200);
-    const listedBody = (await listed.json()) as Array<{ id: string }>;
-    expect(listedBody.some((environment) => environment.id === created.id)).toBe(true);
-    expect(JSON.stringify(listedBody)).not.toContain("tok-write-only-123456");
-    const canonicalListed = await app.request(workspacePath(workspaceId, "/variable-sets"));
-    expect(canonicalListed.status).toBe(200);
-    const canonicalListedBody = (await canonicalListed.json()) as Array<{
-      id: string;
-    }>;
-    expect(canonicalListedBody).toEqual(listedBody);
-
-    const rotated = await app.request(
-      workspacePath(workspaceId, `/environments/${created.id}/variables/API_TOKEN`),
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ value: "tok-rotated-654321" }),
-      },
-    );
-    expect(rotated.status).toBe(200);
-    const rotatedBody = (await rotated.json()) as {
-      name: string;
-      version: number;
-    };
-    expect(rotatedBody).toMatchObject({ name: "API_TOKEN", version: 2 });
-    expect(JSON.stringify(rotatedBody)).not.toContain("tok-rotated-654321");
-
-    const storedRows = await dbClient.db.execute(dbSql<{
-      value_encrypted: string;
-    }>`
-      select value_encrypted from workspace_variable_set_variables
-      where variable_set_id = ${created.id} and name = 'API_TOKEN'
-    `);
-    expect(storedRows[0]?.value_encrypted).toStartWith("v2:");
-    expect(storedRows[0]?.value_encrypted).not.toContain("tok-rotated-654321");
-
-    const renamed = await app.request(workspacePath(workspaceId, `/environments/${created.id}`), {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: `${name}-renamed`, description: null }),
-    });
-    expect(renamed.status).toBe(200);
-    expect(
-      ((await renamed.json()) as { name: string; description: string | null }).description,
-    ).toBeNull();
-
-    const deletedVariable = await app.request(
-      workspacePath(workspaceId, `/environments/${created.id}/variables/DB_PASSWORD`),
-      { method: "DELETE" },
-    );
-    expect(deletedVariable.status).toBe(200);
-    const deletedAgain = await app.request(
-      workspacePath(workspaceId, `/environments/${created.id}/variables/DB_PASSWORD`),
-      { method: "DELETE" },
-    );
-    expect(deletedAgain.status).toBe(404);
-
-    const missing = await app.request(
-      workspacePath(workspaceId, `/environments/${crypto.randomUUID()}`),
-    );
-    expect(missing.status).toBe(404);
-
-    const audited = await dbClient.db.execute(dbSql<{ count: string }>`
-      select count(*)::text as count from audit_events
-      where target_id = ${created.id} and action like 'variable_set.%'
-    `);
-    expect(Number(audited[0]?.count ?? 0)).toBeGreaterThanOrEqual(4);
-    const auditedPayloads = await dbClient.db.execute(dbSql<{
-      metadata: unknown;
-    }>`
-      select metadata from audit_events where target_id = ${created.id}
-    `);
-    expect(JSON.stringify(auditedPayloads)).not.toContain("tok-rotated-654321");
-
-    const deletedEnvironment = await app.request(
-      workspacePath(workspaceId, `/environments/${created.id}`),
-      { method: "DELETE" },
-    );
-    expect(deletedEnvironment.status).toBe(200);
-  });
-
-  test("returns 503 for environment writes and attachments without the encryption key", async () => {
-    const app = createApp({
-      settings: testSettings({ databaseUrl: services.databaseUrl }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const createResponse = await app.request(workspacePath(workspaceId, "/environments"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: `nokey-${crypto.randomUUID()}` }),
-    });
-    expect(createResponse.status).toBe(503);
-    const createError = (await createResponse.json()) as {
-      error: { code: string };
-    };
-    expect(createError.error.code).toBe("upstream_unavailable");
-    expect(JSON.stringify(createError)).not.toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
-
-    const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        initialMessage: "attach",
-        environmentId: crypto.randomUUID(),
-      }),
-    });
-    expect(sessionResponse.status).toBe(503);
-  });
-
-  test("attaches environments to sessions at creation with names-only events", async () => {
-    workflow = new FakeWorkflowClient();
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: workflow,
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const environment = await createTestEnvironment(app, workspaceId, {
-      variables: [{ name: "SERVICE_TOKEN", value: "session-secret-abcdef" }],
-    });
-
-    const unknownAttachment = await app.request(workspacePath(workspaceId, "/sessions"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        initialMessage: "attach",
-        environmentId: crypto.randomUUID(),
-      }),
-    });
-    expect(unknownAttachment.status).toBe(422);
-    expect(await unknownAttachment.text()).toContain("unknown variableSetId");
-
-    const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        initialMessage: "attach",
-        environmentId: environment.id,
-      }),
-    });
-    expect(sessionResponse.status).toBe(202);
-    const session = (await sessionResponse.json()) as {
-      id: string;
-      environmentId: string | null;
-    };
-    expect(session.environmentId).toBe(environment.id);
-
-    const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
-    const createdEvent = events.find((event) => event.type === "session.created");
-    expect(createdEvent?.payload).toMatchObject({
-      variableSetId: environment.id,
-      variableSetName: environment.name,
-    });
-    expect(JSON.stringify(events)).not.toContain("session-secret-abcdef");
-  });
-
-  test("keeps every session attachment fenced until an explicit quiescent detach", async () => {
-    workflow = new FakeWorkflowClient();
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: workflow,
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-
-    const createAttachedSession = async (status: SessionStatus) => {
-      const environment = await createTestEnvironment(app, workspaceId, {});
-      const response = await app.request(workspacePath(workspaceId, "/sessions"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          initialMessage: `deletion fence ${status}`,
-          environmentId: environment.id,
-        }),
-      });
-      expect(response.status).toBe(202);
-      const session = (await response.json()) as {
-        id: string;
-        environmentId: string | null;
-      };
-      if (status !== "queued") {
-        await setSessionStatus(dbClient.db, workspaceId, session.id, status, null);
-      }
-      return { environment, session };
-    };
-
-    for (const status of [
-      "queued",
-      "running",
-      "requires_action",
-      "recovering",
-      "waiting_capacity",
-      "idle",
-      "failed",
-      "cancelled",
-    ] as const) {
-      const { environment, session } = await createAttachedSession(status);
-      const blocked = await app.request(
-        workspacePath(workspaceId, `/environments/${environment.id}`),
-        { method: "DELETE" },
-      );
-      expect(blocked.status).toBe(409);
-      expect(await blocked.text()).toContain("session");
-      const retained = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
-      expect(((await retained.json()) as { environmentId: string | null }).environmentId).toBe(
-        environment.id,
-      );
-
-      await setSessionStatus(dbClient.db, workspaceId, session.id, "cancelled", null);
-      await settleSessionTurnsForVariableSetDetach(dbClient.db, workspaceId, session.id);
-      const detached = await app.request(
-        workspacePath(workspaceId, `/sessions/${session.id}/variable-sets`),
-        {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ variableSetIds: [] }),
-        },
-      );
-      expect(detached.status).toBe(200);
-      expect(
-        ((await detached.json()) as { environmentId: string | null }).environmentId,
-      ).toBeNull();
-      const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
-      expect(events.filter((event) => event.type === "session.variable_sets.updated")).toHaveLength(
-        1,
-      );
-      const cleanup = await app.request(
-        workspacePath(workspaceId, `/environments/${environment.id}`),
-        { method: "DELETE" },
-      );
-      expect(cleanup.status).toBe(200);
-    }
-  });
-
-  test("enforces environment permissions for management and attachment", async () => {
-    const delegationSecret = "test-environments-permission-secret";
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        productAccessMode: "managed",
-        delegationSecret,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const signToken = async (permissions: Permission[]) =>
-      `Bearer ${await signDelegatedAccessToken(delegationSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        subjectId: grant.subjectId,
-        permissions,
-        principalKind: "human_session",
-        exp: Math.floor(Date.now() / 1000) + 3600,
-      })}`;
-    const adminAuth = {
-      authorization: await signToken(allWorkspacePermissions),
-    };
-    const limitedAuth = {
-      authorization: await signToken([
-        "workspace:read",
-        "sessions:create",
-        "sessions:read",
-        "scheduled_tasks:manage",
-        "scheduled_tasks:run",
-      ]),
-    };
-
-    const forbiddenCreate = await app.request(workspacePath(grant.workspaceId, "/environments"), {
-      method: "POST",
-      headers: { ...limitedAuth, "content-type": "application/json" },
-      body: JSON.stringify({ name: `forbidden-${crypto.randomUUID()}` }),
-    });
-    expect(forbiddenCreate.status).toBe(403);
-    const forbiddenList = await app.request(workspacePath(grant.workspaceId, "/environments"), {
-      headers: limitedAuth,
-    });
-    expect(forbiddenList.status).toBe(403);
-    const deprecatedAliasAuth = {
-      authorization: await signToken(["workspace:read", "environments:use" as Permission]),
-    };
-    const deprecatedAliasList = await app.request(
-      workspacePath(grant.workspaceId, "/variable-sets"),
-      { headers: deprecatedAliasAuth },
-    );
-    expect(deprecatedAliasList.status).toBe(403);
-    const explicitListAuth = {
-      authorization: await signToken(["workspace:read", "variable-sets:list", "secrets:list"]),
-    };
-    const explicitList = await app.request(workspacePath(grant.workspaceId, "/variable-sets"), {
-      headers: explicitListAuth,
-    });
-    expect(explicitList.status).toBe(200);
-
-    const createdResponse = await app.request(workspacePath(grant.workspaceId, "/environments"), {
-      method: "POST",
-      headers: { ...adminAuth, "content-type": "application/json" },
-      body: JSON.stringify({
-        name: `perm-${crypto.randomUUID()}`,
-        variables: [{ name: "PERM_TOKEN", value: "perm-secret-123456" }],
-      }),
-    });
-    expect(createdResponse.status).toBe(201);
-    const environment = (await createdResponse.json()) as { id: string };
-
-    const forbiddenAttach = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
-      method: "POST",
-      headers: { ...limitedAuth, "content-type": "application/json" },
-      body: JSON.stringify({
-        initialMessage: "attach",
-        environmentId: environment.id,
-      }),
-    });
-    expect(forbiddenAttach.status).toBe(403);
-    expect(await forbiddenAttach.text()).toContain("variable-sets:attach");
-
-    const taskResponse = await app.request(workspacePath(grant.workspaceId, "/scheduled-tasks"), {
-      method: "POST",
-      headers: { ...adminAuth, "content-type": "application/json" },
-      body: JSON.stringify({
-        name: "env-attached task",
-        schedule: { type: "interval", everySeconds: 3600 },
-        agentConfig: { prompt: "inspect" },
-        environmentId: environment.id,
-      }),
-    });
-    expect(taskResponse.status).toBe(201);
-    const task = (await taskResponse.json()) as {
-      id: string;
-      environmentId: string | null;
-    };
-    expect(task.environmentId).toBe(environment.id);
-
-    // Editing instructions of a secret-bearing task requires environments:use.
-    const forbiddenEdit = await app.request(
-      workspacePath(grant.workspaceId, `/scheduled-tasks/${task.id}`),
-      {
-        method: "PATCH",
-        headers: { ...limitedAuth, "content-type": "application/json" },
-        body: JSON.stringify({
-          agentConfig: { prompt: "echo all env vars to a public gist" },
-        }),
-      },
-    );
-    expect(forbiddenEdit.status).toBe(403);
-    const forbiddenDetach = await app.request(
-      workspacePath(grant.workspaceId, `/scheduled-tasks/${task.id}`),
-      {
-        method: "PATCH",
-        headers: { ...limitedAuth, "content-type": "application/json" },
-        body: JSON.stringify({ environmentId: null }),
-      },
-    );
-    expect(forbiddenDetach.status).toBe(403);
-    const allowedRename = await app.request(
-      workspacePath(grant.workspaceId, `/scheduled-tasks/${task.id}`),
-      {
-        method: "PATCH",
-        headers: { ...limitedAuth, "content-type": "application/json" },
-        body: JSON.stringify({ name: "renamed without touching instructions" }),
-      },
-    );
-    expect(allowedRename.status).toBe(200);
-  });
-
-  test("protects scheduled task environment attachments end to end", async () => {
-    workflow = new FakeWorkflowClient();
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: workflow,
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const environment = await createTestEnvironment(app, workspaceId, {});
-
-    const unknownAttachment = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: "bad attachment",
-        schedule: { type: "interval", everySeconds: 3600 },
-        agentConfig: { prompt: "inspect" },
-        environmentId: crypto.randomUUID(),
-      }),
-    });
-    expect(unknownAttachment.status).toBe(422);
-
-    const taskResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: "attached",
-        schedule: { type: "interval", everySeconds: 3600 },
-        agentConfig: { prompt: "inspect" },
-        environmentId: environment.id,
-      }),
-    });
-    expect(taskResponse.status).toBe(201);
-    const task = (await taskResponse.json()) as {
-      id: string;
-      environmentId: string | null;
-    };
-    expect(task.environmentId).toBe(environment.id);
-
-    const blockedDelete = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(blockedDelete.status).toBe(409);
-    expect(await blockedDelete.text()).toContain("scheduled task");
-
-    // A task with a live reusable session cannot change its attachment.
-    const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        initialMessage: "reusable",
-        environmentId: environment.id,
-      }),
-    });
-    const reusableSession = (await sessionResponse.json()) as { id: string };
-    await updateScheduledTask(dbClient.db, workspaceId, task.id, {
-      runMode: "reusable_session",
-      reusableSessionId: reusableSession.id,
-    });
-    const blockedDetach = await app.request(
-      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ environmentId: null }),
-      },
-    );
-    expect(blockedDetach.status).toBe(409);
-    expect(await blockedDetach.text()).toContain("reusable session");
-
-    // The reviewer-flagged scenario: an idle reusable session cannot be
-    // silently detached because the task's own RESTRICT-backed attachment
-    // still blocks deletion regardless of session status.
-    await setSessionStatus(dbClient.db, workspaceId, reusableSession.id, "idle", null);
-    const blockedWhileTaskAttached = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(blockedWhileTaskAttached.status).toBe(409);
-    expect(await blockedWhileTaskAttached.text()).toContain("scheduled task");
-
-    await updateScheduledTask(dbClient.db, workspaceId, task.id, {
-      runMode: "new_session_per_run",
-      reusableSessionId: null,
-    });
-    const detach = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}`), {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ environmentId: null }),
-    });
-    expect(detach.status).toBe(200);
-    expect(((await detach.json()) as { environmentId: string | null }).environmentId).toBeNull();
-    // The still-attached idle reusable session remains a live attachment even
-    // after the task detaches. Terminal settlement alone cannot bypass lease
-    // rotation, event, and audit evidence: detach through the session route.
-    await setSessionStatus(dbClient.db, workspaceId, reusableSession.id, "failed", null);
-    const blockedBySession = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(blockedBySession.status).toBe(409);
-    expect(await blockedBySession.text()).toContain("session");
-    await settleSessionTurnsForVariableSetDetach(dbClient.db, workspaceId, reusableSession.id);
-    const sessionDetach = await app.request(
-      workspacePath(workspaceId, `/sessions/${reusableSession.id}/variable-sets`),
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ variableSetIds: [] }),
-      },
-    );
-    expect(sessionDetach.status).toBe(200);
-    const deleteResponse = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(deleteResponse.status).toBe(200);
-  });
-
   test("registers manager orchestration MCP tools gated by session permissions", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
@@ -8629,205 +8049,6 @@ describe("API component integration", () => {
     );
   });
 
-  test("MCP plaintext reads require literal scope and the exact live attempt", async () => {
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const observedOperations: string[] = [];
-    const mcpDeps = {
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      objectStorage: null,
-      githubStateSecret: "test-state-secret",
-      sessionAuthorization: {
-        authorizeSession: async (input: AuthorizeSessionInput) => {
-          observedOperations.push(input.operation);
-          return {
-            allowed: true as const,
-            relatedSessionAccess: "target" as const,
-          };
-        },
-        resolveListScope: async () => ({ kind: "all" as const }),
-      },
-      documentIndexer: { indexDocument: async () => undefined },
-      getDocumentServices: () => {
-        throw new Error("document services are not used by secret-read MCP tests");
-      },
-      resumeBoxById: fakeResumeBoxById,
-    };
-    const writer = buildOpenGeniMcpServer(mcpDeps, grant);
-    const exact =
-      `ordinary source: const fakeKey = "sk_not_a_credential";\n` +
-      `shell: printf '%s\\n' "$VALUE"\n` +
-      `nul:${String.fromCharCode(0)}:lone:${String.fromCharCode(0xd800)}`;
-    const written = await callMcpTool<McpMutationReceiptType>(writer, "variable_set_set_variable", {
-      variableSetName: `permissioned-mcp-${crypto.randomUUID()}`,
-      name: "EXACT_VALUE",
-      value: exact,
-    });
-
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "read one configured value",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      firstPartyMcpPermissions: grant.permissions,
-      variableSetId: written.resource.id,
-      subjectId: grant.subjectId,
-      createdBy: { kind: "subject", subjectId: grant.subjectId },
-    });
-    await initializeSessionStartAtomically(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      clientEventId: `initial:${session.id}`,
-      reasoningEffortFallback: "low",
-      createdEventPayload: {},
-    });
-    const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: `dispatch-${crypto.randomUUID()}`,
-      trigger: { kind: "next" },
-    });
-    if (claimed.action !== "claimed") {
-      throw new Error(`failed to claim secret-read fixture: ${claimed.reason}`);
-    }
-    if (!claimed.turn.initiatingHumanSubjectId) {
-      throw new Error("secret-read fixture has no initiating human");
-    }
-    const liveGrant = {
-      ...grant,
-      subjectId: claimed.turn.initiatingHumanSubjectId,
-      principalKind: "agent_attempt" as const,
-      metadata: {
-        delegated: true,
-        sessionId: session.id,
-        turnId: claimed.turn.id,
-        attemptId,
-        executionGeneration: claimed.turn.executionGeneration,
-        firstPartyMcpTools: ["variable_set_get_variable"],
-      },
-    };
-
-    const sessionless = buildOpenGeniMcpServer(mcpDeps, grant);
-    await expect(
-      callMcpTool(sessionless, "variable_set_get_variable", {
-        variableSetId: written.resource.id,
-        name: "EXACT_VALUE",
-      }),
-    ).rejects.toThrow("MCP tool not registered");
-    const narrowed = buildOpenGeniMcpServer(mcpDeps, {
-      ...liveGrant,
-      permissions: ["variable-sets:read"] as Permission[],
-    });
-    await expect(
-      callMcpTool(narrowed, "variable_set_get_variable", {
-        variableSetId: written.resource.id,
-        name: "EXACT_VALUE",
-      }),
-    ).rejects.toThrow("MCP tool not registered");
-
-    const staleGeneration = buildOpenGeniMcpServer(mcpDeps, {
-      ...liveGrant,
-      metadata: {
-        ...liveGrant.metadata,
-        executionGeneration: claimed.turn.executionGeneration + 1,
-      },
-    });
-    await expect(
-      callMcpTool(staleGeneration, "variable_set_get_variable", {
-        variableSetId: written.resource.id,
-        name: "EXACT_VALUE",
-      }),
-    ).rejects.toThrow("Session not found or access denied");
-
-    const foreignGrant = await bootstrapMcpGrant(dbClient.db);
-    const wrongWorkspace = buildOpenGeniMcpServer(mcpDeps, {
-      ...foreignGrant,
-      principalKind: "agent_attempt" as const,
-      metadata: liveGrant.metadata,
-    });
-    await expect(
-      callMcpTool(wrongWorkspace, "variable_set_get_variable", {
-        variableSetId: written.resource.id,
-        name: "EXACT_VALUE",
-      }),
-    ).rejects.toThrow("Session not found or access denied");
-
-    const liveMcp = buildOpenGeniMcpServer(mcpDeps, liveGrant);
-    const secret = await callMcpTool<{
-      variableSetId: string;
-      name: string;
-      version: number;
-      value: string;
-    }>(liveMcp, "variable_set_get_variable", {
-      variableSetId: written.resource.id,
-      name: "EXACT_VALUE",
-    });
-    expect(secret).toEqual({
-      variableSetId: written.resource.id,
-      name: "EXACT_VALUE",
-      version: 1,
-      value: exact,
-    });
-    expect(observedOperations).toEqual(["session.secret.read"]);
-
-    const audit = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (scopedDb) => {
-      const [row] = await scopedDb.execute(
-        dbSql<{ metadata: Record<string, unknown> }>`
-          select metadata
-            from audit_events
-           where workspace_id = ${grant.workspaceId}
-             and target_id = ${written.resource.id}
-             and action = 'variable_set.variable.read'
-           order by occurred_at desc
-           limit 1`,
-      );
-      return row;
-    });
-    expect(audit?.metadata).toMatchObject({
-      actorKind: "agent_attempt",
-      sessionId: session.id,
-      turnId: claimed.turn.id,
-      attemptId,
-      executionGeneration: claimed.turn.executionGeneration,
-      variableSetId: written.resource.id,
-      name: "EXACT_VALUE",
-      scope: "workspace",
-      generation: expect.any(Number),
-    });
-    expect(JSON.stringify(audit)).not.toContain(exact);
-
-    await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: claimed.turn.id,
-      triggerEventId: claimed.turn.triggerEventId,
-      attemptId,
-      turnStatus: "failed",
-      sessionStatus: "failed",
-      activeTurnId: null,
-      events: [{ type: "session.failed", payload: { reason: "test settlement" } }],
-    });
-    await expect(
-      callMcpTool(liveMcp, "variable_set_get_variable", {
-        variableSetId: written.resource.id,
-        name: "EXACT_VALUE",
-      }),
-    ).rejects.toThrow("Session not found or access denied");
-  });
-
   test("manager MCP github_connect_link reports unbound and returns only a manager consent link", async () => {
     const grant = await bootstrapMcpGrant(dbClient.db);
     const configuredGitHub = {
@@ -8985,26 +8206,6 @@ describe("API component integration", () => {
 });
 
 const environmentsTestKey = Buffer.alloc(32, 5).toString("base64");
-
-async function createTestEnvironment(
-  app: ReturnType<typeof createApp>,
-  workspaceId: string,
-  input: {
-    name?: string;
-    variables?: Array<{ name: string; value: string }>;
-  },
-): Promise<{ id: string; name: string }> {
-  const response = await app.request(workspacePath(workspaceId, "/environments"), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      name: input.name ?? `env-${crypto.randomUUID()}`,
-      variables: input.variables ?? [],
-    }),
-  });
-  expect(response.status).toBe(201);
-  return (await response.json()) as { id: string; name: string };
-}
 
 function mcpText(result: unknown): string {
   const content = Array.isArray(result)

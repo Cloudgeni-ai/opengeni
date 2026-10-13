@@ -2939,7 +2939,7 @@ export type TurnToolCancellationControllerOptions = {
   /**
    * The attempt's secret resolver. Commands, stdin, patches and image paths
    * holding `{{secret:…}}` / `{{secretfile:…}}` references are resolved below
-   * every recorder (dossier §10.3). Omitted, or `enabled: false`, passes
+   * every recorder (design §10.3). Omitted, or `enabled: false`, passes
    * references through literally.
    */
   secretResolver?: SecretResolver | null;

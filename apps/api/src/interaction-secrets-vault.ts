@@ -1,5 +1,5 @@
 /**
- * The vault-backed `InteractionSecretsPort` (dossier §10B.4, Q-32, D20): the
+ * The vault-backed `InteractionSecretsPort` (design §10B.4, Q-32, D20): the
  * real secret resolver for agent Browser and Computer actions, and passkey
  * items for the session's virtual authenticators.
  */

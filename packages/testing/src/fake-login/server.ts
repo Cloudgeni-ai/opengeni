@@ -27,7 +27,7 @@ import {
 } from "./webauthn";
 
 /**
- * Fake-login site suite (dossier §13B.3). One Bun server for the site
+ * Fake-login site suite (design §13B.3). One Bun server for the site
  * (`http://localhost:<port>`, rpId `localhost`) plus a second server on a
  * different host and port (`http://127.0.0.1:<iframePort>`) that hosts the
  * cross-origin CAPTCHA widget and the FakeID login popup.

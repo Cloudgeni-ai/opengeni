@@ -125,7 +125,7 @@ export function isVaultProviderError(error: unknown): error is VaultProviderErro
 
 /**
  * The embedder's connection-credential port with its password-manager leg
- * (dossier §10.9, OP-6). `@opengeni/contracts` cannot name `VaultProvider`
+ * (design §10.9, OP-6). `@opengeni/contracts` cannot name `VaultProvider`
  * (this package depends on it), so the leg is added here; core and worker
  * dependencies use this type. A host provider is linked as a vault with
  * `source: "host"` and resolved through `createVaultProviderRegistry({ host })`.

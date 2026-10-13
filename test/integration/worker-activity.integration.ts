@@ -4938,7 +4938,7 @@ describe("worker activities integration", () => {
     ).toBe(agentRunsBefore);
   });
 
-  test("layers workspace environment values between deployment env and GitHub run auth", async () => {
+  test("builds the sandbox environment from deployment env and GitHub run auth only", async () => {
     const settings = testSettings({
       sandboxBackend: "docker",
       sandboxEnvAllowlist: "WORKER_TEST_ALLOWLISTED",
@@ -4948,14 +4948,10 @@ describe("worker activities integration", () => {
     const previous = process.env.WORKER_TEST_ALLOWLISTED;
     process.env.WORKER_TEST_ALLOWLISTED = "deployment-value";
     try {
-      const { environment: unattached } = await sandboxEnvironmentForRun(settings, []);
-      expect(unattached.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
-      const { environment } = await sandboxEnvironmentForRun(settings, [], {
-        WORKER_TEST_ALLOWLISTED: "workspace-override",
-        WORKSPACE_ONLY_TOKEN: "workspace-only-value",
-      });
-      expect(environment.WORKER_TEST_ALLOWLISTED).toBe("workspace-override");
-      expect(environment.WORKSPACE_ONLY_TOKEN).toBe("workspace-only-value");
+      // Workspace secrets are never injected as env; agents reach them through
+      // `{{secret:…}}` references resolved at execution time.
+      const { environment } = await sandboxEnvironmentForRun(settings, []);
+      expect(environment.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
       expect(environment.GIT_AUTHOR_NAME).toBe("Deployment Author");
       expect(environment.HOME).toBe("/workspace");
     } finally {

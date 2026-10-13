@@ -1571,7 +1571,7 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
 }
 
 /**
- * The 1Password tile (dossier §10.9). Connecting a service account happens in
+ * The 1Password tile (design §10.9). Connecting a service account happens in
  * Settings > Secrets (`POST /connections/1password/install`); its vaults are
  * then reached through secret references and the secrets tools, not MCP.
  * Enabled while a workspace-shared 1Password connection is active.

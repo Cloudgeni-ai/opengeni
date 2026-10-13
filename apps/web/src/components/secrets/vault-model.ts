@@ -12,7 +12,7 @@ import { userErrorText } from "@/lib/api-error";
 
 /* ----------------------------------------------------------------------------
    Secrets: vocabulary, grouping and error copy shared by every Secrets page.
-   Vocabulary (dossier §13A.1, no synonyms): Secrets, vault, item, field;
+   Vocabulary (design §13A.1, no synonyms): Secrets, vault, item, field;
    "Only me", "This workspace", "This task", "Organization"; "1Password",
    "Read-only", "Read & write"; "Copy reference", "Reveal", "Generate".
    -------------------------------------------------------------------------- */

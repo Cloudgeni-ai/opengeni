@@ -1,5 +1,5 @@
 /**
- * Secret delivery at the physical exec boundary (dossier §10.3, W1).
+ * Secret delivery at the physical exec boundary (design §10.3, W1).
  *
  * The tool wrappers (turn-tool-cancellation.ts) call `prepareSecretExec` with
  * the model's command text. It tokenizes `{{secret:…}}` / `{{secretfile:…}}`

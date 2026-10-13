@@ -1417,7 +1417,7 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
 
   test("Windows machine: forced powershell -NoProfile -NonInteractive -Command", async () => {
     const { mock, error } = await execWithSecret(
-      "C:/Users/dev/project",
+      "C:/Users/user/project",
       "Write-Output '{{secret:Canary}}'",
     );
     expect(error).toBeNull();
@@ -1437,7 +1437,7 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     "%s is refused before dispatch with unsupported_shell",
     async (shell) => {
       const { mock, error } = await execWithSecret(
-        "C:/Users/dev/project",
+        "C:/Users/user/project",
         "echo {{secret:Canary}}",
         {
           shell,

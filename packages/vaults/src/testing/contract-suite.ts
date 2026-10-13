@@ -54,7 +54,7 @@ function field(meta: ProviderItemMeta, name: string) {
 }
 
 /**
- * Behaviour every `VaultProvider` must share (dossier §10B.1.4, OP-1). Runs
+ * Behaviour every `VaultProvider` must share (design §10B.1.4, OP-1). Runs
  * against the fake in CI and against live 1Password behind
  * `OPENGENI_ONEPASSWORD_LIVE=1`. Steps share one subject and run in order; one
  * pass costs about 20 provider calls so it fits a FAMILY plan's daily quota.

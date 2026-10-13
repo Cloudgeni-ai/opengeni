@@ -1,5 +1,5 @@
 /**
- * Local full-stack access for the secrets gate (dossier §13.0, §17.1).
+ * Local full-stack access for the secrets gate (design §13.0, §17.1).
  *
  * The stack is the f598 "localstack" (one per worktree and port slot), started by
  * `$F598_LS/up.sh`. Every helper takes the stack NAME and reads that stack's own

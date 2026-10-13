@@ -1,5 +1,5 @@
 /**
- * The secrets gate scenarios (dossier §12 "E2E", §13.6, §17.1): E2E-1..E2E-12
+ * The secrets gate scenarios (design §12 "E2E", §13.6, §17.1): E2E-1..E2E-12
  * plus baseline smokes that prove the harness itself works on today's stack.
  *
  * A scenario declares the product features it needs (features.ts). When any is

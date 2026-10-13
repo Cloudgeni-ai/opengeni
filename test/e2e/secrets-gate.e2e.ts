@@ -1,5 +1,5 @@
 /**
- * Secrets full-stack gate as a bun test (dossier §13.6 "E2E-1 to E2E-12").
+ * Secrets full-stack gate as a bun test (design §13.6 "E2E-1 to E2E-12").
  * Opt-in: it needs a running localstack for the worktree under test.
  *
  *   SECRETS_GATE_WORKTREE=<wt> SECRETS_GATE_SLOT=3 SECRETS_GATE_NAME=sv-w7 \

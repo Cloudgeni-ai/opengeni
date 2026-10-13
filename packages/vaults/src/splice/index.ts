@@ -1,5 +1,5 @@
 /**
- * Shell splice contract (dossier §10B.1.4). F1 owns the signatures; W1
+ * Shell splice contract (design §10B.1.4). F1 owns the signatures; W1
  * implements the dialect-aware bodies. Each reference in a command becomes a
  * per-command environment variable (`${OPENGENI_SECRET_<n>}` on POSIX,
  * `${env:OPENGENI_SECRET_<n>}` on PowerShell). Literal bodies (quoted heredocs,

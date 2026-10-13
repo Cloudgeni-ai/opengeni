@@ -1,5 +1,5 @@
 /**
- * The one secret reference grammar (dossier §10B.2, normative).
+ * The one secret reference grammar (design §10B.2, normative).
  *
  * ```
  * reference = "{{" kind ":" body "}}"        ; no whitespace after "{{" or before "}}"

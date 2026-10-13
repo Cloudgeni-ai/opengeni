@@ -1,5 +1,5 @@
 /**
- * `{{secret:…}}` references in Browser and Computer actions (dossier §10B.4,
+ * `{{secret:…}}` references in Browser and Computer actions (design §10B.4,
  * BR-1..3). Only agent attempts resolve: the API resolves the references in
  * the secret-bearing fields of an action right before dispatch and sends the
  * plaintext to the controller in the private `secretValues` side map. Human

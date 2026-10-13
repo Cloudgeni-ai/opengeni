@@ -1048,7 +1048,7 @@ export class SelfhostedSession {
       // its exact connection/capability/policy snapshot through completion.
       admission = await this.admitCommand();
       const requestedShell = args.shell?.trim();
-      // Secret references (dossier §10.3, connected machines): splice in the
+      // Secret references (design §10.3, connected machines): splice in the
       // machine's dialect and deliver the values natively in ExecRequest.env.
       // With no explicit shell the command is forced through a known one
       // (`/bin/sh -c` on POSIX, `powershell -NoProfile -NonInteractive

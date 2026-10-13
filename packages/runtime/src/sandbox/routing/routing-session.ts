@@ -2647,7 +2647,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   /**
-   * Env-file delivery (dossier §10.3 step 5) for one command carrying resolved
+   * Env-file delivery (design §10.3 step 5) for one command carrying resolved
    * references: write `export OPENGENI_SECRET_n=…` lines to a 0600 file under
    * the attempt's 0700 secret directory through a writer whose bytes never
    * pass through argv or command text, then prefix the command to source and

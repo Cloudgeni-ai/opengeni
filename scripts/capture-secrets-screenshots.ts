@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Screenshots plus machine checks of every Secrets screen and state (dossier
+ * Screenshots plus machine checks of every Secrets screen and state (design
  * §13A.2 S1–S16, §13A.3, §13A.5) at every viewport and theme, for the five UI
  * review passes.
  *

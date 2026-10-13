@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Leaked-value sweep (dossier SEC-1, SEC-2, SEC-3, SEC-5, OB-3; gate scenario E2E-11).
+ * Leaked-value sweep (design SEC-1, SEC-2, SEC-3, SEC-5, OB-3; gate scenario E2E-11).
  *
  * Searches every place a secret could come to rest for known test values and
  * reports locations and counts only (never the value):
