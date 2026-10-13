@@ -402,11 +402,23 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       qual: `session_tenancy_fence_owner_policy_active((CURRENT_USER)::text, '${owned.ownerRole}'::text, (2200)::oid, workspace_id, true)`,
       check: null,
     };
+    // ...and 0765, which lets the connected-machine audience routines read runs
+    // under their same-transaction scoped-compute capability.
+    const scopedComputeRead = {
+      relname: "scheduled_task_runs",
+      polname: "scoped_compute_capability_read",
+      polcmd: "r",
+      polpermissive: true,
+      roles: "{0}",
+      qual: `scoped_compute_policy_capability_active((CURRENT_USER)::text, '${owned.ownerRole}'::text, NULL::text)`,
+      check: null,
+    };
     const plannedWithVaults = byPolicy([
       ...plannedPolicies,
       vaultRead("scheduled_task_runs"),
       vaultRead("session_turns"),
       exhaustedScheduleRead,
+      scopedComputeRead,
     ]);
     expect(byPolicy([...(await snapshot())])).toEqual(plannedWithVaults);
     const [backfill] =

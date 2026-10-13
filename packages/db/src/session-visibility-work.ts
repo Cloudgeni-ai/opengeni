@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
-import { rawRows, type Database } from "./database";
+import { rawRows, type Database, type SessionActivityDatabase } from "./database";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
@@ -240,7 +240,7 @@ export type SessionVisibilityWorkSettlement = {
  * {@link lockSessionForVisibilityWork}.
  */
 export async function settleSessionVisibilityWorkInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     session: typeof schema.sessions.$inferSelect;
     actorSubjectId: string;
