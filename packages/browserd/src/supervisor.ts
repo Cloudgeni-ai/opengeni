@@ -3169,7 +3169,8 @@ function profileManifest(
   };
 }
 
-async function restoreTabs(
+/** Rebuild a checkpoint's tab set on a freshly launched restored profile. */
+export async function restoreTabs(
   driver: BrowserSupervisorDriver,
   capturedTabs: BrowserRuntimeSnapshot["tabs"],
 ): Promise<void> {
@@ -3189,13 +3190,14 @@ async function restoreTabs(
   const used = new Set<string>();
   let selectedTargetId: string | null = null;
   for (const [index, tab] of ordered.entries()) {
-    let target = available.find(
-      (candidate) => !used.has(candidate.id) && candidate.url === tab.url,
-    );
-    if (!target) {
-      const opened = index === 0 ? first : await driver.openTarget(tab.url);
-      target = opened.target;
-    }
+    // Startup chose a live tab for the primary and navigated it there. A
+    // reopened tab with the same URL may have a dead renderer, so the primary
+    // is always the tab startup returned, never a URL look-alike.
+    const target =
+      index === 0
+        ? first.target
+        : (available.find((candidate) => !used.has(candidate.id) && candidate.url === tab.url) ??
+          (await driver.openTarget(tab.url)).target);
     used.add(target.id);
     if (index === 0) selectedTargetId = target.id;
   }
