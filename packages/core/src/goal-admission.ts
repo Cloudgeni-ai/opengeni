@@ -166,7 +166,9 @@ export async function goalSessionUsageLimitBlocked(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string },
 ): Promise<GoalAdmissionBlock | null> {
-  const admission = await checkSessionUsageLimitAdmission(db, input);
+  // Server-internal: the goal's session is already authorized, so a private
+  // root is enforced rather than read as missing; a missing tree fails closed.
+  const admission = await checkSessionUsageLimitAdmission(db, { ...input, runtime: true });
   if (admission.allowed) return null;
   return { pausedReason: "session_usage_limit", message: admission.refusal.message };
 }

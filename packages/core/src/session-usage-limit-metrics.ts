@@ -63,6 +63,10 @@ export const SESSION_USAGE_LIMIT_METRIC_OUTCOMES = [
   "imported",
   /** Legacy import maintenance failed and will be retried. */
   "import_failed",
+  /** A settled receipt could not be written yet and is held for a DB-only retry. */
+  "held",
+  /** An unfilled single-call custody marker passed its lost window; disclosed as unpriced. */
+  "lost_resolved",
 ] as const;
 export type SessionUsageLimitMetricOutcome = (typeof SESSION_USAGE_LIMIT_METRIC_OUTCOMES)[number];
 

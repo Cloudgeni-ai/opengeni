@@ -372,7 +372,15 @@ export async function applyInitialSessionUsageLimit(
  */
 export async function requireSessionUsageLimitAllows(
   db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    /** Server-internal admission for an authorized attempt: fail closed on a missing tree. */
+    runtime?: boolean;
+    /** Runtime only: open a durable custody marker for this single call when admitted. */
+    openSourceId?: string;
+  },
   metrics?: {
     sink: SessionUsageLimitMetricsSink | null | undefined;
     boundary: SessionUsageLimitMetricBoundary;

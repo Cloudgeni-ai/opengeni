@@ -84,7 +84,45 @@ export type ModelUsageSettlementInput = {
   onCreditsDebited?: (result: { debitedMicros: number; grantDebitedMicros: number }) => void;
   /** Content-free per-task usage limit diagnostics (closed-set labels only). */
   usageLimitMetrics?: SessionUsageLimitMetricsSink | null;
+  /**
+   * Attempt-scoped custody for a receipt whose write failed. When present, a
+   * failed receipt write is handed over (content-free, original identity) and
+   * settlement continues, so the response is never lost or replayed; the
+   * owner must write held receipts before its next model request. Without
+   * custody the failure throws.
+   */
+  receiptCustody?: ((receipt: HeldSessionUsageReceipt, error: unknown) => void) | null;
 };
+
+/** A content-free task usage receipt whose write is still owed. */
+export type HeldSessionUsageReceipt = {
+  sessionId: string;
+  sourceId: string;
+  turnId: string | null;
+  amountMicros: number | null;
+  pricingSource: "configured_list_price" | "gateway_reported" | null;
+  model: string | null;
+};
+
+/**
+ * The per-task meter amount: the canonical pre-margin estimate, but only when
+ * the response actually reported usage. A response without token telemetry
+ * (or with zero input and output tokens) and no provider-reported cost is an
+ * unknown amount, never a known-free call. Billing and Insights keep their
+ * own `estimatedProviderCostMicros` unchanged.
+ */
+export function sessionUsageMeterAmountMicros(input: {
+  estimatedProviderCostMicros: number | null;
+  gatewayReported: boolean;
+  inputTokens: number | null;
+  outputTokens: number | null;
+}): number | null {
+  if (input.estimatedProviderCostMicros === null) return null;
+  if (input.gatewayReported) return input.estimatedProviderCostMicros;
+  return (input.inputTokens ?? 0) + (input.outputTokens ?? 0) > 0
+    ? input.estimatedProviderCostMicros
+    : null;
+}
 
 export async function settleModelUsage(
   settings: Settings,
@@ -207,35 +245,51 @@ export async function settleModelUsage(
   // Per-task usage limit meter. Synchronous and awaited before any
   // credit/usage write: the canonical pre-margin estimate is recorded once
   // per source identity against the session's task root, for every funding
-  // path. A failure throws so no further model request is dispatched until
-  // the database recovers; the provider call is never replayed.
+  // path. A failed write is handed to the caller's custody (which must write
+  // it before any further model request) or, without custody, throws; the
+  // provider call is never replayed.
   const usageLimitSessionId = input.usageLimitSessionId ?? input.sessionId;
   if (usageLimitSessionId) {
-    let receipt: Awaited<ReturnType<typeof settleSessionUsageReceipt>>;
+    const meterAmountMicros = sessionUsageMeterAmountMicros({
+      estimatedProviderCostMicros,
+      gatewayReported: pricingSource === "gateway_reported",
+      inputTokens: normalizedUsage.telemetry.inputTokens,
+      outputTokens: normalizedUsage.telemetry.outputTokens,
+    });
+    const held: HeldSessionUsageReceipt = {
+      sessionId: usageLimitSessionId,
+      sourceId: input.sourceId,
+      turnId: input.turnId ?? null,
+      amountMicros: meterAmountMicros,
+      pricingSource: meterAmountMicros === null ? null : pricingSource,
+      model: input.model,
+    };
+    let receipt: Awaited<ReturnType<typeof settleSessionUsageReceipt>> | null = null;
     try {
       receipt = await settleSessionUsageReceipt(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        sessionId: usageLimitSessionId,
-        sourceId: input.sourceId,
-        turnId: input.turnId ?? null,
-        amountMicros: estimatedProviderCostMicros,
-        pricingSource,
-        model: input.model,
+        ...held,
       });
     } catch (error) {
-      recordSessionUsageLimitEvent(input.usageLimitMetrics, "settlement", "accounting_failure");
-      throw error;
+      if (!input.receiptCustody) {
+        recordSessionUsageLimitEvent(input.usageLimitMetrics, "settlement", "accounting_failure");
+        throw error;
+      }
+      input.receiptCustody(held, error);
+      recordSessionUsageLimitEvent(input.usageLimitMetrics, "settlement", "held");
     }
-    recordSessionUsageLimitEvent(
-      input.usageLimitMetrics,
-      "settlement",
-      receipt.outcome === "conflict"
-        ? "source_conflict"
-        : estimatedProviderCostMicros === null && receipt.outcome === "recorded"
-          ? "unpriced"
-          : receipt.outcome,
-    );
+    if (receipt) {
+      recordSessionUsageLimitEvent(
+        input.usageLimitMetrics,
+        "settlement",
+        receipt.outcome === "conflict"
+          ? "source_conflict"
+          : meterAmountMicros === null && receipt.outcome === "recorded"
+            ? "unpriced"
+            : receipt.outcome,
+      );
+    }
   }
   // Provider settlement and workspace-facing cost are separate. Externally
   // metered subscription/workspace turns remain exempt from the Opengeni token

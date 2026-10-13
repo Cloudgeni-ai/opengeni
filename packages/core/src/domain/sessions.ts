@@ -2390,7 +2390,7 @@ export async function retryFailedSession(
   // A retry is a new model request: a reached task usage limit refuses it.
   await requireSessionUsageLimitAllows(
     deps.db,
-    { accountId: grant.accountId, workspaceId, sessionId },
+    { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
     { sink: deps.observability, boundary: "send" },
   );
   const failure = await getSessionEvent(deps.db, workspaceId, request.failureEventId);
@@ -2496,7 +2496,7 @@ async function withSessionCreateUsageRecording(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   workspaceId: string;
-  startMode: "realtime" | undefined;
+  startMode: "realtime" | "standard" | undefined;
   origin: "system" | "user";
   createOutcome: CreateSessionOutcome;
 }): Promise<CreateSessionRequestOutcome> {
@@ -4299,7 +4299,7 @@ async function acceptSessionUserMessageInFileScope(
     // after exact replays returned above and before any queue/interrupt write.
     await requireSessionUsageLimitAllows(
       db,
-      { accountId: grant.accountId, workspaceId, sessionId },
+      { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
       { sink: deps.observability, boundary: delivery === "steer" ? "steer" : "send" },
     );
     const settings = await resolveWorkspaceModelBoundarySettings(
