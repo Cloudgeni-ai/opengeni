@@ -550,6 +550,28 @@ describe("MachineCard — attach/swap affordance", () => {
     await r.unmount();
   });
 
+  test("an automatic update postponed because browsers would close says so", async () => {
+    const m = machine({
+      sandboxId: "sh-browsers",
+      state: "online",
+      runtime: runtimeWith({
+        installedVersion: "0.1.57",
+        desiredVersion: "0.1.58",
+        versionState: "outdated",
+        update: failedUpdate("0.1.58", "update_busy_browsers"),
+      }),
+    });
+    const r = await renderComponent(<MachineCard machine={m} onUpdateAgent={() => {}} />);
+    await flush();
+    expect(r.container.textContent).toContain(
+      "Update to v0.1.58 postponed: open browsers would close",
+    );
+    expect(r.container.textContent).toContain("Updating now closes them.");
+    expect(r.container.textContent).not.toContain("failed");
+    expect(r.container.querySelector("[data-update-agent]")?.textContent).toBe("Update now");
+    await r.unmount();
+  });
+
   test("a failed update to the version already installed is not a failure", async () => {
     const m = machine({
       sandboxId: "sh-noop",

@@ -16,6 +16,7 @@ import {
 } from "@opengeni/agent-proto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
+  activateBrowserSession,
   advanceEnrollmentAgentUpdate,
   claimEnrollmentConnection,
   beginEnrollmentAgentUpdate,
@@ -26,6 +27,7 @@ import {
   createSession,
   getEnrollment,
   listSandboxes,
+  prepareBrowserSessionCreate,
   revokeEnrollment,
   setActiveSandbox,
   type Database,
@@ -472,6 +474,42 @@ async function seed(opts: SeedOpts = {}) {
   }
   const bus = busWithAgent({ workspaceId, agentId: enrollment.id, online: opts.online ?? true });
   return { accountId, workspaceId, session, enrollment, sandbox, bus };
+}
+
+/** A managed browser bound to its controller on one Connected Machine. */
+async function openManagedBrowser(
+  scope: { accountId: string; workspaceId: string; sessionId: string },
+  sandboxId: string,
+): Promise<string> {
+  const operationId = crypto.randomUUID();
+  const prepared = await prepareBrowserSessionCreate(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    operationId,
+    associatedSessionId: scope.sessionId,
+    actorSubjectId: "user:test",
+    name: "Machine browser",
+    initialUrl: "https://example.com/",
+    placement: { kind: "connected_machine", sandboxId },
+    driverId: "opengeni.cdp.v1",
+    engine: "chromium",
+    headless: false,
+    identityId: null,
+    baseRevisionId: null,
+  });
+  await activateBrowserSession(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    operationId,
+    browserSessionId: prepared.session.id,
+    controller: {
+      controllerId: "browserd:test",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: "placement:test",
+    },
+    engineVersion: "151.0.7922.108",
+  });
+  return prepared.session.id;
 }
 
 describe("M10 GET /machines — dashboard list + states + metrics", () => {
@@ -1545,6 +1583,166 @@ describe("Connected Machine signed self-update orchestration", () => {
     await heartbeat();
     await Bun.sleep(50);
     expect(updateRequests()).toHaveLength(2);
+  }, 90_000);
+
+  test("an older agent with open managed browsers is not updated automatically until they close", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, enrollment, sandbox } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.57",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    // One live managed browser on this machine, and one saved browser whose
+    // process is already gone.
+    const open = await openManagedBrowser(
+      { accountId, workspaceId, sessionId: session.id },
+      sandbox.id,
+    );
+    const saved = await openManagedBrowser(
+      { accountId, workspaceId, sessionId: session.id },
+      sandbox.id,
+    );
+    await admin`update browser_sessions set lifecycle = 'suspended', controller_id = null,
+      controller_generation = null, placement_instance_id = null, controller_heartbeat_at = null
+      where id = ${saved}`;
+
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    let now = Date.now();
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.58",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+      now: () => now,
+    })!;
+    const heartbeat = () =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: { $case: "heartbeat", heartbeat: {} },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        bus,
+        updates,
+      );
+    const updateRequests = () =>
+      requests.filter((request) => request.op?.$case === "agentUpdateApply");
+    const status = async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate;
+
+    await heartbeat();
+    const postponed = await waitForValue(
+      status,
+      (update) => update?.status === "failed",
+      "the postponed automatic update",
+    );
+    expect(postponed).toMatchObject({
+      targetVersion: "0.1.58",
+      errorCode: "update_busy_browsers",
+      retryable: true,
+    });
+    expect(updateRequests()).toHaveLength(0);
+
+    // Still open after the busy backoff: postponed again, never requested.
+    now += 11 * 60_000;
+    await heartbeat();
+    await waitForValue(
+      status,
+      (update) => update?.operationId !== postponed!.operationId,
+      "the second postponement",
+    );
+    expect((await status())?.errorCode).toBe("update_busy_browsers");
+    expect(updateRequests()).toHaveLength(0);
+
+    // Once the browser has ended, the next look requests the update.
+    await admin`update browser_sessions set lifecycle = 'ended', controller_id = null,
+      controller_generation = null, placement_instance_id = null, controller_heartbeat_at = null
+      where id = ${open}`;
+    now += 11 * 60_000;
+    await heartbeat();
+    await waitForValue(status, (update) => update?.status === "accepted", "the automatic update");
+    expect(updateRequests()).toHaveLength(1);
+  }, 90_000);
+
+  test("an agent that keeps its browsers across restarts is updated while they are open", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, enrollment, sandbox } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.58",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    await openManagedBrowser({ accountId, workspaceId, sessionId: session.id }, sandbox.id);
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.59",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+    })!;
+    await handleAgentEventPayload(
+      db,
+      undefined,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: { $case: "heartbeat", heartbeat: {} },
+        }),
+      ).finish(),
+      `${subject}.events`,
+      bus,
+      updates,
+    );
+    await waitForValue(
+      async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate,
+      (update) => update?.status === "accepted",
+      "the automatic update",
+    );
+    expect(requests.filter((request) => request.op?.$case === "agentUpdateApply")).toHaveLength(1);
   }, 90_000);
 });
 
