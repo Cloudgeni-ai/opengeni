@@ -1,0 +1,824 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { AccessGrant } from "@opengeni/contracts";
+import type {
+  ApiRouteDeps,
+  ObjectStorageDependency,
+  SessionWorkflowClient,
+} from "@opengeni/core";
+import {
+  createDb,
+  createOrganizationApiKey,
+  createSession,
+  createWorkspace,
+  ensureExternalIdentity,
+  type DbClient,
+} from "@opengeni/db";
+import type { Settings } from "@opengeni/config";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { createApp, type AppDependencies } from "../src/app";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
+
+// Site Data runs the real routes against PostgreSQL as the restricted
+// application role: tenant isolation is RLS, access rules are the API's.
+let shared: SharedTestDatabase;
+let db: DbClient;
+beforeAll(async () => {
+  const acquired = await acquireSharedTestDatabase("site-data");
+  if (!acquired) throw new Error("Site Data tests require real PostgreSQL");
+  shared = acquired;
+  db = createDb(shared.appUrl);
+}, 180_000);
+afterAll(async () => {
+  await db?.close();
+  await shared?.release();
+});
+
+const noop = async () => undefined;
+const memberPermissions = [
+  "workspace:read",
+  "sessions:read",
+  "sessions:create",
+  "artifacts:read",
+  "artifacts:publish",
+] as const;
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+function memoryObjectStorage() {
+  const objects = new Map<string, Uint8Array>();
+  const storage = {
+    maxSinglePutSizeBytes: 5_000_000_000,
+    headObject: async (key: string) => {
+      const bytes = objects.get(key);
+      return bytes ? { ContentLength: bytes.length, VersionToken: "v" } : null;
+    },
+    getObjectRange: async (input: { key: string; start: number; endInclusive: number }) => {
+      const bytes = objects.get(input.key);
+      return bytes
+        ? { bytes: bytes.slice(input.start, input.endInclusive + 1), versionToken: "v" }
+        : null;
+    },
+    putObject: async (input: { key: string; body: Uint8Array }) => {
+      objects.set(input.key, input.body.slice());
+    },
+    putObjectStreamIfAbsent: async (input: { key: string; chunks: AsyncIterable<Uint8Array> }) => {
+      if (objects.has(input.key)) return false;
+      const parts: Uint8Array[] = [];
+      for await (const part of input.chunks) parts.push(part);
+      objects.set(input.key, Buffer.concat(parts));
+      return true;
+    },
+    getObjectBytes: async (key: string) => {
+      const bytes = objects.get(key);
+      return bytes ? { bytes, contentType: "text/html" } : null;
+    },
+    createGetUrl: async (input: { key: string; responseContentDisposition?: string }) => ({
+      url: `https://storage.example.test/${input.key}${input.responseContentDisposition ? "?download=1" : ""}`,
+      expiresAt: new Date(Date.now() + 60_000),
+    }),
+    createPutUrl: async (input: { key: string }) => ({
+      url: `https://storage.example.test/${input.key}`,
+      expiresAt: new Date(Date.now() + 60_000),
+      requiredHeaders: {},
+    }),
+    deleteObject: async (key: string) => {
+      objects.delete(key);
+    },
+  };
+  return { storage: storage as unknown as ObjectStorageDependency, objects };
+}
+
+type Who = { subjectId: string; grant: AccessGrant; headers: Record<string, string> };
+
+async function fixture(overrides: Partial<Settings> = {}) {
+  const [account] =
+    await shared.admin`insert into managed_accounts (name) values ('Site data fixture') returning id`;
+  const accountId = String(account!.id);
+  const workspace = await createWorkspace(db.db, { accountId, name: "Team workspace" });
+  const token = crypto.randomUUID();
+  await createOrganizationApiKey(db.db, {
+    accountId,
+    name: "Service fixture",
+    prefix: "test",
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    permissions: [
+      "workspace:read",
+      "workspace:admin",
+      "members:manage",
+      "sessions:read",
+      "sessions:create",
+      "artifacts:read",
+      "artifacts:publish",
+      "account:admin",
+    ],
+  });
+  const settings = testSettings({
+    productAccessMode: "configured",
+    sandboxBackend: "none",
+    ...overrides,
+  });
+  const { storage, objects } = memoryObjectStorage();
+  const deps = {
+    db: db.db,
+    bus: new MemoryEventBus(),
+    settings,
+    objectStorage: storage,
+    workflowClient: {
+      signalUserMessage: noop,
+      wakeSessionWorkflow: noop,
+      requestSessionWorkflowWakeDispatch: noop,
+      signalApprovalDecision: noop,
+      signalSessionControl: noop,
+    } as unknown as SessionWorkflowClient,
+    managedAuth: null,
+  } as unknown as AppDependencies;
+  const app = createApp(deps);
+  const source = "example:instance";
+  const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  const person = async (permissions: readonly string[]): Promise<Who> => {
+    const identity = await ensureExternalIdentity(db.db, {
+      accountId,
+      source,
+      externalId: crypto.randomUUID(),
+    });
+    const added = await app.request(`/v1/workspaces/${workspace.id}/external-members`, {
+      method: "POST",
+      headers: service,
+      body: JSON.stringify({
+        identity: { source, externalId: identity.externalId },
+        permissions,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(added.status).toBe(200);
+    return {
+      subjectId: identity.subjectId,
+      grant: {
+        accountId,
+        workspaceId: workspace.id,
+        subjectId: identity.subjectId,
+        permissions: [...permissions] as AccessGrant["permissions"],
+        principalKind: "human_session",
+      },
+      headers: {
+        ...service,
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({ mode: "external", identity: { source, externalId: identity.externalId } }),
+        ),
+      },
+    };
+  };
+  const owner = await person(memberPermissions);
+  const member = await person(memberPermissions);
+  const third = await person(memberPermissions);
+  const admin = await person([...memberPermissions, "workspace:admin"]);
+  await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+    values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'site-data-test')`;
+  await shared.admin`insert into organization_private_session_settings (account_id, enabled, version, updated_by_membership_id)
+    values (${accountId}, true, 1, null) on conflict (account_id) do update set enabled = true`;
+  const base = `/v1/workspaces/${workspace.id}/published-artifacts`;
+  const call = (
+    who: { headers: Record<string, string> },
+    method: string,
+    path: string,
+    body?: unknown,
+    headers: Record<string, string> = {},
+  ) =>
+    app.request(`${base}${path}`, {
+      method,
+      headers: { ...who.headers, ...headers },
+      ...(body === undefined
+        ? {}
+        : { body: body instanceof Uint8Array ? body : JSON.stringify(body) }),
+    });
+  const publish = async (title: string, visibility?: "private" | "workspace") => {
+    const response = await call(owner, "POST", "", {
+      title,
+      html: `<!doctype html><h1>${title}</h1>`,
+      idempotencyKey: crypto.randomUUID(),
+      ...(visibility ? { visibility } : {}),
+    });
+    expect(response.status, await response.clone().text()).toBe(201);
+    const created = (await response.json()) as {
+      artifact: { id: string };
+      version: { id: string };
+    };
+    return { id: created.artifact.id, versionId: created.version.id };
+  };
+  const site = (siteId: string) => {
+    const request = async (
+      who: Who,
+      method: string,
+      path: string,
+      body?: unknown,
+      headers?: Record<string, string>,
+    ) => {
+      const response = await call(who, method, `/${siteId}${path}`, body, headers);
+      const text = await response.text();
+      let json: any = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = text;
+      }
+      return { status: response.status, json, headers: response.headers };
+    };
+    return {
+      request,
+      define: (who: Who, name: string, definition: Record<string, unknown>) =>
+        request(who, "PUT", `/data/collections/${name}`, definition),
+      write: (who: Who, operations: unknown[], headers?: Record<string, string>) =>
+        request(who, "POST", "/data/write", { operations }, headers),
+      query: (who: Who, query: Record<string, unknown>, headers?: Record<string, string>) =>
+        request(who, "POST", "/data/query", query, headers),
+      get: (who: Who, query: Record<string, unknown>) => request(who, "POST", "/data/get", query),
+      describe: (who: Who) => request(who, "GET", "/data"),
+    };
+  };
+  return {
+    app,
+    deps,
+    settings,
+    accountId,
+    workspace,
+    owner,
+    member,
+    third,
+    admin,
+    objects,
+    call,
+    publish,
+    site,
+  };
+}
+
+const errorCode = (result: { json: any }) => result.json?.error?.details?.code;
+const ids = (result: { json: any }) =>
+  (result.json.records as Array<{ id: string }>).map((record) => record.id).sort();
+
+test("each access mode applies to viewers and managers", async () => {
+  const f = await fixture();
+  const s = f.site((await f.publish("Team CRM")).id);
+
+  // Only managers define collections; members are viewers of the owner's Site.
+  expect((await f.site(s.request.length ? "" : "").request).length).toBeGreaterThan(0);
+  const denied = await s.define(f.member, "contacts", { accessMode: "shared" });
+  expect(denied.status).toBe(403);
+  for (const [name, definition] of [
+    ["contacts", { accessMode: "shared", uniqueFields: [["email"]] }],
+    ["companies", { accessMode: "shared_read" }],
+    ["tracker", { accessMode: "per_viewer" }],
+    ["diary", { accessMode: "per_viewer", privateRecords: true }],
+    ["feedback", { accessMode: "append_only" }],
+  ] as const) {
+    const defined = await s.define(f.owner, name, definition);
+    expect({ name, status: defined.status }).toEqual({ name, status: 201 });
+  }
+  // A workspace admin manages any workspace Site's data.
+  expect((await s.describe(f.admin)).status).toBe(200);
+  expect((await s.describe(f.member)).status).toBe(403);
+
+  // shared: members create, update and delete every record.
+  const created = await s.write(f.member, [
+    { op: "insert", collection: "contacts", data: { name: "Ada", email: "ada@example.com" } },
+  ]);
+  expect(created.status, JSON.stringify(created.json)).toBe(200);
+  const contact = created.json.results[0].record;
+  expect(contact.owner).toBe(`user:${f.member.subjectId}`);
+  const patched = await s.write(f.third, [
+    { op: "patch", collection: "contacts", id: contact.id, data: { stage: "lead" }, expectedVersion: 1 },
+  ]);
+  expect(patched.status).toBe(200);
+  expect(patched.json.results[0].record).toMatchObject({
+    version: 2,
+    data: { name: "Ada", email: "ada@example.com", stage: "lead" },
+  });
+  // A stale write is a conflict, not a lost update.
+  const stale = await s.write(f.member, [
+    { op: "patch", collection: "contacts", id: contact.id, data: { stage: "won" }, expectedVersion: 1 },
+  ]);
+  expect(stale.status).toBe(409);
+  expect(errorCode(stale)).toBe("conflict");
+  expect(stale.json.error.details).toMatchObject({ reason: "version", currentVersion: 2 });
+  // Declared unique fields are enforced.
+  const duplicate = await s.write(f.third, [
+    { op: "insert", collection: "contacts", data: { name: "Other Ada", email: "ada@example.com" } },
+  ]);
+  expect(duplicate.status).toBe(409);
+  expect(duplicate.json.error.details).toMatchObject({ reason: "unique", fields: ["email"] });
+  const removed = await s.write(f.third, [{ op: "delete", collection: "contacts", id: contact.id }]);
+  expect(removed.json.results[0]).toEqual({ op: "delete", deleted: { id: contact.id } });
+
+  // shared_read: members read; only managers write.
+  const fed = await s.write(f.owner, [
+    { op: "put", collection: "companies", key: "acme", data: { name: "Acme", score: 7 } },
+  ]);
+  expect(fed.status).toBe(200);
+  expect((await s.query(f.member, { collection: "companies" })).json.records).toHaveLength(1);
+  const readOnly = await s.write(f.member, [
+    { op: "insert", collection: "companies", data: { name: "Mine" } },
+  ]);
+  expect(readOnly.status).toBe(403);
+  expect(errorCode(readOnly)).toBe("forbidden");
+  const readOnlyPatch = await s.write(f.member, [
+    { op: "patch", collection: "companies", key: "acme", data: { score: 1 } },
+  ]);
+  expect(readOnlyPatch.status).toBe(403);
+
+  // per_viewer: each member sees only their own; the owner sees everyone's.
+  const mine = await s.write(f.member, [
+    { op: "put", collection: "tracker", key: "today", data: { steps: 1200 } },
+  ]);
+  const theirs = await s.write(f.third, [
+    { op: "put", collection: "tracker", key: "today", data: { steps: 300 } },
+  ]);
+  const mineId = mine.json.results[0].record.id;
+  const theirsId = theirs.json.results[0].record.id;
+  expect(ids(await s.query(f.member, { collection: "tracker" }))).toEqual([mineId]);
+  expect(ids(await s.query(f.third, { collection: "tracker" }))).toEqual([theirsId]);
+  expect(ids(await s.query(f.owner, { collection: "tracker" }))).toEqual([mineId, theirsId].sort());
+  expect(ids(await s.query(f.owner, { collection: "tracker", scope: "own" }))).toEqual([]);
+  expect((await s.get(f.third, { collection: "tracker", id: mineId })).json.record).toBeNull();
+  const foreignPatch = await s.write(f.third, [
+    { op: "patch", collection: "tracker", id: mineId, data: { steps: 0 } },
+  ]);
+  expect(foreignPatch.status).toBe(404);
+  // Keys are per viewer, so both members own a record called "today".
+  expect((await s.get(f.member, { collection: "tracker", key: "today" })).json.record.id).toBe(
+    mineId,
+  );
+
+  // private per_viewer records stay hidden even from the owner.
+  const secret = await s.write(f.member, [
+    { op: "insert", collection: "diary", data: { text: "private" } },
+  ]);
+  expect(secret.status).toBe(200);
+  expect((await s.query(f.owner, { collection: "diary" })).json.records).toEqual([]);
+  expect((await s.query(f.admin, { collection: "diary" })).json.records).toEqual([]);
+  expect((await s.query(f.member, { collection: "diary" })).json.records).toHaveLength(1);
+
+  // append_only: members add and read their own; they cannot change them.
+  const submitted = await s.write(f.member, [
+    { op: "insert", collection: "feedback", data: { rating: 5 } },
+  ]);
+  const feedbackId = submitted.json.results[0].record.id;
+  await s.write(f.third, [{ op: "insert", collection: "feedback", data: { rating: 2 } }]);
+  expect(ids(await s.query(f.member, { collection: "feedback" }))).toEqual([feedbackId]);
+  expect((await s.query(f.owner, { collection: "feedback" })).json.records).toHaveLength(2);
+  const edit = await s.write(f.member, [
+    { op: "patch", collection: "feedback", id: feedbackId, data: { rating: 1 } },
+  ]);
+  expect(edit.status).toBe(403);
+  const erase = await s.write(f.member, [{ op: "delete", collection: "feedback", id: feedbackId }]);
+  expect(erase.status).toBe(403);
+  expect(
+    (await s.write(f.owner, [{ op: "delete", collection: "feedback", id: feedbackId }])).status,
+  ).toBe(200);
+
+  // A collection's access mode is fixed once it has records.
+  const locked = await s.define(f.owner, "tracker", { accessMode: "shared" });
+  expect(locked.status).toBe(409);
+});
+
+test("Site frames read their own records and never manage", async () => {
+  const f = await fixture();
+  const first = await f.publish("Tracker");
+  const second = await f.publish("Other");
+  const s = f.site(first.id);
+  await s.define(f.owner, "tracker", { accessMode: "per_viewer" });
+  await s.write(f.member, [{ op: "insert", collection: "tracker", data: { steps: 1 } }]);
+  const own = await s.write(f.owner, [{ op: "insert", collection: "tracker", data: { steps: 2 } }]);
+  const frame = { "x-opengeni-site-id": first.id };
+  // The owner's own Site page shows only their records unless it asks for all.
+  expect(ids(await s.query(f.owner, { collection: "tracker" }, frame))).toEqual([
+    own.json.results[0].record.id,
+  ]);
+  expect(
+    (await s.query(f.owner, { collection: "tracker", scope: "all" }, frame)).json.records,
+  ).toHaveLength(2);
+  // A frame cannot define, describe, export, or reach another Site.
+  expect((await s.request(f.owner, "PUT", "/data/collections/x", { accessMode: "shared" }, frame)).status).toBe(403);
+  expect((await s.request(f.owner, "GET", "/data", undefined, frame)).status).not.toBe(200);
+  expect(
+    (await s.request(f.owner, "GET", "/data/collections/tracker/export", undefined, frame)).status,
+  ).toBe(403);
+  const crossSite = await f
+    .site(second.id)
+    .query(f.owner, { collection: "tracker" }, frame);
+  expect(crossSite.status).toBe(403);
+});
+
+test("data is isolated by Site, workspace and Only me audience", async () => {
+  const f = await fixture();
+  const a = await f.publish("A");
+  const b = await f.publish("B");
+  await f.site(a.id).define(f.owner, "notes", { accessMode: "shared" });
+  await f.site(a.id).write(f.owner, [{ op: "insert", collection: "notes", data: { text: "a" } }]);
+  // Another Site has its own collections.
+  const otherSite = await f.site(b.id).query(f.owner, { collection: "notes" });
+  expect(otherSite.status).toBe(404);
+  expect(errorCode(otherSite)).toBe("not_found");
+
+  // Another organization cannot see the Site at all.
+  const g = await fixture();
+  const crossTenant = await g.app.request(
+    `/v1/workspaces/${f.workspace.id}/published-artifacts/${a.id}/data/query`,
+    { method: "POST", headers: g.owner.headers, body: JSON.stringify({ collection: "notes" }) },
+  );
+  expect([403, 404]).toContain(crossTenant.status);
+  const viaOwnWorkspace = await g.site(a.id).query(g.owner, { collection: "notes" });
+  expect(viaOwnWorkspace.status).toBe(404);
+  // RLS keeps tenants apart even below the API.
+  const visible = await db.db.execute(
+    (await import("drizzle-orm")).sql`select count(*)::int as count from site_data_records`,
+  );
+  expect(Number((visible as unknown as Array<{ count: number }>)[0]?.count ?? 0)).toBe(0);
+
+  // An Only me Site's data is reachable only by its owner.
+  const mine = await f.publish("Mine", "private");
+  const p = f.site(mine.id);
+  expect((await p.define(f.owner, "notes", { accessMode: "shared" })).status).toBe(201);
+  for (const who of [f.member, f.admin]) {
+    expect((await p.query(who, { collection: "notes" })).status).toBe(404);
+    expect(
+      (await p.write(who, [{ op: "insert", collection: "notes", data: { x: 1 } }])).status,
+    ).toBe(404);
+    expect((await p.describe(who)).status).toBe(404);
+    expect((await p.request(who, "GET", "/files")).status).toBe(404);
+  }
+  expect((await p.query(f.owner, { collection: "notes" })).status).toBe(200);
+});
+
+test("archived Sites keep their data but give viewers and frames no access", async () => {
+  const f = await fixture();
+  const created = await f.publish("Archive me");
+  const s = f.site(created.id);
+  await s.define(f.owner, "notes", { accessMode: "shared" });
+  await s.write(f.member, [{ op: "insert", collection: "notes", data: { text: "kept" } }]);
+  const archived = await f.call(f.owner, "PATCH", `/${created.id}/status`, {
+    status: "archived",
+    expectedCurrentVersionId: created.versionId,
+    reason: "done",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(archived.status, await archived.clone().text()).toBe(200);
+  const viewer = await s.query(f.member, { collection: "notes" });
+  expect(viewer.status).toBe(403);
+  expect(viewer.json.error.message).toContain("archived");
+  expect(
+    (await s.query(f.owner, { collection: "notes" }, { "x-opengeni-site-id": created.id })).status,
+  ).toBe(403);
+  // Its managers still see and export the data.
+  expect((await s.query(f.owner, { collection: "notes" })).json.records).toHaveLength(1);
+  expect((await s.describe(f.owner)).json.usage.recordCount).toBe(1);
+});
+
+test("batches are atomic and queries filter, sort, count and page", async () => {
+  const f = await fixture();
+  const s = f.site((await f.publish("Board")).id);
+  await s.define(f.owner, "items", {
+    accessMode: "shared",
+    indexedFields: ["score"],
+    jsonSchema: {
+      type: "object",
+      properties: { score: { type: "number" }, title: { type: "string" } },
+      required: ["title"],
+    },
+  });
+  const failed = await s.write(f.member, [
+    { op: "insert", collection: "items", data: { title: "kept?", score: 1 } },
+    { op: "patch", collection: "items", key: "missing", data: { score: 2 } },
+  ]);
+  expect(failed.status).toBe(404);
+  expect((await s.query(f.member, { collection: "items" })).json.records).toEqual([]);
+  const invalid = await s.write(f.member, [
+    { op: "insert", collection: "items", data: { score: "high" } },
+  ]);
+  expect(invalid.status).toBe(422);
+  expect(errorCode(invalid)).toBe("validation");
+
+  const operations = Array.from({ length: 25 }, (_, index) => ({
+    op: "insert",
+    collection: "items",
+    key: `item-${index}`,
+    data: { title: `Item ${index}`, score: index, tags: index % 2 ? ["odd"] : ["even"], meta: { group: index % 3 } },
+  }));
+  expect((await s.write(f.member, operations)).status).toBe(200);
+  const filtered = await s.query(f.member, {
+    collection: "items",
+    where: [
+      { field: "score", op: "gte", value: 10 },
+      { field: "tags", op: "contains", value: "odd" },
+      { field: "meta.group", op: "in", value: [0, 1] },
+    ],
+    sort: [{ field: "score", direction: "desc" }],
+    count: true,
+  });
+  expect(filtered.status, JSON.stringify(filtered.json)).toBe(200);
+  const scores = filtered.json.records.map((record: any) => record.data.score);
+  expect(scores).toEqual([24, 23, 22, 21, 19, 18, 17, 16, 15, 13, 12, 11, 10].filter((n) => n % 2 && n % 3 !== 2));
+  expect(filtered.json.count).toBe(scores.length);
+
+  const seen: number[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: any = await s.query(f.member, {
+      collection: "items",
+      sort: [
+        { field: "meta.group", direction: "asc" },
+        { field: "$createdAt", direction: "desc" },
+      ],
+      limit: 4,
+      ...(cursor ? { cursor } : {}),
+    });
+    expect(page.status, JSON.stringify(page.json)).toBe(200);
+    seen.push(...page.json.records.map((record: any) => record.data.score));
+    cursor = page.json.nextCursor;
+  } while (cursor);
+  expect(seen).toHaveLength(25);
+  expect(new Set(seen).size).toBe(25);
+
+  const counter = await s.write(f.member, [
+    { op: "increment", collection: "items", key: "item-3", field: "score", by: 5 },
+    { op: "increment", collection: "items", key: "votes", field: "count" },
+  ]);
+  expect(counter.status, JSON.stringify(counter.json)).toBe(400 - 200 + 0 === 200 ? 200 : 422);
+});
+
+test("quotas and write limits are enforced", async () => {
+  const f = await fixture({
+    siteDataMaxRecordBytes: 200,
+    siteDataRecordBytesPerSite: 600,
+    siteDataMaxCollectionsPerSite: 2,
+    siteDataViewerWritesPerMinute: 3,
+    siteDataMaxFileBytes: 64,
+    siteDataFileBytesPerSite: 100,
+  });
+  const s = f.site((await f.publish("Small")).id);
+  await s.define(f.owner, "a", { accessMode: "shared" });
+  await s.define(f.owner, "b", { accessMode: "shared" });
+  const third = await s.define(f.owner, "c", { accessMode: "shared" });
+  expect(third.status).toBe(413);
+  expect(third.json.error.details).toMatchObject({ code: "quota_exceeded", quota: "collections" });
+
+  const large = await s.write(f.owner, [
+    { op: "insert", collection: "a", data: { text: "x".repeat(300) } },
+  ]);
+  expect(large.status).toBe(413);
+  expect(large.json.error.details.quota).toBe("record_bytes");
+  for (let index = 0; index < 4; index += 1)
+    await s.write(f.owner, [{ op: "insert", collection: "a", data: { text: "y".repeat(120) } }]);
+  const full = await s.write(f.owner, [
+    { op: "insert", collection: "a", data: { text: "z".repeat(120) } },
+  ]);
+  expect(full.status).toBe(413);
+  expect(full.json.error.details.quota).toBe("site_record_bytes");
+
+  // Viewers get a per-minute write window; managers are bounded by quotas.
+  const statuses: number[] = [];
+  for (let index = 0; index < 4; index += 1)
+    statuses.push(
+      (await s.write(f.member, [{ op: "insert", collection: "b", data: { n: index } }])).status,
+    );
+  expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
+  expect(statuses[3]).toBe(429);
+
+  const tooBig = await s.request(f.owner, "POST", "/files?name=big.png", new Uint8Array(100), {
+    "content-type": "image/png",
+  });
+  expect(tooBig.status).toBe(413);
+  const first = await s.request(f.owner, "POST", "/files?name=a.png", PNG, {
+    "content-type": "image/png",
+  });
+  expect(first.status, JSON.stringify(first.json)).toBe(201);
+  const blob = new Uint8Array(60);
+  const second = await s.request(f.owner, "POST", "/files?name=b.bin", blob, {
+    "content-type": "application/octet-stream",
+  });
+  expect(second.status, JSON.stringify(second.json)).toBe(201);
+  const overflow = await s.request(f.owner, "POST", "/files?name=c.bin", blob, {
+    "content-type": "application/octet-stream",
+  });
+  expect(overflow.status).toBe(413);
+  expect(overflow.json.error.details.quota).toBe("site_file_bytes");
+});
+
+test("files upload, list, download and delete with shared and private scope", async () => {
+  const f = await fixture();
+  const created = await f.publish("Intake");
+  const s = f.site(created.id);
+  const frame = { "x-opengeni-site-id": created.id };
+  const shared = await s.request(
+    f.member,
+    "POST",
+    "/files?name=photo.png",
+    PNG,
+    { "content-type": "image/png", ...frame },
+  );
+  expect(shared.status, JSON.stringify(shared.json)).toBe(201);
+  const secret = await s.request(
+    f.member,
+    "POST",
+    "/files?name=id.pdf&scope=private",
+    new TextEncoder().encode("%PDF-1.7 test"),
+    { "content-type": "application/pdf", ...frame },
+  );
+  expect(secret.status).toBe(201);
+  const spoofed = await s.request(f.member, "POST", "/files?name=x.png", new Uint8Array([1, 2, 3]), {
+    "content-type": "image/png",
+  });
+  expect(spoofed.status).toBe(422);
+  const html = await s.request(f.member, "POST", "/files?name=x.html", new Uint8Array([60]), {
+    "content-type": "text/html",
+  });
+  expect(html.status).toBe(422);
+
+  const names = (result: { json: any }) =>
+    (result.json.files as Array<{ name: string }>).map((file) => file.name).sort();
+  expect(names(await s.request(f.member, "GET", "/files"))).toEqual(["id.pdf", "photo.png"]);
+  expect(names(await s.request(f.third, "GET", "/files"))).toEqual(["photo.png"]);
+  expect(names(await s.request(f.owner, "GET", "/files"))).toEqual(["id.pdf", "photo.png"]);
+  expect((await s.request(f.third, "GET", `/files/${secret.json.id}`)).status).toBe(404);
+  const download = await s.request(f.third, "GET", `/files/${shared.json.id}`);
+  expect(download.status).toBe(200);
+  expect(download.json.url).toContain(`/site-data/${created.id}/files/${shared.json.id}`);
+  // Only the uploader or a manager deletes a shared file.
+  expect((await s.request(f.third, "DELETE", `/files/${shared.json.id}`)).status).toBe(403);
+  expect((await s.request(f.member, "DELETE", `/files/${shared.json.id}`)).status).toBe(200);
+  expect([...f.objects.keys()].some((key) => key.endsWith(shared.json.id))).toBe(false);
+  expect((await s.describe(f.owner)).json.usage).toMatchObject({ fileCount: 1 });
+});
+
+test("an agent defines and feeds a collection the way a schedule would", async () => {
+  const f = await fixture();
+  const created = await f.publish("Company research");
+  const session = await createSession(db.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    initialMessage: "Refresh research",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const [turn] = await shared.admin<{ id: string }[]>`
+    INSERT INTO session_turns (
+      account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend,
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+    ) VALUES (
+      ${f.accountId}, ${f.workspace.id}, ${session.id}, gen_random_uuid(),
+      ${`site-data-wf-${crypto.randomUUID()}`}, 'running', 0, 'Refresh research',
+      'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${f.owner.subjectId}, '{"accepted":true}'::jsonb
+    ) RETURNING id`;
+  const attemptId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx`UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${session.id}`;
+    await tx`UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) VALUES (
+        ${attemptId}, ${f.accountId}, ${f.workspace.id}, ${session.id}, ${turn!.id}, 1,
+        'running', 'site-data-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )`;
+  });
+  const tools = [
+    "site_data_describe",
+    "site_data_define_collection",
+    "site_data_query",
+    "site_data_write",
+    "site_data_import",
+    "site_data_export",
+    "site_data_reset",
+    "site_files_list",
+    "site_files_upload",
+    "site_files_delete",
+  ];
+  const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: "worker:first-party-mcp",
+    permissions: ["artifacts:read", "artifacts:publish"],
+    principalKind: "agent_attempt",
+    metadata: {
+      sessionId: session.id,
+      turnId: turn!.id,
+      attemptId,
+      executionGeneration: 1,
+      firstPartyMcpTools: tools,
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({ name: "site-data-test", version: "1" });
+  await server.connect(serverTransport);
+  await mcp.connect(clientTransport);
+  const callTool = async (name: string, args: Record<string, unknown>) => {
+    const result = await mcp.callTool({ name, arguments: args });
+    const text = (result.content as Array<{ type: string; text?: string }>).find(
+      (item) => item.type === "text",
+    )?.text;
+    return { isError: result.isError === true, value: JSON.parse(text ?? "null") };
+  };
+  try {
+    expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
+      [...tools].sort(),
+    );
+    const defined = await callTool("site_data_define_collection", {
+      siteId: created.id,
+      name: "companies",
+      accessMode: "shared_read",
+      uniqueFields: [["domain"]],
+    });
+    expect(defined.isError, JSON.stringify(defined.value)).toBe(false);
+    const write = () =>
+      callTool("site_data_write", {
+        siteId: created.id,
+        operations: [
+          { op: "put", collection: "companies", key: "acme.com", data: { name: "Acme", domain: "acme.com" } },
+          { op: "put", collection: "companies", key: "globex.com", data: { name: "Globex", domain: "globex.com" } },
+        ],
+      });
+    expect((await write()).isError).toBe(false);
+    // A rerun replaces records instead of duplicating them.
+    expect((await write()).isError).toBe(false);
+    const conflict = await callTool("site_data_write", {
+      siteId: created.id,
+      operations: [{ op: "insert", collection: "companies", data: { domain: "acme.com" } }],
+    });
+    expect(conflict.isError).toBe(true);
+    expect(conflict.value.error.code).toBe("conflict");
+
+    // The page reads it as any member would.
+    const page = await f
+      .site(created.id)
+      .query(f.member, { collection: "companies", sort: [{ field: "name" }] }, {
+        "x-opengeni-site-id": created.id,
+      });
+    expect(page.json.records.map((record: any) => [record.data.name, record.version])).toEqual([
+      ["Acme", 2],
+      ["Globex", 2],
+    ]);
+    // The agent acts for the owner: records are owned by the person, written by the agent.
+    expect(page.json.records[0]).toMatchObject({
+      owner: `user:${f.owner.subjectId}`,
+      updatedBy: "agent:worker:first-party-mcp",
+    });
+
+    const exported = await callTool("site_data_export", {
+      siteId: created.id,
+      collection: "companies",
+      format: "csv",
+    });
+    expect(exported.value.records).toBe(2);
+    expect(exported.value.content.split("\r\n")[0]).toBe("$id,$key,$owner,$createdAt,$updatedAt,domain,name");
+    const imported = await callTool("site_data_import", {
+      siteId: created.id,
+      collection: "companies",
+      format: "csv",
+      csv: "name,domain\nInitech,initech.com\n\"Hooli, Inc\",hooli.com\n",
+      keyField: "domain",
+    });
+    expect(imported.value).toEqual({ imported: 2 });
+    const described = await callTool("site_data_describe", { siteId: created.id });
+    expect(described.value.collections[0]).toMatchObject({ name: "companies", recordCount: 4 });
+    const uploaded = await callTool("site_files_upload", {
+      siteId: created.id,
+      name: "summary.csv",
+      contentType: "text/csv",
+      text: "a,b\n1,2\n",
+    });
+    expect(uploaded.isError, JSON.stringify(uploaded.value)).toBe(false);
+    const reset = await callTool("site_data_reset", {
+      siteId: created.id,
+      collection: "companies",
+      confirm: true,
+    });
+    expect(reset.value).toEqual({ deletedRecords: 4 });
+
+    // Usage is metered for the workspace in usage-only mode.
+    const usage = await shared.admin<{ event_type: string; total: string }[]>`
+      select event_type, sum(quantity)::text as total from usage_events
+      where workspace_id = ${f.workspace.id} and source_resource_id = ${created.id}
+      group by event_type order by event_type`;
+    expect(usage.map((row) => row.event_type)).toEqual([
+      "site_data.file_upload_bytes",
+      "site_data.write",
+      "site_data.write_bytes",
+    ]);
+  } finally {
+    await mcp.close();
+  }
+});

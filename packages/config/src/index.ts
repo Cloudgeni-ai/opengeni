@@ -1545,6 +1545,17 @@ const SettingsSchema = z.object({
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Site Data (OPE-800) quotas and write rate limits. Usage is recorded in the
+  // usage ledger only; shadow and paid modes are a later rollout step.
+  siteDataRecordBytesPerSite: z.coerce.number().int().positive().default(100 * 1024 * 1024),
+  siteDataMaxRecordBytes: z.coerce.number().int().positive().default(256 * 1024),
+  siteDataMaxCollectionsPerSite: z.coerce.number().int().positive().default(50),
+  siteDataFileBytesPerSite: z.coerce.number().int().positive().default(1024 * 1024 * 1024),
+  siteDataMaxFileBytes: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+  siteDataWorkspaceBytes: z.coerce.number().int().positive().default(1024 * 1024 * 1024),
+  siteDataViewerWritesPerMinute: z.coerce.number().int().positive().default(120),
+  siteDataSiteWritesPerMinute: z.coerce.number().int().positive().default(600),
+  siteDataBillingMode: z.enum(["usage_only"]).default("usage_only"),
   // Explicit commercial cutover. Existing queued revisions remain unpriced;
   // only jobs created at or after this instant may enter the paid rail.
   documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
@@ -4876,6 +4887,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
+    siteDataRecordBytesPerSite: optional("OPENGENI_SITE_DATA_RECORD_BYTES_PER_SITE"),
+    siteDataMaxRecordBytes: optional("OPENGENI_SITE_DATA_MAX_RECORD_BYTES"),
+    siteDataMaxCollectionsPerSite: optional("OPENGENI_SITE_DATA_MAX_COLLECTIONS_PER_SITE"),
+    siteDataFileBytesPerSite: optional("OPENGENI_SITE_DATA_FILE_BYTES_PER_SITE"),
+    siteDataMaxFileBytes: optional("OPENGENI_SITE_DATA_MAX_FILE_BYTES"),
+    siteDataWorkspaceBytes: optional("OPENGENI_SITE_DATA_WORKSPACE_BYTES"),
+    siteDataViewerWritesPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_WRITES_PER_MINUTE"),
+    siteDataSiteWritesPerMinute: optional("OPENGENI_SITE_DATA_SITE_WRITES_PER_MINUTE"),
+    siteDataBillingMode: optional("OPENGENI_SITE_DATA_BILLING_MODE"),
     documentEmbeddingCreditsActivatedAt: optional(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
     ),

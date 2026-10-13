@@ -15,6 +15,7 @@ export {
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
+export * from "./site-data";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
@@ -1082,6 +1083,16 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_rollback",
   "artifacts_archive",
   "artifacts_restore",
+  "site_data_describe",
+  "site_data_define_collection",
+  "site_data_query",
+  "site_data_write",
+  "site_data_import",
+  "site_data_export",
+  "site_data_reset",
+  "site_files_list",
+  "site_files_upload",
+  "site_files_delete",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
