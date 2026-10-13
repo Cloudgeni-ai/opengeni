@@ -8,6 +8,7 @@ import {
 } from "../src/sandbox/metrics-ingestion";
 import {
   AgentEvent,
+  AttachedBrowserConnectionEndReason,
   Arch,
   GoingOfflineReason,
   Os,
@@ -312,6 +313,7 @@ describe("wireAttachedBrowserInventoryToContract", () => {
           },
         },
       ],
+      connectionEnds: [],
       ...overrides,
     };
   }
@@ -336,7 +338,53 @@ describe("wireAttachedBrowserInventoryToContract", () => {
           capabilities: expect.objectContaining({ debuggerAttachment: true }),
         },
       ],
+      connectionEnds: [],
     });
+  });
+
+  test("projects why recent profile connections ended and drops ends it cannot hold", () => {
+    const end = {
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      connectionGeneration: "extension-connection-0",
+      reason:
+        AttachedBrowserConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_NATIVE_HOST_LOST,
+      detail: "",
+      endedAtUnixMs: "1767225600000",
+      connectedMs: "4200",
+    };
+    const projected = wireAttachedBrowserInventoryToContract(
+      inventory({
+        connectionEnds: [
+          end,
+          {
+            ...end,
+            connectionGeneration: "extension-connection-1",
+            reason:
+              AttachedBrowserConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_AGENT_REJECTED,
+            detail: "x".repeat(600),
+          },
+          {
+            ...end,
+            reason:
+              AttachedBrowserConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_UNSPECIFIED,
+          },
+          { ...end, endedAtUnixMs: "0" },
+          { ...end, connectionGeneration: "" },
+        ],
+      }),
+    );
+    expect(projected.devices).toHaveLength(1);
+    expect(projected.connectionEnds).toEqual([
+      {
+        deviceId: end.deviceId,
+        connectionGeneration: "extension-connection-0",
+        reason: "native_host_lost",
+        detail: null,
+        endedAt: "2026-01-01T00:00:00.000Z",
+        connectedMs: 4200,
+      },
+      expect.objectContaining({ reason: "agent_rejected", detail: "x".repeat(512) }),
+    ]);
   });
 
   test("accepts native base64url generation prefixes without rewriting the fence", () => {

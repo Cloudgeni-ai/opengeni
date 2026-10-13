@@ -216,6 +216,21 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+Each ended connection generation is recorded with its reason in
+`attached_browser_devices.connection_history` (the latest 50 per profile).
+The native host sends a final `native_host_closing` frame before it exits,
+naming whether Chrome closed the port (`browser_closed_port`), sent an
+unreadable message (`browser_message_invalid`) or stopped accepting output
+(`browser_output_failed`). A socket end without that frame is
+`native_host_lost`: the native host process itself vanished. A hello or message
+the agent refuses is `agent_rejected`. The agent reports its recent ends in
+every inventory snapshot. The server records `agent_restarted` for generations
+that ended with a replaced bridge and `unreported` for older agents; a later
+agent report for the same generation replaces either inference. Native-host
+diagnostics are written to stderr because stdout carries Chrome frames.
+Oversized tab titles are truncated and oversized tab URLs make only that tab
+uncontrollable; neither ends the profile's connection.
+
 Renaming a Chrome profile is inventory metadata, not a connection transition.
 The extension keeps the same ready native port and sends optional
 `profile: { profileLabel }` metadata with its inventory revision. The agent updates

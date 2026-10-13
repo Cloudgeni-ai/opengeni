@@ -86,7 +86,7 @@ const CONNECTION_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
 fn main() -> std::process::ExitCode {
     if browser_bridge::is_native_host_invocation() {
-        init_tracing();
+        init_native_host_tracing();
         return match browser_bridge::run_native_host() {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
@@ -131,6 +131,20 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .try_init();
+}
+
+/// The Native Messaging host's stdout is Chrome's message channel: a log line
+/// there is read as a frame length and Chrome drops the connection. Its logs go
+/// to stderr, which Chrome leaves to the host, without terminal colors.
+fn init_native_host_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,opengeni_agent=info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
         .try_init();
 }
 
