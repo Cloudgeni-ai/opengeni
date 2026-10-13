@@ -892,6 +892,14 @@ Namespace-wide contract discovery is build-time only; runtime projection keeps
 the original schema objects and exact JSON output without retaining unrelated
 contract exports.
 
+Object storage loads only the configured provider's SDK. The synchronous
+`createObjectStorage` factory loads its SDK before returning; worker startup
+calls `prepareObjectStorageProvider` before registering its default activities,
+so the first activity does not pay import cost. This preparation constructs no
+client, opens no connection and changes no pool or cache policy. The published
+ESM package supplies Node's `createRequire`; Bun release bundles retain literal
+provider require boundaries without requiring a full runtime dependency tree.
+
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
