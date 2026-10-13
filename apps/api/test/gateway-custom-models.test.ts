@@ -52,11 +52,8 @@ import {
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
-// The legacy Claude pool is deleted (design 5.3, C4): Claude accounts and
-// access policies fail closed until the shared subscription core serves them
-// (C2a, C2b). Claude custom models keep their own API. The public app
-// redacts the 503 message, so routes assert the status.
-const CLAUDE_CORE_ONLY = /shared subscription core/;
+// Claude accounts and access policies are served by the shared core.
+// Custom-model metadata remains separate from executable connection authority.
 
 const SECRET = "gateway-custom-models-test-secret-at-least-32-bytes";
 
@@ -317,7 +314,7 @@ describe("workspace Gateway custom model API", () => {
       const accessPath = `/model-connections/${providerKind}/${claude ? crypto.randomUUID() : "current"}/access`;
       const access = await request(accessPath, {}, publicApp);
       if (claude) {
-        expect(access.status).toBe(503);
+        expect(access.status).toBe(404);
       } else {
         expect(access.status).toBe(200);
         const accessBody = await access.json();
@@ -341,7 +338,7 @@ describe("workspace Gateway custom model API", () => {
         publicApp,
       );
       // Claude admission comes only from the shared core; this organization
-      // has no cutover row and no serving core connection, so the model is
+      // has no serving core connection, so the model is
       // not selectable (core admission is covered in
       // packages/db/test/organization-claude-model-admission.test.ts).
       const admissible = providerKind === "anthropic";
@@ -463,8 +460,9 @@ describe("workspace Gateway custom model API", () => {
       ).toBeNull();
     });
   }
-  test("Claude pool API and access policies fail closed after authorization", async () => {
-    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+  test("Claude core access refuses missing connections and maintenance routes fail closed", async () => {
+    if (!client || !grant || !publicApp || !shared)
+      throw new Error("Real database fixture required");
     const connectionId = crypto.randomUUID();
     const target = {
       accountId: grant.accountId,
@@ -473,7 +471,7 @@ describe("workspace Gateway custom model API", () => {
       kind: "claude_subscription" as const,
       connectionId,
     };
-    await expect(getModelConnectionAccess(client.db, target)).rejects.toThrow(CLAUDE_CORE_ONLY);
+    expect(await getModelConnectionAccess(client.db, target)).toBeNull();
     await expect(
       updateModelConnectionAccess(client.db, target, {
         allowedModels: [],
@@ -481,7 +479,7 @@ describe("workspace Gateway custom model API", () => {
         allowPersonalWorkspaces: false,
         version: 1,
       }),
-    ).rejects.toThrow(CLAUDE_CORE_ONLY);
+    ).resolves.toBeNull();
     const path = `/claude/accounts/${connectionId}`;
     const routes: Array<[string, string, unknown?]> = [
       ["GET", "/claude/accounts"],
@@ -492,9 +490,18 @@ describe("workspace Gateway custom model API", () => {
       ["DELETE", path],
       ["GET", `/model-connections/claude_subscription/${connectionId}/access`],
     ];
-    for (const [method, route, body] of routes) {
-      const response = await request(route, { method, body }, publicApp);
-      expect({ method, route, status: response.status }).toEqual({ method, route, status: 503 });
+    await shared.admin`
+      update subscription_provider_cutovers set enabled = false
+      where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
+    try {
+      for (const [method, route, body] of routes) {
+        const response = await request(route, { method, body }, publicApp);
+        expect({ method, route, status: response.status }).toEqual({ method, route, status: 503 });
+      }
+    } finally {
+      await shared.admin`
+        update subscription_provider_cutovers set enabled = true
+        where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
     }
   });
   test("disabled subscription routes fail closed while Anthropic remains accessible", async () => {

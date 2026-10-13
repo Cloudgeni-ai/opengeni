@@ -16,10 +16,9 @@ import { registerClaudeSubscriptionAccountRoutes } from "../src/routes/claude-su
 import { registerClaudeSubscriptionOAuthRoutes } from "../src/routes/claude-subscription-oauth";
 import { registerModelConnectionAccessRoutes } from "../src/routes/model-connection-access";
 
-// The legacy Claude pool is deleted (design 5.3, C4). Until the shared
-// subscription core serves Claude accounts, usage, setup-token connect and
-// access policies (C2a, C2b), each route authenticates and then fails closed
-// with a typed 503, writing nothing.
+// The legacy Claude pool is deleted (design 5.3, C4). These tests explicitly
+// disable the shared-core cutover to verify authenticated maintenance refusals
+// without reviving legacy stores. Enabled routes are covered by claude-core-routes.
 
 const secret = "claude-usage-api-test-delegation";
 const key = Buffer.alloc(32, 7);
@@ -41,6 +40,9 @@ beforeAll(async () => {
     subjectId,
   });
   ({ accountId, workspaceId } = result.workspaceGrants[0]!);
+  await shared.admin`
+    update subscription_provider_cutovers set enabled = false
+    where account_id = ${accountId}::uuid and provider = 'claude'`;
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -117,7 +119,7 @@ async function claudeRowCounts() {
   return row;
 }
 
-test("legacy Claude account, usage, setup-token and access routes fail closed after authentication", async () => {
+test("Claude account, usage, setup-token and access routes fail closed during core maintenance", async () => {
   const { app } = api();
   const before = await claudeRowCounts();
   const admin = await headers(["workspace:read", "workspace:admin", "connections:write"]);
@@ -148,7 +150,7 @@ test("legacy Claude account, usage, setup-token and access routes fail closed af
     const response = await app.request(path, { method, headers: auth, body });
     expect({ method, path, status: response.status }).toEqual({ method, path, status: 503 });
     const text = await response.text();
-    expect(text).toContain("served only by the shared subscription core");
+    expect(text).toContain("paused for maintenance");
     expect(text).not.toContain("sk-ant-oat01");
   }
   // OAuth sign-in still needs a browser human before anything else; it never
@@ -162,16 +164,16 @@ test("legacy Claude account, usage, setup-token and access routes fail closed af
   expect(await claudeRowCounts()).toEqual(before);
 });
 
-test("the fail-closed routes keep their pre-deletion permission checks ahead of the 503", async () => {
+test("core maintenance routes check workspace access before revealing the 503", async () => {
   const { app } = api();
   const before = await claudeRowCounts();
-  const reader = await headers(["workspace:read"]);
-  const writer = await headers(["workspace:read", "connections:write"]);
+  const reader = await headers(["sessions:read"]);
+  const writer = await headers(["connections:write"]);
   const connectionId = crypto.randomUUID();
   const workspace = `/v1/workspaces/${workspaceId}`;
   const setup = JSON.stringify({ token: "sk-ant-oat01-route-fixture", scope: "workspace" });
   const refused: Array<[string, string, Record<string, string>, string?]> = [
-    // Workspace-scope mutations needed workspace:admin before the deletion.
+    // Neither token may read this workspace, even if it names write permission.
     ["POST", `${workspace}/claude/accounts/${connectionId}/activate`, reader],
     ["DELETE", `${workspace}/claude/accounts/${connectionId}`, writer],
     [
@@ -213,7 +215,7 @@ test("the fail-closed routes keep their pre-deletion permission checks ahead of 
   expect(await claudeRowCounts()).toEqual(before);
 });
 
-test("a local browser administrator reaches the 503 on organization routes and OAuth sign-in", async () => {
+test("a local browser administrator reaches core maintenance on organization routes and OAuth sign-in", async () => {
   const origin = "http://opengeni.test";
   const settings = testSettings({
     productAccessMode: "local",
@@ -239,6 +241,9 @@ test("a local browser administrator reaches the 503 on organization routes and O
     "sec-fetch-site": "same-origin",
   };
   const access = await (await app.request(`${origin}/identity`, { headers: browser })).json();
+  await shared.admin`
+    update subscription_provider_cutovers set enabled = false
+    where account_id = ${access.defaultAccountId}::uuid and provider = 'claude'`;
   const organization = `${origin}/v1/organizations/${access.defaultAccountId}`;
   const workspace = `${origin}/v1/workspaces/${access.defaultWorkspaceId}`;
   const connectionId = crypto.randomUUID();

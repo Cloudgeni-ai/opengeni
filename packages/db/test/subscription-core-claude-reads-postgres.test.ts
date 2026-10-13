@@ -476,15 +476,18 @@ describe("before the Claude cutover receipt (legacy route)", () => {
   beforeAll(async () => {
     current = { shared, client };
     const legacy = await acquireSharedTestDatabase("claude-reads-before-cutover", {
-      withheldMigrations: ["0741_subscription_core_claude_cutover.sql"],
+      withheldMigrations: [
+        "0741_subscription_core_claude_cutover.sql",
+        "0744_subscription_core_legacy_retirement.sql",
+      ],
     });
     if (!legacy) throw new Error("Real PostgreSQL is required");
     shared = legacy;
     client = createDb(shared.appUrl, { max: 6 });
   }, 180_000);
   afterAll(async () => {
-    await client.close();
-    await shared.release();
+    if (client !== current.client) await client.close();
+    if (shared !== current.shared) await shared.release();
     ({ shared, client } = current);
   }, 60_000);
 
@@ -510,16 +513,24 @@ describe("before the Claude cutover receipt (legacy route)", () => {
       token: "sk-ant-oat01-legacy-admission",
       identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
     };
-    await upsertOrganizationClaudeSubscription(client.db, {
-      organizationId: org.accountId,
-      actorSubjectId: org.ownerSubjectId,
-      encryptionKey: key,
-      secret,
-      providerAccountId: secret.identity.accountUuid,
-      label: null,
-      accountEmail: null,
-      expiresAt: null,
-    });
+    // Seed historical data only with the fixture administrator: current app
+    // roles deliberately no longer execute retired Claude writer routines.
+    // Every admission assertion below still runs as the restricted app role.
+    const seed = createDb(shared.adminUrl, { max: 1 });
+    try {
+      await upsertOrganizationClaudeSubscription(seed.db, {
+        organizationId: org.accountId,
+        actorSubjectId: org.ownerSubjectId,
+        encryptionKey: key,
+        secret,
+        providerAccountId: secret.identity.accountUuid,
+        label: null,
+        accountEmail: null,
+        expiresAt: null,
+      });
+    } finally {
+      await seed.close();
+    }
     expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
     expect(
       await admit(org, org.opus, { authoritySnapshot: { version: 1, scope: "workspace" } }),
@@ -594,7 +605,8 @@ describe("on the Claude core route", () => {
     expect(await target(org.workspaceId, personalAlias)).toBeNull();
     expect(await target(org.personalWorkspaceId, personalAlias, "user:someone-else")).toBeNull();
     expect(await target(org.personalWorkspaceId, "not-a-uuid")).toBeNull();
-    // The organization path: the organization's own connections, administrators only.
+    // Every shared account is organization-owned, including workspace-managed
+    // accounts. Organization administrators can read both, never personal rows.
     const orgRow = (subjectId: string, accountIdParam: string) =>
       readSubscriptionCoreClaudeOrganizationUsageRow(client.db, {
         organizationId: org.accountId,
@@ -606,7 +618,7 @@ describe("on the Claude core route", () => {
       await connectionVersion(organizationPool),
     );
     expect((await orgRow(org.ownerSubjectId, legacyId))?.id).toBe(organizationPool);
-    expect(await orgRow(org.ownerSubjectId, workspacePool)).toBeNull();
+    expect((await orgRow(org.ownerSubjectId, workspacePool))?.id).toBe(workspacePool);
     expect(await orgRow(org.ownerSubjectId, personal)).toBeNull();
     expect(await orgRow("user:not-an-administrator", organizationPool)).toBeNull();
   });

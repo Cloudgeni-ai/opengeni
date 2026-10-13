@@ -15,12 +15,11 @@ import {
 import { readSubscriptionCoreRouteFunding } from "../src/subscription-core/route-readiness";
 
 // Claude subscription custom-model admission after the drained cutover
-// (design 5.3, C4): the legacy pool admission is deleted, so at both scopes a
-// Claude custom model is live only while the shared core serves it in the
-// workspace (the 0720 receipt, an enabled organization cutover and a serving
-// shared Claude connection that allows the exact product model). Everything
-// else fails closed. Runs on the fully migrated schema (the 0720 receipt is
-// present) as the non-owner application role.
+// (design 5.3, C4): organization-model admission requires explicit caller
+// authority and a serving core connection. The workspace helper locks only
+// custom-model metadata; it is not a credential/capacity authorization. Public
+// workspace admission is covered in gateway-custom-models.test.ts. Runs on the
+// fully migrated schema as the non-owner application role.
 let shared: SharedTestDatabase;
 let client: DbClient;
 const key = Buffer.alloc(32, 41);
@@ -155,6 +154,7 @@ async function admitOrganization(
         workspaceId,
         providerKind: "claude_subscription",
         upstreamModelId: "claude-opus-5-5",
+        claudeAuthority: { authoritySnapshot: { version: 1, scope: "organization" } },
       }),
   );
   return admitted !== null;
@@ -192,26 +192,26 @@ test("runs as the non-owner application role", async () => {
   expect(posture).toEqual({ rolsuper: false, rolbypassrls: false });
 });
 
-test("both scopes are admitted on the core route with a serving connection", async () => {
+test("organization admission requires serving core capacity; workspace metadata is independent", async () => {
   const input = await fixture();
-  // Receipt present, but the organization has no cutover row: maintenance.
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  // A new organization is on the core, but has no serving connection.
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   await setCutover(input, true);
   // Core route, but no serving shared Claude connection.
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   await addConnection(input);
   expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
-  // An operator hold (maintenance) refuses both again.
+  // Maintenance refuses execution, not reading an existing model definition.
   await setCutover(input, false);
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
 });
 
 test("the serving connection must allow the exact product model", async () => {
   const input = await fixture();
   await setCutover(input, true);
-  await addConnection(input, ["organization-claude-subscription/claude-opus-5-5"]);
-  expect(await admitBoth(input)).toEqual({ organization: true, workspace: false });
   await addConnection(input, ["workspace-claude-subscription/claude-sonnet-5-5"]);
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
+  await addConnection(input, ["organization-claude-subscription/claude-opus-5-5"]);
   expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
 });
 
@@ -222,7 +222,7 @@ test("an unhealthy connection does not serve, and a retired model is never admit
   await shared.admin`
     update subscription_connections set status = 'error'
     where id = ${connectionId}::uuid`;
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   await addConnection(input);
   expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
   await retireOrganizationModelProviderCustomModel(client.db, {
@@ -237,7 +237,7 @@ test("an unhealthy connection does not serve, and a retired model is never admit
   expect(await admitWorkspace(input)).toBe(true);
 });
 
-test("a personal Claude connection never admits, not even in its owner's Personal workspace", async () => {
+test("a personal Claude connection does not admit an organization model, even in its owner's Personal workspace", async () => {
   const input = await fixture();
   await setCutover(input, true);
   // The same Claude workspace-scope model in the owner's Personal workspace.
@@ -251,7 +251,7 @@ test("a personal Claude connection never admits, not even in its owner's Persona
     )`;
   // Only the admitting subject's own personal connection exists. Admission
   // runs under that owner's subject, but asks the core for shared capacity
-  // only, so the personal connection serves neither scope anywhere.
+  // only, so the personal connection cannot serve the organization prefix.
   await addPersonalConnection(input);
   // The connection is serviceable: the core funds its owner's own turn in
   // the Personal workspace with it.
@@ -264,13 +264,13 @@ test("a personal Claude connection never admits, not even in its owner's Persona
       productModelId: "organization-claude-subscription/claude-opus-5-5",
     }),
   ).toEqual({ route: "core", value: true });
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   expect(await admitBoth(input, input.personalWorkspaceId)).toEqual({
     organization: false,
-    workspace: false,
+    workspace: true,
   });
   // A shared organization connection (personal workspaces allowed) admits
-  // both workspaces, so the refusals above came from the personal ownership.
+  // the organization model in both workspaces, unlike personal ownership.
   await addConnection(input);
   expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
   expect(await admitBoth(input, input.personalWorkspaceId)).toEqual({
@@ -286,7 +286,7 @@ test("a shared connection scoped to other workspaces does not admit here", async
     insert into workspaces (account_id, name)
     values (${input.grant.accountId}, 'Claude admission other workspace') returning id::text as id`;
   const connectionId = await addConnection(input, null, [other!.id]);
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: false });
+  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   // Covering this workspace too admits it.
   await shared.admin`
     insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
