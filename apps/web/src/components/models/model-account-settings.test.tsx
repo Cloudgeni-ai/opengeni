@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import type { ModelAccountSettingsOverview, ModelAccountPreferences } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
-   How accounts are used, against a mocked client: the organization's rules,
+   Sharing subscriptions, against a mocked client: the organization's rules,
    which of them workspaces can change, and a workspace's one-step return to
    the organization.
    -------------------------------------------------------------------------- */
@@ -109,6 +109,7 @@ const {
   WorkspaceAccountRulesSection,
   accountRuleChanges,
   changeableRulesSummary,
+  ruleReach,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
 } = await import("./model-account-settings");
@@ -171,14 +172,13 @@ function Locks() {
 }
 
 /** The option of the segmented control in the row labelled `row`. */
-function rowOption(container: HTMLElement, row: string, option: string) {
-  const group = [...container.querySelectorAll<HTMLElement>("[role='radiogroup']")].find(
-    (candidate) =>
-      document.getElementById(candidate.getAttribute("aria-labelledby") ?? "")?.textContent === row,
+/** The switch of the setting row with this label. */
+function rowSwitch(container: HTMLElement, row: string) {
+  return [...container.querySelectorAll<HTMLButtonElement>("[role='switch']")].find((candidate) =>
+    (candidate.getAttribute("aria-labelledby") ?? "")
+      .split(" ")
+      .some((id) => document.getElementById(id)?.textContent === row),
   );
-  return [...(group?.querySelectorAll("button") ?? [])].find(
-    (candidate) => candidate.textContent?.trim() === option,
-  ) as HTMLButtonElement | undefined;
 }
 
 const checkbox = (container: HTMLElement, label: string) =>
@@ -192,7 +192,9 @@ const checkbox = (container: HTMLElement, label: string) =>
 
 function Workspace() {
   const state = useWorkspaceModelAccountSettings("design", true);
-  return <WorkspaceAccountRulesSection organizationName="Acme" state={state} />;
+  return (
+    <WorkspaceAccountRulesSection organizationName="Acme" workspaceName="Design" state={state} />
+  );
 }
 
 test("fallback mappings save exact order and support an explicit empty override", async () => {
@@ -210,7 +212,7 @@ test("fallback mappings save exact order and support an explicit empty override"
       expectedVersion: 7,
     });
     // A completed save releases the writer; another rule still saves without remounting.
-    const failover = view.container.querySelectorAll("[role='switch']")[2] as HTMLButtonElement;
+    const failover = rowSwitch(view.container, "Switch models when subscriptions run out")!;
     await act(async () => failover.click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenLastCalledWith("acme", {
       crossProviderFailover: false,
@@ -277,9 +279,9 @@ test("a late personal preference save cannot overwrite the newly selected organi
 test("rotation saves the selected provider without guessing another provider's policy", async () => {
   const view = await render(<Organization />);
   try {
-    const option = rowOption(view.container, "Claude accounts", "Primary only");
-    expect(option).toBeDefined();
-    await act(async () => option!.click());
+    const sharing = rowSwitch(view.container, "Share work between Claude subscriptions");
+    expect(sharing?.getAttribute("aria-checked")).toBe("true");
+    await act(async () => sharing!.click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenCalledWith("acme", {
       rotation: { claude: { mode: "primary_first" } },
       expectedVersion: 7,
@@ -355,7 +357,7 @@ test("a workspace's changes read as words, and locked rules are never its change
       },
     }),
   ).toEqual([
-    "Claude: Primary only",
+    "Claude sharing: Off",
     "Personal subscriptions: On",
     "Switch models: Off",
     "Own fallback order",
@@ -367,6 +369,52 @@ test("a workspace's changes read as words, and locked rules are never its change
       entrySources: { rotation: {}, providers: {}, fallbackOrder: {} },
     }),
   ).toEqual([]);
+});
+
+test("a default rule says which workspaces use it, and never guesses a count", () => {
+  const workspace = (
+    name: string,
+    own = false,
+  ): ModelAccountSettingsOverview["workspaces"][number] => ({
+    workspaceId: name.toLowerCase(),
+    name,
+    values: own
+      ? {
+          ...VALUES,
+          rotation: { ...VALUES.rotation, claude: { mode: "primary_first" as const } },
+          crossProviderFailover: false,
+        }
+      : VALUES,
+    sources: {
+      ...SOURCES,
+      personalConnectionsAllowed: "organization" as const,
+      ...(own
+        ? { rotation: "workspace" as const, crossProviderFailover: "workspace" as const }
+        : {}),
+    },
+    entrySources: {
+      rotation: own ? { claude: "workspace" as const } : {},
+      providers: {},
+      fallbackOrder: {},
+    },
+  });
+  const all = [workspace("Design"), workspace("Platform"), workspace("Research", true)];
+  expect(ruleReach(all, "personalConnectionsAllowed")).toBe("Used by every workspace");
+  expect(ruleReach(all, "crossProviderFailover")).toBe(
+    "Used by 2 of 3 workspaces · Research has its own (Off)",
+  );
+  expect(ruleReach(all, "rotation", "claude")).toBe(
+    "Used by 2 of 3 workspaces · Research has its own (Off)",
+  );
+  expect(ruleReach(all, "rotation", "codex")).toBe("Used by every workspace");
+  expect(
+    ruleReach(
+      [workspace("Design", true), workspace("Platform", true), workspace("Research")],
+      "crossProviderFailover",
+    ),
+  ).toBe("Used by 1 of 3 workspaces · 2 have their own");
+  // More workspaces than one page: no count.
+  expect(ruleReach(null, "crossProviderFailover")).toBeNull();
 });
 
 test("dependent rules show only while their rule is on", async () => {
@@ -401,9 +449,9 @@ test("the organization keeps a rule the same everywhere with the version it read
     expect(checkbox(view.container, "Fall back to personal subscriptions").checked).toBe(false);
     expect(view.container.textContent).toContain("Changed in Design.");
     await act(async () => checkbox(view.container, "Personal subscriptions").click());
-    expect(view.container.textContent).toContain("Design will go back to Acme’s setting.");
+    expect(view.container.textContent).toContain("Design will go back to the default.");
     await act(async () => checkbox(view.container, "Personal subscriptions").click());
-    await act(async () => checkbox(view.container, "Sharing work between accounts").click());
+    await act(async () => checkbox(view.container, "Share work between subscriptions").click());
     const form = view.container.querySelector("form")!;
     await act(async () =>
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
@@ -420,11 +468,15 @@ test("the organization keeps a rule the same everywhere with the version it read
   }
 });
 
-test("the organization's rules say which ones every workspace keeps", async () => {
+test("the default rules say which workspaces use each one", async () => {
   const view = await render(<Organization />);
   try {
-    expect(view.container.textContent).toContain("Opus → Sonnet");
-    expect(view.container.textContent).toContain("Same in every workspace");
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Opus → Sonnet");
+    // A kept rule, a rule every workspace uses, and one a workspace changed, with its value.
+    expect(text).toContain("Used by every workspace. Workspaces can’t change it.");
+    expect(text).toContain("Used by every workspace");
+    expect(text).toContain("Not used by any workspace · Design has its own (Off)");
     expect(view.container.textContent).toContain("4 of 5 rules");
     const row = [...view.container.querySelectorAll("button")].find((candidate) =>
       candidate.textContent?.includes("What workspaces can change"),
@@ -436,14 +488,18 @@ test("the organization's rules say which ones every workspace keeps", async () =
   }
 });
 
-test("a workspace admin goes back to the organization's value in one step", async () => {
+test("a workspace admin goes back to the default in one step", async () => {
   const view = await render(<Workspace />);
   try {
-    const fallback = view.container.querySelectorAll("[role='switch']")[1]!;
+    const fallback = rowSwitch(view.container, "Fall back to personal subscriptions")!;
     expect(fallback.getAttribute("aria-disabled")).toBe("true");
-    expect(view.container.textContent).toContain("Acme keeps this the same in every workspace.");
-    expect(view.container.textContent).toContain("1 rule changed here. The rest follow Acme.");
-    const reset = buttons(view.container, "Use Acme’s setting");
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Acme keeps this the same in every workspace.");
+    expect(text).toContain("1 rule changed for Design. The rest use the defaults.");
+    // Every rule says where its value comes from, with the value.
+    expect(text).toContain("Uses the default (On)");
+    expect(text).toContain("Changed for Design");
+    const reset = buttons(view.container, "Use the default");
     expect(reset).toHaveLength(1);
     await act(async () => reset[0]!.click());
     expect(client.updateWorkspaceModelAccountSettings).toHaveBeenCalledWith("design", {
@@ -459,8 +515,8 @@ test("a member sees the sources without changing them", async () => {
   canEdit = false;
   const view = await render(<Workspace />);
   try {
-    expect(buttons(view.container, "Use Acme’s setting")).toHaveLength(0);
-    expect(view.container.textContent).toContain("Set for this workspace.");
+    expect(buttons(view.container, "Use the default")).toHaveLength(0);
+    expect(view.container.textContent).toContain("Changed for Design");
     for (const control of view.container.querySelectorAll("[role='switch']")) {
       expect(control.getAttribute("aria-disabled")).toBe("true");
     }
@@ -475,7 +531,7 @@ test("a refused change says why", async () => {
   });
   const view = await render(<Workspace />);
   try {
-    await act(async () => buttons(view.container, "Use Acme’s setting")[0]!.click());
+    await act(async () => buttons(view.container, "Use the default")[0]!.click());
     expect(toastError).toHaveBeenCalledWith("Your organization locked this setting.");
   } finally {
     await view.cleanup();
