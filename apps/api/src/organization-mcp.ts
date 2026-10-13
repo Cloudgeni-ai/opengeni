@@ -5,7 +5,6 @@ import {
   type CallToolResult,
   type Icon,
 } from "@modelcontextprotocol/sdk/types.js";
-import * as contracts from "@opengeni/contracts";
 import {
   isReadOnlyPermissionSet,
   OPENGENI_API_CONTRACT_HEADER,
@@ -17,6 +16,7 @@ import { z } from "zod";
 
 import type { ActionCatalogEntry } from "./mcp/action-catalog-types";
 import { ACTION_CATALOG } from "./mcp/action-catalog.gen";
+import { ACTION_REQUEST_SCHEMAS } from "./mcp/action-schema-imports.gen";
 import { actionDescription } from "./mcp/action-descriptions";
 
 /* ----------------------------------------------------------------------------
@@ -297,7 +297,7 @@ function pathParameters(path: string): string[] {
 }
 
 function schemaFor(name: string): unknown {
-  const candidate = (contracts as Record<string, unknown>)[name];
+  const candidate = ACTION_REQUEST_SCHEMAS[name];
   if (!(candidate instanceof z.ZodType)) return null;
   try {
     return z.toJSONSchema(candidate, { io: "input", unrepresentable: "any" });

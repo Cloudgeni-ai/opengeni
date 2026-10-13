@@ -142,8 +142,9 @@ const CANARY_RECEIPT_POLL_INTERVAL_MS = 1_000;
 // quota; the floor keeps small cohorts from polling too sparsely.
 const CANARY_RECEIPT_READS_PER_PACKAGE = 16;
 const CANARY_RECEIPT_MIN_READS = 64;
-const CANARY_RECEIPT_MAX_COHORT = 64;
-const CANARY_RECEIPT_MAX_READS = CANARY_RECEIPT_MAX_COHORT * CANARY_RECEIPT_READS_PER_PACKAGE;
+export const CANARY_RECEIPT_MAX_COHORT = 64;
+export const CANARY_RECEIPT_MAX_READS =
+  CANARY_RECEIPT_MAX_COHORT * CANARY_RECEIPT_READS_PER_PACKAGE;
 
 export function defaultCanaryReceiptReads(packageCount: number): number {
   return Math.min(

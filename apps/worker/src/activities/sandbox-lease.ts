@@ -68,6 +68,8 @@ import {
   recordRetainedProcessReconciliationProof,
   replaceWorkspaceArchiveCaptureAfterProof,
   listEndedEpochWorkspaceBlockers,
+  listEndedEpochSandboxSetupUncertainties,
+  reconcileCompletedSandboxSetup,
   readLease,
   settleEndedEpochWorkspaceBlockers,
   readWorkspaceArchiveCapturePreflight,
@@ -1993,6 +1995,13 @@ export type EndedEpochProbeBackoff = Map<string, { failures: number; nextProbeAt
  * is ambiguous here (deletion or a rotated Modal credential workspace) and,
  * like a running or unreachable box, keeps the rows for a later probe (with
  * backoff) or an operator.
+ *
+ * The same observation also ends a turn's wait on sandbox setup whose start
+ * outcome is unknown: once the exact box all its setup ran on is terminated,
+ * nothing it may have started can still run, so the turn's setup reruns its
+ * idempotent preparation (`reconcileCompletedSandboxSetup`). A start that
+ * failed before any process was recorded otherwise had nothing to exit and
+ * stayed recovering forever.
  */
 async function settleEndedEpochBlockers(
   db: ActivityServices["db"],
@@ -2006,6 +2015,49 @@ async function settleEndedEpochBlockers(
   if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret) {
     return;
   }
+  const startedAtMs = Date.now();
+  // One observation per box: several tuples and turns can name the same box.
+  const observed = new Map<string, string>();
+  const kept: Record<string, number> = {};
+  /** The box's status, or null when it is backing off or the budget is spent. */
+  async function observe(
+    instanceId: string,
+    details: Record<string, unknown>,
+  ): Promise<string | null> {
+    const known = observed.get(instanceId);
+    if (known !== undefined) return known;
+    const nowMs = Date.now();
+    if ((backoff.get(instanceId)?.nextProbeAtMs ?? 0) > nowMs) return null;
+    if (nowMs - startedAtMs >= ENDED_EPOCH_BLOCKER_SWEEP_BUDGET_MS) return null;
+    let status: string;
+    try {
+      status = (
+        await withRetainedProcessProbeTimeout(
+          inspectHistoricalModalSandbox(settings, instanceId, null),
+        )
+      ).status;
+    } catch (error) {
+      status = error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "error";
+      observability.warn("sandbox reaper: ended-epoch box probe failed", {
+        ...details,
+        error:
+          error === RETAINED_PROCESS_PROBE_TIMEOUT
+            ? "provider_timeout"
+            : error instanceof Error
+              ? error.message
+              : String(error),
+      });
+    }
+    observed.set(instanceId, status);
+    if (status === "terminated") {
+      backoff.delete(instanceId);
+    } else {
+      deferEndedEpochProbe(backoff, instanceId);
+      kept[status] = (kept[status] ?? 0) + 1;
+    }
+    return status;
+  }
+
   let tuples: Awaited<ReturnType<typeof listEndedEpochWorkspaceBlockers>>;
   try {
     tuples = await listEndedEpochWorkspaceBlockers(db, { limit: ENDED_EPOCH_BLOCKER_LIST_LIMIT });
@@ -2013,12 +2065,8 @@ async function settleEndedEpochBlockers(
     observability.warn("sandbox reaper: ended-epoch blocker inventory failed", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return;
+    tuples = [];
   }
-  const startedAtMs = Date.now();
-  // One observation per box: several tuples can name the same instance.
-  const observed = new Map<string, string>();
-  const kept: Record<string, number> = {};
   for (const tuple of tuples) {
     const instanceId = tuple.lostInstanceId;
     const details = {
@@ -2028,46 +2076,7 @@ async function settleEndedEpochBlockers(
       instanceId,
     };
     try {
-      let status = observed.get(instanceId);
-      if (status === undefined) {
-        const nowMs = Date.now();
-        if ((backoff.get(instanceId)?.nextProbeAtMs ?? 0) > nowMs) continue;
-        if (nowMs - startedAtMs >= ENDED_EPOCH_BLOCKER_SWEEP_BUDGET_MS) break;
-        try {
-          status = (
-            await withRetainedProcessProbeTimeout(
-              inspectHistoricalModalSandbox(settings, instanceId, null),
-            )
-          ).status;
-        } catch (error) {
-          status = error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "error";
-          observability.warn("sandbox reaper: ended-epoch box probe failed", {
-            ...details,
-            error:
-              error === RETAINED_PROCESS_PROBE_TIMEOUT
-                ? "provider_timeout"
-                : error instanceof Error
-                  ? error.message
-                  : String(error),
-          });
-        }
-        observed.set(instanceId, status);
-        if (status === "terminated") {
-          backoff.delete(instanceId);
-        } else {
-          const failures = (backoff.get(instanceId)?.failures ?? 0) + 1;
-          backoff.set(instanceId, {
-            failures,
-            nextProbeAtMs:
-              Date.now() +
-              Math.min(
-                ENDED_EPOCH_BLOCKER_BACKOFF_MAX_MS,
-                ENDED_EPOCH_BLOCKER_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 16),
-              ),
-          });
-          kept[status] = (kept[status] ?? 0) + 1;
-        }
-      }
+      const status = await observe(instanceId, details);
       if (status !== "terminated") continue;
       const settled = await settleEndedEpochWorkspaceBlockers(db, tuple);
       if (settled) {
@@ -2083,9 +2092,76 @@ async function settleEndedEpochBlockers(
       });
     }
   }
+
+  let setups: Awaited<ReturnType<typeof listEndedEpochSandboxSetupUncertainties>>;
+  try {
+    setups = await listEndedEpochSandboxSetupUncertainties(db, {
+      limit: ENDED_EPOCH_BLOCKER_LIST_LIMIT,
+    });
+  } catch (error) {
+    observability.warn("sandbox reaper: ended-epoch setup inventory failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    setups = [];
+  }
+  for (const setup of setups) {
+    const instanceId = setup.box.providerInstanceId;
+    // A turn whose reconciliation is refused on a terminated box (for example
+    // an ancestor is paused) backs off by turn, so it never re-probes per tick.
+    const turnKey = `setup:${setup.turnId}:${setup.attemptId}`;
+    if ((backoff.get(turnKey)?.nextProbeAtMs ?? 0) > Date.now()) continue;
+    const details = {
+      workspaceId: setup.workspaceId,
+      sessionId: setup.sessionId,
+      turnId: setup.turnId,
+      sandboxGroupId: setup.sandboxGroupId,
+      lostEpoch: setup.box.leaseEpoch,
+      instanceId,
+    };
+    try {
+      const status = await observe(instanceId, details);
+      if (status !== "terminated") continue;
+      const { reconciled } = await reconcileCompletedSandboxSetup(db, {
+        accountId: setup.accountId,
+        workspaceId: setup.workspaceId,
+        sessionId: setup.sessionId,
+        turnId: setup.turnId,
+        attemptId: setup.attemptId,
+        terminatedBox: setup.box,
+      });
+      if (reconciled) {
+        backoff.delete(turnKey);
+        observability.info(
+          "sandbox reaper: resumed a turn whose unknown setup ran on a terminated box",
+          details,
+        );
+      } else {
+        deferEndedEpochProbe(backoff, turnKey);
+      }
+    } catch (error) {
+      deferEndedEpochProbe(backoff, turnKey);
+      observability.warn("sandbox reaper: ended-epoch setup reconciliation failed", {
+        ...details,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   if (Object.keys(kept).length) {
     observability.info("sandbox reaper: ended-epoch blockers kept without terminal proof", kept);
   }
+}
+
+function deferEndedEpochProbe(backoff: EndedEpochProbeBackoff, key: string): void {
+  const failures = (backoff.get(key)?.failures ?? 0) + 1;
+  backoff.set(key, {
+    failures,
+    nextProbeAtMs:
+      Date.now() +
+      Math.min(
+        ENDED_EPOCH_BLOCKER_BACKOFF_MAX_MS,
+        ENDED_EPOCH_BLOCKER_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 16),
+      ),
+  });
 }
 
 async function reconcileTerminalRetainedProcesses(

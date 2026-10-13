@@ -349,13 +349,38 @@ Document indexing depends on:
 - `OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS`
 
 Typical uploads include PDF, Word, PowerPoint, Excel, OpenDocument,
-plain-text/structured-text, email, and common image formats. The stock API and
-worker images include headless LibreOffice for Office conversion and local
-English OCR data; native source runs use the parser's built-in image conversion
-but require LibreOffice on the host to index Office formats. If parser
-dependencies are missing locally, documents can fail indexing and later be
+plain-text/structured-text, email, and common image formats. The standalone API
+queues parsing to the existing control worker through Temporal. Only the worker
+image includes LiteParse's native parser, headless LibreOffice for Office
+conversion and local English OCR data. The API keeps FFmpeg for voice transcription
+and fonts for native artifact rendering; artifact import/export does not use
+LibreOffice. Desktop recording runs FFmpeg inside the desktop sandbox, while
+worker-side video validation uses
+FFprobe from the worker's FFmpeg package.
+
+Native source runs and embedded API compositions using the inline indexing
+fallback require LibreOffice and OCR data on the host that parses documents.
+The parser uses built-in image conversion and native Tesseract OCR, not the
+Tesseract CLI. Missing converters or OCR data persist an explicit indexing
+failure rather than a ready document with empty text. Failed documents can be
 retried from the UI after the dependency issue is fixed. See
 [`knowledge.md`](knowledge.md) for how indexed content is retrieved.
+
+After changing workload converter ownership, build the API and worker targets
+and run the Linux Docker image integration gate:
+
+```bash
+OPENGENI_CONVERTER_API_IMAGE=opengeni-api:local \
+OPENGENI_CONVERTER_WORKER_IMAGE=opengeni-worker:local \
+bun test ./test/integration/workload-converters.integration.ts
+```
+
+It starts isolated PostgreSQL, NATS, object storage and Temporal fixtures; uploads
+DOCX, XLSX, PPTX, image-only PDF and PNG through the built API; verifies text
+prepared by the worker and retrieved by vector search; and checks missing-converter
+errors and voice decoding. Embeddings use the built-in deterministic test provider
+and remote transcription uses a local stub; FFmpeg and document converters run
+from the actual workload images.
 
 ## Using the web app
 

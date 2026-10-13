@@ -47,6 +47,8 @@ mod dispatch;
 mod embedded_runtime;
 mod engine;
 mod enrollment;
+#[cfg(unix)]
+mod handover;
 mod instance_lock;
 mod job;
 mod legacy;
@@ -55,6 +57,7 @@ mod ops;
 mod overrides;
 mod rpc_replay;
 mod service;
+mod stream_digest;
 mod supervisor;
 mod uninstall;
 mod update;
@@ -96,8 +99,20 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
+    // Before any thread or child process exists: commands the previous agent
+    // image handed over must not leak into anything spawned from here on.
+    #[cfg(unix)]
+    let inherited = handover::inherit_from_env();
     let cli = Cli::parse();
     init_tracing();
+    #[cfg(unix)]
+    match inherited {
+        Ok(true) => info!("continuing commands handed over by the previous agent image"),
+        Ok(false) => {}
+        Err(error) => {
+            error!(%error, "commands handed over by the previous agent image could not be continued; they end");
+        }
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -371,7 +386,13 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // the agent then serves exactly as before, with no per-op isolation.
     let op_cgroup_config = opengeni_agent_platform::OpCgroupConfig::from_env().map_err(to_boxed)?;
     let requires_operation_policy = op_cgroup_config.has_limits();
-    let op_cgroups = opengeni_agent_platform::establish_oom_isolation(op_cgroup_config);
+    // Leaves of commands handed over by the previous image stay in place.
+    #[cfg(unix)]
+    let handed_over_cgroups = handover::inherited_cgroup_dirs();
+    #[cfg(not(unix))]
+    let handed_over_cgroups: Vec<std::path::PathBuf> = Vec::new();
+    let op_cgroups =
+        opengeni_agent_platform::establish_oom_isolation(op_cgroup_config, &handed_over_cgroups);
     if requires_operation_policy
         && op_cgroups
             .as_ref()
@@ -400,10 +421,20 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
-    let connection_instance_id = uuid::Uuid::new_v4().to_string();
+    // A successor image keeps its predecessor's connection instance, so the
+    // op subjects of commands it continues stay valid.
+    #[cfg(unix)]
+    let inherited_instance = handover::inherited_connection_instance();
+    #[cfg(not(unix))]
+    let inherited_instance: Option<String> = None;
+    let connection_instance_id =
+        inherited_instance.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
     let browser_bridge = start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await;
+    if let (Some(sidecars), Some(bridge)) = (&browser_sidecars, &browser_bridge) {
+        sidecars.observe_attached_inventory(bridge.inventory());
+    }
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
@@ -413,6 +444,20 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
     supervisor = supervisor.with_update_drain(update_drain);
+    #[cfg(unix)]
+    {
+        let inherited = handover::take_inherited();
+        if let Some(dir) = &config_dir {
+            handover::remove_stray_frames(&dir.join("spool"), inherited.as_ref());
+            supervisor = supervisor.with_update_handover(
+                dir.join(handover::MANIFEST_FILE),
+                connection_instance_id.clone(),
+            );
+        }
+        if let Some(inherited) = inherited {
+            supervisor.adopt_handed_over(&platform, inherited.ops);
+        }
+    }
     if let Some(bridge) = &browser_bridge {
         supervisor = supervisor.with_browser_bridge(bridge.inventory());
     }
@@ -472,24 +517,44 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         // The running path has already been atomically replaced and health-gated.
         // Release the single-process lock before replacing/spawning the successor.
         drop(instance_lock_guard);
-        restart_after_verified_update()?;
+        #[cfg(unix)]
+        let handover = supervisor.take_pending_handover();
+        #[cfg(not(unix))]
+        let handover = None::<()>;
+        restart_after_verified_update(&handover)?;
     }
     info!("agent stopped");
     Ok(())
 }
 
-fn restart_after_verified_update() -> anyhow_lite::Result {
+#[cfg(unix)]
+type CarriedHandover = Option<supervisor::PendingHandover>;
+#[cfg(not(unix))]
+type CarriedHandover = Option<()>;
+
+fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Result {
     let executable = update::installed_executable().map_err(string_err)?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     info!(path = %executable.display(), "starting verified self-update successor");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let error = std::process::Command::new(executable).args(&args).exec();
+        let mut command = std::process::Command::new(executable);
+        command.args(&args);
+        if let Some(handover) = handover {
+            // Last step before exec: nothing else spawns from here, so only
+            // the successor image inherits the carried descriptors.
+            for exec in &handover.execs {
+                exec.prepare_exec().map_err(to_boxed)?;
+            }
+            command.env(handover::HANDOVER_ENV, &handover.env_value);
+        }
+        let error = command.exec();
         return Err(to_boxed(error));
     }
     #[cfg(windows)]
     {
+        let _ = handover;
         std::process::Command::new(executable)
             .args(&args)
             .spawn()

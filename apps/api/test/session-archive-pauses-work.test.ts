@@ -12,6 +12,7 @@ import {
   createSession,
   createSessionGoal,
   createWorkspace,
+  initializeSessionStartAtomically,
   migrate,
   type Database,
   type DbClient,
@@ -93,6 +94,16 @@ async function freshChat(
     createdBy: { kind: "subject", subjectId: OWNER },
   });
   if (status) await admin`update sessions set status = ${status} where id = ${session.id}`;
+  // Creation reserves an idle shell (#4330); a chat with work has its first turn admitted.
+  else
+    await initializeSessionStartAtomically(db, {
+      accountId: account!.id,
+      workspaceId: workspace.id,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
+    });
   // Archive is personal per-member state, so both people are workspace members.
   await admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id) values

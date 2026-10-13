@@ -6,6 +6,16 @@ export const CANARY_RESPONSE_BYTES = 8 * 1024 * 1024;
 const CANARY_BODY_BYTES = 64 * 1024 * 1024;
 const CANARY_OUTPUT_BYTES = 80 * 1024 * 1024;
 const CANARY_RECORD_BYTES = 64 * 1024;
+/**
+ * Receipt files one publication may retain. A registry GET retains up to four
+ * files (selection, response, body, body record) and each receipt adds an
+ * observation, so the largest default read budget (64 packages × 16 GETs) needs
+ * about 4,800 files. The bound must cover that budget: when it did not, a slow
+ * registry exhausted the files before the read quota or deadline, so the
+ * publisher could not record its failure and reconciliation was refused.
+ * The reconciliation reader admits the same count (`PUBLISHER_RECEIPT_FILES`).
+ */
+export const CANARY_RECEIPT_FILES = 6144;
 
 export type CanaryIdentity = {
   source: string;
@@ -196,7 +206,9 @@ export class CanaryReceiptStore implements CanaryCustody {
   }
 
   private nextFile(extension: string): string {
-    if (this.ordinal >= 2048) throw new Error("Canary receipt file count exceeds bound");
+    if (this.ordinal >= CANARY_RECEIPT_FILES) {
+      throw new Error("Canary receipt file count exceeds bound");
+    }
     return `${String(this.ordinal++).padStart(4, "0")}.${extension}`;
   }
 

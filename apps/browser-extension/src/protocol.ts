@@ -29,6 +29,8 @@ export type ExtensionDevice = {
   platform: ExtensionPlatform;
   architecture: ExtensionArchitecture;
   connectionGeneration: string;
+  /** Stable for this extension worker's lifetime, across native reconnects. */
+  stateGeneration: string;
   inventoryRevision: number;
   capabilities: {
     tabInventory: true;

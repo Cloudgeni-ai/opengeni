@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { normalizeAutomaticSessionTitle } from "./session-titles";
 
@@ -61,77 +62,90 @@ export function normalizeWorkClaimDisplayLabel(value: string): string | null {
   return normalized;
 }
 
-export const WorkClaimNamespace = z
-  .string()
-  .min(1)
-  .max(WORK_CLAIM_NAMESPACE_MAX_BYTES)
-  .regex(NAMESPACE_PATTERN)
-  .refine((value) => value === normalizeWorkClaimNamespace(value), {
-    message: "work claim namespace must already be canonical lowercase text",
-  });
+export const WorkClaimNamespace = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(WORK_CLAIM_NAMESPACE_MAX_BYTES)
+    .regex(NAMESPACE_PATTERN)
+    .refine((value) => value === normalizeWorkClaimNamespace(value), {
+      message: "work claim namespace must already be canonical lowercase text",
+    }),
+);
 export type WorkClaimNamespace = z.infer<typeof WorkClaimNamespace>;
 
-export const WorkClaimCanonicalKey = boundedCanonicalText(
-  WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
-  "work claim canonical key",
+export const WorkClaimCanonicalKey = /* @__PURE__ */ defineSchema(() =>
+  boundedCanonicalText(WORK_CLAIM_CANONICAL_KEY_MAX_BYTES, "work claim canonical key"),
 );
 export type WorkClaimCanonicalKey = z.infer<typeof WorkClaimCanonicalKey>;
 
-export const WorkClaimDisplayLabel = z
-  .string()
-  .min(1)
-  .superRefine((value, context) => {
-    if (utf8Bytes(value) > WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `work claim display label must be at most ${WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES} UTF-8 bytes`,
-      });
-    }
-    if (normalizeWorkClaimDisplayLabel(value) !== value) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "work claim display label must be a safe concise semantic label",
-      });
-    }
-  });
+export const WorkClaimDisplayLabel = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .superRefine((value, context) => {
+      if (utf8Bytes(value) > WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `work claim display label must be at most ${WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+      if (normalizeWorkClaimDisplayLabel(value) !== value) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "work claim display label must be a safe concise semantic label",
+        });
+      }
+    }),
+);
 export type WorkClaimDisplayLabel = z.infer<typeof WorkClaimDisplayLabel>;
 
-export const WorkClaimSubjectType = z.enum([
-  "repository",
-  "branch",
-  "pull_request",
-  "issue",
-  "artifact",
-  "release",
-  "ci_run",
-  "other",
-]);
+export const WorkClaimSubjectType = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "repository",
+    "branch",
+    "pull_request",
+    "issue",
+    "artifact",
+    "release",
+    "ci_run",
+    "other",
+  ]),
+);
 export type WorkClaimSubjectType = z.infer<typeof WorkClaimSubjectType>;
 
-export const WorkClaimRole = z.enum(["working", "reviewing", "monitoring", "delivering"]);
+export const WorkClaimRole = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["working", "reviewing", "monitoring", "delivering"]),
+);
 export type WorkClaimRole = z.infer<typeof WorkClaimRole>;
 
-export const WorkClaimState = z.enum(["active", "released", "superseded", "stale"]);
+export const WorkClaimState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "released", "superseded", "stale"]),
+);
 export type WorkClaimState = z.infer<typeof WorkClaimState>;
 
-export const WorkClaimProvenance = z.enum([
-  "explicit_agent",
-  "user_api",
-  "trusted_integration",
-  "session_resource",
-  "system_lifecycle",
-]);
+export const WorkClaimProvenance = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "explicit_agent",
+    "user_api",
+    "trusted_integration",
+    "session_resource",
+    "system_lifecycle",
+  ]),
+);
 export type WorkClaimProvenance = z.infer<typeof WorkClaimProvenance>;
 
-export const WorkClaimVersionKind = z.enum([
-  "git_commit",
-  "branch_head",
-  "pull_request_head",
-  "artifact_version",
-  "release_version",
-  "ci_run",
-  "other",
-]);
+export const WorkClaimVersionKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "git_commit",
+    "branch_head",
+    "pull_request_head",
+    "artifact_version",
+    "release_version",
+    "ci_run",
+    "other",
+  ]),
+);
 export type WorkClaimVersionKind = z.infer<typeof WorkClaimVersionKind>;
 
 export const WorkClaimVersionValue = boundedCanonicalText(
@@ -140,112 +154,120 @@ export const WorkClaimVersionValue = boundedCanonicalText(
 );
 export type WorkClaimVersionValue = z.infer<typeof WorkClaimVersionValue>;
 
-export const WorkClaimReleaseReason = z.enum([
-  "completed",
-  "cancelled",
-  "failed",
-  "superseded",
-  "no_longer_active",
-  "corrected",
-  "external_state_changed",
-  "other",
-]);
+export const WorkClaimReleaseReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "completed",
+    "cancelled",
+    "failed",
+    "superseded",
+    "no_longer_active",
+    "corrected",
+    "external_state_changed",
+    "other",
+  ]),
+);
 export type WorkClaimReleaseReason = z.infer<typeof WorkClaimReleaseReason>;
 
-export const WorkClaimMutationKind = z.enum([
-  "created",
-  "updated",
-  "released",
-  "superseded",
-  "stale",
-]);
+export const WorkClaimMutationKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["created", "updated", "released", "superseded", "stale"]),
+);
 export type WorkClaimMutationKind = z.infer<typeof WorkClaimMutationKind>;
 
-export const WorkClaim = z.object({
-  id: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  rootSessionId: z.string().uuid(),
-  subject: z.object({
-    namespace: WorkClaimNamespace,
-    type: WorkClaimSubjectType,
-    canonicalKey: WorkClaimCanonicalKey,
-    displayLabel: WorkClaimDisplayLabel.nullable(),
+export const WorkClaim = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    rootSessionId: z.string().uuid(),
+    subject: z.object({
+      namespace: WorkClaimNamespace,
+      type: WorkClaimSubjectType,
+      canonicalKey: WorkClaimCanonicalKey,
+      displayLabel: WorkClaimDisplayLabel.nullable(),
+    }),
+    role: WorkClaimRole,
+    state: WorkClaimState,
+    revision: z.number().int().positive(),
+    provenance: WorkClaimProvenance,
+    version: z
+      .object({
+        kind: WorkClaimVersionKind,
+        value: WorkClaimVersionValue,
+      })
+      .nullable(),
+    observedAt: z.string().datetime({ offset: true }),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+    settledAt: z.string().datetime({ offset: true }).nullable(),
   }),
-  role: WorkClaimRole,
-  state: WorkClaimState,
-  revision: z.number().int().positive(),
-  provenance: WorkClaimProvenance,
-  version: z
-    .object({
-      kind: WorkClaimVersionKind,
-      value: WorkClaimVersionValue,
-    })
-    .nullable(),
-  observedAt: z.string().datetime({ offset: true }),
-  createdAt: z.string().datetime({ offset: true }),
-  updatedAt: z.string().datetime({ offset: true }),
-  settledAt: z.string().datetime({ offset: true }).nullable(),
-});
+);
 export type WorkClaim = z.infer<typeof WorkClaim>;
 
-export const WorkClaimMutationResult = z.object({
-  claim: WorkClaim,
-  mutation: WorkClaimMutationKind,
-  replayed: z.boolean(),
-});
+export const WorkClaimMutationResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    claim: WorkClaim,
+    mutation: WorkClaimMutationKind,
+    replayed: z.boolean(),
+  }),
+);
 export type WorkClaimMutationResult = z.infer<typeof WorkClaimMutationResult>;
 
-export const WorkClaimDiscoverySummary = WorkClaim.pick({
-  id: true,
-  sessionId: true,
-  subject: true,
-  role: true,
-  state: true,
-  revision: true,
-  provenance: true,
-  version: true,
-  observedAt: true,
-  updatedAt: true,
-  settledAt: true,
-});
+export const WorkClaimDiscoverySummary = /* @__PURE__ */ defineSchema(() =>
+  WorkClaim.pick({
+    id: true,
+    sessionId: true,
+    subject: true,
+    role: true,
+    state: true,
+    revision: true,
+    provenance: true,
+    version: true,
+    observedAt: true,
+    updatedAt: true,
+    settledAt: true,
+  }),
+);
 export type WorkClaimDiscoverySummary = z.infer<typeof WorkClaimDiscoverySummary>;
 
-export const WorkClaimSubjectFilter = z
-  .object({
-    namespace: WorkClaimNamespace,
-    type: WorkClaimSubjectType,
-    canonicalKey: WorkClaimCanonicalKey,
-  })
-  .strict();
+export const WorkClaimSubjectFilter = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      namespace: WorkClaimNamespace,
+      type: WorkClaimSubjectType,
+      canonicalKey: WorkClaimCanonicalKey,
+    })
+    .strict(),
+);
 export type WorkClaimSubjectFilter = z.infer<typeof WorkClaimSubjectFilter>;
 
-export const WorkDiscoveryMatchClass = z.enum(["exact_subject", "title", "goal", "fuzzy"]);
+export const WorkDiscoveryMatchClass = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["exact_subject", "title", "goal", "fuzzy"]),
+);
 export type WorkDiscoveryMatchClass = z.infer<typeof WorkDiscoveryMatchClass>;
 
-export const WorkDiscoveryMatchedField = z.enum([
-  "subject",
-  "title",
-  "goal",
-  "claim_key",
-  "claim_label",
-]);
+export const WorkDiscoveryMatchedField = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["subject", "title", "goal", "claim_key", "claim_label"]),
+);
 export type WorkDiscoveryMatchedField = z.infer<typeof WorkDiscoveryMatchedField>;
 
 /**
  * Deliberately stable bands rather than a raw ranking score. Raw full-text or
  * trigram values are query-relative and become a misleading cross-query API.
  */
-export const WorkDiscoveryScoreBand = z.enum(["exact", "strong", "related"]);
+export const WorkDiscoveryScoreBand = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["exact", "strong", "related"]),
+);
 export type WorkDiscoveryScoreBand = z.infer<typeof WorkDiscoveryScoreBand>;
 
-export const WorkDiscoveryMatch = z
-  .object({
-    class: WorkDiscoveryMatchClass,
-    field: WorkDiscoveryMatchedField,
-    scoreBand: WorkDiscoveryScoreBand,
-    claimId: z.string().uuid().nullable(),
-  })
-  .strict();
+export const WorkDiscoveryMatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      class: WorkDiscoveryMatchClass,
+      field: WorkDiscoveryMatchedField,
+      scoreBand: WorkDiscoveryScoreBand,
+      claimId: z.string().uuid().nullable(),
+    })
+    .strict(),
+);
 export type WorkDiscoveryMatch = z.infer<typeof WorkDiscoveryMatch>;
 
 /**
@@ -253,14 +275,16 @@ export type WorkDiscoveryMatch = z.infer<typeof WorkDiscoveryMatch>;
  * the wire contract so a consumer cannot accidentally present a claim as a
  * lock, authorization grant, ownership transfer, or mandatory instruction.
  */
-export const WorkDiscoveryProjection = z
-  .object({
-    claims: z.array(WorkClaimDiscoverySummary).max(WORK_CLAIM_DISCOVERY_LIMIT),
-    claimsTruncated: z.boolean(),
-    match: WorkDiscoveryMatch.nullable(),
-    possibleOverlap: z.boolean(),
-    advisoryOnly: z.literal(true),
-    noAdditionalAccess: z.literal(true),
-  })
-  .strict();
+export const WorkDiscoveryProjection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      claims: z.array(WorkClaimDiscoverySummary).max(WORK_CLAIM_DISCOVERY_LIMIT),
+      claimsTruncated: z.boolean(),
+      match: WorkDiscoveryMatch.nullable(),
+      possibleOverlap: z.boolean(),
+      advisoryOnly: z.literal(true),
+      noAdditionalAccess: z.literal(true),
+    })
+    .strict(),
+);
 export type WorkDiscoveryProjection = z.infer<typeof WorkDiscoveryProjection>;

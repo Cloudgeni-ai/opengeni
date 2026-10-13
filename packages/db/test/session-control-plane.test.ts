@@ -6215,9 +6215,11 @@ describe("clean session control plane", () => {
 
   test("Pause and Resume preserve lifecycle while Cancel is terminal", async () => {
     const { grant, session } = await fixture();
+    const before = (await getSession(client.db, grant.workspaceId!, session.id))?.status;
     const paused = await controlSession(grant, session.id, "pause");
     expect(paused.control.state).toBe("paused");
-    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("queued");
+    // Pause is control state only: the lifecycle status (an idle shell since #4330) is unchanged.
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe(before!);
     const resumed = await controlSession(grant, session.id, "resume");
     expect(resumed.control.state).toBe("active");
   });

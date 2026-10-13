@@ -12,6 +12,9 @@ import {
   createScheduledTask,
   createScheduledTaskRun,
   createSession,
+  createSessionWithIdempotencyKeyResult,
+  initializeSessionStartAtomically,
+  claimSessionWorkForAttempt,
   failScheduledGeneratedSessionRoute,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTaskRunByProducerKey,
@@ -115,7 +118,7 @@ async function fixture() {
     producerKey,
     acceptedExecutionSnapshot: acceptedExecution,
   });
-  const session = await createSession(client.db, {
+  const sessionInput: Parameters<typeof createSessionWithIdempotencyKeyResult>[1] = {
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     initialMessage: task.agentConfig.prompt,
@@ -155,17 +158,56 @@ async function fixture() {
     allowNestedAgentDepthIncrease: true,
     subjectId: `scheduled_task:${task.id}`,
     createIdempotencyKey: acceptedExecution.generatedSessionBinding.createIdempotencyKey,
-  });
+  };
+  const session = await createSession(client.db, sessionInput);
   await bindScheduledTaskRunSessionInTransaction(client.db, {
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     runId: run.id,
     sessionId: session.id,
   });
-  return { task, run, session, producerKey };
+  return { task, run, session, producerKey, sessionInput };
 }
 
 describe("scheduled generated-session route failure", () => {
+  test("a retry after create-before-start reuses the idle shell and claims exactly one turn", async () => {
+    const { task, session, sessionInput } = await fixture();
+    expect(session.status).toBe("idle");
+    // The dispatcher disappeared after the durable create/bind boundary. Its
+    // replacement must use the frozen run identity, not create another chat.
+    const replay = await createSessionWithIdempotencyKeyResult(client.db, sessionInput);
+    if (replay.denied) throw new Error("Unexpected retry denial");
+    expect(replay.created).toBe(false);
+    expect(replay.session.id).toBe(session.id);
+    const start = {
+      accountId: task.accountId,
+      workspaceId: task.workspaceId,
+      sessionId: replay.session.id,
+      reasoningEffortFallback: "medium" as const,
+      createdEventPayload: {},
+    };
+    const first = await initializeSessionStartAtomically(client.db, start);
+    const duplicate = await initializeSessionStartAtomically(client.db, start);
+    expect(first.turn?.id).toBeDefined();
+    expect(duplicate.turn?.id).toBe(first.turn?.id);
+    const claim = () =>
+      claimSessionWorkForAttempt(client.db, task.workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+    expect((await claim()).action).toBe("claimed");
+    expect((await claim()).action).not.toBe("claimed");
+    const [counts] = await shared.admin`select
+      (select count(*)::int from sessions where workspace_id=${task.workspaceId}) as sessions,
+      (select count(*)::int from session_turns where session_id=${session.id}) as turns,
+      (select count(*)::int from session_turn_attempts where session_id=${session.id}) as attempts`;
+    expect(counts).toEqual({ sessions: 1, turns: 1, attempts: 1 });
+  });
+
   test("fails the run and reclaims its unstarted generated session atomically", async () => {
     const { task, run, session, producerKey } = await fixture();
     const failed = await failScheduledGeneratedSessionRoute(client.db, {

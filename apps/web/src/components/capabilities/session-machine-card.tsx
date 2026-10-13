@@ -29,6 +29,7 @@ import { RowButton } from "@/components/ui/page-actions";
 import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import { moveChatToMachine } from "@/lib/move-chat-to-machine";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { SessionCapabilityFrame } from "./session-capability-frame";
@@ -40,8 +41,8 @@ const WATCH_POLL_MS = 3_000;
 const CHROME_POLL_MS = 5_000;
 /** Stop checking for the extension after this long without a link. */
 const CHROME_POLL_LIMIT_MS = 10 * 60_000;
-/** Longest machine name repeated in the person's message. */
-const MESSAGE_NAME_LIMIT = 60;
+
+export { machineUseMessage } from "@/lib/move-chat-to-machine";
 
 /** A neutral laptop mark for the card (the frame renders logos as images). */
 export const CONNECTED_MACHINE_LOGO =
@@ -49,22 +50,6 @@ export const CONNECTED_MACHINE_LOGO =
   encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 -2 28 28" fill="none" stroke="#71717a" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"/><path d="M20.054 15.987H3.946"/></svg>',
   );
-
-/**
- * What the person's message says when they move the chat onto a machine. The
- * name comes from whoever enrolled the machine, so it is quoted, kept to one
- * line and shortened: it names a machine and can never read as an instruction.
- */
-export function machineUseMessage(name: string): string {
-  const line = name
-    .replace(/[\s\u0000-\u001f\u007f]+/g, " ")
-    .replaceAll("“", "")
-    .replaceAll("”", "")
-    .trim();
-  const short =
-    line.length > MESSAGE_NAME_LIMIT ? `${line.slice(0, MESSAGE_NAME_LIMIT - 1)}…` : line;
-  return `Use the machine “${short || "unnamed"}” for this chat.`;
-}
 
 export type SessionMachineCapabilityCardProps = {
   item: AuthNeededItem;
@@ -195,45 +180,27 @@ export function SessionMachineCapabilityCard({
       const name = machineDisplayName(machine);
       setUseError(null);
       setOutcome(null);
-      // Like a composer Send: a chat that can't take input isn't moved either.
       const chat = sendContext?.() ?? { blocked: null, awaitingHuman: false, extras: {} };
       if (chat.blocked) {
         setUseError({ name, reason: chat.blocked });
         return;
       }
       setUsing(machine.sandboxId);
-      const moved = await fleet.attach(machine.sandboxId);
+      const result = await moveChatToMachine({
+        machine,
+        chat,
+        canMessage,
+        previousSandboxId: fleet.machines.find((candidate) => candidate.active)?.sandboxId ?? null,
+        attach: fleet.attach,
+        sendMessage: (message) => context.client.sendMessage(workspaceId, sessionId, message),
+      });
       if (!alive.current) return;
-      if (!moved) {
+      if (!result.moved) {
         setUsing(null);
-        setUseError({ name, reason: null });
+        setUseError({ name, reason: result.reason });
         return;
       }
-      // Tell the agent where it now runs. A chat waiting on a question keeps
-      // that question; the person's answer continues it on the new machine.
-      let told = false;
-      let routing: unknown = null;
-      if (canMessage && !chat.awaitingHuman) {
-        try {
-          const accepted = await context.client.sendMessage(workspaceId, sessionId, {
-            text: machineUseMessage(name),
-            ...chat.extras,
-            clientEventId: crypto.randomUUID(),
-          });
-          routing = (accepted.payload as { routing?: unknown } | null)?.routing ?? null;
-          told = true;
-        } catch {
-          told = false;
-        }
-      }
-      if (!alive.current) return;
-      const text = chat.awaitingHuman
-        ? `This chat now runs on ${name}. Answer the question above to continue.`
-        : !told
-          ? `This chat now runs on ${name}. Send a message to continue.`
-          : routing === "queued_for_execution"
-            ? `This chat now runs on ${name}. The agent continues there after its current step.`
-            : `This chat now runs on ${name}.`;
+      const text = result.text;
       setUsing(null);
       setOutcome({ sandboxId: machine.sandboxId, text });
       setAnnouncement(text);

@@ -430,7 +430,7 @@ export function allowedModelsSource(
   if (state.scope !== "workspace" || !saved?.originalPolicy.source || !organizationName) {
     return null;
   }
-  return saved.follow ? `Following ${organizationName}.` : "Changed for this workspace.";
+  return saved.follow ? "Uses the default." : "Changed for this workspace.";
 }
 
 /** The Allowed models row on the Models page: opens its page. */

@@ -4,7 +4,10 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { copyRuntimeDependencies } from "./copy-runtime-dependencies";
 
-export const API_RUNTIME_EXTERNALS = ["@llamaindex/liteparse", "sharp", "better-auth"];
+// The standalone API always queues Documents parsing through Temporal. Keep
+// LiteParse's native closure only in the worker image. The API npm package still
+// declares it for embedded createApp compositions that use inline indexing.
+export const API_RUNTIME_EXTERNALS = ["sharp", "better-auth"];
 export const WORKER_RUNTIME_EXTERNALS = [
   "@llamaindex/liteparse",
   "sharp",
@@ -113,7 +116,7 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     }
     await writeFile(
       join(destination, "artifact-runtime-doctor.js"),
-      await doctor.outputs[0]!.arrayBuffer(),
+      new Uint8Array(await doctor.outputs[0]!.arrayBuffer()),
     );
     const commands = await Bun.build({
       entrypoints: [

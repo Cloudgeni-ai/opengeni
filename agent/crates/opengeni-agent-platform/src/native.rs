@@ -235,12 +235,13 @@ struct ExecOutput {
 /// the still-unreaped anchor fences the numeric PGID against reuse.
 #[cfg(unix)]
 struct ExecProcessGroup {
-    anchor: tokio::process::Child,
+    anchor: crate::exec_handover::UnixProc,
     /// The sole writer for the anchor's kernel-close death lease. Tokio creates
     /// child pipes close-on-exec, so user commands and descendants cannot inherit
     /// authority to keep the anchor alive after the runner process disappears.
-    runner_lease: Option<tokio::process::ChildStdin>,
-    child: tokio::process::Child,
+    /// Only an in-place agent update deliberately carries it across `exec`.
+    runner_lease: Option<std::os::fd::OwnedFd>,
+    child: crate::exec_handover::UnixProc,
     pgid: i32,
     running: bool,
     reservation: Option<crate::WorkReservation>,
@@ -263,6 +264,7 @@ struct ExecProcessGroup {
 
 #[cfg(unix)]
 impl ExecProcessGroup {
+    #[allow(clippy::too_many_lines)] // one ordered containment sequence; each step's failure unwinds the previous ones
     fn spawn(
         mut command: tokio::process::Command,
         cgroups: Option<&OpCgroups>,
@@ -308,6 +310,14 @@ impl ExecProcessGroup {
             return Err(std::io::Error::other(
                 "exec anchor did not expose its runner-death lease",
             ));
+        };
+        let runner_lease = match runner_lease.into_owned_fd() {
+            Ok(lease) => lease,
+            Err(error) => {
+                mark_unsettled_work();
+                let _ = anchor.start_kill();
+                return Err(error);
+            }
         };
         let pgid =
             i32::try_from(anchor.id().expect("new anchor must have a pid")).map_err(|_| {
@@ -376,9 +386,9 @@ impl ExecProcessGroup {
         };
 
         Ok(Self {
-            anchor,
+            anchor: crate::exec_handover::UnixProc::Owned(anchor),
             runner_lease: Some(runner_lease),
-            child,
+            child: crate::exec_handover::UnixProc::Owned(child),
             pgid,
             running: true,
             reservation: crate::current_work_reservation(),
@@ -390,11 +400,12 @@ impl ExecProcessGroup {
     /// Removes the child's stdio handles for the streaming [`ContainedExec`]; after
     /// this the group only tracks lifecycle (wait/terminate), the caller owns I/O.
     fn take_pipes(&mut self) -> ContainedPipes {
-        (
-            self.child.stdin.take(),
-            self.child.stdout.take(),
-            self.child.stderr.take(),
-        )
+        match &mut self.child {
+            crate::exec_handover::UnixProc::Owned(child) => {
+                (child.stdin.take(), child.stdout.take(), child.stderr.take())
+            }
+            crate::exec_handover::UnixProc::Adopted(_) => (None, None, None),
+        }
     }
 
     fn terminate(&mut self) -> std::io::Result<()> {
@@ -472,6 +483,104 @@ impl Drop for ExecProcessGroup {
         if let Some(handle) = self.op_cgroup.take() {
             drop(handle);
         }
+    }
+}
+
+#[cfg(unix)]
+impl ExecProcessGroup {
+    /// Completes a handover prepared by [`ContainedExec::into_handover`]:
+    /// gives up ownership of every part without signaling anything.
+    /// Infallible, so nothing is half given up.
+    fn finish_handover(
+        mut self,
+        anchor: crate::exec_handover::ProcHandover,
+        child: crate::exec_handover::ProcHandover,
+        pipes: [Option<std::os::fd::OwnedFd>; 3],
+    ) -> crate::exec_handover::ExecHandover {
+        use crate::exec_handover::{release_fd, UnixProc};
+
+        std::mem::replace(&mut self.anchor, UnixProc::released()).release();
+        std::mem::replace(&mut self.child, UnixProc::released()).release();
+        // Drop must neither signal the group nor touch the leaf from here on.
+        let running = std::mem::replace(&mut self.running, false);
+        let op_cgroup = self
+            .op_cgroup
+            .take()
+            .and_then(crate::cgroup::OpCgroupHandle::into_handover);
+        let [stdin, stdout, stderr] = pipes;
+        crate::exec_handover::ExecHandover {
+            anchor,
+            child,
+            pgid: self.pgid,
+            running,
+            wait_killed_group: self.wait_killed_group,
+            lease_fd: self.runner_lease.take().map(release_fd),
+            stdin_fd: stdin.map(release_fd),
+            stdout_fd: stdout.map(release_fd),
+            stderr_fd: stderr.map(release_fd),
+            op_cgroup,
+        }
+    }
+
+    /// Takes over a contained exec a predecessor process image handed over.
+    /// Any failure drops what was already claimed; dropping the death lease
+    /// makes the anchor kill the operation, the same fail-closed outcome as a
+    /// crashed runner.
+    fn adopt(
+        handover: &crate::exec_handover::ExecHandover,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<(Self, ContainedPipes)> {
+        use crate::exec_handover::{claim, UnixProc};
+
+        let runner_lease = handover.lease_fd.map(claim).transpose()?;
+        let stdin = handover
+            .stdin_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStdin::from_std(std::process::ChildStdin::from(fd))
+                })
+            })
+            .transpose()?;
+        let stdout = handover
+            .stdout_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStdout::from_std(std::process::ChildStdout::from(fd))
+                })
+            })
+            .transpose()?;
+        let stderr = handover
+            .stderr_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStderr::from_std(std::process::ChildStderr::from(fd))
+                })
+            })
+            .transpose()?;
+        let op_cgroup = match (&handover.op_cgroup, cgroups) {
+            (Some(leaf), Some(cgroups)) => Some(cgroups.adopt_op(leaf)?),
+            (Some(leaf), None) => {
+                tracing::warn!(
+                    dir = %leaf.dir.display(),
+                    "operation cgroups are unavailable after the update; the handed-over command keeps only process-group containment"
+                );
+                None
+            }
+            (None, _) => None,
+        };
+        Ok((
+            Self {
+                anchor: UnixProc::adopt(handover.anchor),
+                runner_lease,
+                child: UnixProc::adopt(handover.child),
+                pgid: handover.pgid,
+                running: handover.running,
+                reservation: crate::current_work_reservation(),
+                wait_killed_group: handover.wait_killed_group,
+                op_cgroup,
+            },
+            (stdin, stdout, stderr),
+        ))
     }
 }
 
@@ -670,6 +779,75 @@ impl ContainedExec {
     pub fn terminate(&mut self) -> std::io::Result<()> {
         self.group.terminate()
     }
+
+    /// Gives this exec (running, or exited but not yet torn down) to a
+    /// successor process image, with whichever of its `stdin`/`stdout`/
+    /// `stderr` handles are still open. Nothing is signaled. Every carried
+    /// descriptor stays close-on-exec until [`crate::ExecHandover::prepare_exec`]
+    /// runs immediately before `exec`, so a command spawned meanwhile cannot
+    /// inherit the death lease or a pipe.
+    ///
+    /// # Errors
+    ///
+    /// The child's state could not be read or a pipe could not be duplicated.
+    /// The exec is returned untouched, still owned by this process.
+    #[cfg(unix)]
+    #[allow(clippy::result_large_err)] // a cold path; the caller must get the exec back unchanged
+    pub fn into_handover(mut self) -> Result<crate::ExecHandover, (Self, std::io::Error)> {
+        use std::os::fd::AsFd as _;
+
+        let prepared = (|| {
+            let anchor = self.group.anchor.carried()?;
+            let child = self.group.child.carried()?;
+            let stdin = self
+                .stdin
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            let stdout = self
+                .stdout
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            let stderr = self
+                .stderr
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            std::io::Result::Ok((anchor, child, [stdin, stdout, stderr]))
+        })();
+        match prepared {
+            Err(error) => Err((self, error)),
+            Ok((anchor, child, pipes)) => {
+                // The duplicates keep every pipe open; these registrations go.
+                self.stdin = None;
+                self.stdout = None;
+                self.stderr = None;
+                Ok(self.group.finish_handover(anchor, child, pipes))
+            }
+        }
+    }
+
+    /// Takes over an exec a predecessor process image of this agent handed
+    /// over, with its pipe ends in `stdin`/`stdout`/`stderr`.
+    ///
+    /// # Errors
+    ///
+    /// A carried descriptor or the operation cgroup could not be claimed; the
+    /// operation has then been killed by its anchor.
+    #[cfg(unix)]
+    pub fn adopt(
+        handover: &crate::ExecHandover,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<Self> {
+        let (group, (stdin, stdout, stderr)) = ExecProcessGroup::adopt(handover, cgroups)?;
+        Ok(Self {
+            stdin,
+            stdout,
+            stderr,
+            group,
+        })
+    }
 }
 
 /// Spawns `command` inside a fresh containment group with piped stdio, returning a
@@ -780,6 +958,11 @@ impl Platform for NativePlatform {
     /// down after the anchor reap in `wait()`, and cancellation-safe in `Drop`.
     fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
         self.spawn_exec_with_policy(req, None)
+    }
+
+    #[cfg(unix)]
+    fn adopt_exec(&self, handover: &crate::ExecHandover) -> std::io::Result<ContainedExec> {
+        ContainedExec::adopt(handover, self.cgroups.as_deref())
     }
 
     fn spawn_exec_with_policy(

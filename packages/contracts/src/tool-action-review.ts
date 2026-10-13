@@ -1,52 +1,55 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Trusted adapter hints, never read from agent arguments or tool output. */
-export const ToolReviewContext = z
-  .object({
-    kind: z.enum(["generic", "gmail"]).default("generic"),
-    title: z.string().max(256).optional(),
-    accountLabel: z.string().max(256).optional(),
-    fieldLabels: z.record(z.string(), z.string().max(256)).optional(),
-    protectedFields: z.array(z.string()).optional(),
-    email: z
-      .object({
-        from: z.string().max(4096),
-        to: z.string().max(32768),
-        cc: z.string().max(32768),
-        bcc: z.string().max(32768),
-        subject: z.string().max(32768),
-        textBody: z.string().max(262144),
-        htmlBody: z.string().max(262144),
-        contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-        attachments: z
-          .array(
-            z
-              .object({
-                name: z.string().max(1024),
-                mediaType: z.string().max(256),
-                bytes: z.number().int().nonnegative(),
-              })
-              .strict(),
-          )
-          .max(100),
-      })
-      .strict()
-      .optional(),
-    samples: z
-      .array(
-        z
-          .object({
-            id: z.string().max(256),
-            title: z.string().max(256),
-            subtitle: z.string().max(256).optional(),
-            provenance: z.literal("provider_metadata"),
-          })
-          .strict(),
-      )
-      .max(3)
-      .optional(),
-  })
-  .strict();
+export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.enum(["generic", "gmail"]).default("generic"),
+      title: z.string().max(256).optional(),
+      accountLabel: z.string().max(256).optional(),
+      fieldLabels: z.record(z.string(), z.string().max(256)).optional(),
+      protectedFields: z.array(z.string()).optional(),
+      email: z
+        .object({
+          from: z.string().max(4096),
+          to: z.string().max(32768),
+          cc: z.string().max(32768),
+          bcc: z.string().max(32768),
+          subject: z.string().max(32768),
+          textBody: z.string().max(262144),
+          htmlBody: z.string().max(262144),
+          contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+          attachments: z
+            .array(
+              z
+                .object({
+                  name: z.string().max(1024),
+                  mediaType: z.string().max(256),
+                  bytes: z.number().int().nonnegative(),
+                })
+                .strict(),
+            )
+            .max(100),
+        })
+        .strict()
+        .optional(),
+      samples: z
+        .array(
+          z
+            .object({
+              id: z.string().max(256),
+              title: z.string().max(256),
+              subtitle: z.string().max(256).optional(),
+              provenance: z.literal("provider_metadata"),
+            })
+            .strict(),
+        )
+        .max(3)
+        .optional(),
+    })
+    .strict(),
+);
 export type ToolReviewContext = z.infer<typeof ToolReviewContext>;
 
 // Names are exact saved identities, never display labels. A name protected by
@@ -163,78 +166,86 @@ export function toolReviewContextFromSchema(
   };
 }
 
-export const ToolReviewStatus = z.enum([
-  "pending",
-  "approved",
-  "executing",
-  "completed",
-  "partial",
-  "unknown",
-  "rejected",
-  "cancelled",
-  "expired",
-  "revoked",
-  "blocked",
-  "stale",
-  "failed",
-  "unavailable",
-]);
+export const ToolReviewStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "pending",
+    "approved",
+    "executing",
+    "completed",
+    "partial",
+    "unknown",
+    "rejected",
+    "cancelled",
+    "expired",
+    "revoked",
+    "blocked",
+    "stale",
+    "failed",
+    "unavailable",
+  ]),
+);
 export type ToolReviewStatus = z.infer<typeof ToolReviewStatus>;
-export const ToolReviewField = z
-  .object({
-    path: z.string(),
-    label: z.string(),
-    preview: z.string(),
-    count: z.number().int().nonnegative().optional(),
-    truncated: z.boolean(),
-    protected: z.boolean().optional(),
-  })
-  .strict();
-export const ToolActionReview = z
-  .object({
-    version: z.literal(1),
-    id: z.string(),
-    actionDigest: z.string(),
-    revision: z.string(),
-    status: ToolReviewStatus,
-    title: z.string(),
-    accountLabel: z.string().optional(),
-    consequence: z.string().optional(),
-    effects: z.array(z.string()),
-    selectionCount: z.number().int().nonnegative().optional(),
-    selectionKind: z.enum(["messages", "threads"]).optional(),
-    samples: ToolReviewContext.shape.samples,
-    fields: z.array(ToolReviewField),
-    moreFields: z.number().int().nonnegative(),
-    reason: z.string(),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-    approveLabel: z.string(),
-    availableActions: z.array(z.enum(["approve", "reject"])),
-    detailsAvailable: z.boolean(),
-  })
-  .strict();
+export const ToolReviewField = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      path: z.string(),
+      label: z.string(),
+      preview: z.string(),
+      count: z.number().int().nonnegative().optional(),
+      truncated: z.boolean(),
+      protected: z.boolean().optional(),
+    })
+    .strict(),
+);
+export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      id: z.string(),
+      actionDigest: z.string(),
+      revision: z.string(),
+      status: ToolReviewStatus,
+      title: z.string(),
+      accountLabel: z.string().optional(),
+      consequence: z.string().optional(),
+      effects: z.array(z.string()),
+      selectionCount: z.number().int().nonnegative().optional(),
+      selectionKind: z.enum(["messages", "threads"]).optional(),
+      samples: ToolReviewContext.shape.samples,
+      fields: z.array(ToolReviewField),
+      moreFields: z.number().int().nonnegative(),
+      reason: z.string(),
+      createdAt: z.string(),
+      updatedAt: z.string(),
+      approveLabel: z.string(),
+      availableActions: z.array(z.enum(["approve", "reject"])),
+      detailsAvailable: z.boolean(),
+    })
+    .strict(),
+);
 export type ToolActionReview = z.infer<typeof ToolActionReview>;
-export const ToolReviewDetailsPage = z
-  .object({
-    version: z.literal(1),
-    id: z.string(),
-    actionDigest: z.string(),
-    path: z.string(),
-    items: z.array(
-      z
-        .object({
-          label: z.string(),
-          value: z.string(),
-          path: z.string().optional(),
-          truncated: z.boolean().optional(),
-        })
-        .strict(),
-    ),
-    total: z.number().int().nonnegative(),
-    nextOffset: z.number().int().nonnegative().nullable(),
-  })
-  .strict();
+export const ToolReviewDetailsPage = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      id: z.string(),
+      actionDigest: z.string(),
+      path: z.string(),
+      items: z.array(
+        z
+          .object({
+            label: z.string(),
+            value: z.string(),
+            path: z.string().optional(),
+            truncated: z.boolean().optional(),
+          })
+          .strict(),
+      ),
+      total: z.number().int().nonnegative(),
+      nextOffset: z.number().int().nonnegative().nullable(),
+    })
+    .strict(),
+);
 export type ToolReviewDetailsPage = z.infer<typeof ToolReviewDetailsPage>;
 
 export {

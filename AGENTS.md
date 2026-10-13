@@ -305,6 +305,14 @@ disabled tools or grant execution outside the current catalog.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+Session creation reserves an idle shell, not queued work. Initial admission
+commits the first turn, status and wake atomically. Never reconstruct accepted
+work from a shell's initial-message field. An empty stale queued projection
+must not suppress schedules forever; use the locked canonical emptiness check,
+preserving Pause, accepted inputs, parked turns and physical writers. Historical
+shell correction uses the existing operator manifest and produces no execution
+or parent notification. See `docs/run-lifecycle.md`.
+
 Useful Knowledge retention is ordinary in-scope work under the accepted learning
 policy, including new Slack sessions; it does not require a separate "remember"
 request. Render the frozen effective modes and destination scope to the agent,

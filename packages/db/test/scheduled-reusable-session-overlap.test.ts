@@ -93,6 +93,7 @@ async function nextOccurrence(target: Awaited<ReturnType<typeof reusableSession>
 test.each([
   ["idle", "added"],
   ["failed", "added"],
+  ["queued", "added"],
   ["running", "session_not_idle"],
   ["requires_action", "session_not_idle"],
   ["waiting_capacity", "session_not_idle"],
@@ -101,6 +102,27 @@ test.each([
   const occurrence = await nextOccurrence(target);
   expect(occurrence.reason as string).toBe(expected);
   expect(occurrence.rejections).toEqual([expected === "added" ? null : "session_not_idle"]);
+});
+
+test("an uninitialized session has no executable queue projection", async () => {
+  const target = await reusableSession("idle");
+  const session = await createSession(client.db, {
+    accountId: target.accountId,
+    workspaceId: target.workspaceId,
+    initialMessage: "Not admitted yet",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: target.subjectId },
+  });
+  expect(session.status).toBe("idle");
+  const [row] = await shared.admin`select
+    (select count(*)::int from session_turns where session_id = ${session.id}) as turns,
+    (select count(*)::int from session_workflow_wake_outbox where session_id = ${session.id}) as wakes`;
+  expect(row).toMatchObject({ turns: 0, wakes: 0 });
 });
 
 test("Pause skips a reusable occurrence without reserving an unserviceable queued boundary", async () => {

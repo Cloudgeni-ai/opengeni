@@ -141,6 +141,12 @@ remain separately gated; see [subscription accounts](subscription-accounts.md).
 **Turns** are accepted work; replaceable **attempts** append ordered,
 exactly-once atomic history batches.
 
+Creating a session reserves an idle shell; atomic initial admission installs
+its first queued turn, events and wake together. Skip-overlap schedules may
+admit into an empty stale queued projection only after a locked check of
+accepted work and physical writers. The existing explicit operator manifest
+can correct never-initialized shells without execution or parent delivery.
+
 `wait_for_input` settles tool-batch execution, preserving trusted authority and
 immutable same-turn deadlines. Command results wake only explicit waits; notices
 never block inbox input. Ordinary same-human agent messages and lifecycle results use the receiving
@@ -872,8 +878,35 @@ API/worker deployment images use `scripts/assemble-server-runtime.ts` and
 and their frozen external dependency closures. Migration and catalog Jobs keep
 their command paths and reviewed data in the API image. Temporal's prebuilt
 workflow path does not eagerly load its source compiler; explicit compilation
-keeps the existing compiler behavior. Native conversions and role boundaries
-remain unchanged.
+keeps the existing compiler behavior. Documents upload parsing already runs on
+the control worker via Temporal: only the worker image carries LiteParse's native
+closure, LibreOffice and English OCR data. API-local voice normalization/segmentation
+retains FFmpeg,
+with no additional hop or cold start; native artifact rendering retains fonts.
+Worker-side video validation needs FFprobe from the FFmpeg package. Desktop
+recording executes inside the desktop sandbox, not the worker host. Native
+artifact import/export uses the artifact runtime, not LibreOffice. Embedded API
+compositions can still use inline indexing and must supply its host dependencies.
+
+Contract schema initializers use pure `defineSchema` factory boundaries so
+release bundlers can omit unused validators, including nested constructors.
+Used validators remain eager and retain their public schemas and parse behavior;
+the helper does not defer work to the first request. Only side-effect-free schema
+construction belongs inside these annotated factories.
+
+Organization action descriptions use the named request-schema registry in
+`apps/api/src/mcp/action-schema-imports.gen.ts`, generated with the action catalog.
+Namespace-wide contract discovery is build-time only; runtime projection keeps
+the original schema objects and exact JSON output without retaining unrelated
+contract exports.
+
+Object storage loads only the configured provider's SDK. The synchronous
+`createObjectStorage` factory loads its SDK before returning; worker startup
+calls `prepareObjectStorageProvider` before registering its default activities,
+so the first activity does not pay import cost. This preparation constructs no
+client, opens no connection and changes no pool or cache policy. The published
+ESM package supplies Node's `createRequire`; Bun release bundles retain literal
+provider require boundaries without requiring a full runtime dependency tree.
 
 ### 4.1 Request and event path
 

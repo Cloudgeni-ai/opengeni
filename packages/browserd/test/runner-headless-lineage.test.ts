@@ -39,7 +39,12 @@ async function fixture() {
     await symlink("synthetic-host-"+browser.pid,${JSON.stringify(join(profileDirectory, "SingletonLock"))});
     console.log(JSON.stringify({browserPid:browser.pid}));setInterval(()=>{},60000);`;
   await writeFile(script, daemonScript, { mode: 0o600 });
+  // The synthetic launcher stands in for agent-browser's native daemon, whose
+  // browser outlives it. `bun test --no-orphans` (CI) exports this flag to nested
+  // Bun processes, which would take the synthetic browser down with its launcher.
+  const { BUN_FEATURE_FLAG_NO_ORPHANS: _noOrphans, ...daemonEnv } = process.env;
   const daemon = Bun.spawn([process.execPath, "--no-env-file", script], {
+    env: daemonEnv,
     stdout: "pipe",
     stderr: "pipe",
   });

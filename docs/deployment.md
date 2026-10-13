@@ -3390,6 +3390,20 @@ plane it already trusts instead of depending on public DNS. Beta is independent
 and unavailable unless `OPENGENI_AGENT_BETA_VERSION` points at an existing signed
 immutable release.
 
+Live machines follow their channel's promoted build automatically. A machine
+running an older build is asked to update from its next heartbeat; the agent
+applies the update only at an idle point, so accepted work is never interrupted.
+An older agent that postpones because it is busy is asked again every 10
+minutes, an unanswered request is re-sent under the same operation after 10
+minutes, and other retryable failures are retried hourly. A non-retryable
+failure waits for a newer promotion or an explicit "Update now". Automatic
+updates only move machines forward: rolling the channel back to an older build
+leaves newer machines alone until someone requests the older build per machine.
+Macs that must first bootstrap through the whole-app installer are never updated
+this way. Set `OPENGENI_AGENT_AUTO_UPDATE=false` to update only on request. The
+agent fetches the release manifest from `OPENGENI_PUBLIC_BASE_URL`, so automatic
+updates also need it set.
+
 ### Enrolling a machine
 
 Enrollment binds a machine to a workspace and requires the enable flag. Two paths

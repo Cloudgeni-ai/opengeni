@@ -490,11 +490,22 @@ export function OrganizationModelsList({
   const connect = (
     <RowButton variant="default" onClick={onConnect}>
       <PlusIcon aria-hidden="true" />
-      Connect account
+      Connect provider
     </RowButton>
   );
   const shared = workspaces.filter((workspace) => !workspace.personal);
   const personal = workspaces.filter((workspace) => workspace.personal);
+  /* On the Defaults scope an admin sees only the workspaces that change
+     something; every other workspace uses the defaults above. */
+  const withOwnSettings = [...shared, ...personal].filter((workspace) => {
+    const snapshot = snapshots[workspace.id];
+    return (
+      workspace.canManage &&
+      (snapshot === "error" ||
+        (typeof snapshot === "object" &&
+          (snapshot.changesDefaults || snapshot.own.accountRules.length > 0)))
+    );
+  });
 
   // Accounts that stopped working, said once above the list.
   const reconnect =
@@ -532,14 +543,14 @@ export function OrganizationModelsList({
   return (
     <SectionStack>
       <Section
-        title="Accounts"
+        title="Model providers"
         description={
           <>
             {administrator
-              ? "Subscriptions, API keys and credits that pay for models. Open one to see its usage, choose who can use it, or reconnect it."
+              ? "Subscriptions, API keys and credits that run models. Open one to see its usage, choose who can use it, or reconnect it."
               : workspaces.some((workspace) => !workspace.personal)
-                ? "Subscriptions, API keys and credits that pay for models in your workspaces."
-                : "Subscriptions, API keys and credits that pay for models in your Personal workspace."}
+                ? "Subscriptions, API keys and credits that run models in your workspaces."
+                : "Subscriptions, API keys and credits that run models in your Personal workspace."}
             {reconnect > 0 ? (
               <span className="font-medium text-fg">
                 {reconnect === 1 ? " 1 needs reconnecting." : ` ${reconnect} need reconnecting.`}
@@ -553,7 +564,7 @@ export function OrganizationModelsList({
           <EmptyState
             variant="page"
             icon={<KeyRoundIcon />}
-            title="No accounts connected"
+            title="No model providers connected"
             description={
               administrator
                 ? "Connect a subscription or an API key, then choose who can use it."
@@ -563,7 +574,7 @@ export function OrganizationModelsList({
             className="pt-8 pb-6"
           />
         ) : (
-          <RowList label="Accounts" columns={ACCOUNT_COLUMNS} flush>
+          <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
             <OpenGeniCreditsRow
               credits={credits}
               workspaceId={anchorWorkspaceId}
@@ -578,8 +589,8 @@ export function OrganizationModelsList({
         )}
         {administrator ? null : (
           <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
-            To connect your own account, open one of your workspaces. Only organization owners and
-            admins add accounts for everyone.
+            To connect your own subscription, pick one of your workspaces above. Only organization
+            owners and admins connect providers for everyone.
           </p>
         )}
       </Section>
@@ -604,32 +615,60 @@ export function OrganizationModelsList({
         />
       ) : null}
 
-      <Section
-        title="Workspaces"
-        description={
-          organizationDefaults
-            ? "Each workspace follows the settings above unless its admins change them. Open one to see what it uses."
-            : "Each workspace's default model and the models people can pick there."
-        }
-      >
-        <RowList label="Workspaces" flush>
-          {[...shared, ...personal].map((workspace) => (
-            <WorkspaceRow
-              key={workspace.id}
-              workspace={workspace}
-              snapshot={snapshots[workspace.id]}
-              follows={organizationDefaults ? organizationName : null}
-              onOpen={() => onOpenWorkspace(workspace.id)}
-            />
-          ))}
-        </RowList>
-        {workspacesError ? (
-          <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
-            Couldn't load every workspace in the organization, so only the ones you're in are
-            listed. Reload the page to try again.
-          </p>
-        ) : null}
-      </Section>
+      {organizationDefaults ? (
+        <Section
+          title="Workspaces with their own settings"
+          description={
+            withOwnSettings.length === 0 && !loadingWorkspaces
+              ? "Every workspace uses the defaults."
+              : "These workspaces change something for themselves. Everything else they use from the defaults."
+          }
+        >
+          {withOwnSettings.length > 0 || loadingWorkspaces ? (
+            <RowList label="Workspaces with their own settings" flush>
+              {withOwnSettings.map((workspace) => (
+                <WorkspaceRow
+                  key={workspace.id}
+                  workspace={workspace}
+                  snapshot={snapshots[workspace.id]}
+                  follows
+                  onOpen={() => onOpenWorkspace(workspace.id)}
+                />
+              ))}
+              {loadingWorkspaces ? <ListRowSkeleton count={1} /> : null}
+            </RowList>
+          ) : null}
+          {workspacesError ? (
+            <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
+              Couldn't load every workspace in the organization, so only the ones you're in are
+              checked. Reload the page to try again.
+            </p>
+          ) : null}
+        </Section>
+      ) : (
+        <Section
+          title="Workspaces"
+          description="Each workspace's default model and the models people can pick there."
+        >
+          <RowList label="Workspaces" flush>
+            {[...shared, ...personal].map((workspace) => (
+              <WorkspaceRow
+                key={workspace.id}
+                workspace={workspace}
+                snapshot={snapshots[workspace.id]}
+                follows={false}
+                onOpen={() => onOpenWorkspace(workspace.id)}
+              />
+            ))}
+          </RowList>
+          {workspacesError ? (
+            <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
+              Couldn't load every workspace in the organization, so only the ones you're in are
+              listed. Reload the page to try again.
+            </p>
+          ) : null}
+        </Section>
+      )}
 
       {!accountRules && administrator && orgCodex.accounts.length >= 2 ? (
         <Section title="Codex">
@@ -694,8 +733,8 @@ export function OrganizationDefaultsSection({
   });
   return (
     <Section
-      title="Models for every workspace"
-      description="What new chats start with and which models people can pick. A workspace's admins can change these for their workspace."
+      title="New chats"
+      description="What new chats start with and which models people can pick."
     >
       {defaults.error ? (
         <ErrorMessage
@@ -1028,8 +1067,8 @@ function WorkspaceRow({
 }: {
   workspace: ModelsWorkspace;
   snapshot: WorkspaceModelsSnapshot | "loading" | "error" | undefined;
-  /** The organization whose settings it follows, when the list shows them above. */
-  follows: string | null;
+  /** The page shows the defaults above, so the row says only what the workspace changes. */
+  follows: boolean;
   onOpen: () => void;
 }) {
   const title = workspace.personal ? "Your Personal workspace" : workspace.name;
@@ -1054,9 +1093,9 @@ function WorkspaceRow({
       ? ["Couldn't load its models"]
       : typeof snapshot !== "object"
         ? []
-        : follows === null
-          ? [snapshot.defaultModel, snapshot.allowed]
-          : workspaceDifferences(snapshot, follows);
+        : follows
+          ? workspaceDifferences(snapshot)
+          : [snapshot.defaultModel, snapshot.allowed];
   return (
     <ListRow
       leading={leading}
@@ -1070,9 +1109,9 @@ function WorkspaceRow({
 
 /**
  * "Default: GPT-6 Astra · Codex", "3 models allowed", what it changed in its
- * account rules ("Claude: Primary only"), or "Follows Acme".
+ * sharing rules ("Claude sharing: Off"), or "Uses the defaults".
  */
-function workspaceDifferences(snapshot: WorkspaceModelsSnapshot, organizationName: string) {
+function workspaceDifferences(snapshot: WorkspaceModelsSnapshot) {
   const facts = [
     snapshot.own.defaultModel && snapshot.defaultModel ? `Default: ${snapshot.defaultModel}` : null,
     snapshot.own.allowed && snapshot.allowed ? `${snapshot.allowed} allowed` : null,
@@ -1080,6 +1119,6 @@ function workspaceDifferences(snapshot: WorkspaceModelsSnapshot, organizationNam
   ].filter((fact): fact is string => fact !== null);
   const rules = snapshot.own.accountRules;
   // Two changes read at a glance; more would crowd the row, so they're counted.
-  facts.push(...(rules.length > 2 ? [`${rules.length} account rules changed`] : rules));
-  return facts.length > 0 ? facts : [`Follows ${organizationName}`];
+  facts.push(...(rules.length > 2 ? [`${rules.length} sharing rules changed`] : rules));
+  return facts.length > 0 ? facts : ["Uses the defaults"];
 }

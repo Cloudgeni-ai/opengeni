@@ -619,6 +619,44 @@ describe("BrowserSupervisor", () => {
     );
   });
 
+  test("a quiescent attached Chrome session does not hold back an update", async () => {
+    const gate = deferred();
+    const dispatched = deferred();
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(2);
+        const created = await supervisor.createSession({
+          ...session,
+          headed: true,
+          transport: {
+            kind: "attached_chrome" as const,
+            deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            connectionGeneration: "chrome-state-1",
+            browserName: "Chrome",
+            browserVersion: "151.0.0.0",
+          },
+        });
+        // The user's Chrome keeps its tabs and pages across a controller
+        // restart; an idle attached session has nothing to lose.
+        expect(supervisor.isIdle()).toBe(true);
+        const action = supervisor.action(command(created.observation));
+        await dispatched.promise;
+        expect(supervisor.isIdle()).toBe(false);
+        gate.resolve();
+        await action;
+        expect(supervisor.isIdle()).toBe(true);
+      },
+      {
+        driverHooks: {
+          async dispatch() {
+            dispatched.resolve();
+            await gate.promise;
+          },
+        },
+      },
+    );
+  });
+
   test("binds attached Chrome to one exact live profile generation", async () => {
     await withSupervisor(async ({ supervisor, contexts }) => {
       const session = reference(1);

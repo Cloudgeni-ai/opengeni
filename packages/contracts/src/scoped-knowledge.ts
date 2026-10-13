@@ -1,29 +1,36 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Tenant scope for normalized knowledge and source provenance. */
-export const ScopedKnowledgeScopeKind = z.enum(["organization", "workspace", "personal"]);
+export const ScopedKnowledgeScopeKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["organization", "workspace", "personal"]),
+);
 export type ScopedKnowledgeScopeKind = z.infer<typeof ScopedKnowledgeScopeKind>;
 
-export const ScopedKnowledgeScope = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("organization"),
-    workspaceId: z.null(),
-    subjectId: z.null(),
-  }),
-  z.object({
-    kind: z.literal("workspace"),
-    workspaceId: z.string().uuid(),
-    subjectId: z.null(),
-  }),
-  z.object({
-    kind: z.literal("personal"),
-    workspaceId: z.string().uuid().nullable(),
-    subjectId: z.string().min(1).max(1024),
-  }),
-]);
+export const ScopedKnowledgeScope = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("organization"),
+      workspaceId: z.null(),
+      subjectId: z.null(),
+    }),
+    z.object({
+      kind: z.literal("workspace"),
+      workspaceId: z.string().uuid(),
+      subjectId: z.null(),
+    }),
+    z.object({
+      kind: z.literal("personal"),
+      workspaceId: z.string().uuid().nullable(),
+      subjectId: z.string().min(1).max(1024),
+    }),
+  ]),
+);
 export type ScopedKnowledgeScope = z.infer<typeof ScopedKnowledgeScope>;
 
-export const ScopedKnowledgeActorKind = z.enum(["human", "service"]);
+export const ScopedKnowledgeActorKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["human", "service"]),
+);
 export type ScopedKnowledgeActorKind = z.infer<typeof ScopedKnowledgeActorKind>;
 
 /**
@@ -36,46 +43,57 @@ export type ScopedKnowledgeActor = {
   initiatingHumanSubjectId: string | null;
 };
 
-export const KnowledgeLifecycleState = z.enum(["active", "deleted", "revoked"]);
+export const KnowledgeLifecycleState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "deleted", "revoked"]),
+);
 export type KnowledgeLifecycleState = z.infer<typeof KnowledgeLifecycleState>;
 
-export const KnowledgeLifecycleEventType = z.enum([
-  "deleted",
-  "revoked",
-  "restored",
-  "acl_changed",
-  "sync_succeeded",
-  "sync_failed",
-  "object_version_added",
-]);
+export const KnowledgeLifecycleEventType = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "deleted",
+    "revoked",
+    "restored",
+    "acl_changed",
+    "sync_succeeded",
+    "sync_failed",
+    "object_version_added",
+  ]),
+);
 export type KnowledgeLifecycleEventType = z.infer<typeof KnowledgeLifecycleEventType>;
 
-export const KnowledgeSyncRunState = z.enum(["started", "succeeded", "failed"]);
+export const KnowledgeSyncRunState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["started", "succeeded", "failed"]),
+);
 export type KnowledgeSyncRunState = z.infer<typeof KnowledgeSyncRunState>;
 
-export const KnowledgeClaimOrigin = z.enum(["explicit", "inferred"]);
+export const KnowledgeClaimOrigin = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["explicit", "inferred"]),
+);
 export type KnowledgeClaimOrigin = z.infer<typeof KnowledgeClaimOrigin>;
 
-export const KnowledgeClaimRelationType = z.enum(["supersedes", "conflicts_with"]);
+export const KnowledgeClaimRelationType = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["supersedes", "conflicts_with"]),
+);
 export type KnowledgeClaimRelationType = z.infer<typeof KnowledgeClaimRelationType>;
 
-export const KnowledgeClaimEvidencePolarity = z.enum(["supports", "contradicts"]);
+export const KnowledgeClaimEvidencePolarity = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["supports", "contradicts"]),
+);
 export type KnowledgeClaimEvidencePolarity = z.infer<typeof KnowledgeClaimEvidencePolarity>;
 
-export const KnowledgeClaimReviewState = z.enum(["proposed", "approved", "rejected", "revoked"]);
+export const KnowledgeClaimReviewState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["proposed", "approved", "rejected", "revoked"]),
+);
 export type KnowledgeClaimReviewState = z.infer<typeof KnowledgeClaimReviewState>;
 
-export const KnowledgeFactObjectKind = z.enum([
-  "entity",
-  "text",
-  "number",
-  "boolean",
-  "json",
-  "timestamp",
-]);
+export const KnowledgeFactObjectKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["entity", "text", "number", "boolean", "json", "timestamp"]),
+);
 export type KnowledgeFactObjectKind = z.infer<typeof KnowledgeFactObjectKind>;
 
-export const KnowledgeChangeProposalTargetKind = z.enum(["instruction_policy", "preference"]);
+export const KnowledgeChangeProposalTargetKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["instruction_policy", "preference"]),
+);
 export type KnowledgeChangeProposalTargetKind = z.infer<typeof KnowledgeChangeProposalTargetKind>;
 
 export type KnowledgeProviderRecord = {

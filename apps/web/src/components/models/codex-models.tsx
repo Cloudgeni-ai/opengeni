@@ -1225,7 +1225,7 @@ function CodexAccountDetail({
               {codex.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description="Used for new work when sharing is set to Primary only."
+                  description="Used for new work when sharing is off."
                   control={
                     account.id === codex.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">

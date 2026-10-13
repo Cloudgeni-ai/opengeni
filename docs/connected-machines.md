@@ -255,6 +255,22 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+The extension's hello carries two generations. `connectionGeneration` is new
+for every native port and fences that transport: commands, results and
+inventory must name the exact live port. `stateGeneration` is created once per
+extension worker lifetime and reused by every native reconnect in it; Chrome
+keeps the tab ids, pages and debugger attachments that the worker owns for
+exactly that long. The agent reports `stateGeneration` as the profile's
+inventory `connectionGeneration` (the placement instance above), so a
+native-host exit, an agent restart or an agent update reconnects in place and
+the profile's sessions stay live; if the agent restarted, the next action
+re-creates the controller session. A restarted worker, a reloaded or updated
+extension, or a restarted Chrome reports a new `stateGeneration` and ends the
+sessions as above. Extensions that do not send `stateGeneration` keep the
+per-port behavior, and the agent's update gate waits while one of them backs a
+live attached controller, because restarting would end its sessions. A
+quiescent attached session does not otherwise hold back an agent update.
+
 Each ended connection generation is recorded with its reason in
 `attached_browser_devices.connection_history` (the latest 50 per profile).
 The native host sends a final `native_host_closing` frame before it exits,
@@ -494,8 +510,19 @@ the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
 unreadable controller as `update_state_unavailable`), keeps admitting new work,
 and every few seconds re-attempts a short fenced idle proof, reopening
 admission whenever it is still busy. It never cancels accepted work, stops
-long-lived servers, or restarts the host early; an update behind a long-lived
-command simply keeps waiting. Only lost physical settlement, which can never
+long-lived servers, or restarts the host early. On Linux and macOS a running
+streamed command (an `OpStart` exec) does not hold the update back: after the
+verified binary is installed, the agent hands each such command to its
+successor and `exec`s the new binary in the same process. The command keeps
+running as the same process with the same pipes, process group and operation
+cgroup; the successor keeps the connection instance, so the server sees a
+short reconnect on the same op subjects (no `GoingOffline`), re-attaches as
+after any reconnect, and the stream continues byte-exact with one digest.
+Every failure is fail-closed: a command that cannot be continued ends as a
+typed failure, and if the successor never starts, the command's anchor ends it
+as for a crashed runner. Other admitted work, such as a request still being
+answered, a git operation or a pending upload, still makes the update wait,
+and Windows keeps waiting for every command. Only lost physical settlement, which can never
 become provable in that process, ends the update with retryable
 `update_state_unavailable`. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
@@ -508,8 +535,12 @@ adopts the same process on its next request, even when the old launcher was
 killed with the stopped service or came from an earlier agent release. A
 session whose browser already ended and a computer session on the machine's
 own physical seat do not keep the host busy either. Older agents still end a
-busy update with
-retryable `update_busy_work`; request it again at a safe idle point.
+busy update with retryable `update_busy_work`. Nobody has to request updates:
+the control plane asks every live machine behind its channel's promoted build
+to update from its heartbeat, and asks an older busy agent again every 10
+minutes until it applies (see the deployment guide for the full policy and
+`OPENGENI_AGENT_AUTO_UPDATE`). A request for the build a machine already runs
+is refused, whatever happened to an earlier attempt.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production

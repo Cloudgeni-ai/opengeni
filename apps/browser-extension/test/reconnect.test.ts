@@ -113,6 +113,28 @@ function harness() {
 }
 
 describe("native bridge reconnection", () => {
+  test("a native reconnect keeps the worker's state generation on a new port generation", async () => {
+    const h = harness();
+    await flush();
+    const first = h.ports[0].messages[0];
+    expect(first.type).toBe("hello");
+    expect(typeof first.device.stateGeneration).toBe("string");
+    expect(first.device.stateGeneration).not.toBe(first.device.connectionGeneration);
+    h.ports[0].onDisconnect.emit();
+    await flush();
+    h.tick(500);
+    await flush();
+    expect(h.ports).toHaveLength(2);
+    const second = h.ports[1].messages[0];
+    expect(second.device.stateGeneration).toBe(first.device.stateGeneration);
+    expect(second.device.connectionGeneration).not.toBe(first.device.connectionGeneration);
+    // A restarted worker (fresh module instance) has lost its live state.
+    const restarted = harness();
+    await flush();
+    expect(restarted.ports[0].messages[0].device.stateGeneration).not.toBe(
+      first.device.stateGeneration,
+    );
+  });
   test("renaming the profile preserves the ready connection and publishes metadata", async () => {
     const h = harness();
     await flush();

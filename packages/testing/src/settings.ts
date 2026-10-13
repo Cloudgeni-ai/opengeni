@@ -64,6 +64,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentReleasesBaseUrl: "https://github.com/Cloudgeni-ai/opengeni/releases",
     agentStableVersion: "0.1.16",
     agentBetaVersion: undefined,
+    agentAutoUpdate: false,
     productAccessMode: "local",
     managedAuthSessionSetMode: "legacy",
     nativeAppSchemes: ["opengeni"],

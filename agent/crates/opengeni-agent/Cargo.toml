@@ -65,6 +65,8 @@ uuid = { workspace = true }
 # Per-channel output digests in the op-stream Exit frame (byte-exact assembly
 # proof, PROTOCOL.md §Wire messages). Already a workspace dep (update cohorting).
 blake3 = { workspace = true }
+# Hex form of carried stream-digest state across an in-place update.
+hex = { workspace = true }
 sha2 = { workspace = true }
 semver = { workspace = true }
 

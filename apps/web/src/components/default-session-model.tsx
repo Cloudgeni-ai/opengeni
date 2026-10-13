@@ -24,13 +24,10 @@ import type { IntelligenceEffort } from "@/lib/session-tools";
 type Draft = { model: string; reasoningEffort: IntelligenceEffort };
 
 /** How an unsaved workspace default is chosen, in plain words. */
-function automaticDefaultNote(
-  source: DefaultModelSelectionSource | undefined,
-  organizationName: string | undefined,
-): string {
+function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): string {
   switch (source) {
     case "organization":
-      return `Following ${organizationName ?? "your organization"}.`;
+      return "Uses the default.";
     case "subscription":
       return "Picked from your connected subscription until you choose one.";
     case "credits":
@@ -128,7 +125,6 @@ export function DefaultSessionModelPreferenceRow(props: {
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
   const organizationScope = props.organizationDefaults !== undefined;
-  const organizationLabel = props.organizationName ?? "your organization";
   const configured = organizationScope
     ? (props.organizationDefaults?.defaults?.sessionDefaults ?? null)
     : resolveWorkspaceSessionDefaults(workspace?.settings);
@@ -219,7 +215,7 @@ export function DefaultSessionModelPreferenceRow(props: {
         toast.success(
           organizationScope
             ? "Default model is automatic again"
-            : `Default model follows ${organizationLabel} again`,
+            : "Default model is back to the default",
         );
         if (!organizationScope) await catalog.refresh();
       }
@@ -268,7 +264,7 @@ export function DefaultSessionModelPreferenceRow(props: {
               <>
                 {" "}
                 <InlineAction onClick={() => void reset()}>
-                  {organizationScope ? "Make automatic" : `Use ${organizationLabel}’s default`}
+                  {organizationScope ? "Make automatic" : "Use the default"}
                 </InlineAction>
               </>
             ) : null}
@@ -276,7 +272,7 @@ export function DefaultSessionModelPreferenceRow(props: {
         ) : organizationScope ? (
           `${starts} Automatic until you choose one: a connected subscription, then Opengeni credits, then this server’s default.`
         ) : (
-          `${starts} ${automaticDefaultNote(automatic?.source, props.organizationName)}`
+          `${starts} ${automaticDefaultNote(automatic?.source)}`
         )
       }
       error={cantRun}

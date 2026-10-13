@@ -197,6 +197,24 @@ did not prove it gone is retried with exponential backoff (5 minutes doubling to
 every tick. Tuples with an active process stay with retained-process
 reconciliation.
 
+**Unknown sandbox setup on a retired box resumes once the box is proven gone.**
+A turn whose setup start outcome is unknown waits, recovering, for physical
+proof that nothing it may have started still runs. The exit of the setup's
+retained process is one proof. A start that failed before any process was
+recorded leaves nothing to exit, so the same terminated observation of the
+exact historical box is the other: the reaper lists such turns through
+`opengeni_private.list_sandbox_ended_epoch_setup_uncertainties(limit)` (an
+active recovering turn of a directly unpaused session, its closed and quiesced
+attempt, no active process, and every setup request on one Modal box whose
+lease has a later epoch and a different instance), probes that box with the
+same per-box backoff, and on a terminated observation calls
+`reconcileCompletedSandboxSetup` with that exact box. It revalidates every
+condition under the canonical locks, retires the marker, appends
+`turn.recovery.requested` (`sandbox_setup_physically_settled`) and wakes the
+session, so the same turn reruns its idempotent setup. Nothing is replayed.
+Running, NotFound, a different box, or a lease still on that epoch is never
+proof, and a refused reconciliation backs off by turn.
+
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
 own batch's durable history-item receipt; a turn-wide update query can therefore
@@ -1261,6 +1279,59 @@ context byte-for-byte. Deploy the notification-only retirement implementation
 before applying a manifest: replay of an older actionable retirement receipt
 fails closed rather than claiming that no parent execution occurred. Migration
 0764's frozen SQL is unchanged; this is the migration runner's operator hook.
+
+**Empty queued shells are projection repair, not turn retirement.** Session
+creation now reserves an `idle` shell. Only `initializeSessionStartAtomically`
+installs its first queued turn, events and wake. A failure before initialization
+therefore leaves no imaginary queue, and a retry of the explicit create still
+initializes exactly once. Never synthesize a turn from a shell's retained initial
+message during maintenance.
+
+For historical shells, the same manifest also accepts `emptyQueuedSessions`:
+an array of `{accountId, workspaceId, sessionId, expectedLastSequence}`. Use
+`targets: []` when repairing only shells. The combined manifest requires 1–1,000
+unique sessions. Under the canonical locks each shell must still be `queued`,
+have the reviewed canonical event sequence, and have no turn history or
+`session.created` event, active pointer, active goal, pending input/outbox,
+capacity waiter, live voice lease, admission block, input wait, compaction,
+unfinished scheduled run or live physical writer. Every target passes in the
+same all-or-nothing transaction as ordinary retirement. A stale target aborts
+the batch rather than widening the selection.
+
+Shell repair appends one `session.status.changed` audit event with
+`code: empty_queue_projection_repaired`, `retirementOperationId` and
+`repairedLastSequence`, then sets only the status projection to `idle`. It does
+not change Pause, create a turn/attempt/history item/input/wake, or notify a
+parent. An exact receipt replay never rewrites newer work. Ordinary upgrades
+without a manifest perform no shell repair.
+
+**Unwanted, never-run prompts require explicit withdrawal.** The same manifest
+accepts `unstartedQueues`, with one entry per session:
+`{accountId, workspaceId, sessionId, expectedLastSequence, turns: [{turnId, expectedVersion}]}`.
+Every selected prompt must still be a queued human/API prompt with generation
+zero, no attempt, no start time and no scheduled-run binding. The session must
+be active under effective control (Pause is never changed), have no active turn
+and retain the exact reviewed event cursor. All other accepted work, active
+goals, waits, voice leases, physical writers, pending deliveries and unfinished
+scheduled runs cause the complete manifest transaction to roll back. Include
+the entire queue: an omitted sibling is never released by clearing the block.
+
+The hook marks these prompts `cancelled` with `cancelReason: operator_not_run`,
+appends ordinary queue-deletion audit events and one `unstarted_queue_retired`
+status receipt, clears the admission block and leaves the session idle. It
+creates no attempt, history item, executable input, parent notice or wake.
+Existing prompt text, accepted authority and prior model context remain intact.
+The exact operation/cursor/turn-version receipt makes retries harmless even
+after a new human message arrives. This is not automatic error recovery, and
+does not authorize replay of any retired message.
+
+Skip-overlap schedule admission independently verifies an empty stale `queued`
+projection under the session lock rather than trusting its label forever.
+Accepted turns, pending input, active goals, live voice, waits and physical
+writers still overlap; Pause still blocks. This admits only the new occurrence,
+never replays historical work or changes the accepted account selection of a
+capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
+requires an authorized account change; time or a deploy cannot override it.
 
 Build the private manifest with a read-only query (psql variables
 `workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its

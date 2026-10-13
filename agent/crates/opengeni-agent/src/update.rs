@@ -546,7 +546,7 @@ mod tests {
             assert_ne!(std::env::current_exe().unwrap(), captured);
             assert_eq!(installed_executable().unwrap(), installed);
             std::fs::write(&marker, b"ready").unwrap();
-            crate::restart_after_verified_update().expect("successor exec");
+            crate::restart_after_verified_update(&None).expect("successor exec");
             panic!("successful Unix exec never returns");
         }
         let directory = tempfile::tempdir().unwrap();

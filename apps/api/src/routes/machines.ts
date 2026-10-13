@@ -27,8 +27,6 @@ import {
   UpdateMachineAgentResponse,
 } from "@opengeni/contracts";
 import {
-  advanceEnrollmentAgentUpdate,
-  beginEnrollmentAgentUpdate,
   changeMachineAudience,
   getLiveEnrollmentConnection,
   listEnrollments,
@@ -56,7 +54,8 @@ import {
   MachineNotActiveError,
   openMachinePrivacySettings,
 } from "../sandbox/screen-control";
-import { listMachines, machineUpdateBlockedReason, metricRowToSample } from "../sandbox/machines";
+import { listMachines, metricRowToSample } from "../sandbox/machines";
+import { requestAgentUpdate } from "../sandbox/agent-update";
 import {
   machineAudienceChangeResponse,
   machineAudiencePreview,
@@ -64,8 +63,6 @@ import {
   machineAudienceRequestFor,
 } from "../sandbox/machine-audience";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
-import { ControlRequest, ErrorCode } from "@opengeni/agent-proto";
-import { NatsControlRpc, subjectFor } from "@opengeni/runtime/sandbox";
 import { parseRequestJson } from "../http/request-body";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
@@ -382,147 +379,22 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       visibleEnrollment.scope === "user" ? grant : originWorkspaceId,
       enrollmentId,
     );
-    if (!live?.connectionInstanceId || !live.agentVersion) {
+    if (!live || live.id !== enrollmentId || live.workspaceId !== originWorkspaceId) {
       throw new HTTPException(409, {
         message: "machine has no authoritative live agent build",
       });
     }
-    const blockedReason = machineUpdateBlockedReason(live.os, live.agentVersion);
-    if (blockedReason) {
-      throw new HTTPException(422, { message: blockedReason });
-    }
-    const channel = live.agentUpdateChannel ?? "stable";
-    const targetVersion =
-      channel === "beta"
-        ? (settings.agentBetaVersion ?? settings.agentStableVersion)
-        : settings.agentStableVersion;
-    const reusableRequest =
-      live.agentUpdate?.status === "requested" &&
-      live.agentUpdate.targetVersion === targetVersion &&
-      live.agentUpdate.connectionInstanceId === live.connectionInstanceId &&
-      live.agentUpdate.connectionGeneration === live.connectionGeneration
-        ? live.agentUpdate
-        : null;
-    if (
-      !reusableRequest &&
-      live.agentVersion === targetVersion &&
-      live.agentUpdate?.status !== "failed"
-    ) {
-      throw new HTTPException(409, {
-        message: "machine already runs the promoted version",
-      });
-    }
-    const operationId = reusableRequest?.operationId ?? crypto.randomUUID();
-    if (!reusableRequest) {
-      const reserved = await beginEnrollmentAgentUpdate(db, {
-        accountId: grant.accountId,
-        workspaceId: originWorkspaceId,
-        enrollmentId,
-        connectionInstanceId: live.connectionInstanceId,
-        connectionGeneration: live.connectionGeneration,
-        operationId,
-        targetVersion,
-      });
-      if (!reserved) {
-        throw new HTTPException(409, {
-          message: "machine update state changed; refresh and retry",
-        });
-      }
-    }
-
-    const rpc = new NatsControlRpc(async () => bus?.getRequestConnection() ?? null);
-    const request: ControlRequest = {
-      requestId: operationId,
-      // The subject already selects the exact authoritative process instance.
-      // `epoch` is the sandbox lease epoch, not the enrollment connection
-      // generation, so this process-scoped operation intentionally leaves it 0.
-      epoch: 0,
-      resourcePolicy: undefined,
-      op: {
-        $case: "agentUpdateApply",
-        agentUpdateApply: {
-          operationId,
-          targetVersion,
-          channel,
-          expectedCurrentVersion: live.agentVersion,
-          expectedCurrentSha256: live.agentBinarySha256 ?? "",
-          releaseBaseUrl: (settings.publicBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, ""),
-        },
-      },
-    };
-    let response = await rpc.request(
-      subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
-      request,
-      { timeoutMs: 10_000 },
-    );
-    // The operation id is idempotent. One retry heals an ambiguous lost reply;
-    // the agent returns the same acceptance and never starts a second update.
-    if (response.error?.code === ErrorCode.ERROR_CODE_TIMEOUT) {
-      response = await rpc.request(
-        subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
-        request,
-        { timeoutMs: 10_000 },
-      );
-    }
-    if (response.error) {
-      // A second timeout remains ambiguous: progress/Hello may still prove the
-      // operation. Keep it requested rather than racing a false terminal failure.
-      if (response.error.code !== ErrorCode.ERROR_CODE_TIMEOUT) {
-        await advanceEnrollmentAgentUpdate(db, {
-          accountId: grant.accountId,
-          workspaceId: originWorkspaceId,
-          enrollmentId,
-          connectionInstanceId: live.connectionInstanceId,
-          connectionGeneration: live.connectionGeneration,
-          operationId,
-          status: "failed",
-          errorCode:
-            response.error.detail.failure_code ??
-            (response.error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE
-              ? "agent_offline"
-              : "update_dispatch_rejected"),
-          retryable: response.error.retryable,
-          rolledBack: false,
-        });
-        throw new HTTPException(response.error.retryable ? 409 : 422, {
-          message: response.error.message,
-        });
-      }
-    } else if (
-      response.result?.$case !== "agentUpdateApply" ||
-      !response.result.agentUpdateApply.accepted
-    ) {
-      await advanceEnrollmentAgentUpdate(db, {
-        accountId: grant.accountId,
-        workspaceId: originWorkspaceId,
-        enrollmentId,
-        connectionInstanceId: live.connectionInstanceId,
-        connectionGeneration: live.connectionGeneration,
-        operationId,
-        status: "failed",
-        errorCode: "invalid_agent_response",
-        retryable: true,
-        rolledBack: false,
-      });
-      throw new HTTPException(502, {
-        message: "agent returned an invalid update response",
-      });
-    } else {
-      await advanceEnrollmentAgentUpdate(db, {
-        accountId: grant.accountId,
-        workspaceId: originWorkspaceId,
-        enrollmentId,
-        connectionInstanceId: live.connectionInstanceId,
-        connectionGeneration: live.connectionGeneration,
-        operationId,
-        status: "accepted",
-      });
+    const result = await requestAgentUpdate({ db, bus, settings }, live, {
+      releaseBaseUrl: settings.publicBaseUrl ?? new URL(c.req.url).origin,
+    });
+    if (result.kind === "refused") {
+      throw new HTTPException(result.status, { message: result.message });
     }
     return c.json(
       UpdateMachineAgentResponse.parse({
-        operationId,
+        operationId: result.operationId,
         accepted: true,
-        targetVersion,
+        targetVersion: result.targetVersion,
       }),
       202,
     );

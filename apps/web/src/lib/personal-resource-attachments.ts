@@ -226,6 +226,30 @@ export function buildPersonalResourceAttachmentIntent(input: {
 }
 
 /**
+ * The owner's consent for their own Connected Machine in this chat. Moving the
+ * chat onto the machine is that consent, so the message that tells the agent
+ * where it runs carries it. It names no resource: the server derives the
+ * machine from the chat's active pointer and checks the owner and the chat's
+ * authority epoch. Without it a chat moved mid-session has no grant for the
+ * machine, and every turn after the move is refused at admission.
+ */
+export function personalMachineUseIntent(
+  tenancy:
+    | Pick<NonNullable<Session["tenancy"]>, "visibility" | "authorityEpoch">
+    | null
+    | undefined,
+): PersonalResourceAttachmentIntent | undefined {
+  if (!tenancy) return undefined;
+  return buildPersonalResourceAttachmentIntent({
+    mode: "session",
+    visibility: tenancy.visibility === "workspace" ? "workspace" : "private",
+    acknowledged: true,
+    expectedAuthorityEpoch: tenancy.authorityEpoch,
+    resourceCount: 1,
+  });
+}
+
+/**
  * Reconcile the Rig restored from a durable new-session draft against the
  * scoped catalog without discarding it while that catalog is still loading.
  */

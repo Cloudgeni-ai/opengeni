@@ -45,6 +45,12 @@ let lastError: string | null = null;
 let debuggerSequence = 0;
 const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Set<number>();
+// Tab ids, debugger attachments and the event buffer above live exactly as long
+// as this worker. Every native reconnect in that lifetime reports the same
+// state generation, so the agent can keep sessions bound across agent or
+// native-host restarts while the per-port connection generation still fences
+// each transport.
+const STATE_GENERATION = crypto.randomUUID();
 
 async function storedState(): Promise<Required<StoredState>> {
   const stored = (await chrome.storage.local.get([
@@ -100,6 +106,7 @@ async function device(revision: number, generation: string): Promise<ExtensionDe
     platform: extensionPlatform(platform),
     architecture: extensionArchitecture(platform),
     connectionGeneration: generation,
+    stateGeneration: STATE_GENERATION,
     inventoryRevision: revision,
     capabilities: {
       tabInventory: true,
