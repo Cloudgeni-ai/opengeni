@@ -558,6 +558,9 @@ async function grantAppRoleIfSchemaExists(
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "maintain_usage_allowances(integer,integer)",
     "usage_allowance_command(jsonb)",
+    // Per-task usage limits: the runtime's only two entry points.
+    "maintain_session_usage_limits(integer,integer)",
+    "session_usage_limit_command(jsonb)",
     "ensure_external_identity(uuid,text,text)",
     "lookup_external_identity(uuid,text,text,text)",
     "prepare_external_workspace_membership_operation(jsonb)",

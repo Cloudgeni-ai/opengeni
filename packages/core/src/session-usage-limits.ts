@@ -4,6 +4,7 @@ import {
   readSessionUsageLimit,
   SessionUsageLimitForbiddenError,
   SessionUsageLimitUnavailableError,
+  setInitialSessionUsageLimitInTransaction,
   setSessionUsageLimitInTransaction,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -347,16 +348,13 @@ export async function applyInitialSessionUsageLimit(
     producerEnabled: boolean;
   },
 ): Promise<void> {
-  const result = await setSessionUsageLimitInTransaction(tx as SessionActivityDatabase, {
+  const result = await setInitialSessionUsageLimitInTransaction(tx, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     limitMicros: input.limitMicros,
-    expectedVersion: 0,
-    operationId: `create:${input.sessionId}`,
     actor: input.actor,
     producerEnabled: input.producerEnabled,
-    appendEvent: false,
   });
   if (result.outcome !== "ok" && result.outcome !== "replayed") setResultToHttp(result);
 }

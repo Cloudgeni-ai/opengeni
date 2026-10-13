@@ -407,24 +407,25 @@ export type SessionUsageLimitWriteActor = {
  * canonical workspace/session event-write prefix before the private counter
  * row. Never wakes, resumes or interrupts a turn.
  */
-export async function setSessionUsageLimitInTransaction(
-  db: SessionActivityDatabase,
-  input: Scope & {
-    sessionId: string;
-    limitMicros: number | null;
-    expectedVersion: number;
-    operationId: string;
-    actor: SessionUsageLimitWriteActor;
-    /** Producer flag; when false only clearing (null) is accepted. */
-    producerEnabled: boolean;
-    /**
-     * False only inside the session-creating transaction, which already owns
-     * the new row and whose create response carries the state; later changes
-     * always append `session.usage_limit.updated`.
-     */
-    appendEvent?: boolean;
-  },
-): Promise<SessionUsageLimitSetResult> {
+type SessionUsageLimitSetInput = Scope & {
+  sessionId: string;
+  limitMicros: number | null;
+  expectedVersion: number;
+  operationId: string;
+  actor: SessionUsageLimitWriteActor;
+  /** Producer flag; when false only clearing (null) is accepted. */
+  producerEnabled: boolean;
+};
+
+async function runSetCommand(
+  db: Database,
+  input: SessionUsageLimitSetInput,
+): Promise<{
+  outcome: SessionUsageLimitSetOutcome;
+  state: SessionUsageLimit | null;
+  rootSessionId: string | null;
+  previousLimitMicros: unknown;
+}> {
   if (currentCreditDebitAttribution().kind === "turn") {
     // Installed by the authenticated agent-attempt boundary, never request JSON.
     throw new SessionUsageLimitForbiddenError();
@@ -436,19 +437,6 @@ export async function setSessionUsageLimitInTransaction(
       input.limitMicros > SESSION_USAGE_LIMIT_MAX_MICROS)
   ) {
     throw new RangeError("Session usage limit must be null or 0..$10,000,000 in micros");
-  }
-  const appendEvent = input.appendEvent !== false;
-  const session = appendEvent
-    ? (
-        await lockSessionEventWriteRows(db, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-        })
-      ).sessions.find((row) => row.id === input.sessionId)
-    : null;
-  if (appendEvent && (!session || session.accountId !== input.accountId)) {
-    return { outcome: "not_found", state: null, rootSessionId: null };
   }
   const result = await runCommand(db, {
     action: "set",
@@ -462,10 +450,53 @@ export async function setSessionUsageLimitInTransaction(
     actorType: input.actor.type,
     producerEnabled: input.producerEnabled,
   });
-  const outcome = result.outcome as SessionUsageLimitSetOutcome;
-  const state = result.state ? projectSessionUsageLimitState(result.state) : null;
-  const rootSessionId = typeof result.rootSessionId === "string" ? result.rootSessionId : null;
-  if (outcome !== "ok" || !state || !appendEvent || !session) {
+  return {
+    outcome: result.outcome as SessionUsageLimitSetOutcome,
+    state: result.state ? projectSessionUsageLimitState(result.state) : null,
+    rootSessionId: typeof result.rootSessionId === "string" ? result.rootSessionId : null,
+    previousLimitMicros: result.previousLimitMicros,
+  };
+}
+
+/**
+ * The limit a person or trusted host requested on create, applied inside the
+ * session-creating transaction (which already owns the new row) before the
+ * initial turn can be claimed. No event: the create response carries the
+ * state. Version 0 and a create-scoped operation make it exactly once.
+ */
+export async function setInitialSessionUsageLimitInTransaction(
+  db: Database,
+  input: Omit<SessionUsageLimitSetInput, "expectedVersion" | "operationId">,
+): Promise<SessionUsageLimitSetResult> {
+  const { outcome, state, rootSessionId } = await runSetCommand(db, {
+    ...input,
+    expectedVersion: 0,
+    operationId: `create:${input.sessionId}`,
+  });
+  return { outcome, state, rootSessionId };
+}
+
+/**
+ * A later change to a root's limit: CAS on `expectedVersion`, idempotent on
+ * `operationId`, and a durable `session.usage_limit.updated` event under the
+ * canonical session event-write locks.
+ */
+export async function setSessionUsageLimitInTransaction(
+  db: SessionActivityDatabase,
+  input: SessionUsageLimitSetInput,
+): Promise<SessionUsageLimitSetResult> {
+  const session = (
+    await lockSessionEventWriteRows(db, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    })
+  ).sessions.find((row) => row.id === input.sessionId);
+  if (!session || session.accountId !== input.accountId) {
+    return { outcome: "not_found", state: null, rootSessionId: null };
+  }
+  const { outcome, state, rootSessionId, previousLimitMicros } = await runSetCommand(db, input);
+  if (outcome !== "ok" || !state) {
     return { outcome, state, rootSessionId };
   }
   const sequence = session.lastSequence + 1;
@@ -479,7 +510,7 @@ export async function setSessionUsageLimitInTransaction(
         eq(schema.sessions.id, input.sessionId),
       ),
     );
-  const previous = result.previousLimitMicros;
+  const previous = previousLimitMicros;
   const [event] = await db
     .insert(schema.sessionEvents)
     .values(

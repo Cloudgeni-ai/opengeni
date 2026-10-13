@@ -308,6 +308,12 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // A person's or host's change to a root's usage limit records
+  // session.usage_limit.updated under the canonical control-share locks.
+  "packages/db/src/session-usage-limits.ts#setSessionUsageLimitInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-control.ts#cancelSessionSubtreeInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
