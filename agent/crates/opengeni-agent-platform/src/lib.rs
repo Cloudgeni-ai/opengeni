@@ -77,7 +77,10 @@ pub use error::{PlatformError, PlatformResult};
 pub use exec_handover::{
     discard_inherited_fd, keep_inherited_fd_private, ExecHandover, OpCgroupHandover, ProcHandover,
 };
-pub use native::{assemble_git_response, spawn_contained, ContainedExec, NativePlatform};
+pub use native::{
+    adopt_workspace_working_directory, assemble_git_response, resolve_workspace_root,
+    spawn_contained, ContainedExec, NativePlatform,
+};
 pub use pty::{spawn_pty, PtyProcess};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen

@@ -877,8 +877,14 @@ for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
 continues to use the directory it was launched from, and an explicit session
 `workingDir` still takes precedence.
 
-After installing a release with this fix, regenerate an older service definition
-with `opengeni-agent service install --restart` when no machine work is running.
+The agent also never treats a filesystem root as its workspace, so an older
+service definition needs no manual step: when `run` starts with `/` (or a
+Windows drive root) as its working directory and the user's home directory
+exists, it moves into that home directory before connecting and reports it as
+the workspace root. Any other launch directory is kept as chosen.
+
+Regenerating an older service definition with `opengeni-agent service install
+--restart` is still useful to pick up other plist changes (such as the stderr log).
 The installer checks launchd's loaded binary and working directory as well as the
 plist on disk. If an earlier install wrote the plist but failed before reloading,
 a retry still reloads the stale job without requiring `--restart`. Dry-run
