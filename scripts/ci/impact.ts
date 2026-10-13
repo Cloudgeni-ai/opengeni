@@ -176,6 +176,13 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/events",
   ],
+  "test/integration/session-usage-limit-restart.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/integration/workspace-capture.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
