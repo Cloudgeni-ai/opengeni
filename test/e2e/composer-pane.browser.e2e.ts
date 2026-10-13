@@ -106,13 +106,13 @@ describe("console composer in a split desktop pane", () => {
     await page.screenshot({ path: `${root}/composer-pane-fixed.png` });
   });
 
-  test("shared actions keep repositories, connectors, and variable sets reachable", async () => {
+  test("shared actions keep repositories, connectors, and secrets reachable", async () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     // The menu body is optional lazy code; the loading shell is not action readiness.
     await page.getByRole("menuitem", { name: /^Chat settings\b/ }).waitFor();
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Connectors/ }).isVisible()).toBe(true);
-    expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
+    expect(await page.getByRole("menuitem", { name: /Secrets/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /^Chat settings\b/ }).count()).toBe(1);
     await page.keyboard.press("Escape");
   });
@@ -127,7 +127,7 @@ describe("console composer in a split desktop pane", () => {
       await page.locator("main").evaluate((node) => {
         node.style.width = "min(448px, calc(100vw - 32px))";
       });
-      for (const name of ["Repositories", "Connectors", "Variable sets"]) {
+      for (const name of ["Repositories", "Connectors", "Secrets"]) {
         const plus = page.getByRole("button", { name: "More composer actions" });
         expect(await page.getByRole("button", { name: "More composer actions" }).count()).toBe(1);
         await plus.click();
