@@ -3237,6 +3237,13 @@ mod tests {
         assert!(response.error.is_none(), "{response:?}");
         assert!(dir.path().join("after-idle").is_dir());
         assert_eq!(supervisor.update_drain.snapshot().unwrap().routed, 0);
+        // Accepting an update waits for idle without fencing work; only the
+        // idle attempt's fence closes admission.
+        assert!(supervisor.update_drain.reserve_work(None).is_some());
+        assert_eq!(
+            supervisor.update_drain.fence_update("audit-update"),
+            UpdateReservation::Started
+        );
         assert!(supervisor.update_drain.reserve_work(None).is_none());
     }
 
