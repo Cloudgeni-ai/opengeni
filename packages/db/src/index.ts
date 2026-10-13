@@ -1090,7 +1090,11 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
-export * from "./quiescence-receipt-wake-repair";
+export type { QuiescenceReceiptWakeRepairCursor } from "./quiescence-receipt-wake-repair";
+import {
+  repairMissingQuiescenceReceiptWakesWith,
+  type QuiescenceReceiptWakeRepairCursor,
+} from "./quiescence-receipt-wake-repair";
 export * from "./maintenance-work-probes";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
@@ -73705,6 +73709,17 @@ async function sessionInputWaitStateTx(
   return {
     disposition: wait.inputWaitUntil.getTime() <= dbNow.getTime() ? "timeout" : "held",
   };
+}
+
+/** A keyset cursor lets busy candidates coexist with later eligible sessions.
+ * It is inventory progress only; every target is rechecked and a restart
+ * safely begins another idempotent lap. */
+export function repairMissingQuiescenceReceiptWakes(
+  db: Database,
+  limit = 100,
+  after: QuiescenceReceiptWakeRepairCursor | null = null,
+) {
+  return repairMissingQuiescenceReceiptWakesWith(peekSessionWork, db, limit, after);
 }
 
 export async function peekSessionWork(
