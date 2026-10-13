@@ -101,24 +101,26 @@ async function deliverOne(
  * One bounded, resumable page of the per-task usage limit legacy import.
  * Roots created before the feature stay `preparing` (never shown or
  * admitted as $0 for a write) until this converges them. A failure is retried
- * on a later tick and never blocks webhook delivery.
+ * on a later tick (per-root exponential backoff with its SQLSTATE kept) and
+ * never blocks webhook delivery. The same pass discloses lost single-call
+ * custody markers as unpriced so a crashed process cannot block a task forever.
  */
 async function importLegacySessionUsage(deps: WorkspaceWebhookDispatchDeps): Promise<void> {
   const sink = deps.observability?.incrementCounter ? deps.observability : null;
+  const metrics = sink as Pick<Observability, "incrementCounter"> | null;
   try {
-    const processed = await maintainSessionUsageLimits(deps.db);
-    recordSessionUsageLimitEvent(
-      sink as Pick<Observability, "incrementCounter"> | null,
-      "import",
-      "imported",
-      processed,
-    );
+    const result = await maintainSessionUsageLimits(deps.db);
+    recordSessionUsageLimitEvent(metrics, "import", "imported", result.processed);
+    recordSessionUsageLimitEvent(metrics, "import", "import_failed", result.failed);
+    recordSessionUsageLimitEvent(metrics, "single_call", "lost_resolved", result.resolvedLost);
+    if (result.failed > 0) {
+      deps.observability?.warn("Session usage limit import pages failed", {
+        failed: result.failed,
+        sqlstates: JSON.stringify(result.errors),
+      });
+    }
   } catch (error) {
-    recordSessionUsageLimitEvent(
-      sink as Pick<Observability, "incrementCounter"> | null,
-      "import",
-      "import_failed",
-    );
+    recordSessionUsageLimitEvent(metrics, "import", "import_failed");
     deps.observability?.warn("Session usage limit import failed", { error: errorText(error) });
   }
 }
