@@ -1806,6 +1806,17 @@ The activated database contract is intentionally narrow:
   receipt. A receipt stranded by a completed turn cannot be resumed or
   resolved, so it no longer blocks transitions, whole-session forks or
   Variable Set changes. This is the same predicate Retry already uses.
+  Rolling migration 0759 does the same for pending machine updates (finished
+  background commands, child results, agent messages) that an idle session
+  keeps until its next turn. Such an update blocks only when its frozen
+  authority belongs to someone other than the session owner: a personal
+  connection delegation, subject-scoped account binding or personal
+  subscription authority of another person, a lineage authority subject other
+  than the owner, a user-scoped provider snapshot without its causal subject,
+  or a causal human turn by someone else (an unreadable or malformed causal
+  turn counts as foreign). The owner's own pending updates stay pending across
+  privatization and are delivered by the next turn, because the delivering
+  turn executes with authority the private session could already use.
 - Who can read a session and who can use its sandbox are separate. Since
   rolling migration 0738, a session may become private, or be created private,
   while it shares a sandbox group or Connected Machine with other sessions.
