@@ -99,6 +99,8 @@ const withheldMigrations = [
   "0755_turn_connection_account_intent.sql",
   "0756_turn_connection_account_intent_schema.sql",
   "0758_connection_account_intent_grants.sql",
+  // Reads session_system_updates columns that withheld migrations add.
+  "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
   "0760_queue_steer_admission_recheck_repair.sql",
   "0746_subscription_failover_readiness_and_request_fence.sql",
   "0749_subscription_shared_personal_choice.sql",

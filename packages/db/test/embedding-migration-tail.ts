@@ -3,7 +3,6 @@ import { allowanceMigrationTail } from "./allowance-migration-tail";
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
-  "0760_queue_steer_admission_recheck_repair.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",
@@ -244,6 +243,10 @@ export const embeddingMigrationTail = [
   "0755_turn_connection_account_intent.sql",
   "0756_turn_connection_account_intent_schema.sql",
   "0758_connection_account_intent_grants.sql",
+  // Reads the subscription, binding and provider-snapshot columns of
+  // session_system_updates added by withheld migrations above.
+  "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+  "0760_queue_steer_admission_recheck_repair.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501
