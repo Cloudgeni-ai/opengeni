@@ -11,8 +11,10 @@ import {
   claimSessionRealtimeConnectionInTransaction,
   claimSessionWorkForAttempt,
   completeSessionRealtimeConnectionInTransaction,
+  createConnection,
   createDb,
   createSession,
+  encryptEnvironmentValue,
   endSessionRealtimeInTransaction,
   ensureManagedAccessForUser,
   getActiveSessionHistoryItems,
@@ -37,6 +39,7 @@ import {
 } from "../src/index";
 import * as schema from "../src/schema";
 import { realtimeConnectionFixture } from "./realtime-connection-fixture";
+import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -165,15 +168,20 @@ function transcript(
   };
 }
 
-async function runMode(
+type ModeOptions = {
+  providerStarted?: boolean;
+  baseMs?: number;
+  accounts?: Awaited<ReturnType<typeof realtimeConnectionFixture>>;
+  ownerSubjectLabel?: string;
+  /** Runs after the transcript is recorded, before voice ends. */
+  beforeEnd?: () => Promise<void>;
+};
+
+/** Start voice and record `entries`, leaving the lease open. */
+async function openMode(
   value: Fixture,
   entries: SessionRealtimeInboundEntryInput[],
-  options: {
-    providerStarted?: boolean;
-    baseMs?: number;
-    accounts?: Awaited<ReturnType<typeof realtimeConnectionFixture>>;
-    ownerSubjectLabel?: string;
-  } = {},
+  options: ModeOptions = {},
 ) {
   const baseMs = options.baseMs ?? Date.now();
   const owner = {
@@ -257,6 +265,16 @@ async function runMode(
       }),
     );
   }
+  return { owner, started, claimed, baseMs };
+}
+
+async function runMode(
+  value: Fixture,
+  entries: SessionRealtimeInboundEntryInput[],
+  options: ModeOptions = {},
+) {
+  const { owner, started, claimed, baseMs } = await openMode(value, entries, options);
+  await options.beforeEnd?.();
   const ended = await transaction(value.workspaceId, (tx) =>
     endSessionRealtimeInTransaction(tx, {
       workspaceId: value.workspaceId,
@@ -286,6 +304,123 @@ function sourceEntry(role: "user" | "assistant", text: string): SessionRealtimeC
 }
 
 describe("voice handoff execution policy", () => {
+  async function sharedAccount(value: Fixture, label: string) {
+    const connection = await createConnection(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      subjectId: null,
+      providerDomain: "mcp.example.test",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        Buffer.alloc(32, 19),
+        JSON.stringify({ access_token: "fixture-only" }),
+      ),
+      createdBySubjectId: value.subjectId,
+    });
+    const binding: McpConnectionAccountBinding = {
+      serverId: `account-${connection.id.replaceAll("-", "")}`,
+      canonicalServerId: `shared-${label}`,
+      connectionId: connection.id,
+      originWorkspaceId: value.workspaceId,
+      ownerSubjectId: null,
+      subjectScope: "workspace",
+      providerDomain: "mcp.example.test",
+      kind: "oauth2",
+      accountLabel: `Team ${label}`,
+      connectionRef: {
+        kind: "oauth2",
+        connectionId: connection.id,
+        providerDomain: "mcp.example.test",
+        subjectScope: "workspace",
+      },
+      connectionAuthorityGeneration: connection.connectionAuthorityGeneration!,
+    };
+    return binding;
+  }
+
+  async function handoffTurn(value: Fixture) {
+    const rows = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, value.workspaceId),
+            eq(schema.sessionTurns.sessionId, value.session.id),
+            eq(schema.sessionTurns.surface, "voice"),
+          ),
+        ),
+    );
+    expect(rows).toHaveLength(1);
+    return rows[0]!;
+  }
+
+  test("an expired voice lease whose shared account was disconnected never blocks the chat", async () => {
+    const value = await fixture();
+    const disconnected = await sharedAccount(value, "disconnected");
+    const kept = await sharedAccount(value, "kept");
+    await openMode(value, [transcript("user", "Check the team channel")], {
+      // Voice started long ago and the browser went away without ending it.
+      baseMs: Date.now() - 60 * 60_000,
+      accounts: { mcpAccountBindings: [disconnected, kept], personalConnectionDelegations: [] },
+    });
+    await shared.admin`
+      update connections set status = 'revoked', authority_generation = authority_generation + 1
+      where id = ${disconnected.connectionId}`;
+
+    // The next work claim settles the expired lease and hands its words off.
+    const claim = await claimSessionWorkForAttempt(client.db, value.workspaceId, {
+      sessionId: value.session.id,
+      workflowId: `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+
+    const handoff = await handoffTurn(value);
+    expect(handoff.mcpAccountBindings).toEqual([kept]);
+    expect(handoff.metadata).toMatchObject({
+      connectionAccountGaps: [
+        {
+          serverId: disconnected.serverId,
+          connectionId: disconnected.connectionId,
+          reason: "account_inactive",
+        },
+      ],
+    });
+    const [session] = await transaction(value.workspaceId, (tx) =>
+      tx.select().from(schema.sessions).where(eq(schema.sessions.id, value.session.id)),
+    );
+    expect(session!.admissionBlock).toBeNull();
+  });
+
+  test("a voice handoff after a shared account was reconnected runs without the old account", async () => {
+    const value = await fixture();
+    const reconnected = await sharedAccount(value, "reconnected");
+    const kept = await sharedAccount(value, "kept");
+    await runMode(value, [transcript("user", "Post the summary")], {
+      accounts: { mcpAccountBindings: [reconnected, kept], personalConnectionDelegations: [] },
+      beforeEnd: async () => {
+        await shared.admin`
+          update connections set authority_generation = authority_generation + 1
+          where id = ${reconnected.connectionId}`;
+      },
+    });
+    const handoff = await handoffTurn(value);
+    expect(handoff.mcpAccountBindings).toEqual([kept]);
+    expect(handoff.metadata).toMatchObject({
+      connectionAccountGaps: [
+        {
+          serverId: reconnected.serverId,
+          connectionId: reconnected.connectionId,
+          reason: "account_mismatch",
+        },
+      ],
+    });
+  });
+
   test("voice handoff retains the exact connector accounts frozen when voice started", async () => {
     const value = await privateFixture();
     const accounts = await realtimeConnectionFixture(client.db, {

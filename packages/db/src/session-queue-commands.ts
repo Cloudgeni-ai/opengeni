@@ -15,6 +15,7 @@ import {
   parseAcceptedMcpAccountBindings,
   parseConnectionAccountIntent,
 } from "./mcp-account-bindings";
+import { withoutLapsedWorkspaceAccountBindings } from "./lapsed-workspace-account-bindings";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -2256,6 +2257,21 @@ export async function submitHumanPromptInTransaction(
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+  // An edit copies its source turn's accounts and a voice session hands off
+  // with the accounts frozen when voice started. Either may name a shared
+  // account disconnected or reconnected since; the prompt runs without it
+  // instead of the turn fence refusing the whole prompt.
+  const acceptedAccounts = await withoutLapsedWorkspaceAccountBindings(
+    db as unknown as Database,
+    input.workspaceId,
+    editedSourceTurn
+      ? editedSourceTurn.mcpAccountBindings
+      : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+  );
+  const acceptedTurnMetadata =
+    acceptedAccounts.gaps.length > 0
+      ? { ...input.turnMetadata, connectionAccountGaps: acceptedAccounts.gaps.slice(0, 32) }
+      : input.turnMetadata;
   const effectiveModelContext =
     editedSourceModelContext !== undefined
       ? editedSourceModelContext
@@ -2334,8 +2350,11 @@ export async function submitHumanPromptInTransaction(
             (session.latencyMode as LatencyMode),
           sandboxBackend: session.sandboxBackend,
           metadata: input.turnExecutionPolicy
-            ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
-            : (input.turnMetadata ?? {}),
+            ? metadataWithTurnExecutionPolicyV1(
+                acceptedTurnMetadata ?? {},
+                input.turnExecutionPolicy,
+              )
+            : (acceptedTurnMetadata ?? {}),
           // An edit names the exact withdrawn turn it copies, so the database
           // resolves the same source for accepted authority (0716).
           lineage: editedSourceTurn
@@ -2346,9 +2365,7 @@ export async function submitHumanPromptInTransaction(
           personalConnectionDelegations: editedSourceTurn
             ? editedSourceTurn.personalConnectionDelegations
             : (input.personalConnectionDelegations ?? []),
-          mcpAccountBindings: editedSourceTurn
-            ? editedSourceTurn.mcpAccountBindings
-            : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+          mcpAccountBindings: acceptedAccounts.bindings,
           connectionAccountIntent: editedSourceTurn
             ? parseConnectionAccountIntent(editedSourceTurn.connectionAccountIntent)
             : parseConnectionAccountIntent(input.connectionAccountIntent),
