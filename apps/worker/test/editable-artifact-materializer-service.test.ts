@@ -82,6 +82,16 @@ describe("editable artifact materializer sidecar service", () => {
         "unsafe role posture",
       );
     }
+    await expect(
+      assertDedicatedMaterializerDatabaseRole(
+        postureDatabase({ current_role: "opengeni_app", session_role: "opengeni_app" }),
+      ),
+    ).rejects.toThrow("connected as role opengeni_app (session role opengeni_app)");
+    await expect(
+      assertDedicatedMaterializerDatabaseRole(
+        postureDatabase({ can_select_jobs: true, can_delete_jobs: true }),
+      ),
+    ).rejects.toThrow("direct SELECT, DELETE on editable_artifact_materialization_jobs");
   });
 
   test("disabled sidecar ignores ordinary DB configuration and never starts accidentally", () => {
