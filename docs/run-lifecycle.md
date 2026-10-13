@@ -1243,13 +1243,24 @@ version and session event sequence. The migration aborts atomically if any
 target changed, has another executable turn (withdrawn drafts are preserved), or lacks a closed, physically
 quiesced recoverable attempt with no live writers. Canonical failure settlement
 closes its interactions, fails pending inputs/runs, suppresses unchanged goal
-continuation and enqueues the existing failed-child result. It creates no attempt
-or prompt, preserves history and Pause, and changes the turn/session to failed.
+continuation and changes the turn/session to failed. It creates no attempt or
+prompt, and preserves history and Pause. After every target passes its reviewed
+fences, a second phase appends one passive parent timeline receipt per retired
+child in the same transaction. This phase order prevents a selected child's
+receipt from invalidating its selected parent's sequence fence. The receipt is
+visible when someone opens the parent chat, but creates no input, child outbox
+row, wake, parent turn, goal continuation or model-history item. It supersedes
+that child's obsolete pending nonterminal notices and exact retired-turn result
+inputs/outboxes; earlier terminal answers and unrelated senders remain intact.
+Captured retries of superseded outbox rows fail their source callback atomically.
 Replaying the same manifest matches the exact audit receipt, not a newer epoch.
 Without a manifest an ordinary upgrade changes only recovery discovery.
 Operator reasons and manifest fences stay in the audit timeline; any realtime
 terminal uses the existing generic failure projection and preserves earlier
-context byte-for-byte. The child result also keeps its existing failed format.
+context byte-for-byte. Deploy the notification-only retirement implementation
+before applying a manifest: replay of an older actionable retirement receipt
+fails closed rather than claiming that no parent execution occurred. Migration
+0764's frozen SQL is unchanged; this is the migration runner's operator hook.
 
 Build the private manifest with a read-only query (psql variables
 `workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its
@@ -1289,8 +1300,7 @@ WHERE s.workspace_id = :'workspace_id'::uuid
 
 Verify that the exact operation settled its selected turns, emitted no new
 attempt, and left no active pointer to them. Compare `retired` to the reviewed
-manifest count; the other three counts must be zero. Parent results remain in
-the ordinary durable child outbox, including after normal delivery.
+manifest count; the other three counts must be zero.
 
 ```sql
 WITH retired AS (
@@ -1305,9 +1315,67 @@ SELECT count(*) AS retired,
   count(*) FILTER (WHERE EXISTS (
     SELECT 1 FROM session_turn_attempts a WHERE a.workspace_id = t.workspace_id
       AND a.session_id = t.session_id AND a.turn_id = t.id
-      AND a.created_at >= r.occurred_at)) AS replayed_turns
+      AND a.started_at >= r.occurred_at)) AS replayed_turns
 FROM retired r JOIN session_turns t ON t.id = r.turn_id
 JOIN sessions s ON s.id = r.session_id;
+```
+
+Run the following immediately after the operation, or set `verify_before` to a
+captured verification timestamp. `parent_receipts` must equal the manifest's
+selected children with parents, and every other count must be zero. The start
+check includes both `turn.started` events (including pre-existing queued turns)
+and newly created turns/attempts. Unrelated human or already-authorized background
+work during this window can produce starts; investigate any nonzero count rather
+than attributing it automatically to retirement. Old unrelated pending inputs
+are deliberately not hidden by these checks.
+
+```sql
+WITH retired AS (
+  SELECT id, session_id, turn_id, occurred_at FROM session_events
+  WHERE workspace_id = :'workspace_id'::uuid AND type = 'turn.failed'
+    AND payload->>'code' = 'interrupted_turn_retired'
+    AND payload->>'retirementOperationId' = :'operation_id'
+), children AS (
+  SELECT r.*, s.parent_session_id FROM retired r
+  JOIN sessions s ON s.id = r.session_id
+), parents AS (
+  SELECT DISTINCT parent_session_id AS id FROM children
+  WHERE parent_session_id IS NOT NULL
+), operation_window AS (
+  SELECT min(occurred_at) AS began, :'verify_before'::timestamptz AS ended FROM retired
+)
+SELECT
+  (SELECT count(*) FROM session_events e JOIN children c
+    ON e.session_id = c.parent_session_id
+    AND e.payload->>'childTerminalEventId' = c.id::text
+    WHERE e.workspace_id = :'workspace_id'::uuid
+      AND e.type = 'system.update.settled'
+      AND e.payload->>'notificationOnly' = 'true'
+      AND e.payload->>'retirementOperationId' = :'operation_id') AS parent_receipts,
+  (SELECT count(*) FROM session_system_updates u JOIN children c
+    ON u.session_id = c.parent_session_id AND u.source_id = c.session_id::text
+    WHERE u.workspace_id = :'workspace_id'::uuid AND u.state = 'pending'
+      AND (u.kind IN ('child_requires_action','child_requires_action_resolved',
+        'child_paused','child_waiting_capacity','child_progress')
+        OR (u.kind = 'child_terminal_result' AND u.payload->>'turnId' = c.turn_id::text)))
+      AS pending_retired_child_inputs,
+  (SELECT count(*) FROM session_system_update_outbox o JOIN children c
+    ON o.target_session_id = c.parent_session_id AND o.source_session_id = c.session_id
+    WHERE o.workspace_id = :'workspace_id'::uuid AND o.status = 'pending'
+      AND (o.kind IN ('child_requires_action','child_requires_action_resolved',
+        'child_paused','child_waiting_capacity','child_progress')
+        OR (o.kind = 'child_terminal_result' AND o.payload->>'turnId' = c.turn_id::text)))
+      AS pending_retired_child_outboxes,
+  (SELECT count(*) FROM session_events e JOIN parents p ON p.id = e.session_id
+    CROSS JOIN operation_window w WHERE e.workspace_id = :'workspace_id'::uuid
+      AND e.type = 'turn.started' AND e.occurred_at >= w.began AND e.occurred_at <= w.ended)
+      AS parent_turns_started,
+  (SELECT count(*) FROM session_turns t JOIN parents p ON p.id = t.session_id
+    CROSS JOIN operation_window w WHERE t.workspace_id = :'workspace_id'::uuid
+      AND t.created_at >= w.began AND t.created_at <= w.ended) AS parent_turns_created,
+  (SELECT count(*) FROM session_turn_attempts a JOIN parents p ON p.id = a.session_id
+    CROSS JOIN operation_window w WHERE a.workspace_id = :'workspace_id'::uuid
+      AND a.started_at >= w.began AND a.started_at <= w.ended) AS parent_attempts_created;
 ```
 
 The initial session status and replay cursor come from one SQL statement

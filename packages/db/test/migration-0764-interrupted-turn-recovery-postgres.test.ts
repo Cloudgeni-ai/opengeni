@@ -2,22 +2,35 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import {
   addSessionSystemUpdate,
+  addSessionSystemUpdateWithSourceMutation,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  childProgressDedupeKey,
+  configureChildLifecycleNotices,
   createDb,
   createSession,
   getSessionHistoryItems,
+  getSessionSystemUpdateOutboxByDedupeKey,
   initializeSessionStartAtomically,
   markSessionAttemptQuiesced,
+  markSessionSystemUpdateOutboxDeliveredInTransaction,
+  markSessionWorkflowWakeDelivered,
   mutateSessionControlInTransaction,
   requestSessionTurnRecovery,
+  recordSessionGoalProgressWithEvent,
+  repairPendingChildTerminalResultWakes,
+  peekSessionWork,
+  sessionSystemUpdateOutboxKindPayload,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import { executeMigrationFile, migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { withRestoredSessionActivityRlsContext } from "../src/database";
 import {
   INTERRUPTED_TURN_RETIREMENT_MIGRATION as MIGRATION,
   parseInterruptedTurnRetirementManifest,
@@ -78,9 +91,11 @@ async function start(
     turn: { id: string; executionGeneration: number };
     attemptId: string;
   },
+  options: { goal?: boolean; requestedSessionId?: string } = {},
 ) {
   const session = await createSession(client.db, {
     ...scope,
+    ...(options.requestedSessionId ? { requestedSessionId: options.requestedSessionId } : {}),
     initialMessage: "Accepted work",
     resources: [],
     metadata: {},
@@ -107,7 +122,7 @@ async function start(
     sessionId: session.id,
     reasoningEffortFallback: "medium",
     createdEventPayload: {},
-    goal: { text: "Complete accepted work" },
+    ...(options.goal === false ? {} : { goal: { text: "Complete accepted work" } }),
   });
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
@@ -186,7 +201,333 @@ async function repair(manifest?: InterruptedTurnRetirementManifest) {
   }
 }
 
-test("the owner repair is opt-in, settles exact interrupted work and delivers one existing-format child result", async () => {
+test("retirement leaves an idle parent non-runnable with no inbox, wake or new turn", async () => {
+  const scope = await fixture();
+  const parent = await start(scope, undefined, { goal: false });
+  const child = await start(scope, parent);
+  await interrupt(scope, child);
+  expect(
+    await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: parent.session.id,
+      turnId: parent.turn.id,
+      triggerEventId: parent.turn.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { reason: "fixture" } }],
+    }),
+  ).toMatchObject({ action: "settled" });
+  const [wakeBefore] = await shared.admin`select * from session_workflow_wake_outbox
+    where session_id = ${parent.session.id}`;
+  expect(
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: parent.session.id,
+      temporalWorkflowId: `session-${parent.session.id}`,
+      wakeRevision: Number(wakeBefore!.wake_revision),
+    }),
+  ).toMatchObject({ action: "acknowledged" });
+  const [baselineWake] = await shared.admin`select * from session_workflow_wake_outbox
+    where session_id = ${parent.session.id}`;
+  const baselineHistory = await getSessionHistoryItems(
+    client.db,
+    scope.workspaceId,
+    parent.session.id,
+  );
+  const baselineTurns = [
+    ...(await shared.admin`select * from session_turns where session_id = ${parent.session.id}`),
+  ];
+  const baselineAttempts = [
+    ...(await shared.admin`select * from session_turn_attempts where session_id = ${parent.session.id}`),
+  ];
+  const manifest = { operationId: crypto.randomUUID(), targets: [await target(scope, child)] };
+  await repair(manifest);
+
+  // Run the real outbox delivery boundary, not a mocked wake decision. The
+  // previous implementation emits an actionable result here and queues this
+  // otherwise idle parent. Notification-only retirement emits no such row.
+  const outbox = await getSessionSystemUpdateOutboxByDedupeKey(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    dedupeKey: `child-completion:${child.session.id}:turn:${child.turn.id}`,
+  });
+  let shouldWake = false;
+  if (outbox && outbox.status === "pending") {
+    const result = await addSessionSystemUpdateWithSourceMutation(
+      client.db,
+      {
+        accountId: outbox.accountId,
+        workspaceId: outbox.workspaceId,
+        sessionId: outbox.targetSessionId,
+        ...sessionSystemUpdateOutboxKindPayload(outbox),
+        classification: outbox.classification,
+        sourceId: outbox.sourceId,
+        dedupeKey: outbox.dedupeKey,
+        summary: outbox.summary,
+        lineage: outbox.lineage,
+        personalConnectionDelegations: outbox.personalConnectionDelegations,
+        mcpAccountBindings: outbox.mcpAccountBindings,
+        xaiProviderAccountAuthoritySnapshot: outbox.xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot: outbox.claudeProviderAccountAuthoritySnapshot,
+        subscriptionAuthority: outbox.subscriptionAuthority,
+      },
+      async (tx) => await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox),
+    );
+    shouldWake = "shouldWake" in result && result.shouldWake;
+  }
+  expect(shouldWake).toBe(false);
+  expect((await peekSessionWork(client.db, scope.workspaceId, parent.session.id)).kind).toBe(
+    "idle",
+  );
+  const sweep = await repairPendingChildTerminalResultWakes(client.db);
+  expect(sweep.registered).toBe(0);
+  expect(sweep.failed).toBe(0);
+  expect(
+    await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    }),
+  ).toEqual({ action: "unclaimed", reason: "no-work" });
+  const [after] =
+    await shared.admin`select status,active_turn_id from sessions where id = ${parent.session.id}`;
+  expect(after).toMatchObject({ status: "idle", active_turn_id: null });
+  const [pending] = await shared.admin`select count(*)::int as count from session_system_updates
+    where session_id = ${parent.session.id} and state = 'pending'`;
+  expect(pending!.count).toBe(0);
+  const [wakeAfter] = await shared.admin`select * from session_workflow_wake_outbox
+    where session_id = ${parent.session.id}`;
+  expect(wakeAfter).toEqual(baselineWake);
+  expect([
+    ...(await shared.admin`select * from session_turns where session_id = ${parent.session.id}`),
+  ]).toEqual(baselineTurns);
+  expect([
+    ...(await shared.admin`select * from session_turn_attempts where session_id = ${parent.session.id}`),
+  ]).toEqual(baselineAttempts);
+  expect(await getSessionHistoryItems(client.db, scope.workspaceId, parent.session.id)).toEqual(
+    baselineHistory,
+  );
+  // Tenancy cutover is an owner-only maintenance capability, not an app grant.
+  const owner = createDb(shared.ownerUrl);
+  try {
+    await owner.db.transaction(async (tx) => {
+      await withRestoredSessionActivityRlsContext(tx, scope, async (scoped) => {
+        await scoped.execute(sql`select assert_session_tenancy_quiescent(${scope.accountId}::uuid,
+          ${scope.workspaceId}::uuid, ${parent.session.id}::uuid, false)`);
+      });
+    });
+  } finally {
+    await owner.close();
+  }
+  const [receipts] = await shared.admin`select count(*)::int as count from session_events
+    where session_id = ${parent.session.id} and type = 'system.update.settled'
+      and payload->>'retirementOperationId' = ${manifest.operationId}
+      and payload->>'notificationOnly' = 'true'`;
+  expect(receipts!.count).toBe(1);
+  // Exercise the exact operator verification SELECT, including pre-existing
+  // queued-turn starts rather than relying only on new turn row timestamps.
+  const runbook = await readFile(join(import.meta.dir, "../../../docs/run-lifecycle.md"), "utf8");
+  const verification = [...runbook.matchAll(/```sql\n([\s\S]*?)\n```/g)]
+    .map((match) => match[1]!)
+    .find((query) => query.includes("AS parent_receipts"));
+  if (!verification) throw new Error("Missing parent retirement verification SELECT");
+  const [counts] = await shared.admin.unsafe(
+    verification
+      .replaceAll(":'workspace_id'", "$1")
+      .replaceAll(":'operation_id'", "$2")
+      .replaceAll(":'verify_before'", "$3"),
+    [scope.workspaceId, manifest.operationId, new Date().toISOString()],
+  );
+  expect(counts).toMatchObject({
+    parent_receipts: "1",
+    pending_retired_child_inputs: "0",
+    pending_retired_child_outboxes: "0",
+    parent_turns_started: "0",
+    parent_turns_created: "0",
+    parent_attempts_created: "0",
+  });
+}, 60_000);
+
+test("a selected child's receipt cannot invalidate a selected parent's manifest cursor", async () => {
+  const scope = await fixture();
+  const parent = await start(scope, undefined, {
+    goal: false,
+    requestedSessionId: crypto.randomUUID().replace(/^./, "f"),
+  });
+  const child = await start(scope, parent, {
+    requestedSessionId: crypto.randomUUID().replace(/^./, "0"),
+  });
+  await interrupt(scope, child);
+  await interrupt(scope, parent);
+  const manifest = {
+    operationId: crypto.randomUUID(),
+    targets: [await target(scope, parent), await target(scope, child)],
+  };
+  expect(child.session.id < parent.session.id).toBe(true);
+  await repair(manifest);
+  const rows = [
+    ...(await shared.admin`select status from session_turns where id in (${parent.turn.id},${child.turn.id})`),
+  ];
+  expect(rows.map((row) => row.status)).toEqual(["failed", "failed"]);
+  await repair(manifest);
+  const receipts = [
+    ...(await shared.admin`select id from session_events where session_id = ${parent.session.id}
+    and type = 'system.update.settled' and payload->>'retirementOperationId' = ${manifest.operationId}`),
+  ];
+  expect(receipts).toHaveLength(1);
+}, 60_000);
+
+test("retirement supersedes obsolete notices and rejects captured delivery without losing other results", async () => {
+  configureChildLifecycleNotices({ enabled: true });
+  try {
+    const scope = await fixture();
+    const parent = await start(scope, undefined, { goal: false });
+    const child = await start(scope, parent);
+    const progress = await recordSessionGoalProgressWithEvent(
+      client.db,
+      scope.workspaceId,
+      child.session.id,
+      {
+        progressNote: "Still working",
+        command: {
+          accountId: scope.accountId,
+          actor: {
+            type: "agent_attempt",
+            sessionId: child.session.id,
+            turnId: child.turn.id,
+            attemptId: child.attemptId,
+            executionGeneration: child.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      },
+    );
+    const progressRow = await getSessionSystemUpdateOutboxByDedupeKey(client.db, {
+      ...scope,
+      dedupeKey: childProgressDedupeKey({
+        childSessionId: child.session.id,
+        receiptId: progress.operationId,
+      }),
+    });
+    if (!progressRow) throw new Error("Missing progress producer");
+    const deliver = (row: typeof progressRow) =>
+      addSessionSystemUpdateWithSourceMutation(
+        client.db,
+        {
+          accountId: row.accountId,
+          workspaceId: row.workspaceId,
+          sessionId: row.targetSessionId,
+          ...sessionSystemUpdateOutboxKindPayload(row),
+          classification: row.classification,
+          sourceId: row.sourceId,
+          dedupeKey: row.dedupeKey,
+          summary: row.summary,
+          lineage: row.lineage,
+          personalConnectionDelegations: row.personalConnectionDelegations,
+          mcpAccountBindings: row.mcpAccountBindings,
+          xaiProviderAccountAuthoritySnapshot: row.xaiProviderAccountAuthoritySnapshot,
+          claudeProviderAccountAuthoritySnapshot: row.claudeProviderAccountAuthoritySnapshot,
+          subscriptionAuthority: row.subscriptionAuthority,
+        },
+        async (tx) => await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, row),
+      );
+    await deliver(progressRow);
+    await interrupt(scope, child);
+    const [paused] = await shared.admin`select dedupe_key from session_system_update_outbox
+      where source_session_id = ${child.session.id} and kind = 'child_paused' and status = 'pending'`;
+    if (!paused) throw new Error("Missing captured pause producer");
+    const captured = await getSessionSystemUpdateOutboxByDedupeKey(client.db, {
+      ...scope,
+      dedupeKey: String(paused.dedupe_key),
+    });
+    if (!captured) throw new Error("Missing captured producer");
+    const requestId = crypto.randomUUID();
+    // Synthetic historical interaction left behind by the interrupted attempt.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into session_human_input_requests
+        (id,account_id,workspace_id,session_id,turn_id,turn_generation,creation_attempt_id,tool_call_id,questions)
+        values (${requestId},${scope.accountId},${scope.workspaceId},${child.session.id},
+          ${child.turn.id},${child.turn.executionGeneration},${child.attemptId},'fixture-question',
+          '[{"id":"choice","kind":"text","prompt":"Which option?","options":[],"required":true,"allowOther":false}]'::jsonb)`;
+    });
+    const priorResultKey = crypto.randomUUID();
+    const otherSenderKey = crypto.randomUUID();
+    await addSessionSystemUpdate(client.db, {
+      ...scope,
+      sessionId: parent.session.id,
+      kind: "child_terminal_result",
+      classification: "info",
+      sourceId: child.session.id,
+      dedupeKey: priorResultKey,
+      summary: "Earlier terminal answer",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: child.session.id,
+        status: "idle",
+        turnId: crypto.randomUUID(),
+      },
+    });
+    await addSessionSystemUpdate(client.db, {
+      ...scope,
+      sessionId: parent.session.id,
+      kind: "child_terminal_result",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: otherSenderKey,
+      summary: "Unrelated terminal answer",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    const manifest = { operationId: crypto.randomUUID(), targets: [await target(scope, child)] };
+    await repair(manifest);
+    const inputs = await shared.admin`select dedupe_key,state from session_system_updates
+      where session_id = ${parent.session.id}`;
+    expect(inputs.find((row) => row.dedupe_key === progressRow.dedupeKey)?.state).toBe(
+      "superseded",
+    );
+    expect(inputs.find((row) => row.dedupe_key === priorResultKey)?.state).toBe("pending");
+    expect(inputs.find((row) => row.dedupe_key === otherSenderKey)?.state).toBe("pending");
+    const [source] =
+      await shared.admin`select status from session_system_update_outbox where id = ${captured.id}`;
+    expect(source!.status).toBe("failed");
+    const [question] =
+      await shared.admin`select status from session_human_input_requests where id = ${requestId}`;
+    expect(question!.status).toBe("cancelled");
+    const [resolution] =
+      await shared.admin`select count(*)::int as count from session_system_update_outbox
+      where source_session_id = ${child.session.id} and kind = 'child_requires_action_resolved'`;
+    expect(resolution!.count).toBe(0);
+    const beforeInputs = [...inputs];
+    const beforeWake = [
+      ...(await shared.admin`select * from session_workflow_wake_outbox where session_id = ${parent.session.id}`),
+    ];
+    await expect(deliver(captured)).rejects.toThrow("System-update outbox row not pending");
+    expect([
+      ...(await shared.admin`select dedupe_key,state from session_system_updates where session_id = ${parent.session.id}`),
+    ]).toEqual(beforeInputs);
+    expect([
+      ...(await shared.admin`select * from session_workflow_wake_outbox where session_id = ${parent.session.id}`),
+    ]).toEqual(beforeWake);
+    await repair(manifest);
+    const [receipts] = await shared.admin`select count(*)::int as count from session_events
+      where session_id = ${parent.session.id} and type = 'system.update.settled'
+      and payload->>'retirementOperationId' = ${manifest.operationId}`;
+    expect(receipts!.count).toBe(1);
+  } finally {
+    configureChildLifecycleNotices({ enabled: false });
+  }
+}, 60_000);
+
+test("the owner repair is opt-in, settles exact interrupted work and records one non-actionable parent receipt", async () => {
   const scope = await fixture();
   const parent = await start(scope);
   const child = await start(scope, parent);
@@ -282,11 +623,18 @@ test("the owner repair is opt-in, settles exact interrupted work and delivers on
     history,
   );
   const notices = [
-    ...(await shared.admin`select payload, dedupe_key from session_system_update_outbox
-    where target_session_id = ${parent.session.id} and kind = 'child_terminal_result'`),
+    ...(await shared.admin`select payload from session_events
+    where session_id = ${parent.session.id} and type = 'system.update.settled'
+      and payload->>'retirementOperationId' = ${manifest.operationId}`),
   ];
   expect(notices).toHaveLength(1);
-  expect(notices[0]!.payload).toMatchObject({ status: "failed", turnId: child.turn.id });
+  expect(notices[0]!.payload).toMatchObject({
+    notificationOnly: true,
+    childTurnId: child.turn.id,
+    members: [
+      { kind: "child_terminal_result", classification: "failure", sourceId: child.session.id },
+    ],
+  });
   const [pending] = await shared.admin`select count(*)::int as count from session_system_updates
     where session_id = ${child.session.id} and state = 'pending'`;
   expect(pending!.count).toBe(0);
@@ -324,9 +672,13 @@ test("the owner repair is opt-in, settles exact interrupted work and delivers on
     ...(await shared.admin`select id from session_events where session_id = ${child.session.id}`),
   ]).toHaveLength(count);
   expect([
-    ...(await shared.admin`select id from session_system_update_outbox where target_session_id = ${parent.session.id}
-    and kind = 'child_terminal_result'`),
+    ...(await shared.admin`select id from session_events where session_id = ${parent.session.id}
+    and type = 'system.update.settled' and payload->>'retirementOperationId' = ${manifest.operationId}`),
   ]).toHaveLength(1);
+  expect([
+    ...(await shared.admin`select id from session_system_update_outbox where source_session_id = ${child.session.id}
+    and status = 'pending'`),
+  ]).toHaveLength(0);
   const [posture] =
     await shared.admin`select bool_and(relrowsecurity and relforcerowsecurity) as forced
     from pg_class where oid in ('sessions'::regclass, 'session_turns'::regclass, 'session_turn_attempts'::regclass)`;

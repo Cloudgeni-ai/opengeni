@@ -274,6 +274,10 @@ quiesced recoveries with lost wakes (0764), using ordinary admission blockers.
 Migration 0764 may terminally retire an operator-selected, exact version and
 event-sequence-fenced manifest without replay. No manifest means no retirement:
 Pause remains resumable, and historical age alone grants no cancellation intent.
+Historical child retirement appends a passive, idempotent parent timeline receipt,
+not an executable child-result input. It supersedes that child's obsolete pending
+nonterminal notices without changing parent control, wakes or model history.
+All manifest targets settle before parent receipts advance any event cursors.
 Reusable schedules skip under effective Pause instead of reserving an input
 that cannot execute; Resume makes later occurrences eligible normally.
 

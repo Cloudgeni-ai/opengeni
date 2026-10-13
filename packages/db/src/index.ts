@@ -74600,6 +74600,185 @@ export async function retireInterruptedSessionTurn(
   );
 }
 
+/** Operator retirement is a terminal historical receipt, not fresh execution
+ * intent for the parent. Called only after all manifest fences have passed,
+ * in the same transaction as their retirement. Normal child delivery is not
+ * changed, and neither existing model history nor parent control is touched. */
+export async function recordRetiredChildNotice(
+  db: Database,
+  workspaceId: string,
+  input: { accountId: string; sessionId: string } & InterruptedTurnRetirementProof,
+): Promise<SessionEvent | null> {
+  return await retrySessionActivityRls(
+    db,
+    workspaceId,
+    {
+      stage: "session_lifecycle_outbox.retirement_notice",
+      eventTypes: ["system.update.settled"],
+      maxAttempts: 3,
+    },
+    async (scoped) =>
+      await scoped.transaction(async (tx) => {
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(
+          tx as unknown as Database,
+          workspaceId,
+          {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+          },
+        );
+        const child = locks.session;
+        if (!locks.workspace || child.accountId !== input.accountId || child.status !== "failed")
+          throw new Error("Retired child notice scope or terminal state changed");
+        if (!child.parentSessionId) return null;
+        const parent = locks.sessions.find((row) => row.id === child.parentSessionId);
+        const turn = locks.turns.find((row) => row.id === input.turnId);
+        if (!parent || !turn || turn.status !== "failed" || turn.sessionId !== child.id)
+          throw new Error("Retired child notice lost its canonical parent or turn");
+        const [terminal] = await tx
+          .select({
+            id: schema.sessionEvents.id,
+            payload: schema.sessionEvents.payload,
+            payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+          })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, child.id),
+              eq(schema.sessionEvents.turnId, turn.id),
+              eq(schema.sessionEvents.type, "turn.failed"),
+              sql`${schema.sessionEvents.payload}->>'code' = 'interrupted_turn_retired'`,
+              sql`${schema.sessionEvents.payload}->>'retirementOperationId' = ${input.operationId}`,
+              sql`${schema.sessionEvents.payload}->>'retiredVersion' = ${String(input.expectedVersion)}`,
+              sql`${schema.sessionEvents.payload}->>'retiredLastSequence' = ${String(input.expectedLastSequence)}`,
+            ),
+          )
+          .limit(1);
+        if (
+          !terminal ||
+          sessionEventPayloadRecord(terminal.payload, terminal.payloadCodecVersion)
+            .parentNotificationMode !== "timeline_only"
+        )
+          throw new Error("Retired child notice requires the notification-only retirement receipt");
+        const [existing] = await tx
+          .select()
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, parent.id),
+              eq(schema.sessionEvents.type, "system.update.settled"),
+              sql`${schema.sessionEvents.payload}->>'retirementOperationId' = ${input.operationId}`,
+              sql`${schema.sessionEvents.payload}->>'childTerminalEventId' = ${terminal.id}`,
+            ),
+          )
+          .limit(1);
+        if (existing) return mapEvent(existing);
+
+        // A terminal historical retirement also supersedes this child's obsolete
+        // nonterminal notices. Preserve earlier terminal answers and all unrelated
+        // senders. Captured outbox retries lose atomically at their source callback.
+        const nonterminalKinds = [
+          "child_requires_action",
+          "child_requires_action_resolved",
+          "child_paused",
+          "child_waiting_capacity",
+          "child_progress",
+        ];
+        const obsoleteInput = or(
+          inArray(schema.sessionSystemUpdates.kind, nonterminalKinds),
+          and(
+            eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
+            sql`${schema.sessionSystemUpdates.payload}->>'turnId' = ${turn.id}`,
+          ),
+        );
+        const obsoleteOutbox = or(
+          inArray(schema.sessionSystemUpdateOutbox.kind, nonterminalKinds),
+          and(
+            eq(schema.sessionSystemUpdateOutbox.kind, "child_terminal_result"),
+            sql`${schema.sessionSystemUpdateOutbox.payload}->>'turnId' = ${turn.id}`,
+          ),
+        );
+        const supersededInputs = await tx
+          .update(schema.sessionSystemUpdates)
+          .set({ state: "superseded" })
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, parent.id),
+              eq(schema.sessionSystemUpdates.sourceId, child.id),
+              eq(schema.sessionSystemUpdates.state, "pending"),
+              obsoleteInput,
+            ),
+          )
+          .returning({ id: schema.sessionSystemUpdates.id });
+        const supersededOutbox = await tx
+          .update(schema.sessionSystemUpdateOutbox)
+          .set({
+            status: "failed",
+            lastError: "Superseded by operator retirement; see the parent timeline receipt.",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionSystemUpdateOutbox.workspaceId, workspaceId),
+              eq(schema.sessionSystemUpdateOutbox.sourceSessionId, child.id),
+              eq(schema.sessionSystemUpdateOutbox.targetSessionId, parent.id),
+              eq(schema.sessionSystemUpdateOutbox.status, "pending"),
+              obsoleteOutbox,
+            ),
+          )
+          .returning({ id: schema.sessionSystemUpdateOutbox.id });
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: parent.accountId,
+                workspaceId,
+                sessionId: parent.id,
+                sequence: parent.lastSequence + 1,
+                type: "system.update.settled",
+                payload: {
+                  notificationOnly: true,
+                  reason: "operator_retirement",
+                  retirementOperationId: input.operationId,
+                  childSessionId: child.id,
+                  childTurnId: turn.id,
+                  childTerminalEventId: terminal.id,
+                  supersededUpdateIds: supersededInputs.map((row) => row.id).sort(),
+                  supersededOutboxIds: supersededOutbox.map((row) => row.id).sort(),
+                  members: [
+                    {
+                      id: terminal.id,
+                      kind: "child_terminal_result",
+                      classification: "failure",
+                      sourceId: child.id,
+                      summary: "Child work was interrupted and retired without replay.",
+                    },
+                  ],
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Retired child notice was not recorded");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: parent.lastSequence + 1, updatedAt: now })
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, parent.id)),
+          );
+        return mapEvent(event);
+      }),
+  );
+}
+
 async function settleSessionWorkBeforeAttemptClaim(
   db: Database,
   workspaceId: string,
@@ -74920,10 +75099,10 @@ async function settleSessionWorkBeforeAttemptClaim(
               questions: schema.sessionHumanInputRequests.questions,
               turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
             });
-          // The child's blocked boundary died with the turn: resolve each
-          // request for the parent (locked by the child-lifecycle prefix
-          // above) so its pending child_requires_action can be superseded.
-          for (const request of cancelledHumanInputs) {
+          // Normal failure resolves each request for the parent. Historical
+          // retirement supersedes obsolete notices in its later passive phase;
+          // never create a fresh resolution input that could wake old work.
+          for (const request of retirement ? [] : cancelledHumanInputs) {
             await enqueueChildRequiresActionResolvedOutboxTx(
               tx as unknown as Database,
               workspaceId,
@@ -75028,6 +75207,7 @@ async function settleSessionWorkBeforeAttemptClaim(
                           retirementOperationId: retirement.operationId,
                           retiredVersion: retirement.expectedVersion,
                           retiredLastSequence: retirement.expectedLastSequence,
+                          parentNotificationMode: "timeline_only",
                           failedSystemUpdateIds,
                         }
                       : {}),
@@ -75149,12 +75329,13 @@ async function settleSessionWorkBeforeAttemptClaim(
                 eq(schema.sessionTurns.id, turn.id),
               ),
             );
-          await enqueueFailedChildOutboxForTurnTx(
-            tx as unknown as Database,
-            workspaceId,
-            session,
-            turn,
-          );
+          if (!retirement)
+            await enqueueFailedChildOutboxForTurnTx(
+              tx as unknown as Database,
+              workspaceId,
+              session,
+              turn,
+            );
         } else {
           await enqueueFailedChildOutboxWithoutTurnTx(
             tx as unknown as Database,
