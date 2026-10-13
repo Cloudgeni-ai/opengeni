@@ -1176,6 +1176,58 @@ describe("session usage limit remediation (real PostgreSQL, non-bypass app role)
     ).rejects.toBeInstanceOf(SessionUsageLimitUnavailableError);
   }
 
+  test("a serialization failure inside the caller's transaction reaches the caller, whose retry records the receipt once", async () => {
+    if (!shared) return;
+    const scope = await fixture();
+    const root = await newSession(scope);
+    expect((await settle(scope, root, "turn-rr:r0", 5)).outcome).toBe("recorded");
+    const sqlStateOf = (error: unknown): string | undefined => {
+      let current: unknown = error;
+      for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+        const code = (current as { code?: unknown }).code;
+        if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+        current = (current as { cause?: unknown }).cause;
+      }
+      return undefined;
+    };
+    let attempts = 0;
+    let firstFailure: unknown;
+    const runOuter = async () =>
+      await app.db.transaction(
+        async (tx) => {
+          attempts += 1;
+          // The repeatable-read snapshot starts here.
+          await tx.execute(sql`select 1`);
+          if (attempts === 1) {
+            // Another writer advances the same root's counter after the snapshot.
+            expect((await settle(scope, root, "turn-rr:r1", 7)).outcome).toBe("recorded");
+          }
+          return await settleSessionUsageReceipt(tx, {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId: root,
+            sourceId: "turn-rr:r2",
+            turnId: null,
+            amountMicros: 11,
+            pricingSource: "configured_list_price",
+            model: "test",
+          });
+        },
+        { isolationLevel: "repeatable read" },
+      );
+    try {
+      await runOuter();
+    } catch (error) {
+      firstFailure = error;
+    }
+    // The settlement does not swallow or mask the caller's 40001 (and never
+    // retries inside the caller's snapshot); the caller's own retry succeeds.
+    expect(sqlStateOf(firstFailure)).toBe("40001");
+    expect((await runOuter()).outcome).toBe("recorded");
+    expect(attempts).toBe(2);
+    expect((await read(scope, root)).usedMicros).toBe(23);
+  });
+
   test("F9: the scheduled refusal guard accepts the session_usage_limit reason", async () => {
     if (!shared) return;
     const [row] = await shared.admin`select
