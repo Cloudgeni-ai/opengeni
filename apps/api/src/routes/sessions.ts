@@ -5563,6 +5563,9 @@ export function sessionTenancyHttpError(error: unknown): Error {
         runningTurnCount: error.work.runningTurnCount,
         queuedTurnCount: error.work.queuedTurnCount,
         activeGoal: error.work.activeGoal,
+        liveVoice: error.work.liveVoice,
+        otherPeoplePendingUpdateCount: error.work.otherPeoplePendingUpdateCount,
+        otherPeopleAccountChoiceCount: error.work.otherPeopleAccountChoiceCount,
       },
     });
   }

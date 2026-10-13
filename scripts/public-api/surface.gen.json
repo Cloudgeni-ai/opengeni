@@ -23982,6 +23982,9 @@
       "shape": {
         "$": "object",
         "$.activeGoal": "boolean!",
+        "$.liveVoice": "boolean!",
+        "$.otherPeopleAccountChoiceCount": "integer!",
+        "$.otherPeoplePendingUpdateCount": "integer!",
         "$.queuedTurnCount": "integer!",
         "$.runningTurnCount": "integer!"
       }

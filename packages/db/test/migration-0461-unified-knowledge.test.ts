@@ -425,6 +425,9 @@ beforeAll(async () => {
     // quiescence function body, which this fixture's withheld migrations shape
     // differently; it adds no storage this fixture reads.
     await owner`INSERT INTO schema_migrations(name) VALUES ('0768_private_visibility_ignores_leftovers.sql')`;
+    // 0769 rewrites the same routines again; it adds a trigger on
+    // session_system_updates whose columns this fixture's withheld migrations shape.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0769_private_visibility_never_blocks.sql')`;
     await migrate(owned.ownerUrl);
     // Current session adapters select these nullable reader fields. Do not
     // activate the import lifecycle before its withheld 0499 prerequisite.

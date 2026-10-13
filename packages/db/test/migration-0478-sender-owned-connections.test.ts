@@ -104,6 +104,7 @@ const withheldMigrations = [
   "0760_terminal_turn_run_state_cleanup.sql",
   "0761_exhausted_scheduled_tasks.sql",
   "0768_private_visibility_ignores_leftovers.sql",
+  "0769_private_visibility_never_blocks.sql",
   "0763_queue_steer_admission_recheck_repair.sql",
   "0764_interrupted_turn_recovery.sql",
   "0746_subscription_failover_readiness_and_request_fence.sql",

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./database";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { rawRows, type Database } from "./database";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
@@ -15,17 +15,24 @@ import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-s
 import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 
 /**
- * Making a chat Only me settles the session's own work inside the visibility
- * change instead of refusing it. Work falls into three groups:
+ * Making a chat Only me never refuses because of what is in the chat. What is
+ * in it falls into four groups:
  *
- * - leftovers: turns still marked queued/recovering/waiting for capacity (or
- *   any other non-terminal state) while the session itself no longer shows
- *   work. Nothing will ever run them; they are cancelled silently.
+ * - leftovers: turns still marked queued/recovering/waiting for capacity while
+ *   the session itself no longer shows work, an expired voice lease, a voice
+ *   connection whose session already ended. Nothing will ever use them; they
+ *   are settled silently.
  * - stoppable work: what the person can see running or waiting in the chat
  *   (the current response, queued messages, a pending question, an active
- *   goal). It is stopped only with explicit "make private anyway" consent.
+ *   goal, a live voice session).
+ * - other people's authority: pending updates that carry another member's
+ *   frozen authority and subscription account choices the owner cannot use.
+ *   The transition routine drops them.
  * - live attempts: a worker is executing the turn right now. Stopping it needs
  *   a durable interruption the worker settles, so it is a separate commit.
+ *
+ * Stoppable work and other people's authority are acted on only with the
+ * owner's one confirmation ("make private anyway").
  *
  * Everything here runs under the transaction's exclusive session-tenancy fence,
  * which excludes every ordinary session-activity writer in the workspace.
@@ -53,6 +60,12 @@ export type SessionVisibilityWork = {
   /** Messages waiting behind the current response. */
   queuedTurnCount: number;
   activeGoal: boolean;
+  /** A voice session is live in the chat. */
+  liveVoice: boolean;
+  /** Pending updates that carry another member's authority. */
+  otherPeoplePendingUpdateCount: number;
+  /** Subscription account choices for the chat that the owner cannot use. */
+  otherPeopleAccountChoiceCount: number;
 };
 
 export type SessionVisibilityWorkInventory = {
@@ -64,13 +77,33 @@ export type SessionVisibilityWorkInventory = {
 };
 
 export function sessionVisibilityWorkIsEmpty(work: SessionVisibilityWork): boolean {
-  return work.runningTurnCount === 0 && work.queuedTurnCount === 0 && !work.activeGoal;
+  return (
+    work.runningTurnCount === 0 &&
+    work.queuedTurnCount === 0 &&
+    !work.activeGoal &&
+    !work.liveVoice &&
+    work.otherPeoplePendingUpdateCount === 0 &&
+    work.otherPeopleAccountChoiceCount === 0
+  );
 }
 
-/** Read-only classification; callers that act on it must hold the tenancy fence. */
+export const EMPTY_SESSION_VISIBILITY_WORK: SessionVisibilityWork = {
+  runningTurnCount: 0,
+  queuedTurnCount: 0,
+  activeGoal: false,
+  liveVoice: false,
+  otherPeoplePendingUpdateCount: 0,
+  otherPeopleAccountChoiceCount: 0,
+};
+
+/**
+ * Read-only classification; callers that act on it must hold the tenancy
+ * fence. The other-people counts come from an owner-only routine, so the
+ * caller's RLS subject must be the session owner.
+ */
 export async function readSessionVisibilityWork(
   db: Database,
-  input: { workspaceId: string; sessionId: string; sessionStatus: string },
+  input: { accountId: string; workspaceId: string; sessionId: string; sessionStatus: string },
 ): Promise<SessionVisibilityWorkInventory> {
   const turns = await db
     .select({ id: schema.sessionTurns.id, status: schema.sessionTurns.status })
@@ -104,6 +137,26 @@ export async function readSessionVisibilityWork(
       ),
     )
     .limit(1);
+  const [voice] = await db
+    .select({ id: schema.sessionRealtimeModes.id })
+    .from(schema.sessionRealtimeModes)
+    .where(
+      and(
+        eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeModes.state, "active"),
+        gt(schema.sessionRealtimeModes.leaseExpiresAt, new Date()),
+      ),
+    )
+    .limit(1);
+  const [others] = await rawRows<{ pendingUpdateCount: number; accountChoiceCount: number }>(
+    db,
+    sql`select pending_update_count as "pendingUpdateCount",
+        account_choice_count as "accountChoiceCount"
+      from session_visibility_foreign_authority_items(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid
+      )`,
+  );
   const liveTurnIds = new Set(liveAttempts.map((attempt) => attempt.turnId));
   const pending = turns.filter((turn) => !liveTurnIds.has(turn.id));
   const sessionShowsWork = WORK_SESSION_STATUSES.has(input.sessionStatus);
@@ -114,6 +167,9 @@ export async function readSessionVisibilityWork(
         liveTurnIds.size + visiblePending.filter((turn) => turn.status !== "queued").length,
       queuedTurnCount: visiblePending.filter((turn) => turn.status === "queued").length,
       activeGoal: goal?.status === "active",
+      liveVoice: voice !== undefined,
+      otherPeoplePendingUpdateCount: Number(others?.pendingUpdateCount ?? 0),
+      otherPeopleAccountChoiceCount: Number(others?.accountChoiceCount ?? 0),
     },
     liveAttempts,
     pendingTurnIds: pending.map((turn) => turn.id),
@@ -339,6 +395,25 @@ export async function settleSessionVisibilityWorkInTransaction(
           where attempt.workspace_id = ${schema.sessionAttemptInterruptions.workspaceId}
             and attempt.id = ${schema.sessionAttemptInterruptions.attemptId}
             and attempt.state = 'closed'
+        )`,
+      ),
+    );
+
+  // A voice connection whose voice session already ended can never carry
+  // audio again; close it with the chat's other leftovers.
+  await db
+    .update(schema.sessionRealtimeConnections)
+    .set({ state: "closed", closedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(schema.sessionRealtimeConnections.workspaceId, workspaceId),
+        eq(schema.sessionRealtimeConnections.sessionId, sessionId),
+        inArray(schema.sessionRealtimeConnections.state, ["negotiating", "ready", "active"]),
+        sql`not exists (
+          select 1 from ${schema.sessionRealtimeModes} mode
+          where mode.workspace_id = ${schema.sessionRealtimeConnections.workspaceId}
+            and mode.id = ${schema.sessionRealtimeConnections.realtimeId}
+            and mode.state = 'active'
         )`,
       ),
     );

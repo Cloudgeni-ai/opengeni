@@ -1742,21 +1742,26 @@ export const UpdateSessionVisibilityRequest = z
     idempotencyKey: SessionTenancyIdempotencyKey,
     /**
      * "Make private anyway": stop the chat's visible work (the running or
-     * parked response, queued messages, an active goal) as part of the change.
-     * Without it such work refuses the change with `active_work`. Leftover
-     * records are settled either way.
+     * parked response, queued messages, an active goal, a live voice session)
+     * and drop what carries another person's access (their pending updates and
+     * account choices) as part of the change. Without it, any of that answers
+     * `active_work` with the same summary. Leftover records are settled either
+     * way, and nothing else refuses the change.
      */
     stopActiveWork: z.boolean().optional(),
   })
   .strict();
 export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
 
-/** The chat's own work that a private change would stop. */
+/** What a confirmed change to Only me stops or removes. */
 export const SessionVisibilityWork = z
   .object({
     runningTurnCount: z.number().int().nonnegative(),
     queuedTurnCount: z.number().int().nonnegative(),
     activeGoal: z.boolean(),
+    liveVoice: z.boolean(),
+    otherPeoplePendingUpdateCount: z.number().int().nonnegative(),
+    otherPeopleAccountChoiceCount: z.number().int().nonnegative(),
   })
   .strict();
 export type SessionVisibilityWork = z.infer<typeof SessionVisibilityWork>;
@@ -1767,9 +1772,12 @@ export const SessionVisibilityChangePreview = z
     visibility: SessionVisibility,
     targetVisibility: SessionVisibility,
     authorityEpoch: z.number().int().positive(),
-    /** Work the change stops when `stopActiveWork` is sent; empty for workspace. */
+    /**
+     * What the change stops or removes when `stopActiveWork` is sent; empty
+     * for workspace. Nothing else refuses a change to Only me.
+     */
     work: SessionVisibilityWork,
-    /** A block that remains even after that work stops, such as someone else's schedule. */
+    /** @deprecated Always `null`: nothing refuses a change to Only me any more. */
     blocker: SessionTenancyBlocker.nullable(),
   })
   .strict();

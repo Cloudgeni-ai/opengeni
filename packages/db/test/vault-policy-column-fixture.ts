@@ -87,10 +87,11 @@ export function withoutAbsentVaultPosture(violations: readonly string[]): string
 const laterCapabilities = new Set([
   "target-schema runtime capability scheduled_task_is_exhausted(uuid) is missing or ambiguous",
   "target-schema runtime capability session_visibility_change_blocker(uuid, uuid, uuid) is missing or ambiguous",
+  "target-schema runtime capability session_visibility_foreign_authority_items(uuid, uuid, uuid) is missing or ambiguous",
 ]);
 
 /**
- * A fixture stopped before 0761 and 0768 has no exhausted-schedule outbox,
+ * A fixture stopped before 0761, 0768 and 0769 has no exhausted-schedule outbox,
  * predicate or visibility preview, so current readiness reports them missing.
  * Drop exactly those messages (and only that table from a combined
  * "... tables are missing" line).

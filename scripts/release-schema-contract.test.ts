@@ -144,6 +144,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers private visibility that never blocks as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0769_private_visibility_never_blocks.sql",
+      ),
+    ).toMatchObject({
+      path: "0769_private_visibility_never_blocks.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers private visibility leftover settlement as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2313,6 +2325,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0769_private_visibility_never_blocks.sql",
       "0768_private_visibility_ignores_leftovers.sql",
       "0765_connected_machine_audience_switch.sql",
       "0764_interrupted_turn_recovery.sql",

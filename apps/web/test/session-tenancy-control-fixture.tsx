@@ -27,9 +27,9 @@ const sharedBoxSession: Partial<Session> | null =
     : null;
 
 // ?case=work renders a workspace-visible session with work in progress, so
-// "Limit to me" summarizes what it stops; ?case=blocked adds a block that
-// stopping work would not clear.
-const workCase = sharedBox === "work" || sharedBox === "blocked" ? sharedBox : null;
+// "Limit to me" summarizes what it stops; ?case=others shows only another
+// member's access that the change drops.
+const workCase = sharedBox === "work" || sharedBox === "others" ? sharedBox : null;
 const workSession: Partial<Session> | null = workCase
   ? {
       title: "Quarterly planning",
@@ -44,10 +44,14 @@ const fixtureClient = {
       visibility: "workspace" as const,
       targetVisibility: "private" as const,
       authorityEpoch: 1,
-      work: workCase
-        ? { runningTurnCount: 1, queuedTurnCount: 2, activeGoal: true }
-        : { runningTurnCount: 0, queuedTurnCount: 0, activeGoal: false },
-      blocker: workCase === "blocked" ? ("active_scheduled_task" as const) : null,
+      work: {
+        runningTurnCount: workCase === "work" ? 1 : 0,
+        queuedTurnCount: workCase === "work" ? 2 : 0,
+        activeGoal: workCase === "work",
+        liveVoice: false,
+        otherPeoplePendingUpdateCount: workCase ? 1 : 0,
+        otherPeopleAccountChoiceCount: workCase === "others" ? 1 : 0,
+      },
     };
   },
   updateSessionVisibility: async () => {
