@@ -234,6 +234,9 @@ import {
   useFixedRigScope,
   usePersonalResourceAttachment,
 } from "@/lib/use-personal-resource-attachment";
+import { personalMachineUseIntent } from "@/lib/personal-resource-attachments";
+import { isPersonalMachine, moveChatToMachine } from "@/lib/move-chat-to-machine";
+import type { MachineView } from "@opengeni/react/machines";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type {
   LineageNode,
@@ -2169,6 +2172,39 @@ function SessionChatPane(props: {
     extras: {},
   });
   const readChatSendContext = useCallback(() => chatSendContext.current, []);
+  // "+" > Runs on: moving onto the person's own machine is their consent to use
+  // it here, so it goes through the same move as the machine card (repoint, then
+  // a message that carries that consent). Other machines only repoint.
+  const runsOnAttach = runsOn.fleet.attach;
+  const runsOnCanMessage =
+    context.accessContext === null ||
+    context.accessContext === undefined ||
+    hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
+  const moveRunsOn = useCallback(
+    async (machine: MachineView): Promise<string | null> => {
+      if (!isPersonalMachine(machine)) {
+        await runsOnAttach(machine.sandboxId);
+        return null;
+      }
+      const result = await moveChatToMachine({
+        machine,
+        chat: readChatSendContext(),
+        canMessage: runsOnCanMessage,
+        attach: runsOnAttach,
+        sendMessage: (message) =>
+          context.client.sendMessage(props.session.workspaceId, props.session.id, message),
+      });
+      return result.moved ? null : result.reason;
+    },
+    [
+      context.client,
+      props.session.id,
+      props.session.workspaceId,
+      readChatSendContext,
+      runsOnAttach,
+      runsOnCanMessage,
+    ],
+  );
   // Session reads return a new resources array; keep the identity while the
   // contents match so timeline renderers keyed on it do not reset.
   const sessionResourcesKey = stableJson(props.session.resources);
@@ -2510,6 +2546,7 @@ function SessionChatPane(props: {
             : null,
     awaitingHuman:
       props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
+    personalMachineIntent: personalMachineUseIntent(props.session.tenancy),
     extras: {
       ...(composer.policy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
@@ -3517,6 +3554,7 @@ function SessionChatPane(props: {
                                   runsOn={runsOn}
                                   workspaceId={props.session.workspaceId}
                                   rigId={props.session.rigId ?? null}
+                                  move={moveRunsOn}
                                 />
                               ),
                             },

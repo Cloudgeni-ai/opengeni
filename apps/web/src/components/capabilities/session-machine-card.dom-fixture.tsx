@@ -192,6 +192,7 @@ beforeEach(() => {
 type SendContext = {
   blocked: string | null;
   awaitingHuman: boolean;
+  personalMachineIntent?: Record<string, unknown> | undefined;
   extras: Record<string, unknown>;
 };
 async function render(sendContext?: () => SendContext) {
@@ -663,6 +664,53 @@ describe("Connected Machine conversation card", () => {
       expect(attach).not.toHaveBeenCalled();
       expect(sendMessage).not.toHaveBeenCalled();
       expect(h.text()).toContain("Couldn't move this chat to Studio Mac. This chat has ended.");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("moving onto my own machine carries my consent to use it in this chat", async () => {
+    // Without the consent the chat points at the machine but every turn is
+    // refused at admission: only a message that carries it grants the machine.
+    const consent = {
+      mode: "session",
+      expectedAuthorityEpoch: 3,
+      workspaceSharedAcknowledged: true,
+      sharedOutputWarningVersion: 1,
+    };
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { scope: "user" })];
+    const h = await render(() => ({
+      blocked: null,
+      awaitingHuman: false,
+      personalMachineIntent: consent,
+      extras: { model: "model-a" },
+    }));
+    try {
+      await click(h.button("Use Studio Mac in this chat"));
+      expect(attach).toHaveBeenCalledWith("mac");
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      const input = sendMessage.mock.calls[0]![2] as Record<string, unknown>;
+      expect(input.text).toBe("Use the machine “Studio Mac” for this chat.");
+      expect(input.model).toBe("model-a");
+      expect(input.personalResourceAttachment).toEqual(consent);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a shared machine needs no personal consent", async () => {
+    fleet.machines = [sessionBox, machine("pc", "Build box", { scope: "workspace" })];
+    const h = await render(() => ({
+      blocked: null,
+      awaitingHuman: false,
+      personalMachineIntent: { mode: "session" },
+      extras: {},
+    }));
+    try {
+      await click(h.button("Use Build box in this chat"));
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      const input = sendMessage.mock.calls[0]![2] as Record<string, unknown>;
+      expect(input.personalResourceAttachment).toBeUndefined();
     } finally {
       await h.close();
     }

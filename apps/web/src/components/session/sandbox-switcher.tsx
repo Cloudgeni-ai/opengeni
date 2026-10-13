@@ -9,7 +9,7 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
 import { LaptopIcon, Loader2Icon, ServerIcon } from "lucide-react";
-import { useRef, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { ComposerMenuHeader } from "@/components/ui/composer-menu";
 import {
@@ -87,10 +87,17 @@ export function SessionRunsOnMenuBody(props: {
   runsOn: SessionRunsOn;
   workspaceId: string;
   rigId: string | null;
+  /**
+   * Moves the chat onto a machine when moving needs more than repointing it
+   * (the person's own machine also needs their consent for this chat).
+   * Resolves to why the chat could not move, or null.
+   */
+  move?: ((machine: MachineView) => Promise<string | null>) | undefined;
 }) {
   const { fleet, machines } = props.runsOn;
   const presentation = props.presentation ?? "menu";
   const bodyRef = useRef<HTMLDivElement>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
   useFocusCheckedRow(bodyRef, presentation);
   const rigs = useWorkspaceRigs({ workspaceId: props.workspaceId, enabled: props.rigId !== null });
   const rig = props.rigId ? rigs.rigs.find((candidate) => candidate.id === props.rigId) : null;
@@ -130,7 +137,12 @@ export function SessionRunsOnMenuBody(props: {
                 disabled={!selectable || fleet.attaching}
                 onSelect={() => {
                   if (machine.active || !selectable || fleet.attaching) return;
-                  void fleet.attach(machine.sandboxId);
+                  setMoveError(null);
+                  if (!props.move) {
+                    void fleet.attach(machine.sandboxId);
+                    return;
+                  }
+                  void props.move(machine).then(setMoveError, () => setMoveError(null));
                 }}
                 label={machineDisplayName(machine)}
                 meta={
@@ -153,7 +165,11 @@ export function SessionRunsOnMenuBody(props: {
             );
           })}
         </RadioGroup>
-        {fleet.mutationError ? (
+        {moveError ? (
+          <p role="alert" className={cn(MENU_NOTE_CLASS, "text-danger")}>
+            Couldn't move this chat. {moveError}
+          </p>
+        ) : fleet.mutationError ? (
           <p role="alert" className={cn(MENU_NOTE_CLASS, "text-danger")}>
             Couldn't move this chat. {userErrorText(fleet.mutationError)}
           </p>
