@@ -372,6 +372,17 @@ export class BrowserControlServer {
     );
   }
 
+  /** Idle with no browser or computer session at all, retained or not: the
+   * controller holds nothing, so its parent may stop it to reclaim memory and
+   * start a fresh one when the next session needs it. */
+  private runtimeEmpty(): boolean {
+    return (
+      this.runtimeIdle() &&
+      this.supervisor.isEmpty() &&
+      (this.computerSupervisor?.isEmpty() ?? true)
+    );
+  }
+
   private retainProducer(work: Promise<void>): void {
     this.producers.add(work);
     void work
@@ -405,6 +416,7 @@ export class BrowserControlServer {
       }
       return success({
         idle: this.runtimeIdle(),
+        empty: this.runtimeEmpty(),
       });
     }
     if (

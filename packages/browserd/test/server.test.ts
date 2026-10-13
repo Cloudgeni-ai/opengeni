@@ -124,6 +124,8 @@ describe("BrowserControlServer", () => {
   });
 
   test("keeps update idle proof private and includes open browser lifetimes", async () => {
+    // `empty` additionally requires that no session exists at all; only then
+    // may the parent agent stop this controller to reclaim its memory.
     await withServer(async ({ server, reference }) => {
       for (const token of [undefined, viewToken, controlToken]) {
         expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
@@ -133,7 +135,7 @@ describe("BrowserControlServer", () => {
       ).toBe(405);
       const idle = async () =>
         await json(await request(server, "/v1/runtime", { token: adminToken }));
-      expect((await idle()).data).toEqual({ idle: true });
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
       expect(
         (
           await request(server, "/v1/browser-sessions", {
@@ -143,7 +145,7 @@ describe("BrowserControlServer", () => {
           })
         ).status,
       ).toBe(201);
-      expect((await idle()).data).toEqual({ idle: false });
+      expect((await idle()).data).toEqual({ idle: false, empty: false });
       expect(
         (
           await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
@@ -153,7 +155,7 @@ describe("BrowserControlServer", () => {
           })
         ).status,
       ).toBe(200);
-      expect((await idle()).data).toEqual({ idle: true });
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
     });
   });
 

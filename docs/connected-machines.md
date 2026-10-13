@@ -1399,6 +1399,17 @@ Chromium profile identities, or a linked ComputerSession. Use Chromium for
 visual/mobile testing and human interaction. Browser authority, per-session
 isolation, and source-placement fences remain identical for both engines.
 
+The agent runs one browser controller (browserd) per scope: workspace,
+placement kind and placement (the machine, or an attached Chrome device). A
+controller that reports holding no session at all (no open, retained or
+recovering browser or computer session and no work in flight), and whose scope
+has not been ensured for ten minutes, is stopped; the next request starts a
+fresh one in about a second. Each controller also holds the write end of a
+stdin lifeline from its agent: however the agent ends, including a crash or
+SIGKILL, the kernel closes it and the controller shuts down gracefully,
+leaving retained browsers running for the next agent to adopt. Controllers no
+longer accumulate across scopes or outlive the agent that started them.
+
 Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
 launched by a shell command remains subject to that command's containment and
 cleanup; repeating its CLI session name does not retain its process. Explicit

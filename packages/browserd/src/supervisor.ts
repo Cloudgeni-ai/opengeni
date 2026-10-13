@@ -609,6 +609,11 @@ export class BrowserSupervisor {
     );
   }
 
+  /** No session of any lifecycle remains and no work is in flight. */
+  isEmpty(): boolean {
+    return this.sessions.size === 0 && this.isIdle();
+  }
+
   listSessions(): BrowserSessionReference[] {
     return [...this.sessions.values()]
       .filter(
