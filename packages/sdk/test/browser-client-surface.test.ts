@@ -132,17 +132,7 @@ const retiredSettingsMethods = [
 // These browser-facing account APIs landed before their separately reviewed
 // settings (#4123) and picker (#4169) UI. Keep the pending surface explicit;
 // remove each entry when its browser consumer lands (the equality below enforces it).
-const pendingModelAccountMethods = [
-  "getModelAccountPreferences",
-  "getModelAccountSettingsOverview",
-  "getOrganizationModelAccountSettings",
-  "getSessionModelAccount",
-  "getWorkspaceModelAccountSettings",
-  "setSessionModelAccount",
-  "updateModelAccountPreferences",
-  "updateOrganizationModelAccountSettings",
-  "updateWorkspaceModelAccountSettings",
-];
+const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

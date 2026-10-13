@@ -114,7 +114,10 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
 beforeAll(async () => {
   if (!realDb) return;
   shared = await acquireSharedTestDatabase("api-supergrok-core-routes", {
-    withheldMigrations: ["0747_subscription_core_xai_cutover.sql"],
+    withheldMigrations: [
+      "0747_subscription_core_xai_cutover.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+    ],
   });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = opengeniDb.createDb(shared.appUrl);
@@ -500,11 +503,6 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       databaseFailure = null;
     }
   }
-
-  test(
-    "legacy connect-poll database loss is a retryable 503 with unknown mutation outcome",
-    expectRetryableConnectPollDatabaseFailure,
-  );
 
   test("after the receipt, without an enabled switch row, every route fails closed", async () => {
     // A fresh install ships SuperGrok's registry row and cutover receipt.

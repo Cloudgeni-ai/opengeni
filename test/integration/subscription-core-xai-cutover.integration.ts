@@ -27,7 +27,6 @@ import {
   createDb,
   createSession,
   peekSessionWork,
-  subscriptionPoolWorkerSubject,
   wakeSubscriptionCoreProviderCapacityWaiters,
   withSessionActivityRlsContext,
   type DbClient,
@@ -43,6 +42,7 @@ import { createHistoricalCodexCapacityPeek } from "../../apps/worker/test/fixtur
 import { migrate } from "../../packages/db/src/migrate";
 import { provisionRoles } from "../../packages/db/src/provision-roles";
 import { createCodexCapacityActivities } from "../../apps/worker/src/activities/codex-capacity";
+import { subscriptionPoolWorkerSubject } from "../../packages/db/test/fixtures/legacy-subscription-session-access";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const MIGRATION = "0747_subscription_core_xai_cutover.sql";
