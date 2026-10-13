@@ -485,6 +485,18 @@ approval authority. Normal resource authorization and command receipts apply.
 See `examples/site-session-embed` for a standard React provider, timeline and
 durable composer using this transport without knowing its execution location.
 
+### Site Data inside a Site
+
+`site.data` and `site.files` ([Site Data](site-data.md)) use the same HTTP
+transport with `published-artifacts/current/...` paths. A host opts in by
+building its bridge with `createSiteToolBridge({ artifactId, siteVersionId,
+requestedTools, fetchResponse, ... })`: the bridge rewrites `current` to the
+pinned Site, adds `x-opengeni-site-id`/`x-opengeni-site-version`, and the frame
+advertises `siteData: 1`. Hosts without `fetchResponse` or a pinned Site (inline
+HTML, tools-only hosts, local previews) do not advertise it, and Site code gets
+`site_data_unsupported` without a request being sent. `createOpenGeniSessionProxy`
+does not forward Site Data routes yet.
+
 ### Session Authorization
 
 Canonical sources: `SessionAuthorizationPort` in

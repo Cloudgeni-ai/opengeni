@@ -71,7 +71,8 @@
           "guides/webhooks-and-credentials",
           "guides/usage-allowances",
           "guides/task-usage-limits",
-          "guides/insights"
+          "guides/insights",
+          "guides/site-data"
         ]
       },
       {
