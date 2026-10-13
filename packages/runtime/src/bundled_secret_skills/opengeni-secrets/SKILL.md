@@ -30,8 +30,9 @@ The `secret_*` tools take references as names and never resolve them.
 
 ## Tools
 
-- `secret_search {query?, website?, type?, vault?}`: items with ready
-  references, never values. Search before asking or creating.
+- `secret_search {query?, website?, type?, vault?, cursor?}`: items and
+  references, never values; no filters lists all, page one lists vaults.
+  Repeat with `cursor` while `nextCursor` is set.
 - `secret_save {item, vault?, saveTo?, type?, websites?, username?, fields?, mode?}`:
   each field takes one of `value`, `generate`, `fromReference` or
   `restoreVersion`. Use `generate` for new passwords.

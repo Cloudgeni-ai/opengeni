@@ -5,6 +5,7 @@
  * encrypts values before writes, decrypts display values after reads, and
  * maps rows to the contract shapes.
  */
+import { createHash } from "node:crypto";
 import {
   generatePassword,
   isValidTotpInput,
@@ -60,6 +61,7 @@ import {
   listVaultFieldVersions,
   listVaultItems,
   listVaultsForSubject,
+  vaultItemCursor,
   moveVaultItem,
   readVaultFieldCiphertext,
   resolveSecretReferenceCandidates,
@@ -938,12 +940,34 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
     async searchForAgent(principal, input) {
       const context = principalContext(principal);
-      let vaults = await listVaultsForSubject(deps.db, context, {
+      const reachable = await listVaultsForSubject(deps.db, context, {
         workspaceId: principal.workspaceId,
       });
-      if (input.vault !== undefined) vaults = [await agentVault(principal, input.vault)];
-      vaults.sort((left, right) => left.tier - right.tier || left.name.localeCompare(right.name));
+      const byTier = (vaults: VaultRow[]) =>
+        [...vaults].sort(
+          (left, right) => left.tier - right.tier || left.name.localeCompare(right.name),
+        );
+      const vaults = byTier(
+        input.vault !== undefined ? [await agentVault(principal, input.vault)] : reachable,
+      );
       const limit = input.limit ?? 20;
+      const filters = agentSearchFilterKey(input);
+      // Resume exactly after the last item the previous page examined.
+      let startIndex = 0;
+      let startAfter: string | null = null;
+      if (input.cursor !== undefined) {
+        const cursor = decodeAgentSearchCursor(input.cursor);
+        const index =
+          cursor && cursor.f === filters ? vaults.findIndex((vault) => vault.id === cursor.v) : -1;
+        if (!cursor || index < 0) {
+          throw new VaultError(
+            "secret_search_cursor_invalid",
+            "the cursor belongs to a different search or a vault you can no longer reach; search again without it",
+          );
+        }
+        startIndex = index;
+        startAfter = cursor.c;
+      }
       const website = input.website?.trim().toLowerCase();
       const hostOf = (value: string) => {
         try {
@@ -956,60 +980,86 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         }
       };
       const wantedHost = website ? hostOf(website) : null;
-      const items: SecretSearchOutput["items"] = [];
-      let truncated = false;
-      for (const vault of vaults) {
-        const page = await listVaultItems(deps.db, context, {
-          vaultId: vault.id,
-          ...(input.query !== undefined ? { q: input.query } : {}),
-          ...(input.type !== undefined ? { type: input.type } : {}),
-          limit: VAULT_LIMITS.searchResultsMax,
+      const matchesWebsite = (row: VaultItemRow) =>
+        wantedHost === null ||
+        row.websites.some((site) => {
+          const host = hostOf(site);
+          return (
+            host === wantedHost ||
+            wantedHost.endsWith(`.${host}`) ||
+            host.endsWith(`.${wantedHost}`)
+          );
         });
-        if (page.nextCursor !== null) truncated = true;
-        for (const row of page.items) {
-          if (
-            wantedHost !== null &&
-            !row.websites.some((site) => {
-              const host = hostOf(site);
-              return (
-                host === wantedHost ||
-                wantedHost.endsWith(`.${host}`) ||
-                host.endsWith(`.${wantedHost}`)
-              );
-            })
-          ) {
-            continue;
-          }
-          if (items.length >= limit) {
-            truncated = true;
-            break;
-          }
-          const summary = toVaultItemSummary(row, key());
-          items.push({
-            vault: {
-              id: vault.id,
-              name: vault.name,
-              ownerKind: vault.ownerKind,
-              source: vault.source,
-              mode: vault.mode,
-            },
-            item: {
-              id: row.id,
-              name: row.name,
-              type: row.type,
-              websites: row.websites,
-              username: summary.username,
-              hasTotp: summary.hasTotp,
-              hasPasskey: summary.hasPasskey,
-              expiresAt: row.expiresAt,
-            },
-            fields: row.fields.map((field) => ({ name: field.name, kind: field.kind })),
-            references: summary.references,
+      const items: SecretSearchOutput["items"] = [];
+      let scanned = 0;
+      let next: AgentSearchCursor | null = null;
+      search: for (let index = startIndex; index < vaults.length; index++) {
+        const vault = vaults[index]!;
+        let after = index === startIndex ? startAfter : null;
+        for (;;) {
+          const page = await listVaultItems(deps.db, context, {
+            vaultId: vault.id,
+            ...(input.query !== undefined ? { q: input.query } : {}),
+            ...(input.type !== undefined ? { type: input.type } : {}),
+            ...(after !== null ? { cursor: after } : {}),
+            limit: Math.min(200, VAULT_LIMITS.searchScanMax - scanned),
           });
+          for (const [position, row] of page.items.entries()) {
+            scanned++;
+            after = vaultItemCursor(row);
+            if (matchesWebsite(row)) items.push(agentSearchResult(vault, row));
+            if (items.length < limit && scanned < VAULT_LIMITS.searchScanMax) continue;
+            const pageHasMore = position < page.items.length - 1 || page.nextCursor !== null;
+            if (pageHasMore) next = { f: filters, v: vault.id, c: after };
+            else if (index < vaults.length - 1)
+              next = { f: filters, v: vaults[index + 1]!.id, c: null };
+            break search;
+          }
+          if (page.nextCursor === null) break;
         }
-        if (items.length >= limit && truncated) break;
       }
-      return { items, truncated };
+      return {
+        items,
+        truncated: next !== null,
+        nextCursor: next === null ? null : encodeAgentSearchCursor(next),
+        ...(input.cursor === undefined
+          ? {
+              vaults: byTier(reachable).map((vault) => ({
+                id: vault.id,
+                name: vault.name,
+                ownerKind: vault.ownerKind,
+                source: vault.source,
+                mode: vault.mode,
+                itemCount: vault.itemCount,
+              })),
+            }
+          : {}),
+      };
+
+      function agentSearchResult(vault: VaultRow, row: VaultItemRow) {
+        const summary = toVaultItemSummary(row, key());
+        return {
+          vault: {
+            id: vault.id,
+            name: vault.name,
+            ownerKind: vault.ownerKind,
+            source: vault.source,
+            mode: vault.mode,
+          },
+          item: {
+            id: row.id,
+            name: row.name,
+            type: row.type,
+            websites: row.websites,
+            username: summary.username,
+            hasTotp: summary.hasTotp,
+            hasPasskey: summary.hasPasskey,
+            expiresAt: row.expiresAt,
+          },
+          fields: row.fields.map((field) => ({ name: field.name, kind: field.kind })),
+          references: summary.references,
+        };
+      }
     },
 
     async saveForAgent(principal, input) {
@@ -1186,4 +1236,45 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       return await revealFromCiphertext(read);
     },
   };
+}
+
+/** Position of an agent search: the vault it stopped in, the item it examined
+ * last there (exclusive), and the filters it was made for. */
+type AgentSearchCursor = { f: string; v: string; c: string | null };
+
+function agentSearchFilterKey(input: SecretSearchInput): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        input.query ?? null,
+        input.website ?? null,
+        input.type ?? null,
+        input.vault ?? null,
+      ]),
+    )
+    .digest("base64url")
+    .slice(0, 16);
+}
+
+function encodeAgentSearchCursor(cursor: AgentSearchCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeAgentSearchCursor(raw: string): AgentSearchCursor | null {
+  try {
+    const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as unknown;
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      typeof (value as AgentSearchCursor).f === "string" &&
+      typeof (value as AgentSearchCursor).v === "string" &&
+      ((value as AgentSearchCursor).c === null ||
+        typeof (value as AgentSearchCursor).c === "string")
+    ) {
+      return value as AgentSearchCursor;
+    }
+  } catch {
+    // Not a cursor this service issued.
+  }
+  return null;
 }
