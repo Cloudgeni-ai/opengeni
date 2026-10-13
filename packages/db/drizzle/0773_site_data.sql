@@ -22,6 +22,11 @@ CREATE TABLE site_data_collections (
   json_schema jsonb CHECK (json_schema IS NULL OR octet_length(json_schema::text) <= 65536),
   indexed_fields jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(indexed_fields) = 'array'),
   unique_fields jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(unique_fields) = 'array'),
+  -- Maintained in the write transaction (under the Site's usage lock) so
+  -- reads never count a collection. record_bytes includes the per-record
+  -- storage overhead charged against quotas.
+  record_count bigint NOT NULL DEFAULT 0 CHECK (record_count >= 0),
+  record_bytes bigint NOT NULL DEFAULT 0 CHECK (record_bytes >= 0),
   created_by text NOT NULL,
   updated_by text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -34,6 +39,8 @@ CREATE TABLE site_data_collections (
     REFERENCES workspace_artifacts(workspace_id, id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX site_data_collections_workspace_id_uq ON site_data_collections (workspace_id, id);
+CREATE UNIQUE INDEX site_data_collections_workspace_site_id_uq
+  ON site_data_collections (workspace_id, site_id, id);
 CREATE UNIQUE INDEX site_data_collections_site_name_uq
   ON site_data_collections (workspace_id, site_id, name);
 
@@ -57,8 +64,9 @@ CREATE TABLE site_data_records (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT site_data_records_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
-  CONSTRAINT site_data_records_collection_fk FOREIGN KEY (workspace_id, collection_id)
-    REFERENCES site_data_collections(workspace_id, id) ON DELETE CASCADE
+  -- A record's Site is always its collection's Site.
+  CONSTRAINT site_data_records_collection_fk FOREIGN KEY (workspace_id, site_id, collection_id)
+    REFERENCES site_data_collections(workspace_id, site_id, id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX site_data_records_workspace_id_uq ON site_data_records (workspace_id, id);
 CREATE UNIQUE INDEX site_data_records_key_uq ON site_data_records (collection_id, key_scope, record_key)
@@ -94,6 +102,9 @@ CREATE TABLE site_data_record_values (
 );
 CREATE UNIQUE INDEX site_data_record_values_unique_uq
   ON site_data_record_values (collection_id, name, scope, value_hash) WHERE kind = 'unique';
+-- Serves the workspace and record cascades.
+CREATE INDEX site_data_record_values_workspace_record_idx
+  ON site_data_record_values (workspace_id, record_id);
 CREATE INDEX site_data_record_values_text_idx
   ON site_data_record_values (collection_id, name, value_text) WHERE kind = 'index';
 CREATE INDEX site_data_record_values_num_idx

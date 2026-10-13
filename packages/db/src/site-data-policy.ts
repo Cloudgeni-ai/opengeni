@@ -70,13 +70,25 @@ export const SITE_DATA_MAX_UNIQUE_SETS = 5;
 export const SITE_DATA_MAX_UNIQUE_SET_FIELDS = 4;
 export const SITE_DATA_MAX_KEY_LENGTH = 256;
 export const SITE_DATA_MAX_JSON_SCHEMA_BYTES = 64 * 1024;
+/** Storage charged per record on top of its JSON, so tiny records still count. */
+export const SITE_DATA_RECORD_OVERHEAD_BYTES = 512;
+/** Longest string a filter may compare with. */
+export const SITE_DATA_MAX_FILTER_STRING = 1024;
+
+/** Names that would reach an object's prototype instead of its own data. */
+const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+
+/** Whether a path segment is a plain field name (never a prototype name). */
+export function isSiteDataPathSegment(segment: string): boolean {
+  return SITE_DATA_PATH_SEGMENT.test(segment) && !FORBIDDEN_SEGMENTS.has(segment);
+}
 
 /** A dotted data path with a small depth cap, or null when invalid. */
 export function parseSiteDataPath(path: string): string[] | null {
   if (typeof path !== "string" || path.length === 0 || path.length > 300) return null;
   const segments = path.split(".");
   if (segments.length > SITE_DATA_MAX_PATH_DEPTH) return null;
-  return segments.every((segment) => SITE_DATA_PATH_SEGMENT.test(segment)) ? segments : null;
+  return segments.every(isSiteDataPathSegment) ? segments : null;
 }
 
 /** Read a dotted path from a JSON object; undefined when absent. */
@@ -90,25 +102,41 @@ export function readSiteDataPath(data: unknown, segments: readonly string[]): un
   return current;
 }
 
-/** Return a copy with a dotted path set, creating intermediate objects. */
+/**
+ * Return a copy with a dotted path set, creating intermediate objects. Every
+ * segment must be a plain field name; anything else throws rather than being
+ * silently dropped or written to a prototype.
+ */
 export function writeSiteDataPath(
   data: Record<string, unknown>,
   segments: readonly string[],
   value: unknown,
 ): Record<string, unknown> {
+  if (segments.length === 0 || !segments.every(isSiteDataPathSegment))
+    throw new Error("Invalid Site Data path");
   const root: Record<string, unknown> = { ...data };
   let current = root;
   segments.forEach((segment, index) => {
     if (index === segments.length - 1) {
-      current[segment] = value;
+      Object.defineProperty(current, segment, {
+        value,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
       return;
     }
-    const next = current[segment];
+    const next = Object.hasOwn(current, segment) ? current[segment] : undefined;
     const copy =
       typeof next === "object" && next !== null && !Array.isArray(next)
         ? { ...(next as Record<string, unknown>) }
         : {};
-    current[segment] = copy;
+    Object.defineProperty(current, segment, {
+      value: copy,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
     current = copy;
   });
   return root;

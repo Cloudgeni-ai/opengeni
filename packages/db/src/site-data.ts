@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 import {
-  canonicalSiteDataJson,
   isPlainJsonObject,
   parseSiteDataPath,
   readSiteDataPath,
@@ -16,6 +14,7 @@ import {
   SITE_DATA_DEFAULT_PAGE,
   SITE_DATA_MAX_BATCH,
   SITE_DATA_MAX_FILTERS,
+  SITE_DATA_MAX_FILTER_STRING,
   SITE_DATA_MAX_IN_VALUES,
   SITE_DATA_MAX_INDEXED_FIELDS,
   SITE_DATA_MAX_JSON_SCHEMA_BYTES,
@@ -24,6 +23,7 @@ import {
   SITE_DATA_MAX_SORT_KEYS,
   SITE_DATA_MAX_UNIQUE_SET_FIELDS,
   SITE_DATA_MAX_UNIQUE_SETS,
+  SITE_DATA_RECORD_OVERHEAD_BYTES,
   type SiteDataAccessMode,
   type SiteDataRole,
 } from "./site-data-policy";
@@ -58,7 +58,7 @@ export type SiteDataScope = { accountId: string; workspaceId: string; siteId: st
 /**
  * Who is calling. `principal` owns records (the person, or the person an agent
  * acts for); `actor` is recorded as the writer. `framed` marks requests from
- * Site HTML, which never manage collections.
+ * Site HTML: they are always viewers and never manage collections.
  */
 export type SiteDataCaller = SiteDataScope & {
   role: SiteDataRole;
@@ -74,8 +74,10 @@ export type SiteDataLimits = {
   fileBytesPerSite: number;
   maxFileBytes: number;
   workspaceBytes: number;
+  maxRecordsPerCollection: number;
   viewerWritesPerMinute: number;
   siteWritesPerMinute: number;
+  viewerReadsPerMinute: number;
 };
 
 export type SiteDataCollectionDefinition = {
@@ -183,8 +185,6 @@ export type SiteDataWriteSummary = {
 
 export type SiteDataWriteOptions = {
   limits: SiteDataLimits;
-  /** Enforce viewer and Site write windows. */
-  rateLimit: boolean;
   /** JSON Schema validation, supplied by the service layer. */
   validate?: (schema: Record<string, unknown>, data: Record<string, unknown>) => string | null;
   /** Usage metering inside the same transaction. */
@@ -249,11 +249,23 @@ export interface SiteDataStore {
     options?: { limit?: number; cursor?: string | null },
   ): Promise<{ files: SiteDataFile[]; nextCursor: string | null }>;
   getFile(caller: SiteDataCaller, fileId: string): Promise<SiteDataStoredFile | null>;
+  /** Check file quotas before any bytes are stored; insertFile checks again under the lock. */
+  checkFileQuota(caller: SiteDataCaller, sizeBytes: number, limits: SiteDataLimits): Promise<void>;
   insertFile(
     caller: SiteDataCaller,
     file: Omit<SiteDataStoredFile, "owner" | "createdBy" | "createdAt">,
-    options: Pick<SiteDataWriteOptions, "limits" | "rateLimit" | "afterWrite">,
+    options: Pick<SiteDataWriteOptions, "limits" | "afterWrite">,
   ): Promise<SiteDataFile>;
+  /**
+   * Count an attempt against the caller's and the Site's one-minute window in
+   * its own committed transaction, before any work: failed attempts count too.
+   */
+  consumeRate(
+    caller: SiteDataCaller,
+    kind: "write" | "read",
+    operations: number,
+    limits: SiteDataLimits,
+  ): Promise<void>;
   deleteFile(caller: SiteDataCaller, fileId: string): Promise<SiteDataStoredFile>;
 }
 
@@ -376,8 +388,24 @@ function recordBytes(data: Record<string, unknown>): number {
   return Buffer.byteLength(JSON.stringify(data), "utf8");
 }
 
+/** A Postgres text[] literal; every element is quoted so `null` stays a name. */
 function pathLiteral(segments: readonly string[]): string {
-  return `{${segments.join(",")}}`;
+  return `{${segments.map((segment) => `"${segment.replace(/["\\]/gu, "\\$&")}"`).join(",")}}`;
+}
+
+/** Storage charged against quotas for a record of this JSON size. */
+export function siteDataChargedBytes(sizeBytes: number): number {
+  return sizeBytes + SITE_DATA_RECORD_OVERHEAD_BYTES;
+}
+
+function databaseErrorCode(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/u.test(code)) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return "";
 }
 
 function validationError(message: string, details: Record<string, unknown> = {}): SiteDataError {
@@ -429,45 +457,6 @@ export function normalizeSiteDataCollectionDefinition(
   };
 }
 
-type ValueEntry = {
-  kind: "unique" | "index";
-  name: string;
-  scope: string;
-  hash: string | null;
-  text: string | null;
-  num: number | null;
-};
-
-function valueEntries(
-  collection: SiteDataCollection,
-  ownerPrincipal: string,
-  data: Record<string, unknown>,
-): ValueEntry[] {
-  const entries: ValueEntry[] = [];
-  const scope = siteDataScopedPerViewer(collection.accessMode) ? ownerPrincipal : "";
-  for (const set of collection.uniqueFields) {
-    const values = set.map((field) => readSiteDataPath(data, parseSiteDataPath(field) ?? []));
-    // Like SQL NULL, a missing or null value never conflicts.
-    if (values.some((value) => value === undefined || value === null)) continue;
-    entries.push({
-      kind: "unique",
-      name: set.join("+"),
-      scope,
-      hash: createHash("sha256").update(canonicalSiteDataJson(values)).digest("hex"),
-      text: null,
-      num: null,
-    });
-  }
-  for (const field of collection.indexedFields) {
-    const value = readSiteDataPath(data, parseSiteDataPath(field) ?? []);
-    if (typeof value === "number" && Number.isFinite(value))
-      entries.push({ kind: "index", name: field, scope: "", hash: null, text: null, num: value });
-    else if (typeof value === "string" && value.length <= 256)
-      entries.push({ kind: "index", name: field, scope: "", hash: null, text: value, num: null });
-  }
-  return entries;
-}
-
 // --- query building --------------------------------------------------------
 
 type SortKey = {
@@ -477,27 +466,52 @@ type SortKey = {
   cursor: (value: unknown) => SQL;
 };
 
-const SYSTEM_SORTS: Record<string, { expr: SQL; cast: (value: unknown) => SQL }> = {
-  $createdAt: {
-    expr: sql`r.created_at`,
-    cast: (value) => sql`${String(value)}::timestamptz`,
-  },
-  $updatedAt: {
-    expr: sql`r.updated_at`,
-    cast: (value) => sql`${String(value)}::timestamptz`,
-  },
-  $key: {
-    expr: sql`(coalesce(r.record_key, '') collate "C")`,
-    cast: (value) => sql`(${String(value)}::text collate "C")`,
-  },
-  $version: { expr: sql`r.version`, cast: (value) => sql`${Number(value)}::integer` },
-  $id: { expr: sql`r.id`, cast: (value) => sql`${String(value)}::uuid` },
-};
+const ISO_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}(:?\d{2})?)?$/u;
+
+function cursorTimestamp(value: unknown): SQL {
+  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value))
+    throw validationError("Invalid cursor for this query");
+  return sql`${value}::timestamptz`;
+}
+
+const SYSTEM_SORTS: Readonly<Record<string, { expr: SQL; cast: (value: unknown) => SQL }>> =
+  Object.freeze(
+    Object.assign(
+      Object.create(null) as Record<string, { expr: SQL; cast: (value: unknown) => SQL }>,
+      {
+        $createdAt: { expr: sql`r.created_at`, cast: cursorTimestamp },
+        $updatedAt: { expr: sql`r.updated_at`, cast: cursorTimestamp },
+        $key: {
+          expr: sql`(coalesce(r.record_key, '') collate "C")`,
+          cast: (value: unknown) => {
+            if (typeof value !== "string") throw validationError("Invalid cursor for this query");
+            return sql`(${value}::text collate "C")`;
+          },
+        },
+        $version: {
+          expr: sql`r.version`,
+          cast: (value: unknown) => {
+            if (
+              typeof value !== "number" ||
+              !Number.isInteger(value) ||
+              value < 0 ||
+              value > 2 ** 31
+            )
+              throw validationError("Invalid cursor for this query");
+            return sql`${value}::integer`;
+          },
+        },
+      },
+    ),
+  );
 
 function sortKey(sort: SiteDataSort): SortKey {
   const direction = sort.direction === "desc" ? "desc" : "asc";
-  const system = SYSTEM_SORTS[sort.field];
+  if (typeof sort.field !== "string") throw validationError("Each sort needs a field");
+  const system = Object.hasOwn(SYSTEM_SORTS, sort.field) ? SYSTEM_SORTS[sort.field] : undefined;
   if (system) return { field: sort.field, direction, expr: system.expr, cursor: system.cast };
+  if (sort.field.startsWith("$")) throw validationError(`Cannot sort by ${sort.field}`);
   const segments = parseSiteDataPath(sort.field);
   if (!segments) throw validationError(`Invalid sort field: ${sort.field}`);
   return {
@@ -540,6 +554,33 @@ function requireScalar(filter: SiteDataFilter): string | number {
   if (typeof filter.value === "number" && Number.isFinite(filter.value)) return filter.value;
   if (typeof filter.value === "string") return filter.value;
   throw validationError(`${filter.op} on ${filter.field} needs a number or string`);
+}
+
+/** Bound what a filter may carry: short strings, short lists, small JSON values. */
+function assertFilterValue(filter: SiteDataFilter): void {
+  const check = (value: unknown) => {
+    if (typeof value === "string" && value.length > SITE_DATA_MAX_FILTER_STRING)
+      throw validationError(
+        `Filter values on ${filter.field} are at most ${SITE_DATA_MAX_FILTER_STRING} characters`,
+      );
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      JSON.stringify(value).length > SITE_DATA_MAX_FILTER_STRING
+    )
+      throw validationError(
+        `Filter values on ${filter.field} are at most ${SITE_DATA_MAX_FILTER_STRING} characters of JSON`,
+      );
+  };
+  if (Array.isArray(filter.value) && filter.op === "in") {
+    if (filter.value.length > SITE_DATA_MAX_IN_VALUES)
+      throw validationError(
+        `in on ${filter.field} needs an array of at most ${SITE_DATA_MAX_IN_VALUES}`,
+      );
+    for (const item of filter.value) check(item);
+    return;
+  }
+  check(filter.value);
 }
 
 function systemFilter(caller: SiteDataCaller, filter: SiteDataFilter): SQL {
@@ -611,7 +652,7 @@ function systemFilter(caller: SiteDataCaller, filter: SiteDataFilter): SQL {
           throw validationError("$version filters need integers");
         return sql`${value}::integer`;
       }
-      if (typeof value !== "string" || Number.isNaN(Date.parse(value)))
+      if (typeof value !== "string" || !ISO_TIMESTAMP.test(value))
         throw validationError(`${field} filters need ISO timestamps`);
       return sql`${value}::timestamptz`;
     };
@@ -702,17 +743,12 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
   const scoped = <T>(scope: SiteDataScope, fn: (tx: Database) => Promise<T>) =>
     withRlsContext(db, { accountId: scope.accountId, workspaceId: scope.workspaceId }, fn);
 
+  // Collections carry their own record count and charged bytes, maintained
+  // in the write transaction, so no read ever counts a collection.
   const loadCollections = async (tx: Database, scope: SiteDataScope) => {
     const rows = await rawRows<CollectionRow>(
       tx,
-      sql`select c.*, coalesce(s.record_count, 0) as record_count, coalesce(s.record_bytes, 0) as record_bytes
-        from site_data_collections c
-        left join (
-          select collection_id, count(*) as record_count, sum(size_bytes) as record_bytes
-          from site_data_records
-          where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}
-          group by collection_id
-        ) s on s.collection_id = c.id
+      sql`select c.* from site_data_collections c
         where c.workspace_id = ${scope.workspaceId} and c.site_id = ${scope.siteId}
         order by c.name`,
     );
@@ -722,10 +758,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
   const loadCollection = async (tx: Database, scope: SiteDataScope, name: string) => {
     const rows = await rawRows<CollectionRow>(
       tx,
-      sql`select c.*,
-          (select count(*) from site_data_records r where r.collection_id = c.id and r.workspace_id = c.workspace_id) as record_count,
-          (select coalesce(sum(size_bytes), 0) from site_data_records r where r.collection_id = c.id and r.workspace_id = c.workspace_id) as record_bytes
-        from site_data_collections c
+      sql`select c.* from site_data_collections c
         where c.workspace_id = ${scope.workspaceId} and c.site_id = ${scope.siteId} and c.name = ${name}`,
     );
     return rows[0] ? toCollection(rows[0]) : null;
@@ -762,6 +795,22 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     };
   };
 
+  /**
+   * Viewers write only to an active Site. Checked inside the write
+   * transaction, holding the Site row, so archiving cannot race a write.
+   */
+  const assertWritableSite = async (tx: Database, caller: SiteDataCaller) => {
+    if (caller.role === "manager" && !caller.framed) return;
+    const [row] = await rawRows<{ status: string }>(
+      tx,
+      sql`select status from workspace_artifacts
+        where workspace_id = ${caller.workspaceId} and id = ${caller.siteId}
+        for share`,
+    );
+    if (!row) throw new SiteDataError("not_found", "Site not found");
+    if (row.status !== "active") throw new SiteDataError("forbidden", "This Site is archived");
+  };
+
   const workspaceBytes = async (tx: Database, scope: SiteDataScope) => {
     const [row] = await rawRows<{ total: string | number | null }>(
       tx,
@@ -790,92 +839,101 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     );
   };
 
-  const consumeRate = async (
+  const fileQuota = async (
     tx: Database,
     caller: SiteDataCaller,
-    operations: number,
+    usage: { fileBytes: number },
+    sizeBytes: number,
     limits: SiteDataLimits,
   ) => {
-    for (const [principal, limit] of [
-      [caller.principal, limits.viewerWritesPerMinute],
-      ["*", limits.siteWritesPerMinute],
-    ] as const) {
-      const [row] = await rawRows<{ operations: number }>(
-        tx,
-        sql`insert into site_data_rate_windows
-            (account_id, workspace_id, site_id, principal_key, window_started_at, operations)
-          values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId}, ${principal},
-            date_trunc('minute', now()), ${operations})
-          on conflict (workspace_id, site_id, principal_key) do update set
-            operations = case
-              when site_data_rate_windows.window_started_at = excluded.window_started_at
-              then site_data_rate_windows.operations + excluded.operations
-              else excluded.operations end,
-            window_started_at = excluded.window_started_at
-          returning operations`,
+    if (sizeBytes > limits.maxFileBytes)
+      throw new SiteDataError(
+        "quota_exceeded",
+        `A file can be at most ${Math.floor(limits.maxFileBytes / (1024 * 1024))} MB`,
+        { quota: "file_bytes", limit: limits.maxFileBytes },
       );
-      if ((row?.operations ?? 0) > limit)
-        throw new SiteDataError(
-          "rate_limited",
-          principal === "*"
-            ? "This Site is receiving too many writes. Try again in a minute."
-            : "Too many writes. Try again in a minute.",
-          { retryAfterSeconds: 60 },
-        );
-    }
+    if (usage.fileBytes + sizeBytes > limits.fileBytesPerSite)
+      throw new SiteDataError("quota_exceeded", "This Site's file storage is full", {
+        quota: "site_file_bytes",
+        limit: limits.fileBytesPerSite,
+      });
+    if ((await workspaceBytes(tx, caller)) + sizeBytes > limits.workspaceBytes)
+      throw new SiteDataError("quota_exceeded", "This workspace's Site data is full", {
+        quota: "workspace_bytes",
+        limit: limits.workspaceBytes,
+      });
   };
 
-  const writeValues = async (
-    tx: Database,
-    caller: SiteDataScope,
-    collection: SiteDataCollection,
-    recordId: string,
-    entries: ValueEntry[],
-  ) => {
+  const deleteValues = async (tx: Database, caller: SiteDataScope, recordId: string) => {
     await tx.execute(
       sql`delete from site_data_record_values where workspace_id = ${caller.workspaceId} and record_id = ${recordId}`,
     );
-    if (entries.length === 0) return;
-    await tx.execute(
-      sql`insert into site_data_record_values
-          (account_id, workspace_id, collection_id, record_id, kind, name, scope, value_hash, value_text, value_num)
-        values ${sql.join(
-          entries.map(
-            (entry) =>
-              sql`(${caller.accountId}, ${caller.workspaceId}, ${collection.id}, ${recordId}, ${entry.kind},
-                ${entry.name}, ${entry.scope}, ${entry.hash}, ${entry.text}, ${entry.num}::double precision)`,
-          ),
-          sql`, `,
-        )}`,
-    );
   };
 
-  const assertUnique = async (
+  /**
+   * Derive unique-set hashes and indexed values from the stored records in
+   * one set-based statement, for one record or a whole collection. The unique
+   * index decides conflicts atomically; the first conflicting set is returned.
+   */
+  const syncValues = async (
     tx: Database,
     caller: SiteDataScope,
     collection: SiteDataCollection,
-    recordId: string | null,
-    entries: ValueEntry[],
-  ) => {
-    for (const entry of entries) {
-      if (entry.kind !== "unique") continue;
-      const rows = await rawRows<{ record_id: string }>(
-        tx,
-        sql`select record_id from site_data_record_values
-          where workspace_id = ${caller.workspaceId} and collection_id = ${collection.id}
-            and kind = 'unique' and name = ${entry.name} and scope = ${entry.scope}
-            and value_hash = ${entry.hash}
-            ${recordId ? sql`and record_id <> ${recordId}` : sql``}
-          limit 1`,
-      );
-      if (rows.length > 0)
-        throw new SiteDataError(
-          "conflict",
-          `Another record already has this ${entry.name.split("+").join(" + ")}`,
-          { reason: "unique", fields: entry.name.split("+") },
-        );
+    records: SQL,
+  ): Promise<string | null> => {
+    const owner = siteDataScopedPerViewer(collection.accessMode)
+      ? sql`r.owner_principal`
+      : sql`''::text`;
+    const value = (field: string) =>
+      sql`(r.data #> ${pathLiteral(parseSiteDataPath(field) ?? [])}::text[])`;
+    const candidates: SQL[] = [];
+    for (const set of collection.uniqueFields) {
+      const values = set.map(value);
+      candidates.push(sql`select r.account_id, r.workspace_id, r.collection_id, r.id as record_id,
+          'unique'::text as kind, ${set.join("+")}::text as name, ${owner} as scope,
+          encode(sha256(convert_to(jsonb_build_array(${sql.join(values, sql`, `)})::text, 'UTF8')), 'hex') as value_hash,
+          null::text as value_text, null::double precision as value_num
+        from site_data_records r
+        where ${records} and ${sql.join(
+          values.map((item) => sql`coalesce(${item}, 'null'::jsonb) <> 'null'::jsonb`),
+          sql` and `,
+        )}`);
     }
+    for (const field of collection.indexedFields) {
+      const item = value(field);
+      candidates.push(sql`select r.account_id, r.workspace_id, r.collection_id, r.id as record_id,
+          'index'::text as kind, ${field}::text as name, ''::text as scope, null::text as value_hash,
+          case when jsonb_typeof(${item}) = 'string' then ${item} #>> '{}' end as value_text,
+          case when jsonb_typeof(${item}) = 'number' then (${item} #>> '{}')::double precision end as value_num
+        from site_data_records r
+        where ${records} and (jsonb_typeof(${item}) = 'number'
+          or (jsonb_typeof(${item}) = 'string' and char_length(${item} #>> '{}') <= 256))`);
+    }
+    if (candidates.length === 0) return null;
+    const [conflict] = await rawRows<{ name: string }>(
+      tx,
+      sql`with candidates as materialized (${sql.join(candidates, sql` union all `)}),
+        inserted as (
+          insert into site_data_record_values
+            (account_id, workspace_id, collection_id, record_id, kind, name, scope, value_hash, value_text, value_num)
+          select * from candidates
+          on conflict (collection_id, name, scope, value_hash) where kind = 'unique' do nothing
+          returning record_id, kind, name
+        )
+        select c.name from candidates c
+        where c.kind = 'unique' and not exists (
+          select 1 from inserted i where i.record_id = c.record_id and i.kind = 'unique' and i.name = c.name)
+        limit 1`,
+    );
+    return conflict?.name ?? null;
   };
+
+  const uniqueConflict = (name: string, message: string, details: Record<string, unknown> = {}) =>
+    new SiteDataError("conflict", message.replace("%s", name.split("+").join(" + ")), {
+      reason: "unique",
+      fields: name.split("+"),
+      ...details,
+    });
 
   const findRecord = async (
     tx: Database,
@@ -910,6 +968,17 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     siteDataReadReach(collection, caller.role) === "all" ||
     row.owner_principal === caller.principal;
 
+  /** Turn a malformed cursor's value errors into validation, never a 500. */
+  const withCursorErrors = async <T>(hasCursor: boolean, run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (error) {
+      if (hasCursor && databaseErrorCode(error).startsWith("22"))
+        throw validationError("Invalid cursor for this query");
+      throw error;
+    }
+  };
+
   const store: SiteDataStore = {
     async describe(scope) {
       return scoped(scope, async (tx) => {
@@ -938,6 +1007,39 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
       return scoped(scope, (tx) => loadCollection(tx, scope, name));
     },
 
+    async consumeRate(caller, kind, operations, limits) {
+      const windows: Array<[string, number, string]> =
+        kind === "read"
+          ? [[`read:${caller.principal}`, limits.viewerReadsPerMinute, "Too many requests."]]
+          : [
+              [caller.principal, limits.viewerWritesPerMinute, "Too many writes."],
+              ["*", limits.siteWritesPerMinute, "This Site is receiving too many writes."],
+            ];
+      // Committed on its own, before any work, so failed attempts count too.
+      await scoped(caller, async (tx) => {
+        for (const [principal, limit, message] of windows) {
+          const [row] = await rawRows<{ operations: number }>(
+            tx,
+            sql`insert into site_data_rate_windows
+                (account_id, workspace_id, site_id, principal_key, window_started_at, operations)
+              values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId}, ${principal},
+                date_trunc('minute', now()), ${operations})
+              on conflict (workspace_id, site_id, principal_key) do update set
+                operations = case
+                  when site_data_rate_windows.window_started_at = excluded.window_started_at
+                  then least(site_data_rate_windows.operations + excluded.operations, 1000000000)
+                  else excluded.operations end,
+                window_started_at = excluded.window_started_at
+              returning operations`,
+          );
+          if ((row?.operations ?? 0) > limit)
+            throw new SiteDataError("rate_limited", `${message} Try again in a minute.`, {
+              retryAfterSeconds: 60,
+            });
+        }
+      });
+    },
+
     async defineCollection(caller, input, limits) {
       if (caller.role !== "manager" || caller.framed)
         throw new SiteDataError("forbidden", "Only the Site's managers can define collections");
@@ -962,7 +1064,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
                 ${definition.jsonSchema === null ? null : JSON.stringify(definition.jsonSchema)}::jsonb,
                 ${JSON.stringify(definition.indexedFields)}::jsonb,
                 ${JSON.stringify(definition.uniqueFields)}::jsonb, ${caller.actor}, ${caller.actor})
-              returning *, 0 as record_count, 0 as record_bytes`,
+              returning *`,
           );
           await applyUsage(tx, caller, { collections: 1 });
           return { collection: toCollection(row!), created: true };
@@ -990,40 +1092,23 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
             where workspace_id = ${caller.workspaceId} and id = ${existing.id}
             returning *`,
         );
-        const updated = {
-          ...toCollection(row!),
-          recordCount: existing.recordCount,
-          recordBytes: existing.recordBytes,
-        };
+        const updated = toCollection(row!);
         const valuesChanged =
           JSON.stringify(existing.indexedFields) !== JSON.stringify(updated.indexedFields) ||
           JSON.stringify(existing.uniqueFields) !== JSON.stringify(updated.uniqueFields);
         if (valuesChanged && existing.recordCount > 0) {
+          // Re-derive every record's values in set-based statements.
           await tx.execute(
             sql`delete from site_data_record_values where workspace_id = ${caller.workspaceId} and collection_id = ${existing.id}`,
           );
-          const records = await rawRows<RecordRow>(
+          const conflict = await syncValues(
             tx,
-            sql`select id, owner_principal, data from site_data_records
-              where workspace_id = ${caller.workspaceId} and collection_id = ${existing.id}
-              order by created_at, id`,
+            caller,
+            updated,
+            sql`r.workspace_id = ${caller.workspaceId} and r.collection_id = ${existing.id}`,
           );
-          const seen = new Map<string, string>();
-          for (const record of records) {
-            const entries = valueEntries(updated, record.owner_principal, record.data);
-            for (const entry of entries) {
-              if (entry.kind !== "unique") continue;
-              const marker = `${entry.name}\u0000${entry.scope}\u0000${entry.hash}`;
-              if (seen.has(marker))
-                throw new SiteDataError(
-                  "conflict",
-                  `Existing records repeat ${entry.name.split("+").join(" + ")}, so it cannot be unique`,
-                  { reason: "unique", fields: entry.name.split("+") },
-                );
-              seen.set(marker, record.id);
-            }
-            await writeValues(tx, caller, updated, record.id, entries);
-          }
+          if (conflict)
+            throw uniqueConflict(conflict, "Existing records repeat %s, so it cannot be unique");
         }
         return { collection: updated, created: false };
       });
@@ -1056,6 +1141,10 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         await tx.execute(
           sql`delete from site_data_records where workspace_id = ${caller.workspaceId} and collection_id = ${collection.id}`,
         );
+        await tx.execute(
+          sql`update site_data_collections set record_count = 0, record_bytes = 0
+            where workspace_id = ${caller.workspaceId} and id = ${collection.id}`,
+        );
         await applyUsage(tx, caller, {
           records: -collection.recordCount,
           recordBytes: -collection.recordBytes,
@@ -1082,6 +1171,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           ...where.map((filter) => {
             if (!filter || typeof filter.field !== "string")
               throw validationError("Each filter needs a field and an op");
+            assertFilterValue(filter);
             return filter.field.startsWith("$")
               ? systemFilter(caller, filter)
               : dataFilter(collection, filter);
@@ -1090,7 +1180,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         const sorts = query.sort?.length
           ? query.sort
           : [{ field: "$createdAt", direction: "desc" as const }];
-        if (sorts.length > SITE_DATA_MAX_SORT_KEYS)
+        if (!Array.isArray(sorts) || sorts.length > SITE_DATA_MAX_SORT_KEYS)
           throw validationError(`Sort by at most ${SITE_DATA_MAX_SORT_KEYS} fields`);
         const keys = sorts.filter((sort) => sort.field !== "$id").map(sortKey);
         const lastDirection =
@@ -1149,12 +1239,14 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               sql`, `,
             )})`
           : sql`'[]'::jsonb`;
-        const rows = await rawRows<RecordRow>(
-          tx,
-          sql`select r.*, ${cursorValues} as cursor_values from site_data_records r
-            where ${filtered} ${paging.length ? sql`and ${paging[0]}` : sql``}
-            order by ${order}
-            limit ${limit + 1}`,
+        const rows = await withCursorErrors(Boolean(query.cursor), () =>
+          rawRows<RecordRow>(
+            tx,
+            sql`select r.*, ${cursorValues} as cursor_values from site_data_records r
+              where ${filtered} ${paging.length ? sql`and ${paging[0]}` : sql``}
+              order by ${order}
+              limit ${limit + 1}`,
+          ),
         );
         const page = rows.slice(0, limit);
         const last = page.at(-1);
@@ -1166,11 +1258,15 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               : null,
         };
         if (query.count) {
-          const [counted] = await rawRows<{ count: string | number }>(
-            tx,
-            sql`select count(*) as count from site_data_records r where ${filtered}`,
-          );
-          result.count = num(counted?.count);
+          // An unfiltered count of everything readable uses the maintained counter.
+          if (where.length === 0 && !own) result.count = collection.recordCount;
+          else {
+            const [counted] = await rawRows<{ count: string | number }>(
+              tx,
+              sql`select count(*) as count from site_data_records r where ${filtered}`,
+            );
+            result.count = num(counted?.count);
+          }
         }
         return result;
       });
@@ -1191,7 +1287,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         throw validationError(`A batch has at most ${SITE_DATA_MAX_BATCH} operations`);
       return scoped(caller, async (tx) => {
         const usage = await lockUsage(tx, caller);
-        if (options.rateLimit) await consumeRate(tx, caller, ops.length, options.limits);
+        await assertWritableSite(tx, caller);
         const collections = new Map<string, SiteDataCollection>();
         const collectionFor = async (name: string) => {
           const cached = collections.get(name);
@@ -1205,6 +1301,15 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           bytesWritten: 0,
           recordDelta: 0,
           byteDelta: 0,
+        };
+        const perCollection = new Map<string, { records: number; bytes: number }>();
+        const account = (collection: SiteDataCollection, records: number, bytes: number) => {
+          const current = perCollection.get(collection.id) ?? { records: 0, bytes: 0 };
+          current.records += records;
+          current.bytes += bytes;
+          perCollection.set(collection.id, current);
+          summary.recordDelta += records;
+          summary.byteDelta += bytes;
         };
         const results: SiteDataWriteResultItem[] = [];
 
@@ -1226,6 +1331,23 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               });
           }
           return size;
+        };
+        const storeValues = async (
+          collection: SiteDataCollection,
+          recordId: string,
+          replacing: boolean,
+          index: number,
+        ) => {
+          if (collection.uniqueFields.length === 0 && collection.indexedFields.length === 0) return;
+          if (replacing) await deleteValues(tx, caller, recordId);
+          const conflict = await syncValues(
+            tx,
+            caller,
+            collection,
+            sql`r.workspace_id = ${caller.workspaceId} and r.id = ${recordId}`,
+          );
+          if (conflict)
+            throw uniqueConflict(conflict, "Another record already has this %s", { index });
         };
         const insertRecord = async (
           collection: SiteDataCollection,
@@ -1249,8 +1371,6 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
                 index,
               });
           }
-          const entries = valueEntries(collection, caller.principal, data);
-          await assertUnique(tx, caller, collection, null, entries);
           const [row] = await rawRows<RecordRow>(
             tx,
             sql`insert into site_data_records
@@ -1261,10 +1381,9 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
                 ${caller.actor}, ${caller.actor}, ${size})
               returning *`,
           );
-          await writeValues(tx, caller, collection, row!.id, entries);
+          await storeValues(collection, row!.id, false, index);
           summary.bytesWritten += size;
-          summary.byteDelta += size;
-          summary.recordDelta += 1;
+          account(collection, 1, siteDataChargedBytes(size));
           return toRecord(row!);
         };
         const targetFor = async (
@@ -1308,8 +1427,6 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           index: number,
         ) => {
           const size = prepare(collection, data, index);
-          const entries = valueEntries(collection, row.owner_principal, data);
-          await assertUnique(tx, caller, collection, row.id, entries);
           const [updated] = await rawRows<RecordRow>(
             tx,
             sql`update site_data_records set data = ${JSON.stringify(data)}::jsonb,
@@ -1317,15 +1434,10 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               where workspace_id = ${caller.workspaceId} and id = ${row.id}
               returning *`,
           );
-          await writeValues(tx, caller, collection, row.id, entries);
+          await storeValues(collection, row.id, true, index);
           summary.bytesWritten += size;
-          summary.byteDelta += size - row.size_bytes;
+          account(collection, 0, size - row.size_bytes);
           return toRecord(updated!);
-        };
-        const refOf = (op: SiteDataRecordRef, index: number): SiteDataRecordRef => {
-          if (op.id !== undefined) return { id: op.id };
-          if (op.key !== undefined) return { key: keyOf(op.key, index)! };
-          throw validationError("Give a record id or key", { index });
         };
         const keyOf = (key: unknown, index: number): string | null => {
           if (key === undefined || key === null) return null;
@@ -1334,6 +1446,11 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               index,
             });
           return key;
+        };
+        const refOf = (op: SiteDataRecordRef, index: number): SiteDataRecordRef => {
+          if (op.id !== undefined) return { id: op.id };
+          if (op.key !== undefined) return { key: keyOf(op.key, index)! };
+          throw validationError("Give a record id or key", { index });
         };
 
         for (const [index, op] of ops.entries()) {
@@ -1391,8 +1508,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               await tx.execute(
                 sql`delete from site_data_records where workspace_id = ${caller.workspaceId} and id = ${row.id}`,
               );
-              summary.recordDelta -= 1;
-              summary.byteDelta -= row.size_bytes;
+              account(collection, -1, -siteDataChargedBytes(row.size_bytes));
               results.push({ op: "delete", deleted: { id: row.id } });
               break;
             }
@@ -1438,6 +1554,29 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               });
           }
         }
+        for (const collection of collections.values()) {
+          const delta = perCollection.get(collection.id);
+          if (!delta) continue;
+          if (
+            delta.records > 0 &&
+            collection.recordCount + delta.records > options.limits.maxRecordsPerCollection
+          )
+            throw new SiteDataError(
+              "quota_exceeded",
+              `A collection can have at most ${options.limits.maxRecordsPerCollection} records`,
+              {
+                quota: "collection_records",
+                limit: options.limits.maxRecordsPerCollection,
+                collection: collection.name,
+              },
+            );
+          await tx.execute(
+            sql`update site_data_collections set
+                record_count = greatest(0, record_count + ${delta.records}),
+                record_bytes = greatest(0, record_bytes + ${delta.bytes})
+              where workspace_id = ${caller.workspaceId} and id = ${collection.id}`,
+          );
+        }
         if (summary.byteDelta > 0) {
           if (usage.recordBytes + summary.byteDelta > options.limits.recordBytesPerSite)
             throw new SiteDataError(
@@ -1470,19 +1609,21 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           Math.max(1, Math.trunc(options.limit ?? 100) || 100),
           SITE_DATA_MAX_PAGE,
         );
-        let after: { createdAt: string; id: string } | null = null;
+        let after: SQL | null = null;
         if (options.cursor) {
           const decoded = decodeCursor(options.cursor, "files");
-          after = { createdAt: String(decoded.v[0]), id: decoded.id };
+          after = sql`(f.created_at, f.id) < (${cursorTimestamp(decoded.v[0])}, ${decoded.id}::uuid)`;
         }
-        const rows = await rawRows<FileRow & { cursor_at: string }>(
-          tx,
-          sql`select f.*, to_jsonb(f.created_at) #>> '{}' as cursor_at from site_data_files f
-            where f.workspace_id = ${caller.workspaceId} and f.site_id = ${caller.siteId}
-              ${caller.role === "manager" ? sql`` : sql`and (f.scope = 'shared' or f.owner_principal = ${caller.principal})`}
-              ${after ? sql`and (f.created_at, f.id) < (${after.createdAt}::timestamptz, ${after.id}::uuid)` : sql``}
-            order by f.created_at desc, f.id desc
-            limit ${limit + 1}`,
+        const rows = await withCursorErrors(Boolean(after), () =>
+          rawRows<FileRow & { cursor_at: string }>(
+            tx,
+            sql`select f.*, to_jsonb(f.created_at) #>> '{}' as cursor_at from site_data_files f
+              where f.workspace_id = ${caller.workspaceId} and f.site_id = ${caller.siteId}
+                ${caller.role === "manager" ? sql`` : sql`and (f.scope = 'shared' or f.owner_principal = ${caller.principal})`}
+                ${after ? sql`and ${after}` : sql``}
+              order by f.created_at desc, f.id desc
+              limit ${limit + 1}`,
+          ),
         );
         const page = rows.slice(0, limit);
         const last = page.at(-1);
@@ -1513,26 +1654,22 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
       });
     },
 
+    async checkFileQuota(caller, sizeBytes, limits) {
+      await scoped(caller, async (tx) => {
+        const [row] = await rawRows<UsageRow>(
+          tx,
+          sql`select collection_count, record_count, record_bytes, file_count, file_bytes
+            from site_data_usage where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}`,
+        );
+        await fileQuota(tx, caller, { fileBytes: num(row?.file_bytes) }, sizeBytes, limits);
+      });
+    },
+
     async insertFile(caller, file, options) {
       return scoped(caller, async (tx) => {
         const usage = await lockUsage(tx, caller);
-        if (options.rateLimit) await consumeRate(tx, caller, 1, options.limits);
-        if (file.sizeBytes > options.limits.maxFileBytes)
-          throw new SiteDataError(
-            "quota_exceeded",
-            `A file can be at most ${Math.floor(options.limits.maxFileBytes / (1024 * 1024))} MB`,
-            { quota: "file_bytes", limit: options.limits.maxFileBytes },
-          );
-        if (usage.fileBytes + file.sizeBytes > options.limits.fileBytesPerSite)
-          throw new SiteDataError("quota_exceeded", "This Site's file storage is full", {
-            quota: "site_file_bytes",
-            limit: options.limits.fileBytesPerSite,
-          });
-        if ((await workspaceBytes(tx, caller)) + file.sizeBytes > options.limits.workspaceBytes)
-          throw new SiteDataError("quota_exceeded", "This workspace's Site data is full", {
-            quota: "workspace_bytes",
-            limit: options.limits.workspaceBytes,
-          });
+        await assertWritableSite(tx, caller);
+        await fileQuota(tx, caller, usage, file.sizeBytes, options.limits);
         const [row] = await rawRows<FileRow>(
           tx,
           sql`insert into site_data_files
@@ -1558,6 +1695,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
       if (!UUID.test(fileId)) throw new SiteDataError("not_found", "File not found");
       return scoped(caller, async (tx) => {
         await lockUsage(tx, caller);
+        await assertWritableSite(tx, caller);
         const [row] = await rawRows<FileRow>(
           tx,
           sql`select * from site_data_files

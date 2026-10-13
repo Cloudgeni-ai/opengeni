@@ -33,6 +33,8 @@ export const siteDataCollections = pgTable(
     jsonSchema: jsonb("json_schema"),
     indexedFields: jsonb("indexed_fields").$type<string[]>().notNull().default([]),
     uniqueFields: jsonb("unique_fields").$type<string[][]>().notNull().default([]),
+    recordCount: bigint("record_count", { mode: "number" }).notNull().default(0),
+    recordBytes: bigint("record_bytes", { mode: "number" }).notNull().default(0),
     createdBy: text("created_by").notNull(),
     updatedBy: text("updated_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -41,6 +43,11 @@ export const siteDataCollections = pgTable(
   (table) => ({
     workspaceId: uniqueIndex("site_data_collections_workspace_id_uq").on(
       table.workspaceId,
+      table.id,
+    ),
+    workspaceSiteId: uniqueIndex("site_data_collections_workspace_site_id_uq").on(
+      table.workspaceId,
+      table.siteId,
       table.id,
     ),
     siteName: uniqueIndex("site_data_collections_site_name_uq").on(
@@ -111,6 +118,10 @@ export const siteDataRecordValues = pgTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.recordId, table.kind, table.name] }),
+    workspaceRecord: index("site_data_record_values_workspace_record_idx").on(
+      table.workspaceId,
+      table.recordId,
+    ),
   }),
 );
 
