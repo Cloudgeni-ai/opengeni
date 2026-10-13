@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
   acceptSessionHumanInputResponse,
@@ -1326,7 +1326,23 @@ describe("session realtime ledger", () => {
     expect(admitted.accepted).toHaveLength(1);
     expect(admitted.accepted[0]).toMatchObject({ replay: false });
     expect(admitted.accepted[0]!.entry.turnId).toBeString();
-    expect(admitted.eventIds).toHaveLength(2);
+    // user.message + turn.queued, plus the idle shell's move to queued (#4330:
+    // creation reserves an idle shell rather than a queued projection).
+    expect(admitted.eventIds).toHaveLength(3);
+    const statusEvents = await transaction(value.owner.workspaceId, async (tx) =>
+      tx
+        .select({ type: schema.sessionEvents.type, payload: schema.sessionEvents.payload })
+        .from(schema.sessionEvents)
+        .where(inArray(schema.sessionEvents.id, admitted.eventIds)),
+    );
+    expect(statusEvents.map((event) => event.type).sort()).toEqual([
+      "session.status.changed",
+      "turn.queued",
+      "user.message",
+    ]);
+    expect(
+      statusEvents.find((event) => event.type === "session.status.changed")?.payload,
+    ).toMatchObject({ status: "queued" });
     expect(admitted.workflowWakeRevision).toBeGreaterThan(0);
     expect(replay.accepted[0]).toMatchObject({
       replay: true,
