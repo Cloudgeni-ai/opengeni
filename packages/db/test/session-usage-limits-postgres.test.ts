@@ -10,7 +10,9 @@ import {
   checkSessionUsageLimitAdmission,
   createDb,
   createSession,
+  ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
+  forkSessionContent,
   inspectRuntimeDatabasePosture,
   maintainSessionUsageLimits,
   migrate,
@@ -156,7 +158,12 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     const zero = await setLimit(scope, root, 0, 0);
     expect(zero.outcome).toBe("ok");
     // Zero is an immediate stop, not "no limit".
-    expect(zero.state).toMatchObject({ status: "reached", limitMicros: 0, usedMicros: 0, version: 1 });
+    expect(zero.state).toMatchObject({
+      status: "reached",
+      limitMicros: 0,
+      usedMicros: 0,
+      version: 1,
+    });
     const admission = await checkSessionUsageLimitAdmission(app.db, {
       ...scope,
       sessionId: grandchild,
@@ -199,8 +206,18 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     const events = await shared.admin`select payload from session_events
       where session_id=${root} and type='session.usage_limit.updated' order by sequence`;
     expect(events.map((row) => row.payload)).toEqual([
-      { basis: "model_api_equivalent_v1", limitMicros: 5_000_000, previousLimitMicros: null, version: 1 },
-      { basis: "model_api_equivalent_v1", limitMicros: null, previousLimitMicros: 5_000_000, version: 2 },
+      {
+        basis: "model_api_equivalent_v1",
+        limitMicros: 5_000_000,
+        previousLimitMicros: null,
+        version: 1,
+      },
+      {
+        basis: "model_api_equivalent_v1",
+        limitMicros: null,
+        previousLimitMicros: 5_000_000,
+        version: 2,
+      },
     ]);
     const audit = await shared.admin`select expected_version, previous_limit_micros, limit_micros,
         result_version, actor_type, actor_subject_id
@@ -326,13 +343,33 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
 
   test("AC05: reached is derived from the latest counter; concurrently admitted usage stays recorded above the limit", async () => {
     if (!shared) return;
-    const scope = await fixture();
+    // A managed person in their personal workspace: the real fork authority.
+    const userId = `usage-limit-fork-${crypto.randomUUID()}`;
+    const context = await ensureManagedAccessForUser(app.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Fork owner",
+    });
+    const personal = context.workspaceGrants.find(
+      (grant) => grant.workspaceId !== context.defaultWorkspaceId,
+    )!;
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${personal.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test'
+      ) on conflict (account_id) do nothing`;
+    const scope: Scope = {
+      accountId: personal.accountId,
+      workspaceId: personal.workspaceId!,
+      subjectId: `user:${userId}`,
+    };
     const root = await newSession(scope);
     const child = await newSession(scope, root);
     await setLimit(scope, root, 1_000_000, 0);
-    expect((await checkSessionUsageLimitAdmission(app.db, { ...scope, sessionId: child })).allowed).toBe(
-      true,
-    );
+    expect(
+      (await checkSessionUsageLimitAdmission(app.db, { ...scope, sessionId: child })).allowed,
+    ).toBe(true);
     // Three calls admitted before the limit was observed all settle in full.
     await Promise.all([
       settle(scope, root, "turn-1:r1", 600_000),
@@ -375,6 +412,61 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     expect(await readSessionUsageLimit(app.db, { ...scope, sessionId: root })).toEqual({
       outcome: "not_found",
     });
+  });
+
+  test("AC15: a person's fork is a new unlimited root without copied usage; the source keeps its spend", async () => {
+    if (!shared) return;
+    // A managed person in their personal workspace: the real fork authority.
+    const userId = `usage-limit-fork-${crypto.randomUUID()}`;
+    const context = await ensureManagedAccessForUser(app.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Fork owner",
+    });
+    const personal = context.workspaceGrants.find(
+      (grant) => grant.workspaceId !== context.defaultWorkspaceId,
+    )!;
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${personal.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test'
+      ) on conflict (account_id) do nothing`;
+    const scope: Scope = {
+      accountId: personal.accountId,
+      workspaceId: personal.workspaceId!,
+      subjectId: `user:${userId}`,
+    };
+    const root = await newSession(scope);
+    const child = await newSession(scope, root);
+    await setLimit(scope, root, 1_000_000, 0);
+    await settle(scope, root, "turn-r:r1", 600_000);
+    await settle(scope, child, "turn-c:r1", 500_000);
+    expect((await read(scope, root)).status).toBe("reached");
+    const fork = await forkSessionContent(app.db, {
+      sourceWorkspaceId: scope.workspaceId,
+      sourceSessionId: root,
+      actorSubjectId: scope.subjectId,
+      destinationWorkspaceId: scope.workspaceId,
+      destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(fork.sessionId).not.toBe(root);
+    expect(await read(scope, fork.sessionId)).toMatchObject({
+      rootSessionId: fork.sessionId,
+      inherited: false,
+      status: "unlimited",
+      limitMicros: null,
+      usedMicros: 0,
+      history: "complete",
+      coverage: "complete",
+      pricedCalls: 0,
+    });
+    // Usage made in the fork is its own; the source root is unchanged.
+    await settle(scope, fork.sessionId, "turn-f:r1", 100);
+    expect((await read(scope, fork.sessionId)).usedMicros).toBe(100);
+    expect(await read(scope, root)).toMatchObject({ usedMicros: 1_100_000, status: "reached" });
   });
 
   test("AC14: bounded resumable lifetime import of facts and events, exactly once with live receipts, stays legacy_partial", async () => {
@@ -432,7 +524,11 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     // A live receipt that the import must not count again.
     const live = await settle(scope, child, `${turnB}:response-6`, 7_000);
     expect(live.outcome).toBe("recorded");
-    expect(live.state).toMatchObject({ status: "preparing", usedMicros: null, history: "preparing" });
+    expect(live.state).toMatchObject({
+      status: "preparing",
+      usedMicros: null,
+      history: "preparing",
+    });
     // Preparing never presents a false zero and refuses a new limit.
     const preparing = await read(scope, root);
     expect(preparing).toMatchObject({ status: "preparing", usedMicros: null, coverage: "partial" });
@@ -512,7 +608,9 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
       "select session_usage_limit_apply_receipt(null,null,null,null,null,null,null,null,null,null)",
       "select session_usage_limit_import_step(null,null,null,1)",
     ]) {
-      await expect(withRlsContext(app.db, scope, (tx) => tx.execute(sql.raw(routine)))).rejects.toThrow();
+      await expect(
+        withRlsContext(app.db, scope, (tx) => tx.execute(sql.raw(routine))),
+      ).rejects.toThrow();
     }
     // Another tenant's scope cannot see the session.
     expect(await readSessionUsageLimit(app.db, { ...other, sessionId: root })).toEqual({
@@ -521,17 +619,17 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     // A command whose explicit scope differs from the RLS context is denied.
     await expect(
       withRlsContext(app.db, other, (tx) =>
-        tx.execute(sql`select session_usage_limit_command(${JSON.stringify({
-          action: "read",
-          accountId: scope.accountId,
-          workspaceId: scope.workspaceId,
-          sessionId: root,
-        })}::jsonb)`),
+        tx.execute(
+          sql`select session_usage_limit_command(${JSON.stringify({
+            action: "read",
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId: root,
+          })}::jsonb)`,
+        ),
       ),
     ).rejects.toThrow();
-    expect(
-      (await settle(other, root, "turn-p:r2", 1)).outcome,
-    ).toBe("source_gone");
+    expect((await settle(other, root, "turn-p:r2", 1)).outcome).toBe("source_gone");
     expect((await read(scope, root)).usedMicros).toBe(10);
   });
 

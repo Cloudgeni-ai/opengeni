@@ -416,6 +416,11 @@ ceilings, not reservations or organization-credit purchases. Keep budget
 configuration/grants in organization-authorized backend flows and use the
 session proxy's own-usage route for a browser meter.
 
+To stop one task (a root session and its child agents) at an API-equivalent
+model-usage amount, set `usageLimitMicros` from your server on create or with
+`setSessionUsageLimit`; see [task usage limits](session-usage-limits.md). The
+browser proxy never accepts a limit from an end user.
+
 ```text
 product browser / mobile client
              |

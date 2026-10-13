@@ -1,0 +1,48 @@
+---
+title: "Task usage limits"
+description: "Stop a task from starting new model requests once its API-equivalent model usage reaches an amount you choose."
+---
+
+A task usage limit stops one task, a chat and every agent it starts, from making new model requests once its recorded model usage reaches an amount. Use it to keep a long-running or delegated task from running on indefinitely.
+
+## How it works
+
+- **One limit per task.** It belongs to the main chat and covers every child agent. Child chats show the main chat's limit.
+- **No limit by default.** A new task is unlimited unless you set an amount. `0` stops before the first model request.
+- **Measured as API-equivalent model usage.** The amount is the provider list-price estimate of the task's model responses, before any Opengeni margin, whatever pays for them: credits, a connected subscription or your own key. It is not your bill.
+- **Checked before each new model request.** Nothing is reserved. Requests already running finish, and several running at once can take recorded usage above the limit together.
+- **Unknown prices are not $0.** A response without a known price is left out of the total and the task shows "at least" that amount. A model priced at $0 counts as $0.
+- **Reaching it is a stop, not a failure.** The task becomes idle with its history and outputs intact, and an active goal pauses. Raising or removing the limit never restarts work: send a message or resume the goal.
+
+Image and video generation, voice, web search, Knowledge indexing and sandbox compute are not counted.
+
+## Set a limit from your server
+
+People can set a limit in the Opengeni app. In your product, set it from your server: the browser session proxy never accepts a limit from an end user.
+
+```ts
+const session = await og.createSession(workspaceId, {
+  initialMessage,
+  usageLimitMicros: 2_000_000, // $2.00
+});
+
+// Raise, lower or remove (null) it later with compare-and-set.
+const current = await og.getSessionUsageLimit(workspaceId, session.id);
+await og.setSessionUsageLimit(workspaceId, session.id, {
+  limitMicros: 5_000_000,
+  expectedVersion: current.version,
+  operationId: crypto.randomUUID(),
+});
+```
+
+Amounts are integer USD micros ($1 = 1,000,000). If the server does not confirm the limit, for example because it predates this feature, the SDK throws rather than running the task without one. Agents can never change a limit.
+
+## When a task reaches its limit
+
+New messages are refused with HTTP 402 and the code `session_usage_limit_reached`; the SDK raises `OpenGeniSessionUsageLimitReachedError`. Keep the person's draft and offer to change the limit; retrying does not help. In the conversation, `@opengeni/react` shows a neutral "usage limit reached" row with the amounts, never a credits or monthly-reset message.
+
+## Before you turn it on
+
+Self-hosted deployments enable new limits with `OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true` after every API, worker, web and SDK consumer is upgraded. Turning it off again refuses new limits but keeps enforcing existing ones.
+
+For the API reference, rollout and diagnostics, see the [task usage limits reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/session-usage-limits.md). Workspace and per-person spending ceilings are a separate feature: see [usage allowances](/guides/usage-allowances).
