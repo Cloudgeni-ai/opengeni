@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { withRestoredSessionActivityRlsContext, type Database } from "./database";
-import { retireInterruptedSessionTurn } from "./index";
+import { recordRetiredChildNotice, retireInterruptedSessionTurn } from "./index";
 
 export const INTERRUPTED_TURN_RETIREMENT_MARKER = "-- OPENGENI_INTERRUPTED_TURN_RETIREMENT_STAGE";
 export const INTERRUPTED_TURN_RETIREMENT_MIGRATION = "0764_interrupted_turn_recovery.sql";
@@ -70,6 +70,14 @@ export async function migrateInterruptedTurnRetirement(
         if (result.action !== "failed" || result.turnId !== target.turnId)
           throw new Error("Interrupted-turn retirement target changed or is unsafe");
       }
+      // A selected child may itself be a selected parent's descendant. First
+      // validate and settle every target against the reviewed event cursors;
+      // only then append parent receipts, in this same atomic transaction.
+      for (const target of targets)
+        await recordRetiredChildNotice(scoped, target.workspaceId, {
+          ...target,
+          operationId: manifest.operationId,
+        });
     });
   }
 }

@@ -566,6 +566,30 @@ export function buildTimeline(
         break;
       }
 
+      case "system.update.settled": {
+        // An operator retirement is a passive historical receipt, not a new
+        // prompt or model-input delivery. Reuse the existing agent-result row
+        // while ordinary turn-input settlement metadata remains quiet.
+        if (payload.notificationOnly !== true || payload.reason !== "operator_retirement") break;
+        const members = machineInputMembers(payload.members).filter(
+          (member) =>
+            member.kind === "child_terminal_result" && member.classification === "failure",
+        );
+        if (members.length === 0) break;
+        for (const member of members) {
+          workerSessions.add(member.sourceId);
+          pendingWorkerSessions.delete(member.sourceId);
+        }
+        items.push({
+          kind: "machine-input-batch",
+          id: event.id,
+          turnId: null,
+          members,
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "system.update.delivered": {
         const inputs = machineInputMembers(payload.members);
         for (const input of inputs) {

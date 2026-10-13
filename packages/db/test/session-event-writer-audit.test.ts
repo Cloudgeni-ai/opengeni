@@ -219,6 +219,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
+  "packages/db/src/index.ts#recordRetiredChildNotice": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#recoverSessionWorkFailedBeforeAttemptClaim": {
     inserts: 1,
     contract: "canonical",

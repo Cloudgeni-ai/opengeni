@@ -40,6 +40,17 @@ The database links every delivered input to one
 Agent Steer is guaranteed admission to the bounded batch and is serialized last
 so an older goal or lifecycle notice cannot override the replacement direction.
 
+An explicit operator retirement of historical interrupted work is not fresh
+execution intent. Its failed child outcome is a `system.update.settled` timeline
+receipt marked `notificationOnly` with reason `operator_retirement`, not a
+`session_system_updates` row. The parent sees the receipt when the chat is opened;
+it is not injected into model history on the next turn and does not wake a held
+wait, create a turn or block tenancy/schedule quiescence. The agent can inspect
+the timeline explicitly during later authorized work. Retirement supersedes that
+child's obsolete pending progress/action/pause/capacity notices, preserving prior
+terminal answers and unrelated senders. Normal child results still follow the
+canonical input and wake lifecycle above.
+
 Execution ownership is selected before batching. Ordinary same-human agent
 messages and child results use the receiving chat's last started user/API request
 context, including its accepted accounts and provider choices. Sender snapshots
