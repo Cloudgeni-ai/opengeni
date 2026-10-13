@@ -2,10 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DATABASE_COMMAND_RUNNERS, finalizeCommandEntry } from "./assemble-server-runtime";
+import {
+  API_RUNTIME_EXTERNALS,
+  WORKER_RUNTIME_EXTERNALS,
+  DATABASE_COMMAND_RUNNERS,
+  finalizeCommandEntry,
+} from "./assemble-server-runtime";
 
 const guardedSource =
   "export async function runMigrateCli() {}\nif (import.meta.main) await runMigrateCli();\n";
+
+test("only the worker image retains the native Documents parser", () => {
+  expect(API_RUNTIME_EXTERNALS).not.toContain("@llamaindex/liteparse");
+  expect(WORKER_RUNTIME_EXTERNALS).toContain("@llamaindex/liteparse");
+  expect(API_RUNTIME_EXTERNALS).toContain("sharp");
+});
 
 describe("finalizeCommandEntry", () => {
   test("keeps an entry whose own output still carries its guard", () => {

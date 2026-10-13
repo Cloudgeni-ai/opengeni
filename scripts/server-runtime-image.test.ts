@@ -44,10 +44,10 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
           const sharp = runtimeRequire('sharp');
           const png = await sharp({create:{width:1,height:1,channels:3,background:'white'}}).png().toBuffer();
           if (!png.length) throw new Error('missing Sharp native output');
-          const {LiteParse} = runtimeRequire('@llamaindex/liteparse');
-          new LiteParse({ocrEnabled:false,numWorkers:1});
           if (!existsSync('./apps/${role}/dist/process/assets/runtime/bundled_default_skills/document-parsing/SKILL.md')) throw new Error('missing Skills');
           if (${JSON.stringify(role)} === 'worker') {
+            const {LiteParse} = runtimeRequire('@llamaindex/liteparse');
+            new LiteParse({ocrEnabled:false,numWorkers:1});
             await module.createDefaultWorkerActivities('control',{});
             await module.createDefaultWorkerActivities('turn',{});
             const definition = module.resolveOpenGeniWorkflowDefinition(new URL('./apps/worker/dist/process/index.js',import.meta.url).href);
@@ -55,6 +55,9 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
             const client = JSON.parse(readFileSync('./apps/worker/dist/process/assets/codemode-client.json','utf8'));
             if (client.version !== 1 || !client.files.ogtool) throw new Error('missing managed client');
           } else {
+            let parserResolved = false;
+            try { runtimeRequire.resolve('@llamaindex/liteparse'); parserResolved = true; } catch {}
+            if (parserResolved) throw new Error('API must not ship the worker-only native parser');
             const migrations = await import('./packages/db/src/migrate.ts');
             if (typeof migrations.migrate !== 'function') throw new Error('missing migrator');
             const sharedMigrations = await Promise.all(readdirSync('./packages/db/src').filter(name=>name.startsWith('runtime-')&&name.endsWith('.js')).map(async name=>{
@@ -85,7 +88,15 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
         `;
         const child = Bun.spawn([process.execPath, "--no-env-file", "-e", program], {
           cwd: fixture,
-          env: { PATH: process.env.PATH },
+          // Clearing inherited URLs is not enough: CLI defaults point at a
+          // local development database. Imports must do no database work, and
+          // a regressed main guard must fail closed instead of using that default.
+          env: {
+            PATH: process.env.PATH,
+            OPENGENI_DATABASE_URL: "postgres://invalid:invalid@127.0.0.1:1/runtime_smoke",
+            OPENGENI_MIGRATIONS_DATABASE_URL:
+              "postgres://invalid:invalid@127.0.0.1:1/runtime_smoke",
+          },
           stdout: "pipe",
           stderr: "pipe",
         });
