@@ -49,6 +49,9 @@ export async function acquirePreKnowledgeTestDatabase(
     // The queue Steer admission repair is a one-time data repair that also
     // reads the withheld 0560 import column; it changes no schema.
     await admin`INSERT INTO schema_migrations(name) VALUES('0763_queue_steer_admission_recheck_repair.sql')`;
+    // Rewrites the quiescence check and the visibility transition that the
+    // withheld 0501/0738 migrations shape differently here.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0768_private_visibility_ignores_leftovers.sql')`;
     await migrate(blank.databaseUrl);
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.

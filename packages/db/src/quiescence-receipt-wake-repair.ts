@@ -5,10 +5,16 @@ import {
   registerSessionWorkflowWakeInTransaction,
 } from "./session-control";
 import * as schema from "./schema";
-import { peekSessionWork } from "./index";
 
 export type QuiescenceReceiptWakeRepairCursor = { workspaceId: string; sessionId: string };
 type Candidate = QuiescenceReceiptWakeRepairCursor & { accountId: string };
+/** The root's peekSessionWork, injected so this module never imports the root
+ * barrel that re-exports it. */
+export type QuiescenceRepairWorkPeek = (
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+) => Promise<{ kind: string }>;
 
 /**
  * A recovering session whose interrupted attempt never received its physical
@@ -26,7 +32,11 @@ type Candidate = QuiescenceReceiptWakeRepairCursor & { accountId: string };
  * gates. Quiesced turns must pass ordinary peek admission. Discovery is not admission; every predicate is rechecked here
  * under the canonical session locks.
  */
-async function repairCandidate(db: Database, candidate: Candidate): Promise<boolean> {
+async function repairCandidate(
+  db: Database,
+  peekSessionWork: QuiescenceRepairWorkPeek,
+  candidate: Candidate,
+): Promise<boolean> {
   return withSessionActivityRlsContext(db, candidate, (scoped) =>
     scoped.transaction(async (tx) => {
       // A busy target is retried on the next inventory lap rather than holding
@@ -138,7 +148,8 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
 /** A keyset cursor lets busy candidates coexist with later eligible sessions.
  * It is inventory progress only; every target is rechecked and a restart
  * safely begins another idempotent lap. */
-export async function repairMissingQuiescenceReceiptWakes(
+export async function repairMissingQuiescenceReceiptWakesWith(
+  peekSessionWork: QuiescenceRepairWorkPeek,
   db: Database,
   limit = 100,
   after: QuiescenceReceiptWakeRepairCursor | null = null,
@@ -160,7 +171,7 @@ export async function repairMissingQuiescenceReceiptWakes(
   for (const row of rows) {
     try {
       if (
-        await repairCandidate(db, {
+        await repairCandidate(db, peekSessionWork, {
           accountId: row.account_id,
           workspaceId: row.workspace_id,
           sessionId: row.session_id,
