@@ -21,6 +21,7 @@ import { dirname, resolve } from "node:path";
 import {
   bootstrapWorkspace,
   checkSessionUsageLimitAdmission,
+  checkWorkspaceAllowance,
   createDb,
   createSession,
   settleSessionUsageReceipt,
@@ -126,9 +127,22 @@ async function main(): Promise<void> {
       return distribution(values);
     };
 
+    // The existing per-call workspace allowance read (unchanged by OPE-798)
+    // is the same-host baseline the new read is compared against.
+    const timeExistingAllowanceRead = async () => {
+      const values: number[] = [];
+      for (let i = 0; i < samples; i += 1) {
+        const started = performance.now();
+        await checkWorkspaceAllowance(app.db, { ...scope, subjectId: "user:usage-limit-bench" });
+        values.push(performance.now() - started);
+      }
+      return distribution(values);
+    };
+
     const admission: Record<string, Distribution> = {};
     const plans: Record<string, string[]> = {};
     admission.select1_round_trip = await timeRoundTrip();
+    admission.existing_workspace_allowance_read = await timeExistingAllowanceRead();
     let seeded = 1;
     for (const target of [0, 10_000, 100_000]) {
       if (target > seeded) {
@@ -186,6 +200,25 @@ async function main(): Promise<void> {
       }
       return { perCallMs: distribution(perCall), roundWallMs: distribution(wall), failures };
     };
+    // Unrelated-root admission while one root absorbs a sibling settlement
+    // storm: it must not wait on that root's counter row.
+    const unrelatedRoot = separateRoots[0]!;
+    await settle(unrelatedRoot, "unrelated:init");
+    const unrelatedIdle = await timeAdmission(unrelatedRoot);
+    let storming = true;
+    const storm = (async () => {
+      let round = 0;
+      while (storming) {
+        round += 1;
+        await Promise.all(
+          children.map((sessionId, index) => settle(sessionId, `storm:${round}:${index}`)),
+        );
+      }
+      return round;
+    })();
+    const unrelatedDuringStorm = await timeAdmission(unrelatedRoot);
+    storming = false;
+    const stormRounds = await storm;
     const sameRoot = await contention(children, "same-root");
     const separate = await contention(separateRoots, "separate-roots");
     const [counter] = await shared.admin.unsafe(
@@ -194,7 +227,7 @@ async function main(): Promise<void> {
         where workspace_id = $1 and root_session_id = $2`,
       [scope.workspaceId, root],
     );
-    const expectedCalls = 1 + fanout * rounds;
+    const expectedCalls = 1 + fanout * rounds + fanout * stormRounds;
     const deadlocks = await shared.admin.unsafe(
       "select deadlocks::bigint as deadlocks from pg_stat_database where datname = current_database()",
     );
@@ -212,6 +245,14 @@ async function main(): Promise<void> {
         before: scansBefore,
         after: scansAfter,
         note: "seq/idx scans on the receipts table across a burst of admissions; equal means admission never read receipts",
+      },
+      unrelatedRootAdmissionMs: {
+        idle: unrelatedIdle,
+        duringSameRootSettlementStorm: unrelatedDuringStorm,
+        stormRounds,
+        p50RegressionPercent: Math.round(
+          ((unrelatedDuringStorm.p50 - unrelatedIdle.p50) / unrelatedIdle.p50) * 100,
+        ),
       },
       settlement: {
         sameRoot20Siblings: sameRoot,
