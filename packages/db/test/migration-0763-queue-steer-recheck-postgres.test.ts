@@ -24,7 +24,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const MIGRATION = "0760_queue_steer_admission_recheck_repair.sql";
+const MIGRATION = "0763_queue_steer_admission_recheck_repair.sql";
 let database: OwnerMigratedTestDatabase;
 let client: ReturnType<typeof createDb>;
 
@@ -155,7 +155,7 @@ async function claim(f: Fixture) {
   return attemptId;
 }
 
-test("0760 repairs only an unchanged explicit recheck, through the real owner/RLS boundary", async () => {
+test("0763 repairs only an unchanged explicit recheck, through the real owner/RLS boundary", async () => {
   const eligible = await fixture();
   await oldSteer(eligible);
   const secondWorkspace = await fixture();

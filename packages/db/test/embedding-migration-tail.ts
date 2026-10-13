@@ -246,7 +246,7 @@ export const embeddingMigrationTail = [
   // Reads the subscription, binding and provider-snapshot columns of
   // session_system_updates added by withheld migrations above.
   "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
-  "0760_queue_steer_admission_recheck_repair.sql",
+  "0763_queue_steer_admission_recheck_repair.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501

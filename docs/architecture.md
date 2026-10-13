@@ -257,7 +257,7 @@ Non-transient preclaim rejection parks accepted work behind a durable admission
 block. Resume/Send/Steer (including queue-row Steer) clears that block atomically
 with the accepted direction and wake, without granting authority; receipt replay
 never clears a newer rejection. Operational outages retain backoff. Migration
-0760 repairs only unchanged, explicitly requested historical queue rechecks.
+0763 repairs only unchanged, explicitly requested historical queue rechecks.
 Paused recovering turns and capacity waiters remain resumable obligations, not
 age-based cancellation candidates.
 
