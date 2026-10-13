@@ -12,12 +12,20 @@ export function CodexCreditBalance({ credits }: { credits?: CodexUsagePayload["c
   return (
     <div className="flex items-baseline justify-between gap-4 py-3 text-sm">
       <span className="text-fg-muted">Extra credits</span>
-      <span className="text-right text-fg">
-        {credits?.unlimited ? "Unlimited" : (credits?.balance ?? "Not reported")}
+      <span className="text-right text-fg tabular-nums">
+        {credits?.unlimited ? "Unlimited" : formatCreditBalance(credits?.balance)}
         {credits?.overageLimitReached ? " · spending limit reached" : null}
       </span>
     </div>
   );
+}
+
+/** "61,686.58": the balance ChatGPT reports, which may arrive as an unformatted decimal string. */
+export function formatCreditBalance(balance: string | number | null | undefined): string {
+  if (balance === null || balance === undefined || balance === "") return "Not reported";
+  const value = typeof balance === "number" ? balance : Number(balance);
+  if (!Number.isFinite(value)) return String(balance);
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
 }
 
 /** No workspace assignment is required to inspect an account the administrator owns. */

@@ -128,6 +128,7 @@ import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
+  AccountRuleLocksPage,
   WorkspaceAccountRulesSection,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
@@ -915,6 +916,15 @@ export function WorkspaceModelsPageBody({
           fields={note}
         />
       );
+  } else if (view === "account-rule-locks" && !workspacePage && organizationAdmin) {
+    page = (
+      <AccountRuleLocksPage
+        key={`account-rule-locks:${orgId}`}
+        organizationName={organizationName}
+        state={accountRules}
+        onClose={backToList}
+      />
+    );
   } else if ((view === "compaction" || view === "allowed-models") && !workspacePage) {
     // Opened from the organization's list: the defaults every workspace follows.
     page = !organizationAdmin ? (
@@ -1081,6 +1091,7 @@ export function WorkspaceModelsPageBody({
         modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
         onEditAllowed={() => nav.openView("allowed-models")}
         onEditCompaction={() => nav.openView("compaction")}
+        onEditAccountRuleLocks={() => nav.openView("account-rule-locks")}
         organizationName={organizationName}
         administrator={organizationAdmin}
         claudeEnabled={claudeEnabled}

@@ -18,6 +18,18 @@ const ACME_PRO = "00000000-0000-4000-8000-0000000000c1";
 const DESIGN_PLAN = "00000000-0000-4000-8000-0000000000c2";
 const RESEARCH_PLAN = "00000000-0000-4000-8000-0000000000c3";
 const PERSONAL_PLAN = "00000000-0000-4000-8000-0000000000c4";
+/** Extra accounts for `mix=full`. */
+const FULL_IDS = {
+  ops: "00000000-0000-4000-8000-0000000000c5",
+  paused: "00000000-0000-4000-8000-0000000000c6",
+  signedOut: "00000000-0000-4000-8000-0000000000c7",
+  empty: "00000000-0000-4000-8000-0000000000c8",
+  claudeTeam: "00000000-0000-4000-8000-0000000000b1",
+  claudeMax: "00000000-0000-4000-8000-0000000000b2",
+  claudeOut: "00000000-0000-4000-8000-0000000000b3",
+  claudeSignedOut: "00000000-0000-4000-8000-0000000000b4",
+  grok: "00000000-0000-4000-8000-0000000000a1",
+};
 
 const params = new URLSearchParams(window.location.search);
 const previewPersonalSharing = params.get("sharing") === "personal";
@@ -30,6 +42,13 @@ const designSource = params.get("designSource") === "organization" ? "organizati
 const researchSource = params.get("researchSource") === "workspace" ? "workspace" : "automatic";
 /** `kept=research`: Research also keeps Acme Pro as its own (a copy an older migration merged). */
 const keptByResearch = params.get("kept") === "research";
+/**
+ * `mix=full`: a busy organization, as an admin meets it: more Codex accounts
+ * (one paused, one signed out, one out of usage, one with usage limit
+ * resets), Claude and SuperGrok subscriptions, two API keys, account rules
+ * with one lock, and a workspace that changed some of them.
+ */
+const full = params.get("mix") === "full";
 
 const weekly = (remaining: number) => ({
   used: 100 - remaining,
@@ -40,7 +59,7 @@ const weekly = (remaining: number) => ({
   resetAfterSeconds: null,
   limitWindowSeconds: 604800,
 });
-function account(id: string, label: string, email: string, remaining: number, active: boolean) {
+function account(id: string, label: string | null, email: string, remaining: number, active: boolean) {
   return {
     id,
     source: "organization" as const,
@@ -63,6 +82,17 @@ const organizationAccounts = [
   account(ACME_PRO, "Acme Pro", "billing@example.com", 62, true),
   account(DESIGN_PLAN, "Design team plan", "design@example.com", 81, false),
   account(RESEARCH_PLAN, "Research team plan", "research@example.com", 44, false),
+  ...(full
+    ? [
+        { ...account(FULL_IDS.ops, null, "ops@example.com", 93, false), resetCreditAvailableCount: 2 },
+        { ...account(FULL_IDS.paused, null, "spare@example.com", 100, false), allocatorEnabled: false },
+        {
+          ...account(FULL_IDS.signedOut, null, "old-plan@example.com", 50, false),
+          status: "needs_relogin" as const,
+        },
+        account(FULL_IDS.empty, null, "night-shift@example.com", 0, false),
+      ]
+    : []),
 ];
 
 type Policy = {
@@ -110,6 +140,33 @@ const policies: Record<string, Policy> = {
     allowPersonalWorkspaces: false,
     version: 1,
   },
+  ...(full
+    ? Object.fromEntries(
+        Object.values(FULL_IDS).map((id) => [
+          id,
+          id === FULL_IDS.empty
+            ? {
+                allowedModels: null,
+                allowedWorkspaces: [WORKSPACES.platform.id, WORKSPACES.research.id],
+                allowPersonalWorkspaces: false,
+                version: 1,
+              }
+            : id === FULL_IDS.claudeOut
+              ? {
+                  allowedModels: null,
+                  allowedWorkspaces: [],
+                  allowPersonalWorkspaces: false,
+                  version: 1,
+                }
+              : {
+                  allowedModels: null,
+                  allowedWorkspaces: null,
+                  allowPersonalWorkspaces: true,
+                  version: 1,
+                },
+        ]),
+      )
+    : {}),
 };
 const local: Record<string, string[]> = {
   ...(keptByResearch ? { [ACME_PRO]: [WORKSPACES.research.id] } : {}),
@@ -139,6 +196,146 @@ const usage = {
   refreshStatus: "not_checked",
   refreshCheckedAt: null,
 };
+
+const inDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
+function claudeAccount(
+  id: string,
+  email: string,
+  plan: string,
+  usedPercent: number,
+  extra: Record<string, unknown> = {},
+) {
+  const now = new Date().toISOString();
+  return {
+    id,
+    scope: "organization" as const,
+    subject: email,
+    email,
+    label: null,
+    plan,
+    status: "active" as const,
+    active: false,
+    expiresAt: null,
+    lastRefreshAt: now,
+    lastError: null,
+    allocatorEnabled: true,
+    allocatorVersion: 1,
+    allocatorUpdatedAt: null,
+    version: 1,
+    usage: {
+      ...usage,
+      observedAt: now,
+      source: "provider",
+      refreshStatus: "available",
+      refreshCheckedAt: now,
+      windows: [
+        {
+          id: "seven_day",
+          usedPercent,
+          resetsAt: inDays(3),
+          status: usedPercent >= 100 ? "rejected" : "allowed",
+          observedAt: now,
+          source: "provider",
+        },
+      ],
+    },
+    ...extra,
+  };
+}
+const claudeAccounts = full
+  ? [
+      { ...claudeAccount(FULL_IDS.claudeTeam, "team@example.com", "claude_max", 31), active: true },
+      claudeAccount(FULL_IDS.claudeMax, "studio@example.com", "claude_max", 64),
+      claudeAccount(FULL_IDS.claudeOut, "lab@example.com", "claude_pro", 100),
+      claudeAccount(FULL_IDS.claudeSignedOut, "former@example.com", "claude_max", 10, {
+        status: "needs_relogin",
+      }),
+    ]
+  : [];
+const grokAccounts = full
+  ? [
+      {
+        id: FULL_IDS.grok,
+        plan: null,
+        scope: "organization" as const,
+        subject: "grok@example.com",
+        email: "grok@example.com",
+        label: "Acme SuperGrok",
+        status: "active" as const,
+        active: true,
+        allocatorEnabled: true,
+        allocatorVersion: 1,
+        quota: {
+          usedPercent: 14,
+          periodStart: inDays(-10),
+          periodEnd: inDays(20),
+          subscriptionTier: "SuperGrok",
+          checkedAt: new Date().toISOString(),
+        },
+      },
+    ]
+  : [];
+/** API keys the organization connected (`mix=full`). */
+const organizationKeys = full ? new Set(["openrouter", "vercel_gateway"]) : new Set<string>();
+const ruleValues = () => ({
+  rotation: full
+    ? {
+        codex: { mode: "spread" as const },
+        claude: { mode: "spread" as const },
+        xai: { mode: "primary_first" as const },
+      }
+    : { codex: { mode: "spread" as const } },
+  providers: full
+    ? {
+        codex: {
+          enabled: true,
+          useOrganizationAccounts: true,
+          inferenceSource: "organization" as const,
+        },
+      }
+    : {},
+  crossProviderFailover: false,
+  fallbackOrder: {},
+  personalConnectionsAllowed: true,
+  personalFallbackAllowed: false,
+});
+const organizationRules = {
+  organizationId: ORG,
+  values: ruleValues(),
+  locked: full ? ["personalFallbackAllowed"] : [],
+  version: 1,
+  updatedAt: null,
+};
+const ORGANIZATION_SOURCES = {
+  rotation: "organization",
+  providers: "organization",
+  crossProviderFailover: "organization",
+  fallbackOrder: "organization",
+  personalConnectionsAllowed: "organization",
+  personalFallbackAllowed: "organization",
+} as const;
+/** In `mix=full`, Research spreads Claude work its own way and switches provider when it runs out. */
+function workspaceRules(workspaceId: string) {
+  const values = ruleValues();
+  const sources: Record<string, string> = {
+    ...ORGANIZATION_SOURCES,
+    ...(organizationRules.locked.includes("personalFallbackAllowed")
+      ? { personalFallbackAllowed: "locked" }
+      : {}),
+  };
+  const entrySources = { rotation: {}, providers: {}, fallbackOrder: {} } as Record<
+    string,
+    Record<string, string>
+  >;
+  if (full && workspaceId === WORKSPACES.research.id) {
+    values.rotation = { ...values.rotation, claude: { mode: "primary_first" } } as never;
+    values.crossProviderFailover = true;
+    sources.rotation = "workspace";
+    sources.crossProviderFailover = "workspace";
+    entrySources.rotation = { claude: "workspace" };
+  }
+  return { values, sources, entrySources };
+}
 
 const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
   async requestJson(method: string, path: string, body?: unknown) {
@@ -261,7 +458,12 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
   async getModelConnectionAccess(target: { connectionId: string }) {
     const id = target.connectionId;
     return {
-      policy: policies[id],
+      policy: policies[id] ?? {
+        allowedModels: null,
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: true,
+        version: 1,
+      },
       models: [
         { id: "codex/gpt-6-astra", label: "GPT-6 Astra" },
         { id: "codex/gpt-6-sol", label: "GPT-6.1 Sol" },
@@ -303,13 +505,30 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     return empty;
   },
   async listOrganizationSuperGrokAccounts() {
-    return empty;
+    return {
+      ...empty,
+      source: "organization",
+      organizationId: ORG,
+      accounts: grokAccounts,
+      activeAccountId: grokAccounts[0]?.id ?? null,
+    };
   },
   async listClaudeSubscriptionAccounts() {
     return { ...empty, source: "workspace" };
   },
   async listOrganizationClaudeSubscriptionAccounts() {
-    return { ...empty, source: "organization" };
+    return {
+      ...empty,
+      source: "organization",
+      organizationId: ORG,
+      accounts: claudeAccounts,
+      activeAccountId: claudeAccounts[0]?.id ?? null,
+      settings: {
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+        activeCredentialId: claudeAccounts[0]?.id ?? null,
+      },
+    };
   },
   async getClaudeSubscriptionAccountUsage() {
     return usage;
@@ -355,27 +574,46 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     return { allowedProviders: null, allowedModels: null, source: "organization" };
   },
   async getModelAccountSettingsOverview() {
-    const settings = await methods.getWorkspaceModelAccountSettings(WORKSPACES.design.id);
     return {
-      organization: { organizationId: ORG, values: settings.values, locked: [], version: 1, updatedAt: null },
+      organization: organizationRules,
       workspaces: [WORKSPACES.design, WORKSPACES.platform, WORKSPACES.research].map((workspace) => ({
-        workspaceId: workspace.id, name: workspace.name, values: settings.values,
-        sources: settings.sources, entrySources: settings.entrySources,
+        workspaceId: workspace.id,
+        name: workspace.name,
+        ...workspaceRules(workspace.id),
       })),
       nextCursor: null,
     };
   },
+  async updateOrganizationModelAccountSettings(
+    _organizationId: string,
+    request: Record<string, unknown>,
+  ) {
+    receipts.push({ accountRules: request });
+    const { expectedVersion: _version, locked, ...values } = request;
+    Object.assign(organizationRules.values, values);
+    if (Array.isArray(locked)) organizationRules.locked = locked as string[];
+    organizationRules.version += 1;
+    return organizationRules;
+  },
   async getWorkspaceModelAccountSettings(workspaceId: string) {
+    const rules = workspaceRules(workspaceId);
     return {
-      workspaceId, version: 1, updatedAt: null, canEdit: workspaceId !== WORKSPACES.personal.id, locked: [],
-      values: { rotation: { codex: { mode: "spread" } }, providers: {}, crossProviderFailover: false, fallbackOrder: {}, personalConnectionsAllowed: true, personalFallbackAllowed: false },
-      sources: { rotation: "organization", providers: "organization", crossProviderFailover: "organization", fallbackOrder: "organization", personalConnectionsAllowed: "organization", personalFallbackAllowed: "organization" },
-      entrySources: { rotation: {}, providers: {}, fallbackOrder: {} },
+      workspaceId,
+      version: 1,
+      updatedAt: null,
+      canEdit: workspaceId !== WORKSPACES.personal.id,
+      locked: organizationRules.locked,
+      ...rules,
       overrides: { rotation: null, providers: null, crossProviderFailover: null, fallbackOrder: null, personalConnectionsAllowed: null, personalFallbackAllowed: null },
     };
   },
-  async getOrganizationModelProviderConnection() {
-    return null;
+  async getOrganizationModelProviderConnection(_organizationId: string, kind: string) {
+    if (!organizationKeys.has(kind)) return null;
+    const now = new Date().toISOString();
+    return { providerKind: kind, status: "active", version: 1, createdAt: now, updatedAt: now };
+  },
+  async listOrganizationProviderCustomModels() {
+    return { models: [] };
   },
   async getOrganizationModelDefaults() {
     return {
@@ -408,6 +646,7 @@ const appContext = {
   client,
   clientConfig: {
     billingMode: "disabled",
+    claudeSubscriptionEnabled: full,
     models: [],
     defaultModel: "codex/gpt-6-astra",
     defaultReasoningEffort: "medium",

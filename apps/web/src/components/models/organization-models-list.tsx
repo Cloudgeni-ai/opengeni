@@ -36,8 +36,8 @@ import {
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { compactionSummary } from "@/components/models/model-compaction-page";
 import {
-  AccountRulesOverviewSection,
   OrganizationAccountRulesSection,
+  changesAccountRules,
   type ModelAccountSettingsOverviewState,
 } from "@/components/models/model-account-settings";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
@@ -150,6 +150,8 @@ export interface WorkspaceModelsSnapshot {
   allowed: string | null;
   /** It has its own default model, Allowed models or a compaction limit. */
   changesDefaults: boolean;
+  /** What it sets itself instead of following the organization. */
+  own: { defaultModel: boolean; allowed: boolean; compaction: boolean; accountRules: boolean };
 }
 
 async function readWorkspaceModels(
@@ -157,13 +159,17 @@ async function readWorkspaceModels(
   workspace: ModelsWorkspace,
   claudeEnabled: boolean,
 ): Promise<WorkspaceModelsSnapshot> {
-  const [codex, grok, connections, catalog, policy, claude] = await Promise.allSettled([
+  const [codex, grok, connections, catalog, policy, claude, rules] = await Promise.allSettled([
     client.listCodexAccounts(workspace.id),
     client.listSuperGrokAccounts(workspace.id),
     client.listConnections(workspace.id),
     client.getWorkspaceModelCatalog(workspace.id),
     client.getWorkspaceModelAccessPolicy(workspace.id),
     claudeEnabled ? client.listClaudeSubscriptionAccounts(workspace.id) : Promise.resolve(null),
+    // A Personal workspace has no account rules of its own.
+    workspace.personal
+      ? Promise.resolve(null)
+      : client.getWorkspaceModelAccountSettings(workspace.id),
   ]);
   const codexAccounts = codex.status === "fulfilled" ? codex.value.accounts : [];
   const grokData = grok.status === "fulfilled" ? grok.value : null;
@@ -176,6 +182,13 @@ async function readWorkspaceModels(
     workspace.savedDefaultModel ??
     (catalog.status === "fulfilled" ? (catalog.value.defaultSelection?.model ?? null) : null);
   const defaultModel = defaultId ? models.find((model) => model.id === defaultId) : undefined;
+  const sets = {
+    defaultModel: Boolean(workspace.savedDefaultModel),
+    allowed: policy.status === "fulfilled" && policy.value.source === "workspace",
+    compaction: models.some((model) => (model.compactionPolicy?.overrideTokens ?? null) !== null),
+    accountRules:
+      rules.status === "fulfilled" && rules.value !== null && changesAccountRules(rules.value),
+  };
   return {
     codexOwn: codexAccounts.filter((account) => account.source !== "organization"),
     codexShared: codexAccounts.filter((account) => account.source === "organization"),
@@ -207,10 +220,8 @@ async function readWorkspaceModels(
             models,
           })
         : null,
-    changesDefaults:
-      Boolean(workspace.savedDefaultModel) ||
-      (policy.status === "fulfilled" && policy.value.source === "workspace") ||
-      models.some((model) => (model.compactionPolicy?.overrideTokens ?? null) !== null),
+    changesDefaults: sets.defaultModel || sets.allowed || sets.compaction,
+    own: sets,
   };
 }
 
@@ -259,6 +270,7 @@ export function OrganizationModelsList({
   modelLabel,
   onEditAllowed,
   onEditCompaction,
+  onEditAccountRuleLocks,
   organizationName,
   administrator,
   claudeEnabled,
@@ -286,6 +298,8 @@ export function OrganizationModelsList({
   modelLabel?: (id: string) => string;
   onEditAllowed: () => void;
   onEditCompaction: () => void;
+  /** Opens "What workspaces can change". */
+  onEditAccountRuleLocks?: () => void;
   organizationName: string;
   /** An organization owner or admin: manages accounts and every workspace. */
   administrator: boolean;
@@ -346,7 +360,9 @@ export function OrganizationModelsList({
   // Personal workspace's never is an organization account.
   const codexReachUnknown = administrator && (orgCodex.loading || Boolean(orgCodex.loadError));
   const ownRows = ready.flatMap(({ workspace, snapshot }) => {
-    const tag = workspace.personal ? "Personal workspace only" : `${workspace.name} only`;
+    // Who owns it: a workspace, or the person who connected it.
+    const tag = workspace.personal ? "Your Personal workspace" : `Belongs to ${workspace.name}`;
+    const yours = workspace.personal ? "Only you" : `Only you, in ${workspace.name}`;
     return [
       ...snapshot.codexOwn
         .filter((account) => !organizationCodexIds.has(account.id))
@@ -376,7 +392,7 @@ export function OrganizationModelsList({
           key={`${workspace.id}:supergrok:${account.id}`}
           leading={<ProviderTile provider="supergrok" size="lg" />}
           title={superGrokAccountName(account)}
-          meta={[account.scope === "user" ? `${tag} · only you` : tag, superGrokPlan(account)]}
+          meta={[account.scope === "user" ? yours : tag, superGrokPlan(account)]}
           indicator={
             account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
           }
@@ -390,7 +406,7 @@ export function OrganizationModelsList({
           title={subscriptionAccountName(account)}
           email={account.email}
           primary={account.active}
-          meta={[account.scope === "user" ? tag + " · only you" : tag, claudePlan(account)]}
+          meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
           cells={{ usage: claudeUsageCell(account) }}
           indicator={
             account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
@@ -480,40 +496,56 @@ export function OrganizationModelsList({
   const shared = workspaces.filter((workspace) => !workspace.personal);
   const personal = workspaces.filter((workspace) => workspace.personal);
 
+  // Accounts that stopped working, said once above the list.
+  const reconnect =
+    (administrator
+      ? [
+          ...orgCodex.accounts,
+          ...(claudeEnabled ? orgClaude.accounts : []),
+          ...(orgGrok.unavailable ? [] : orgGrok.accounts),
+        ]
+      : []
+    ).filter((account) => account.status !== "active").length +
+    ready.reduce(
+      (count, { snapshot }) =>
+        count +
+        [
+          ...snapshot.codexOwn.filter((account) => !organizationCodexIds.has(account.id)),
+          ...snapshot.grokOwn,
+          ...snapshot.claudeOwn,
+        ].filter((account) => account.status !== "active").length,
+      0,
+    );
+  const accountCountsKnown =
+    administrator &&
+    !orgCodex.loading &&
+    !(claudeEnabled && orgClaude.loading) &&
+    !(!orgGrok.unavailable && orgGrok.loading);
+  const accountCounts = accountCountsKnown
+    ? {
+        codex: orgCodex.accounts.length,
+        claude: claudeEnabled ? orgClaude.accounts.length : 0,
+        xai: orgGrok.unavailable ? 0 : orgGrok.accounts.length,
+      }
+    : undefined;
+
   return (
     <SectionStack>
-      {organizationDefaults ? (
-        <OrganizationDefaultsSection
-          organizationName={organizationName}
-          anchorWorkspaceId={anchorWorkspaceId}
-          defaults={organizationDefaults}
-          onEditAllowed={onEditAllowed}
-          onEditCompaction={onEditCompaction}
-        />
-      ) : null}
-      {accountRules ? (
-        <>
-          <OrganizationAccountRulesSection
-            organizationName={organizationName}
-            state={accountRules}
-            modelLabel={modelLabel}
-          />
-          <AccountRulesOverviewSection
-            organizationName={organizationName}
-            state={accountRules}
-            modelLabel={modelLabel}
-            onOpenWorkspace={(id) => onOpenWorkspace(id)}
-          />
-        </>
-      ) : null}
       <Section
         title="Accounts"
         description={
-          administrator
-            ? "Subscriptions, API keys and credits that pay for models."
-            : workspaces.some((workspace) => !workspace.personal)
-              ? "Subscriptions, API keys and credits that pay for models in your workspaces."
-              : "Subscriptions, API keys and credits that pay for models in your Personal workspace."
+          <>
+            {administrator
+              ? "Subscriptions, API keys and credits that pay for models. Open one to see its usage, choose who can use it, or reconnect it."
+              : workspaces.some((workspace) => !workspace.personal)
+                ? "Subscriptions, API keys and credits that pay for models in your workspaces."
+                : "Subscriptions, API keys and credits that pay for models in your Personal workspace."}
+            {reconnect > 0 ? (
+              <span className="font-medium text-fg">
+                {reconnect === 1 ? " 1 needs reconnecting." : ` ${reconnect} need reconnecting.`}
+              </span>
+            ) : null}
+          </>
         }
         action={administrator && !empty ? connect : null}
       >
@@ -552,11 +584,31 @@ export function OrganizationModelsList({
         )}
       </Section>
 
+      {organizationDefaults ? (
+        <OrganizationDefaultsSection
+          organizationName={organizationName}
+          anchorWorkspaceId={anchorWorkspaceId}
+          defaults={organizationDefaults}
+          onEditAllowed={onEditAllowed}
+          onEditCompaction={onEditCompaction}
+        />
+      ) : null}
+
+      {accountRules ? (
+        <OrganizationAccountRulesSection
+          organizationName={organizationName}
+          state={accountRules}
+          accountCounts={accountCounts}
+          modelLabel={modelLabel}
+          onEditLocks={onEditAccountRuleLocks ?? (() => undefined)}
+        />
+      ) : null}
+
       <Section
         title="Workspaces"
         description={
           organizationDefaults
-            ? "Each workspace follows the defaults above unless its admins change them there."
+            ? "Each workspace follows the settings above unless its admins change them. Open one to see what it uses."
             : "Each workspace's default model and the models people can pick there."
         }
       >
@@ -566,6 +618,7 @@ export function OrganizationModelsList({
               key={workspace.id}
               workspace={workspace}
               snapshot={snapshots[workspace.id]}
+              follows={organizationDefaults ? organizationName : null}
               onOpen={() => onOpenWorkspace(workspace.id)}
             />
           ))}
@@ -641,8 +694,8 @@ export function OrganizationDefaultsSection({
   });
   return (
     <Section
-      title="Defaults for every workspace"
-      description="Workspaces use these unless their admins change them for one workspace."
+      title="Models for every workspace"
+      description="What new chats start with and which models people can pick. A workspace's admins can change these for their workspace."
     >
       {defaults.error ? (
         <ErrorMessage
@@ -962,14 +1015,21 @@ function OrganizationKeyRow({
   );
 }
 
-/** One workspace: its default model and Allowed models, opening its model page. */
+/**
+ * One workspace, opening its model page. For an organization admin it says
+ * only what the workspace sets itself; otherwise its default model and
+ * Allowed models.
+ */
 function WorkspaceRow({
   workspace,
   snapshot,
+  follows,
   onOpen,
 }: {
   workspace: ModelsWorkspace;
   snapshot: WorkspaceModelsSnapshot | "loading" | "error" | undefined;
+  /** The organization whose settings it follows, when the list shows them above. */
+  follows: string | null;
   onOpen: () => void;
 }) {
   const title = workspace.personal ? "Your Personal workspace" : workspace.name;
@@ -992,13 +1052,11 @@ function WorkspaceRow({
   const facts =
     snapshot === "error"
       ? ["Couldn't load its models"]
-      : typeof snapshot === "object"
-        ? [
-            snapshot.defaultModel,
-            snapshot.allowed,
-            snapshot.changesDefaults ? "Changes some defaults" : null,
-          ]
-        : [];
+      : typeof snapshot !== "object"
+        ? []
+        : follows === null
+          ? [snapshot.defaultModel, snapshot.allowed]
+          : workspaceDifferences(snapshot, follows);
   return (
     <ListRow
       leading={leading}
@@ -1008,4 +1066,15 @@ function WorkspaceRow({
       onOpen={onOpen}
     />
   );
+}
+
+/** "Default: GPT-6 Astra · Codex", "3 models allowed", "Own account rules", or "Follows Acme". */
+function workspaceDifferences(snapshot: WorkspaceModelsSnapshot, organizationName: string) {
+  const facts = [
+    snapshot.own.defaultModel && snapshot.defaultModel ? `Default: ${snapshot.defaultModel}` : null,
+    snapshot.own.allowed && snapshot.allowed ? `${snapshot.allowed} allowed` : null,
+    snapshot.own.compaction ? "Own compaction limits" : null,
+    snapshot.own.accountRules ? "Own account rules" : null,
+  ].filter((fact): fact is string => fact !== null);
+  return facts.length > 0 ? facts : [`Follows ${organizationName}`];
 }

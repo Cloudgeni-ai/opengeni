@@ -11,6 +11,7 @@
      ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only
      ?section=models&workspace=<id>&view=allowed-models  its Allowed models (form page)
      ?section=models&account=...&view=model-access       Models an account can serve
+     ?section=models&view=account-rule-locks             What workspaces can change
 
    `workspace` also names the workspace a page was opened from, so an
    organization account or Connect account opened there returns to it.
@@ -32,6 +33,7 @@ export type ModelsView =
   | `connect-org:${ModelsProvider}`
   | "allowed-models"
   | "compaction"
+  | "account-rule-locks"
   | "model-access";
 
 const PROVIDERS: readonly ModelsProvider[] = [
@@ -51,6 +53,7 @@ const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
   "allowed-models",
   "compaction",
+  "account-rule-locks",
   "model-access",
 ]);
 
