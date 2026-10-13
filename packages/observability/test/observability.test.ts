@@ -925,6 +925,48 @@ describe("observability", () => {
     });
   });
 
+  test("public structured logs admit projected web client error text and nothing raw", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const stack = "TypeError: x is undefined\n    at A (https://app.example.test/assets/a.js:1:2)";
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("projected", {
+        clientErrorName: "TypeError",
+        clientErrorMessage: "token=[redacted] rejected",
+        clientErrorStack: stack,
+        clientComponentStack: "\n    at ArtifactPageChrome\n    at Suspense",
+      });
+      obs.warn("raw", {
+        clientErrorName: "x".repeat(129),
+        clientErrorMessage: "token=abc rejected",
+        clientErrorStack: "GET https://api.example.test/v1/files?sig=abc",
+        clientComponentStack: 42,
+        clientErrorCode: "free text under an unreviewed name",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      clientErrorName: "TypeError",
+      clientErrorMessage: "token=[redacted] rejected",
+      clientErrorStack: stack,
+      clientComponentStack: "\n    at ArtifactPageChrome\n    at Suspense",
+    });
+    const raw = JSON.parse(observed[1]!);
+    for (const key of [
+      "clientErrorName",
+      "clientErrorMessage",
+      "clientErrorStack",
+      "clientComponentStack",
+      "clientErrorCode",
+    ]) {
+      expect(raw).not.toHaveProperty(key);
+    }
+  });
+
   test("public structured logs retain only grammar-validated request correlation ids", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;

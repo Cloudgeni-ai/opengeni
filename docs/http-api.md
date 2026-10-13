@@ -16,7 +16,8 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 
 - `GET /healthz`
 - `GET /v1/config/client`
-- `POST /v1/client-errors` (public, content-free web client error beacon; see
+- `POST /v1/client-errors` (public web client error beacon with scrubbed,
+  bounded error diagnostics; see
   [`application-observability.md`](application-observability.md#web-client-errors))
 - `POST /v1/analytics-consent` (public, content-free count of analytics banner
   answers; see [`application-observability.md`](application-observability.md#analytics-consent))
