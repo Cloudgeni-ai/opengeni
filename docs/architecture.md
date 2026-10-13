@@ -85,6 +85,15 @@ explicit session folders remain authoritative. Service rendering is owned by
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
 
+Connected Machine control replies use a negotiated, process-scoped receipt
+journal (`agent/crates/opengeni-agent/src/rpc_replay.rs`). NATS/JWT rotation
+rebuilds transport, not execution: immutable delivery identities join accepted
+work or replay its reply. Expired deliveries cannot execute after receipt GC;
+unknown outcomes never become never-sent merely because a later retry has no
+responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
+bounded recovery; legacy agents keep one-shot mutation semantics. See the
+[recovery contract](connected-machines.md#control-transport-recovery).
+
 Control revisions increase.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,

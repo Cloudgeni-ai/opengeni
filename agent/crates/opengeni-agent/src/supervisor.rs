@@ -301,6 +301,24 @@ struct ConnectedNats {
     transport_lost: TransportLossSignal,
 }
 
+/// Ending either half retires the generation, rather than silently serving
+/// only half of the advertised control surface.
+fn rpc_messages(
+    control: impl futures::Stream<Item = async_nats::Message> + Unpin + Send,
+    replay: impl futures::Stream<Item = async_nats::Message> + Unpin + Send,
+) -> impl futures::Stream<Item = async_nats::Message> + Unpin + Send {
+    futures::stream::select(
+        control
+            .map(Some)
+            .chain(futures::stream::once(futures::future::ready(None))),
+        replay
+            .map(Some)
+            .chain(futures::stream::once(futures::future::ready(None))),
+    )
+    .take_while(|message| futures::future::ready(message.is_some()))
+    .map(|message| message.expect("subscription termination was handled"))
+}
+
 /// Public, immutable definition of one independently authenticated connection.
 /// The platform carries that connection's relay registrar while host-operation
 /// containment is shared underneath (for `NativePlatform`, the cgroup manager is
@@ -382,6 +400,7 @@ struct WorkspaceLink<P: Platform> {
     bulk_tx: BulkLane,
     /// Upload identity is local to this exact connection/process instance.
     uploads: Arc<std::sync::Mutex<crate::uploads::Uploads>>,
+    replies: Arc<std::sync::Mutex<crate::rpc_replay::Registry>>,
     /// Display sleep/wake and permission changes must not require a reconnect.
     /// OS probing runs off-loop; heartbeats only clone the last completed sample.
     desktop_status: std::sync::RwLock<Option<v1::DesktopStatus>>,
@@ -399,6 +418,7 @@ impl<P: Platform> WorkspaceLink<P> {
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
             uploads: Arc::new(std::sync::Mutex::new(crate::uploads::Uploads::default())),
+            replies: Arc::new(std::sync::Mutex::new(crate::rpc_replay::Registry::default())),
             desktop_status: std::sync::RwLock::new(None),
         }
     }
@@ -430,6 +450,7 @@ impl<P: Platform> WorkspaceLink<P> {
             // Rebinding this same Arc lets retained pumps replay through the
             // successor's authenticated bulk connection.
             replacement.bulk_tx = previous.bulk_tx.clone();
+            replacement.replies = previous.replies.clone();
         }
         replacement
     }
@@ -484,7 +505,13 @@ pub struct Supervisor<P: Platform> {
     /// Process-global update admission fence + idempotency key. One binary backs
     /// every workspace link, so concurrent per-link updates cannot be independent.
     update_drain: Arc<UpdateDrain>,
+    /// Keep exact-scope receipts even if a credential file temporarily disappears.
+    /// Re-adding that same process subject must never re-admit an old delivery.
+    reply_journals: std::sync::Mutex<HashMap<ReplyScope, ReplyJournal>>,
 }
+
+type ReplyScope = (Option<String>, String, String);
+type ReplyJournal = Arc<std::sync::Mutex<crate::rpc_replay::Registry>>;
 
 impl<P: Platform + 'static> Supervisor<P> {
     /// Builds a supervisor over a platform + persisted credentials. The op
@@ -529,6 +556,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             browser_bridge: None,
             shutdown: ShutdownSignal::default(),
             update_drain: Arc::new(UpdateDrain::default()),
+            reply_journals: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -562,6 +590,28 @@ impl<P: Platform + 'static> Supervisor<P> {
     #[must_use]
     pub fn shutdown_handle(&self) -> ShutdownSignal {
         self.shutdown.clone()
+    }
+
+    fn retain_reply_scope(&self, mut link: WorkspaceLink<P>) -> Arc<WorkspaceLink<P>> {
+        let key = (
+            link.api_url.clone(),
+            link.connection_id.clone(),
+            link.subject_prefix(),
+        );
+        link.replies = self
+            .reply_journals
+            .lock()
+            .expect("reply scopes")
+            .entry(key)
+            .or_insert_with(|| link.replies.clone())
+            .clone();
+        Arc::new(link)
+    }
+
+    fn collect_replies(&self) {
+        for journal in self.reply_journals.lock().expect("reply scopes").values() {
+            journal.lock().expect("control receipts").collect();
+        }
     }
 
     fn link_stop_requested(&self, link: &WorkspaceLink<P>) -> bool {
@@ -624,12 +674,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         let mut removed_or_rescoped = HashSet::new();
         let mut serves = FuturesUnordered::new();
         for definition in desired.values().cloned() {
-            let link = Arc::new(WorkspaceLink::from_definition(definition));
+            let link = self.retain_reply_scope(WorkspaceLink::from_definition(definition));
             active.insert(link.connection_id.clone(), link.clone());
             serves.push(self.run_owned_link(link));
         }
 
         let mut updates_open = true;
+        let mut reply_collection = tokio::time::interval(HOUSEKEEPING_TICK);
         loop {
             if self.shutdown.is_requested() {
                 for link in active.values() {
@@ -639,6 +690,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 break;
             }
             tokio::select! {
+                _ = reply_collection.tick() => {
+                    self.collect_replies();
+                }
                 () = self.shutdown.notified() => {
                     for link in active.values() {
                         link.shutdown.request();
@@ -675,7 +729,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     desired = next;
                     for (id, definition) in &desired {
                         if !active.contains_key(id) {
-                            let link = Arc::new(WorkspaceLink::from_definition(definition.clone()));
+                            let link = self.retain_reply_scope(WorkspaceLink::from_definition(definition.clone()));
                             active.insert(id.clone(), link.clone());
                             serves.push(self.run_owned_link(link));
                         }
@@ -686,7 +740,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         let previous = active.remove(&id);
                         let may_reuse = !removed_or_rescoped.remove(&id);
                         if let Some(definition) = desired.get(&id).cloned() {
-                            let link = Arc::new(match (previous.as_deref(), may_reuse) {
+                            let link = self.retain_reply_scope(match (previous.as_deref(), may_reuse) {
                                 (Some(previous), true) =>
                                     WorkspaceLink::replacing_definition(definition, previous),
                                 _ => WorkspaceLink::from_definition(definition),
@@ -839,6 +893,16 @@ impl<P: Platform + 'static> Supervisor<P> {
             Err(e) => return ConnectionOutcome::Disconnected(format!("subscribe failed: {e}")),
         };
         debug!(subject = %link.rpc_subject(), "subscribed to rpc subject");
+        let replay_subscription = match client
+            .subscribe(format!("{}.replay.>", link.rpc_subject()))
+            .await
+        {
+            Ok(sub) => sub,
+            Err(e) => {
+                return ConnectionOutcome::Disconnected(format!("replay subscribe failed: {e}"))
+            }
+        };
+        let subscription = rpc_messages(subscription, replay_subscription);
 
         // The ack subject rides the SAME control connection (PROTOCOL.md
         // §Subjects: subscribed alongside rpc at establishment).
@@ -912,7 +976,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         &self,
         link: &WorkspaceLink<P>,
         client: &async_nats::Client,
-        mut subscription: async_nats::Subscriber,
+        mut subscription: impl futures::Stream<Item = async_nats::Message> + Unpin,
         mut ack_subscription: async_nats::Subscriber,
         control_transport_lost: TransportLossSignal,
         bulk_transport_lost: TransportLossSignal,
@@ -953,6 +1017,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // Heartbeat is deliberately ahead of inbound work in this biased
                 // select. A ready subscription can never starve the liveness tick.
                 _ = heartbeat.tick() => {
+                    link.replies.lock().expect("control receipts").collect();
                     hb_seq = hb_seq.wrapping_add(1);
                     if let Err(e) = self.send_heartbeat(link, client, hb_seq).await {
                         break ConnectionOutcome::Disconnected(format!("heartbeat failed: {e}"));
@@ -1038,6 +1103,49 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// holds no concurrency policy — LIMITS-DOCTRINE).
     #[allow(clippy::too_many_lines)]
     async fn route_message(
+        &self,
+        link: &WorkspaceLink<P>,
+        client: &async_nats::Client,
+        message: async_nats::Message,
+        rpc_tasks: &mut JoinSet<()>,
+    ) {
+        let prefix = format!("{}.replay.", link.rpc_subject());
+        let Some(suffix) = message.subject.as_str().strip_prefix(&prefix) else {
+            self.route_request(link, client, message, rpc_tasks).await;
+            return;
+        };
+        let Some(reply) = message.reply.clone() else {
+            return;
+        };
+        let admission = link
+            .replies
+            .lock()
+            .expect("control receipts")
+            .admit(suffix, &message.payload);
+        match admission {
+            crate::rpc_replay::Admission::New(receipt) => {
+                crate::rpc_replay::scope(
+                    Some(receipt),
+                    self.route_request(link, client, message, rpc_tasks),
+                )
+                .await;
+            }
+            crate::rpc_replay::Admission::Existing(receipt) => {
+                let client = client.clone();
+                rpc_tasks.spawn(async move {
+                    receipt.deliver(&client, reply).await;
+                });
+            }
+            crate::rpc_replay::Admission::Rejected => {
+                // No execution and no fabricated tool result. The caller retains
+                // its existing timeout/unknown-outcome semantics.
+                warn!("rejected expired or conflicting control delivery");
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn route_request(
         &self,
         link: &WorkspaceLink<P>,
         client: &async_nats::Client,
@@ -1196,13 +1304,14 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // renewed file (which restarts this link) cannot cut the reply.
                 let connection_id = link.connection_id.clone();
                 let client = client.clone();
-                tokio::spawn(async move {
+                let receipt = crate::rpc_replay::current();
+                tokio::spawn(crate::rpc_replay::scope(receipt, async move {
                     let response =
                         credential_renew_response(request_id, renew_now(&connection_id).await);
                     publish_response(&client, reply, response, label, max_payload).await;
                     // Adopting the renewed file restarts this link; send first.
                     let _ = client.flush().await;
-                });
+                }));
             }
             Route::LegacyGit(git) => {
                 let resource_policy = request.resource_policy;
@@ -2203,9 +2312,10 @@ fn spawn_admitted_rpc<F>(tasks: &mut JoinSet<()>, reservation: WorkReservation, 
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
-        Some(reservation),
-        work,
+    let receipt = crate::rpc_replay::current();
+    let actual = tokio::spawn(crate::rpc_replay::scope(
+        receipt,
+        opengeni_agent_platform::with_work_reservation(Some(reservation), work),
     ));
     tasks.spawn(async move {
         if let Err(error) = actual.await {
@@ -2242,7 +2352,10 @@ async fn publish_response(
         encoded
     };
 
-    if let Some(reservation) = reservation {
+    if let Some(receipt) = crate::rpc_replay::current() {
+        receipt.complete(payload, reservation);
+        receipt.deliver(client, reply).await;
+    } else if let Some(reservation) = reservation {
         // Attach the reply's receipt to its actual publication command. A
         // reconnect must fail that receipt rather than redeem it on a socket
         // that never wrote the old reply. This is not a consumer storage ACK.
@@ -2250,8 +2363,15 @@ async fn publish_response(
             reservation.mark_unsettled();
             warn!(error = %flush_error, op = label, "control rpc reply transport did not settle");
         }
-    } else if let Err(publish_error) = client.publish(reply, payload.into()).await {
-        warn!(error = %publish_error, op = label, "failed to publish control rpc reply");
+    } else {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Opengeni-Control-Replay", "1");
+        if let Err(publish_error) = client
+            .publish_with_headers(reply, headers, payload.into())
+            .await
+        {
+            warn!(error = %publish_error, op = label, "failed to publish control rpc reply");
+        }
     }
 }
 
@@ -2373,6 +2493,14 @@ fn update_busy_code(update_drain: &UpdateDrain, engine: &Engine) -> Option<&'sta
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn either_rpc_subscription_ending_ends_the_generation() {
+        let mut messages = rpc_messages(futures::stream::empty(), futures::stream::pending());
+        assert!(messages.next().await.is_none());
+        let mut messages = rpc_messages(futures::stream::pending(), futures::stream::empty());
+        assert!(messages.next().await.is_none());
+    }
+
     /// A real async-nats client over TCP with its actual writer backpressured.
     /// `Client::flush` settles socket writes, not a server or consumer ACK.
     async fn paused_reply_transport() -> (
@@ -4315,6 +4443,7 @@ mod tests {
         refreshed.credentials.nats_bearer = "example-refreshed-bearer".into();
         let successor = WorkspaceLink::replacing_definition(refreshed, &original);
         assert!(Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+        assert!(Arc::ptr_eq(&original.replies, &successor.replies));
         assert!(!Arc::ptr_eq(&original.epoch, &successor.epoch));
         assert!(!Arc::ptr_eq(&original.uploads, &successor.uploads));
 
@@ -4322,6 +4451,7 @@ mod tests {
         different_instance.connection_instance_id = "example-instance-b".into();
         let successor = WorkspaceLink::replacing_definition(different_instance, &original);
         assert!(!Arc::ptr_eq(&original.bulk_tx, &successor.bulk_tx));
+        assert!(!Arc::ptr_eq(&original.replies, &successor.replies));
 
         let mut different_workspace = definition.clone();
         different_workspace.credentials.workspace_id = "example-workspace-b".into();
@@ -4734,6 +4864,244 @@ mod tests {
             .expect("shutdown")
             .expect("supervisor")
             .expect("clean run");
+    }
+
+    #[test]
+    fn control_receipts_survive_scope_removal_but_never_cross_authority() {
+        use opengeni_agent_platform::NativePlatform;
+        let directory = tempfile::tempdir().unwrap();
+        let definition = SupervisorLink::new(
+            "receipt-scope",
+            Arc::new(NativePlatform::with_root(directory.path())),
+            it::test_credentials("nats://127.0.0.1:1"),
+        )
+        .with_api_url("https://example.test");
+        let supervisor = Supervisor::new_links(std::slice::from_ref(&definition), "test");
+        let first =
+            supervisor.retain_reply_scope(WorkspaceLink::from_definition(definition.clone()));
+        let retained = first.replies.clone();
+        drop(first);
+        let readded =
+            supervisor.retain_reply_scope(WorkspaceLink::from_definition(definition.clone()));
+        assert!(Arc::ptr_eq(&retained, &readded.replies));
+        let other = supervisor.retain_reply_scope(WorkspaceLink::from_definition(
+            definition.with_api_url("https://other.example.test"),
+        ));
+        assert!(!Arc::ptr_eq(&retained, &other.replies));
+    }
+
+    /// The first non-idempotent move commits, but nobody receives its reply.
+    /// Restart the actual broker, replace the enrollment transport credentials,
+    /// and retrieve the original reply: executing again would return NOT_FOUND.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)]
+    async fn control_reply_survives_broker_restart_and_credential_replacement() {
+        use opengeni_agent_platform::{DesktopBackend, NativePlatform, PlatformResult};
+        use std::sync::atomic::AtomicUsize;
+
+        struct PendingInput {
+            executions: AtomicUsize,
+            started: Notify,
+            release: tokio::sync::watch::Receiver<bool>,
+        }
+        #[async_trait::async_trait]
+        impl DesktopBackend for PendingInput {
+            fn probe(&self) -> Option<v1::Display> {
+                None
+            }
+            async fn capture(&self) -> PlatformResult<opengeni_agent_platform::CapturedFrame> {
+                unreachable!("synthetic input only")
+            }
+            async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
+                self.executions.fetch_add(1, Ordering::SeqCst);
+                self.started.notify_one();
+                let mut release = self.release.clone();
+                release.wait_for(|released| *released).await.unwrap();
+                Ok(())
+            }
+        }
+
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP control reply recovery: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let mut server = it::NatsServerGuard::spawn(&bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        std::fs::write(&source, b"exactly once").unwrap();
+        let (release_input, release) = tokio::sync::watch::channel(false);
+        let input = Arc::new(PendingInput {
+            executions: AtomicUsize::new(0),
+            started: Notify::new(),
+            release,
+        });
+        let mut credentials = it::test_credentials(&url);
+        credentials.consented_screen_control = true;
+        let definition = SupervisorLink::new(
+            "reply-recovery-test",
+            Arc::new(NativePlatform::with_root(directory.path()).with_desktop(input.clone())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut events = client.subscribe(link.events_subject()).await.unwrap();
+        let supervisor = Supervisor::new_links(std::slice::from_ref(&definition), "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let (updates_tx, updates_rx) = tokio::sync::watch::channel(vec![definition.clone()]);
+        let run = tokio::spawn(async move { supervisor.run_with_updates(updates_rx).await });
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(10), |event| {
+                matches!(event.event, Some(Event::Heartbeat(_)))
+            })
+            .await
+        );
+
+        let ping = ControlRequest {
+            request_id: "probe".into(),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 0 })),
+            ..Default::default()
+        };
+        let probe = client
+            .request(link.rpc_subject(), ping.encode_to_vec().into())
+            .await
+            .unwrap();
+        assert_eq!(
+            probe
+                .headers
+                .unwrap()
+                .get("Opengeni-Control-Replay")
+                .unwrap()
+                .as_str(),
+            "1"
+        );
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            + 120_000;
+        let delivery = format!(
+            "{}.replay.{expires}.{}",
+            link.rpc_subject(),
+            uuid::Uuid::new_v4()
+        );
+        let request = ControlRequest {
+            request_id: "move-once".into(),
+            op: Some(v1::control_request::Op::FsMove(v1::FsMoveRequest {
+                from: source.to_string_lossy().into_owned(),
+                to: destination.to_string_lossy().into_owned(),
+                overwrite: false,
+            })),
+            ..Default::default()
+        };
+        client
+            .publish_with_reply(
+                delivery.clone(),
+                "_INBOX.abandoned",
+                request.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !destination.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the original request executed");
+
+        let input_delivery = format!(
+            "{}.replay.{expires}.{}",
+            link.rpc_subject(),
+            uuid::Uuid::new_v4()
+        );
+        let input_request = ControlRequest {
+            request_id: "input-once".into(),
+            op: Some(v1::control_request::Op::DesktopInput(
+                v1::DesktopInputRequest::default(),
+            )),
+            ..Default::default()
+        };
+        client
+            .publish_with_reply(
+                input_delivery.clone(),
+                "_INBOX.abandoned",
+                input_request.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), input.started.notified())
+            .await
+            .expect("input accepted before disconnect");
+
+        server.stop();
+        // Let the actual supervisor observe loss before bringing the broker back.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        server = it::NatsServerGuard::spawn(&bin, port);
+        let recovered = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let mut refreshed = definition;
+        refreshed.credentials.nats_bearer = "refreshed-synthetic-bearer".into();
+        updates_tx.send(vec![refreshed]).unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match recovered
+                    .request(delivery.clone(), request.encode_to_vec().into())
+                    .await
+                {
+                    Ok(reply) => break reply,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                }
+            }
+        })
+        .await
+        .expect("retained reply after resubscription");
+        let response = ControlResponse::decode(reply.payload).unwrap();
+        assert!(
+            response.error.is_none(),
+            "must not repeat the move: {response:?}"
+        );
+        assert!(matches!(
+            response.result,
+            Some(v1::control_response::Result::FsMove(_))
+        ));
+        assert_eq!(std::fs::read(destination).unwrap(), b"exactly once");
+        assert!(!source.exists());
+        // Resend while the original non-idempotent input is STILL executing.
+        // Both requests must join the same pending result across generations.
+        let first = recovered.request(input_delivery.clone(), input_request.encode_to_vec().into());
+        let second = recovered.request(input_delivery, input_request.encode_to_vec().into());
+        let recover_input = async { tokio::join!(first, second) };
+        tokio::pin!(recover_input);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut recover_input)
+                .await
+                .is_err()
+        );
+        assert_eq!(input.executions.load(Ordering::SeqCst), 1);
+        release_input.send(true).unwrap();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(5), recover_input)
+            .await
+            .unwrap();
+        for reply in [first.unwrap(), second.unwrap()] {
+            let response = ControlResponse::decode(reply.payload).unwrap();
+            assert!(response.error.is_none(), "{response:?}");
+            assert!(matches!(
+                response.result,
+                Some(v1::control_response::Result::DesktopInput(_))
+            ));
+        }
+        assert_eq!(input.executions.load(Ordering::SeqCst), 1);
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(server);
     }
 
     /// Test-only integration helpers (a throwaway local nats-server + event
