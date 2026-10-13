@@ -110,7 +110,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
       port: server.port,
     })}\n`,
   );
-  await waitForShutdownSignal();
+  await waitForShutdownSignal(environment.OPENGENI_BROWSERD_PARENT_LIFELINE === "stdin");
   await server.stop();
 }
 
@@ -336,15 +336,38 @@ function commaSeparated(value: string | undefined): string[] {
   return entries;
 }
 
-async function waitForShutdownSignal(): Promise<void> {
+/**
+ * Resolves on SIGINT/SIGTERM and, with `stdinLifeline`, when stdin reaches EOF.
+ * A supervising parent that keeps the write end of stdin open (and never
+ * writes) gives browserd a lifeline the kernel closes however the parent ends,
+ * including SIGKILL or a crash. Without it a controller in its own process
+ * group outlives its parent indefinitely, holding its port and state root
+ * while the parent's successor starts another controller beside it. Shutdown is
+ * the same graceful drain either way, which leaves retained browsers running.
+ */
+async function waitForShutdownSignal(stdinLifeline: boolean): Promise<void> {
   await new Promise<void>((resolveShutdown) => {
     const shutdown = () => {
       process.off("SIGINT", shutdown);
       process.off("SIGTERM", shutdown);
+      if (stdinLifeline) {
+        process.stdin.off("end", shutdown);
+        process.stdin.off("close", shutdown);
+        process.stdin.off("error", shutdown);
+        process.stdin.off("data", discard);
+        process.stdin.destroy();
+      }
       resolveShutdown();
     };
+    const discard = () => {};
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
+    if (stdinLifeline) {
+      process.stdin.once("end", shutdown);
+      process.stdin.once("close", shutdown);
+      process.stdin.once("error", shutdown);
+      process.stdin.on("data", discard);
+    }
   });
 }
 

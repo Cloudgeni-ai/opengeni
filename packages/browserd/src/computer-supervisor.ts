@@ -219,6 +219,11 @@ export class ComputerSupervisor {
     );
   }
 
+  /** No session of any lifecycle remains and no work is in flight. */
+  isEmpty(): boolean {
+    return this.sessions.size === 0 && this.isIdle();
+  }
+
   listSessions(): Array<
     ComputerSessionReference & {
       platform: "linux" | "macos" | "windows";

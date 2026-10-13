@@ -656,6 +656,7 @@ fn attach_browser_controller(
     match BrowserSidecarManager::discover(directory) {
         Ok(manager) => {
             let manager = Arc::new(manager.with_update_drain(update_drain));
+            manager.spawn_empty_controller_reaper();
             (
                 platform.with_browser_control(manager.clone()),
                 Some(manager),
