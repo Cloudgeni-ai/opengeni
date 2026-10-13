@@ -267,13 +267,14 @@ CREATE TABLE vault_passkey_leases (
 );
 CREATE INDEX vault_passkey_leases_holder_idx ON vault_passkey_leases (holder);
 
--- Constant defaults: no table rewrite and no row scan under FORCE RLS.
+-- Constant defaults: no table rewrite and no row scan under FORCE RLS. IF NOT
+-- EXISTS lets fixtures stopped before 0738 stage the column for current adapters.
 ALTER TABLE sessions
-  ADD COLUMN vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
+  ADD COLUMN IF NOT EXISTS vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
   ADD CONSTRAINT sessions_vault_policy_check
     CHECK (opengeni_private.vault_policy_is_valid(vault_policy));
 ALTER TABLE scheduled_tasks
-  ADD COLUMN vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
+  ADD COLUMN IF NOT EXISTS vault_policy jsonb NOT NULL DEFAULT '{"mode":"all"}'::jsonb,
   ADD CONSTRAINT scheduled_tasks_vault_policy_check
     CHECK (opengeni_private.vault_policy_is_valid(vault_policy));
 
@@ -553,6 +554,11 @@ $$;
 REVOKE ALL ON FUNCTION opengeni_private.vault_capability_open(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.vault_capability_close() FROM PUBLIC;
 
+-- Every vault capability policy is scoped TO the routine owner. Their USING
+-- already demands current_user = owner, so this changes nothing for vault
+-- routines; it keeps other roles (reporting/analytics readers of sessions,
+-- workspaces, ...) from ever evaluating the private predicate they cannot
+-- EXECUTE (0359 reporting-role compatibility).
 DO $vault_policies$
 DECLARE
   data_schema text := current_schema();
@@ -567,10 +573,10 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', data_schema, table_name);
     EXECUTE format('REVOKE ALL ON TABLE %I.%I FROM PUBLIC', data_schema, table_name);
     EXECUTE format(
-      'CREATE POLICY vault_authority_capability_write ON %I.%I FOR ALL '
+      'CREATE POLICY vault_authority_capability_write ON %I.%I FOR ALL TO %I '
         || 'USING (current_user = %L AND opengeni_private.vault_authority_capability_active(''write'')) '
         || 'WITH CHECK (current_user = %L AND opengeni_private.vault_authority_capability_active(''write''))',
-      data_schema, table_name, routine_owner, routine_owner
+      data_schema, table_name, routine_owner, routine_owner, routine_owner
     );
   END LOOP;
 
@@ -584,9 +590,9 @@ BEGIN
     'scheduled_task_runs', 'connections'
   ] LOOP
     EXECUTE format(
-      'CREATE POLICY vault_authority_capability_read ON %I.%I FOR SELECT '
+      'CREATE POLICY vault_authority_capability_read ON %I.%I FOR SELECT TO %I '
         || 'USING (current_user = %L AND opengeni_private.vault_authority_capability_active())',
-      data_schema, table_name, routine_owner
+      data_schema, table_name, routine_owner, routine_owner
     );
   END LOOP;
 
@@ -594,29 +600,29 @@ BEGIN
   -- audit rows, and the session vault policy.
   EXECUTE format(
     'CREATE POLICY vault_authority_capability_insert ON %I.organization_user_resource_authorities '
-      || 'FOR INSERT WITH CHECK (current_user = %L AND '
+      || 'FOR INSERT TO %I WITH CHECK (current_user = %L AND '
       || 'opengeni_private.vault_authority_capability_active(''write''))',
-    data_schema, routine_owner
+    data_schema, routine_owner, routine_owner
   );
   EXECUTE format(
     'CREATE POLICY vault_authority_capability_update ON %I.organization_user_resource_authorities '
-      || 'FOR UPDATE USING (current_user = %L AND '
+      || 'FOR UPDATE TO %I USING (current_user = %L AND '
       || 'opengeni_private.vault_authority_capability_active(''write'')) '
       || 'WITH CHECK (current_user = %L AND opengeni_private.vault_authority_capability_active(''write''))',
-    data_schema, routine_owner, routine_owner
+    data_schema, routine_owner, routine_owner, routine_owner
   );
   EXECUTE format(
     'CREATE POLICY vault_authority_capability_insert ON %I.audit_events '
-      || 'FOR INSERT WITH CHECK (current_user = %L AND '
+      || 'FOR INSERT TO %I WITH CHECK (current_user = %L AND '
       || 'opengeni_private.vault_authority_capability_active())',
-    data_schema, routine_owner
+    data_schema, routine_owner, routine_owner
   );
   EXECUTE format(
     'CREATE POLICY vault_authority_capability_update ON %I.sessions '
-      || 'FOR UPDATE USING (current_user = %L AND '
+      || 'FOR UPDATE TO %I USING (current_user = %L AND '
       || 'opengeni_private.vault_authority_capability_active(''write'')) '
       || 'WITH CHECK (current_user = %L AND opengeni_private.vault_authority_capability_active(''write''))',
-    data_schema, routine_owner, routine_owner
+    data_schema, routine_owner, routine_owner, routine_owner
   );
 END
 $vault_policies$;
@@ -2684,6 +2690,9 @@ BEGIN
   context := opengeni_private.vault_context(p_principal);
   account := (context ->> 'accountId')::uuid;
   workspace := (context ->> 'workspaceId')::uuid;
+  -- sessions is a session-tenancy hot table: take the workspace fence (shared)
+  -- before reading the policy chain or updating the row (0345 protocol).
+  PERFORM acquire_session_tenancy_fence(workspace);
   IF NOT opengeni_private.vault_policy_is_valid(p_policy) THEN
     PERFORM opengeni_private.vault_raise('vault_policy_outside_parent',
       'policy is {"mode":"all"} or {"mode":"selected","vaultIds":[...]} with at most 200 IDs');

@@ -18331,7 +18331,9 @@ export async function createScheduledTask(
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           variableSetId: input.variableSetId ?? null,
-          vaultPolicy: input.vaultPolicy ?? { mode: "all" },
+          // The column default is { mode: "all" }; omit it so rows written
+          // before 0738 (and older-migration fixtures) keep working.
+          ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
           rigId: input.rigId ?? null,
           metadata: input.metadata,
         })
@@ -31215,7 +31217,7 @@ async function createSessionInTransaction(
             initialXaiProviderAccountAuthoritySnapshot,
             initialClaudeProviderAccountAuthoritySnapshot,
             instructions: input.instructions ?? null,
-            vaultPolicy: input.vaultPolicy ?? { mode: "all" },
+            ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
             policyRole: input.policyRole ?? null,
             agentAccess: input.agentAccess ?? "workspace",
             scopeSubjectId:

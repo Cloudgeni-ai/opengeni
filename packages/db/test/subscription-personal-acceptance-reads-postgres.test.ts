@@ -40,6 +40,7 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
+import { stageVaultPolicyColumns, withoutAbsentVaultPosture } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
 
@@ -477,6 +478,7 @@ beforeAll(async () => {
     for (const name of heldBack)
       await staging`insert into schema_migrations(name) values (${name})`;
     await migrate(database.ownerUrl);
+    await stageVaultPolicyColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -532,10 +534,13 @@ beforeAll(async () => {
     targetSchema: "public",
     requiredRuntimeRoutines: [],
   };
+  // Stopped before 0738: the absent vault objects are expected.
   const evaluate = async () =>
-    evaluateRuntimeDatabasePosture(
-      await inspectRuntimeDatabasePosture(client!.db, options),
-      options,
+    withoutAbsentVaultPosture(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      ),
     );
   const unprovisioned = await evaluate();
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });

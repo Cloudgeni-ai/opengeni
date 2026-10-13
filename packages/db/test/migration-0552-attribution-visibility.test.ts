@@ -18,6 +18,7 @@ import {
   setSubjectRlsContext,
   withSessionActivityRlsContext,
 } from "../src";
+import { stageVaultPolicyColumns } from "./vault-policy-column-fixture";
 
 const repair = "0552_usage_allowances.sql";
 // Current adapters require the actual nullable agent config and canonical
@@ -94,6 +95,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     );
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
+    await stageVaultPolicyColumns(owned.ownerUrl);
     // Current adapters need nullable reader fields, not the deferred import
     // lifecycle. Remove these before the real ordered migration replay.
     await owner`ALTER TABLE sessions
@@ -367,7 +369,29 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
             ? { ...row, qual: plannedRuns!.qual }
             : row,
     );
-    expect([...(await snapshot())]).toEqual(plannedPolicies);
+    // The full replay also runs 0738, which adds exactly one owner-scoped vault
+    // read lane on two snapshotted tables. Pin its exact shape.
+    const [ownerRole] = await owned.admin<Array<{ oid: string }>>`
+      select oid::text as oid from pg_roles where rolname = ${owned.ownerRole}`;
+    const vaultRead = (relname: string) => ({
+      relname,
+      polname: "vault_authority_capability_read",
+      polcmd: "r",
+      polpermissive: true,
+      roles: `{${ownerRole!.oid}}`,
+      qual: `((CURRENT_USER = '${owned.ownerRole}'::name) AND opengeni_private.vault_authority_capability_active())`,
+      check: null,
+    });
+    const byPolicy = (rows: Array<Record<string, unknown>>) =>
+      [...rows].sort((a, b) =>
+        `${a.relname}\0${a.polname}` < `${b.relname}\0${b.polname}` ? -1 : 1,
+      );
+    const plannedWithVaults = byPolicy([
+      ...plannedPolicies,
+      vaultRead("scheduled_task_runs"),
+      vaultRead("session_turns"),
+    ]);
+    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithVaults);
     const [backfill] =
       await owned.admin`select attribution from opengeni_private.usage_allowance_attribution_receipts
       where account_id=${accountId} and workspace_id=${workspaceId} and source_kind='turn' and source_id=${String(turn!.id)}`;
@@ -553,7 +577,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     const [closed] =
       await owned.admin`select count(*)::int as count from opengeni_private.usage_allowance_capabilities`;
     expect(closed!.count).toBe(0);
-    expect([...(await snapshot())]).toEqual(plannedPolicies);
+    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithVaults);
   } finally {
     await appSql?.end();
     await app?.close();

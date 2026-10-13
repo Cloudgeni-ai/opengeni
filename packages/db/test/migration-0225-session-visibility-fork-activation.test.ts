@@ -494,9 +494,12 @@ describe("migration 0303 session tenancy product activation", () => {
     // session references still require the restrictive visibility policy,
     // except published Site versions and events (0731): those belong to the
     // workspace, and their source chat is only provenance, which the API
-    // redacts for anyone who cannot read that chat.
+    // redacts for anyone who cannot read that chat. Task vaults (0738) name
+    // their root session, but `vaults` has no direct app DML: every read goes
+    // through vault routines that check the caller's session reach.
     expect(Array.from(missing)).toEqual([
       { tableName: "session_admin_access" },
+      { tableName: "vaults" },
       { tableName: "workspace_artifact_events" },
       { tableName: "workspace_artifact_versions" },
     ]);
