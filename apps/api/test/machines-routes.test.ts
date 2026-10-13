@@ -16,6 +16,7 @@ import {
 } from "@opengeni/agent-proto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
+  advanceEnrollmentAgentUpdate,
   claimEnrollmentConnection,
   beginEnrollmentAgentUpdate,
   createDb,
@@ -39,6 +40,7 @@ import {
   startMetricsIngestion,
 } from "../src/sandbox/metrics-ingestion";
 import { machineUpdateBlockedReason } from "../src/sandbox/machines";
+import { createAutomaticAgentUpdater } from "../src/sandbox/agent-update";
 
 test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
   for (const version of [null, "development", "0.1.27", "0.1.28", "0.1.29-beta.1"]) {
@@ -1368,6 +1370,181 @@ describe("Connected Machine signed self-update orchestration", () => {
       operationId,
       status: "accepted",
     });
+  }, 90_000);
+
+  test("does not re-request the installed promoted version after a failed attempt", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const hello = (agentVersion: string) =>
+      handleHelloPayload(
+        db,
+        undefined,
+        Hello.encode(
+          Hello.fromPartial({
+            agentId: enrollment.id,
+            workspaceId,
+            agentVersion,
+            binarySha256: "ab".repeat(32),
+            updateChannel: "stable",
+          }),
+        ).finish(),
+        `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+      );
+    await hello("0.1.15");
+    const live = await getEnrollment(db, workspaceId, enrollment.id);
+    const operationId = crypto.randomUUID();
+    const fence = {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      connectionGeneration: live!.connectionGeneration,
+      operationId,
+    };
+    await beginEnrollmentAgentUpdate(db, { ...fence, targetVersion: "0.1.16" });
+    await advanceEnrollmentAgentUpdate(db, {
+      ...fence,
+      status: "failed",
+      errorCode: "update_busy_work",
+      retryable: true,
+    });
+    // The promoted build arrived another way (installer, a later attempt).
+    await hello("0.1.16");
+    const requests: ControlRequest[] = [];
+    const app = appFor(
+      busWithAgent({
+        workspaceId,
+        agentId: enrollment.id,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      }),
+      { settings: { ...settings, agentStableVersion: "0.1.16" } },
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+        },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain("already runs the promoted version");
+    expect(requests.filter((request) => request.op?.$case === "agentUpdateApply")).toHaveLength(0);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.operationId).toBe(
+      operationId,
+    );
+  }, 90_000);
+
+  test("a live machine behind its promoted build updates from its heartbeat, and a busy postponement is retried", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    let now = Date.now();
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.16",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+      now: () => now,
+    })!;
+    const heartbeat = () =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: { $case: "heartbeat", heartbeat: {} },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        bus,
+        updates,
+      );
+    const updateRequests = () =>
+      requests.filter((request) => request.op?.$case === "agentUpdateApply");
+    const status = async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate;
+
+    await heartbeat();
+    const first = await waitForValue(
+      status,
+      (update) => update?.status === "accepted",
+      "the automatic update request",
+    );
+    expect(updateRequests()).toHaveLength(1);
+    expect(updateRequests()[0]!.op).toMatchObject({
+      agentUpdateApply: { targetVersion: "0.1.16", expectedCurrentVersion: "0.1.15" },
+    });
+    // An older agent accepts, then postpones because it is busy.
+    await handleAgentEventPayload(
+      db,
+      undefined,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: {
+              operationId: first!.operationId,
+              stage: AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED,
+              errorCode: "update_busy_work",
+              retryable: true,
+              rolledBack: false,
+            },
+          },
+        }),
+      ).finish(),
+      `${subject}.events`,
+      bus,
+    );
+    expect((await status())?.errorCode).toBe("update_busy_work");
+    // Heartbeats keep arriving; the busy machine is left alone for a while...
+    await heartbeat();
+    await heartbeat();
+    await Bun.sleep(50);
+    expect(updateRequests()).toHaveLength(1);
+    // ...and asked again once the busy backoff has passed.
+    now += 11 * 60_000;
+    await heartbeat();
+    const second = await waitForValue(
+      status,
+      (update) => update?.status === "accepted" && update.operationId !== first!.operationId,
+      "the retried automatic update",
+    );
+    expect(updateRequests()).toHaveLength(2);
+    expect(updateRequests()[1]!.requestId).toBe(second!.operationId);
+    // An accepted update is the runner's to finish; heartbeats do not re-send it.
+    now += 60 * 60_000;
+    await heartbeat();
+    await Bun.sleep(50);
+    expect(updateRequests()).toHaveLength(2);
   }, 90_000);
 });
 

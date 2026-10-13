@@ -424,6 +424,10 @@ const SettingsSchema = z.object({
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
+  // Bring every live Connected Machine to its channel's promoted build without
+  // a click. The agent applies an update only at an idle point, so this never
+  // interrupts accepted work; a busy machine is retried until it can apply.
+  agentAutoUpdate: EnvBoolean.default(true),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
@@ -4473,6 +4477,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
+    agentAutoUpdate: optional("OPENGENI_AGENT_AUTO_UPDATE"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),

@@ -508,8 +508,12 @@ adopts the same process on its next request, even when the old launcher was
 killed with the stopped service or came from an earlier agent release. A
 session whose browser already ended and a computer session on the machine's
 own physical seat do not keep the host busy either. Older agents still end a
-busy update with
-retryable `update_busy_work`; request it again at a safe idle point.
+busy update with retryable `update_busy_work`. Nobody has to request updates:
+the control plane asks every live machine behind its channel's promoted build
+to update from its heartbeat, and asks an older busy agent again every 10
+minutes until it applies (see the deployment guide for the full policy and
+`OPENGENI_AGENT_AUTO_UPDATE`). A request for the build a machine already runs
+is refused, whatever happened to an earlier attempt.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production

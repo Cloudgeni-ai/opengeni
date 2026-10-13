@@ -48,6 +48,7 @@ import { createAppComposition, type DocumentIndexClient, type SessionWorkflowCli
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
+import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
@@ -542,6 +543,12 @@ export async function startApi(
       db: dbClient.db,
       bus,
       observability,
+      agentUpdates: createAutomaticAgentUpdater({
+        db: dbClient.db,
+        bus,
+        settings,
+        observability,
+      }),
     });
     stopHelloIngestion = startHelloIngestion({
       db: dbClient.db,
