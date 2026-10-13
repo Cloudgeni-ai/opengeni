@@ -162,8 +162,12 @@ END $policies$;
 
 -- Content-free projection of one counter row. `usedMicros` is null while the
 -- history is still preparing: an incomplete import is never presented as $0.
-CREATE FUNCTION session_usage_limit_state(p_root opengeni_private.session_usage_limit_roots,
-  p_inherited boolean)
+-- The row arrives as jsonb (`to_jsonb(root_row)`), not as the private row type:
+-- a private-type argument renders unqualified when `opengeni_private` is on a
+-- dedicated-schema deployment's search path, so the routine's identity would
+-- depend on the caller's search_path and the runtime posture check could not
+-- name it.
+CREATE FUNCTION session_usage_limit_state(p_root_json jsonb, p_inherited boolean)
 RETURNS jsonb LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT jsonb_build_object(
     'basis','model_api_equivalent_v1',
@@ -185,6 +189,7 @@ RETURNS jsonb LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
     'unpricedCalls',p_root.unpriced_calls,
     'conflicts',p_root.conflict_count,
     'updatedAt',to_char(p_root.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+  FROM jsonb_populate_record(NULL::opengeni_private.session_usage_limit_roots, p_root_json) AS p_root
 $$;
 
 -- Apply one receipt to a locked root row. Exactly-once per (workspace,
@@ -660,7 +665,7 @@ BEGIN
     v_fenced := EXISTS (SELECT 1 FROM opengeni_private.session_usage_limit_receipts r
       WHERE r.workspace_id = w AND r.root_session_id = v_root AND r.status = 'pending'
         AND (r.fenced OR r.recorded_at < clock_timestamp() - interval '15 minutes'));
-    v_state := session_usage_limit_state(root_row, v_root <> v_session);
+    v_state := session_usage_limit_state(to_jsonb(root_row), v_root <> v_session);
     IF v_fenced THEN v_state := v_state || jsonb_build_object('coverage','partial'); END IF;
     IF p_input ? 'openSourceId' AND v_runtime AND NOT v_fenced
       AND (root_row.limit_micros IS NULL OR root_row.history_state = 'preparing'
@@ -685,7 +690,7 @@ BEGIN
     SELECT * INTO root_row FROM opengeni_private.session_usage_limit_roots
       WHERE workspace_id = w AND root_session_id = v_root;
     result := jsonb_build_object('outcome', v_outcome,
-      'state', session_usage_limit_state(root_row, v_root <> v_session));
+      'state', session_usage_limit_state(to_jsonb(root_row), v_root <> v_session));
   ELSE
     IF p_input->>'actorType' NOT IN ('human','host')
       OR octet_length(coalesce(p_input->>'actorSubjectId','')) NOT BETWEEN 1 AND 1024
@@ -708,7 +713,7 @@ BEGIN
       IF prior_receipt.expected_version <> v_expected
         OR prior_receipt.limit_micros IS DISTINCT FROM v_limit THEN
         result := jsonb_build_object('outcome','operation_conflict',
-          'state', session_usage_limit_state(root_row, false));
+          'state', session_usage_limit_state(to_jsonb(root_row), false));
       ELSE
         -- An exact replay returns the operation's committed configuration
         -- (its limit and resulting version), not a later change; usage stays
@@ -717,14 +722,14 @@ BEGIN
         root_row.config_version := prior_receipt.result_version;
         result := jsonb_build_object('outcome','replayed','resultVersion',prior_receipt.result_version,
           'previousLimitMicros', prior_receipt.previous_limit_micros,
-          'state', session_usage_limit_state(root_row, false));
+          'state', session_usage_limit_state(to_jsonb(root_row), false));
       END IF;
     ELSIF root_row.config_version <> v_expected THEN
-      result := jsonb_build_object('outcome','conflict','state', session_usage_limit_state(root_row, false));
+      result := jsonb_build_object('outcome','conflict','state', session_usage_limit_state(to_jsonb(root_row), false));
     ELSIF v_limit IS NOT NULL AND root_row.history_state = 'preparing' THEN
-      result := jsonb_build_object('outcome','preparing','state', session_usage_limit_state(root_row, false));
+      result := jsonb_build_object('outcome','preparing','state', session_usage_limit_state(to_jsonb(root_row), false));
     ELSIF v_limit IS NOT NULL AND coalesce((p_input->>'producerEnabled')::boolean, false) IS NOT TRUE THEN
-      result := jsonb_build_object('outcome','disabled','state', session_usage_limit_state(root_row, false));
+      result := jsonb_build_object('outcome','disabled','state', session_usage_limit_state(to_jsonb(root_row), false));
     ELSE
       v_previous := root_row.limit_micros;
       UPDATE opengeni_private.session_usage_limit_roots SET limit_micros = v_limit,
@@ -738,7 +743,7 @@ BEGIN
         v_previous, v_limit,
         root_row.config_version, p_input->>'actorSubjectId', p_input->>'actorType');
       result := jsonb_build_object('outcome','ok','previousLimitMicros', v_previous,
-        'state', session_usage_limit_state(root_row, false));
+        'state', session_usage_limit_state(to_jsonb(root_row), false));
     END IF;
     result := result || jsonb_build_object('rootSessionId', v_root);
   END IF;
@@ -862,7 +867,7 @@ BEGIN
   FOREACH function_name IN ARRAY ARRAY['session_usage_limit_command(jsonb)',
     'maintain_session_usage_limits(integer,integer)',
     'session_usage_limit_capability_active(uuid,uuid)',
-    'session_usage_limit_state(opengeni_private.session_usage_limit_roots,boolean)',
+    'session_usage_limit_state(jsonb,boolean)',
     'session_usage_limit_apply_receipt(uuid,uuid,uuid,text,uuid,uuid,bigint,text,text,text)',
     'session_usage_limit_import_page(uuid,uuid,uuid,integer)',
     'session_usage_limit_import_step(uuid,uuid,uuid,integer)',

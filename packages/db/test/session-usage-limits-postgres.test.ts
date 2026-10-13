@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
+  acquireRestrictedRuntimeTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { dbSearchPath } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {
   bootstrapWorkspace,
@@ -693,6 +695,33 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
       await owner.release();
     }
   }, 300_000);
+
+  test("AC20: a dedicated-schema deployment passes the posture check through the production search path", async () => {
+    if (!shared) return;
+    // The API and workers reach a dedicated schema with dbSearchPath(), which
+    // puts opengeni_private on the path. Routine identities must not depend on
+    // it (a private row-type argument would render unqualified and vanish).
+    const restricted = await acquireRestrictedRuntimeTestDatabase("session-usage-limit-schema");
+    if (!restricted) throw new Error("Restricted PostgreSQL database unavailable");
+    const searchPath = dbSearchPath({ dbSchema: restricted.schema });
+    expect(searchPath).toContain("opengeni_private");
+    const runtime = createDb(restricted.appUrl, { searchPath, rlsStrategy: "force" });
+    try {
+      const options = {
+        expectedRole: "opengeni_app",
+        rlsStrategy: "force" as const,
+        targetSchema: restricted.schema,
+      };
+      const posture = await inspectRuntimeDatabasePosture(runtime.db, options);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      expect(posture.targetRoutines.map((routine) => routine.name)).toContain(
+        "session_usage_limit_state(jsonb, boolean)",
+      );
+    } finally {
+      await runtime.close();
+      await restricted.release();
+    }
+  }, 600_000);
 });
 
 async function insertUsageEvent(

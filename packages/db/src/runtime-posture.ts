@@ -1345,8 +1345,7 @@ export const SESSION_USAGE_LIMIT_RUNTIME_ROUTINES = [
   "session_usage_limit_command(jsonb)",
   SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
 ] as const;
-export const SESSION_USAGE_LIMIT_STATE_ROUTINE =
-  "session_usage_limit_state(opengeni_private.session_usage_limit_roots, boolean)";
+export const SESSION_USAGE_LIMIT_STATE_ROUTINE = "session_usage_limit_state(jsonb, boolean)";
 /** Owner-internal helpers; never runtime-callable. */
 export const SESSION_USAGE_LIMIT_INTERNAL_ROUTINES = [
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
