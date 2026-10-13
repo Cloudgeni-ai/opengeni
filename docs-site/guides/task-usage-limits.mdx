@@ -11,7 +11,8 @@ A task usage limit stops one task, a chat and every agent it starts, from making
 - **No limit by default.** A new task is unlimited unless you set an amount. `0` stops before the first model request.
 - **Measured as API-equivalent model usage.** The amount is the provider list-price estimate of the task's model responses, before any Opengeni margin, whatever pays for them: credits, a connected subscription or your own key. It is not your bill.
 - **Checked before each new model request.** Nothing is reserved. Requests already running finish, and several running at once can take recorded usage above the limit together.
-- **Unknown prices are not $0.** A response without a known price is left out of the total and the task shows "at least" that amount. A model priced at $0 counts as $0.
+- **Unknown prices are not $0.** A response without a known price or without reported usage is left out of the total and the task shows "at least" that amount. A model priced at $0 counts as $0.
+- **Usage is recorded before more work.** If recording fails, for example during a database outage, the task makes no new model request until it is recorded. The model is never called again to recover it.
 - **Reaching it is a stop, not a failure.** The task becomes idle with its history and outputs intact, and an active goal pauses. Raising or removing the limit never restarts work: send a message or resume the goal.
 
 Image and video generation, voice, web search, Knowledge indexing and sandbox compute are not counted.
@@ -35,11 +36,11 @@ await og.setSessionUsageLimit(workspaceId, session.id, {
 });
 ```
 
-Amounts are integer USD micros ($1 = 1,000,000). If the server does not confirm the limit, for example because it predates this feature, the SDK throws rather than running the task without one. Agents can never change a limit.
+Amounts are integer USD micros ($1 = 1,000,000). If the server predates this feature, the SDK throws `OpenGeniSessionUsageLimitUnsupportedError` before any work starts rather than running the task without a limit. Agents can never change a limit.
 
 ## When a task reaches its limit
 
-New messages are refused with HTTP 402 and the code `session_usage_limit_reached`; the SDK raises `OpenGeniSessionUsageLimitReachedError`. Keep the person's draft and offer to change the limit; retrying does not help. In the conversation, `@opengeni/react` shows a neutral "usage limit reached" row with the amounts, never a credits or monthly-reset message.
+New messages are refused with HTTP 402 and the code `session_usage_limit_reached`; the SDK raises `OpenGeniSessionUsageLimitReachedError`. Keep the person's draft and offer to change the limit; retrying does not help. Scheduled runs in that task are skipped with the reason `session_usage_limit`. In the conversation, `@opengeni/react` shows a neutral "usage limit reached" row with the amounts, never a credits or monthly-reset message.
 
 ## Before you turn it on
 
