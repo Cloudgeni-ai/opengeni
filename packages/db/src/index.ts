@@ -9,6 +9,7 @@ export * from "./session-target";
 export * from "./human-input-secret-answers";
 export * from "./connected-machine-audience";
 import { sessionRetentionFromRow } from "./session-archive";
+import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -20185,10 +20186,11 @@ export async function failScheduledGeneratedSessionRoute(
         session.metadata?.scheduledTaskRunId === input.runId;
       const reclaimSession =
         schedulerCreatedForRun &&
-        session.status === "queued" &&
+        (session.status === "queued" || session.status === "idle") &&
         session.activeTurnId === null &&
         existingTurn === undefined &&
-        existingSystemUpdate === undefined;
+        existingSystemUpdate === undefined &&
+        (await sessionQueueIsEmptyInTransaction(scopedDb, input.workspaceId, input.sessionId));
 
       let events: SessionEvent[] = [];
       if (reclaimSession) {
@@ -29945,7 +29947,9 @@ async function createSessionInTransaction(
                 : "portable"),
             codeSearchEnabled,
             agentConfig: input.agentConfig ?? null,
-            status: "queued",
+            // Creation reserves identity, not runnable work. The atomic start
+            // transaction installs queued status together with its turn/wake.
+            status: "idle",
           },
           "initialMessage",
           "initialMessageCodecVersion",
@@ -81511,11 +81515,20 @@ export async function addSessionSystemUpdateWithSourceMutation<
           } as const;
         };
 
-        // A failed session has finished its work and accepts new turns; only
-        // work still in progress (or awaiting a person) overlaps a new run.
+        // A stale queued projection with no accepted work must not suppress
+        // every future occurrence. Prove emptiness under the admission lock;
+        // never bypass Pause, a parked turn, pending input or physical writers.
+        const emptyQueuedProjection =
+          options.requireIdleSession &&
+          session.status === "queued" &&
+          (await sessionQueueIsEmptyInTransaction(
+            tx as unknown as Database,
+            input.workspaceId,
+            input.sessionId,
+          ));
         if (
           options.requireIdleSession &&
-          ((session.status !== "idle" && session.status !== "failed") ||
+          ((session.status !== "idle" && session.status !== "failed" && !emptyQueuedProjection) ||
             session.activeTurnId !== null ||
             effectiveControl.state !== "active")
         ) {

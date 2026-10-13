@@ -141,6 +141,12 @@ remain separately gated; see [subscription accounts](subscription-accounts.md).
 **Turns** are accepted work; replaceable **attempts** append ordered,
 exactly-once atomic history batches.
 
+Creating a session reserves an idle shell; atomic initial admission installs
+its first queued turn, events and wake together. Skip-overlap schedules may
+admit into an empty stale queued projection only after a locked check of
+accepted work and physical writers. The existing explicit operator manifest
+can correct never-initialized shells without execution or parent delivery.
+
 `wait_for_input` settles tool-batch execution, preserving trusted authority and
 immutable same-turn deadlines. Command results wake only explicit waits; notices
 never block inbox input. Ordinary same-human agent messages and lifecycle results use the receiving
