@@ -1,4 +1,5 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
+import { z } from "zod";
 import {
   applySkillFileChanges,
   buildPortableSkillArtifact,
@@ -22,6 +23,27 @@ export type SkillSaveReceipt = {
   outcome: "applied" | "pending" | "preserved";
   replayed: boolean;
 };
+
+const skillSaveArguments = z
+  .object({
+    operationId: z.uuid(),
+    skillId: z.uuid(),
+    expectedRevisionId: z.uuid().nullable(),
+    expectedScopeVersion: z.number().int().nonnegative(),
+    files: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1).max(1024),
+            content: z.string(),
+          })
+          .strict(),
+      )
+      .max(PORTABLE_SKILL_MAX_FILES),
+    deletions: z.array(z.string().min(1).max(1024)).max(PORTABLE_SKILL_MAX_FILES).optional(),
+    reason: z.string().min(1).max(2000),
+  })
+  .strict();
 
 /** Persistence owns mode enforcement, replay, and the final compare-and-swap. */
 export function createSkillSaveAttemptToolDefinition(input: {
@@ -91,8 +113,14 @@ export function createSkillSaveAttemptToolDefinition(input: {
     approval: "none",
     execute: async (args) => {
       await input.authorize();
-      const skillId = args.skillId as string;
-      const expectedRevisionId = args.expectedRevisionId as string | null;
+      // Some model calls stringify JSON null. Normalize only this nullable
+      // creation sentinel, then validate before any revision lookup or write.
+      // Missing, empty and malformed IDs must not silently become creation.
+      const request = skillSaveArguments.parse({
+        ...args,
+        expectedRevisionId: args.expectedRevisionId === "null" ? null : args.expectedRevisionId,
+      });
+      const { skillId, expectedRevisionId } = request;
       // Expand the edit against its immutable base, not today's head. The
       // lifecycle can then replay an already committed operation before CAS.
       const current =
@@ -102,17 +130,17 @@ export function createSkillSaveAttemptToolDefinition(input: {
       }
       const files = applySkillFileChanges(
         current?.files ?? [],
-        args.files as SkillTextFile[],
-        (args.deletions ?? []) as string[],
+        request.files,
+        request.deletions ?? [],
       );
       const artifact = buildPortableSkillArtifact(files);
       const output = await input.save({
-        operationId: args.operationId as string,
+        operationId: request.operationId,
         skillId,
         expectedRevisionId,
-        expectedScopeVersion: args.expectedScopeVersion as number,
+        expectedScopeVersion: request.expectedScopeVersion,
         files: artifact.files,
-        reason: args.reason as string,
+        reason: request.reason,
       });
       return {
         isError: false,
