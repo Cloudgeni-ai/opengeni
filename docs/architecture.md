@@ -873,6 +873,12 @@ Used validators remain eager and retain their public schemas and parse behavior;
 the helper does not defer work to the first request. Only side-effect-free schema
 construction belongs inside these annotated factories.
 
+Organization action descriptions use the named request-schema registry in
+`apps/api/src/mcp/action-schema-imports.gen.ts`, generated with the action catalog.
+Namespace-wide contract discovery is build-time only; runtime projection keeps
+the original schema objects and exact JSON output without retaining unrelated
+contract exports.
+
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.

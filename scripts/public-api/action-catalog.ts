@@ -11,6 +11,7 @@ import { testSettings } from "@opengeni/testing";
 
 import { createApp } from "../../apps/api/src/app";
 import surface from "./surface.gen.json";
+import { ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports } from "./action-schema-imports";
 
 export type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
 import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
@@ -272,9 +273,8 @@ export const ACTION_CATALOG_PATH = new URL(
 );
 
 if (import.meta.main && process.argv.includes("--write")) {
-  await Bun.write(
-    ACTION_CATALOG_PATH,
-    renderActionCatalog(buildActionCatalog(registeredApiRoutes())),
-  );
+  const catalog = buildActionCatalog(registeredApiRoutes());
+  await Bun.write(ACTION_CATALOG_PATH, renderActionCatalog(catalog));
+  await Bun.write(ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports(catalog));
   console.log(`[action-catalog] wrote ${ACTION_CATALOG_PATH.pathname}`);
 }
