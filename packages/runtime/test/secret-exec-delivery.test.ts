@@ -1,5 +1,5 @@
 /**
- * W1 delivery on a real `local` sandbox (dossier §13.3 DL-1, DL-4..8, PF-1,
+ * W1 delivery on a real `local` sandbox (design §13.3 DL-1, DL-4..8, PF-1,
  * SEC-4): the model-facing `exec_command` / `write_stdin` / `apply_patch` /
  * `view_image` wrappers resolve references through a SecretResolver, the
  * routing session delivers values through a sourced-then-deleted env file,

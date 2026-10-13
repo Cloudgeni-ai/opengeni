@@ -79,7 +79,7 @@ type Seeded = {
 const persistedEnvelope = {
   backendId: "docker",
   sessionState: {
-    manifest: { root: "/workspace", environment: { API_KEY: "upper", HOME: "/home/agent" } },
+    manifest: { root: "/workspace", environment: { API_KEY: "upper", HOME: "/home/user" } },
     environment: { STRIPE_KEY: "sk_test_org", PATH: "/usr/bin" },
     providerState: {
       environment: { MULTILINE: "line one", GIT_TERMINAL_PROMPT: "0" },
@@ -426,7 +426,7 @@ test.skipIf(!realDb)(
     expect(envelope!.envelope).toEqual({
       backendId: "docker",
       sessionState: {
-        manifest: { root: "/workspace", environment: { HOME: "/home/agent" } },
+        manifest: { root: "/workspace", environment: { HOME: "/home/user" } },
         environment: { PATH: "/usr/bin" },
         providerState: {
           environment: { GIT_TERMINAL_PROMPT: "0" },

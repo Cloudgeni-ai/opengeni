@@ -621,7 +621,7 @@ function fakePasskeyFields(): VaultItemSeed["fields"] {
 }
 
 /**
- * Secrets showcase for Platform engineering (dossier §13B.1): every item type,
+ * Secrets showcase for Platform engineering (design §13B.1): every item type,
  * TOTP, a passkey, a file, history, a renamed item, expiry badges, a dense and
  * an empty vault, and organization vaults with narrow availability. The
  * "Fake Login" items match the fake login site's default accounts.

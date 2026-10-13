@@ -1878,7 +1878,7 @@ export class BrowserControlSessionClient {
     );
   }
 
-  /** Controller-private passkey exchange (dossier §10B.4): load the
+  /** Controller-private passkey exchange (design §10B.4): load the
    * principal's passkeys into every authenticator and pull registration and
    * assertion events. Controllers that predate it answer 404. */
   async passkeySync(

@@ -1,9 +1,9 @@
 /**
- * REST client for the planned vault API (dossier §10B.1.10; every route lives
+ * REST client for the planned vault API (design §10B.1.10; every route lives
  * under `/v1/workspaces/:workspaceId`). Until F1/F2/W2 land these routes return
  * 404 and the gate reports the scenario as `missing_feature`; once they land,
  * the scenarios run unchanged. Request shapes follow `packages/contracts/src/vaults.ts`
- * as specified in dossier §10B.1.1 and will be switched to the real contract
+ * as specified in design §10B.1.1 and will be switched to the real contract
  * types when that module exists.
  */
 import type { ApiResult, StackApi } from "./stack";
@@ -16,7 +16,7 @@ export type VaultFieldInput = {
   name: string;
   kind: "text" | "concealed" | "totp" | "file";
   value?: string;
-  /** Ask the server generator for a value (dossier §10B.1.6). */
+  /** Ask the server generator for a value (design §10B.1.6). */
   generate?: { length?: number; symbols?: boolean };
 };
 

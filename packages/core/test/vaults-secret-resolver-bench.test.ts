@@ -1,4 +1,4 @@
-// PF-2 (dossier §13): hosted resolution of 5 references takes at most 50 ms
+// PF-2 (design §13): hosted resolution of 5 references takes at most 50 ms
 // p95 against real PostgreSQL. One resolve() call per command, five
 // references across two tiers, 500 timed iterations after a warm-up.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";

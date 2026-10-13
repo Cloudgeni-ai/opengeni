@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Secrets full-stack gate (dossier §12 E2E-1..E2E-12, §13.6, §17.1).
+ * Secrets full-stack gate (design §12 E2E-1..E2E-12, §13.6, §17.1).
  *
  * Takes a worktree, makes sure its localstack is up (optionally starting,
  * seeding and logging in), starts the fake-login suite on the slot's ports,

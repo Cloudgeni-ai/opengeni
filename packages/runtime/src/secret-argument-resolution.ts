@@ -1,5 +1,5 @@
 /**
- * Gateway argument resolution for secret references (dossier §10.4, §10B.2).
+ * Gateway argument resolution for secret references (design §10.4, §10B.2).
  *
  * `literal` sources (remote MCP servers and Codex apps) receive the values in
  * place of each `{{secret:…}}`; `preserve` sources (interaction tools, which

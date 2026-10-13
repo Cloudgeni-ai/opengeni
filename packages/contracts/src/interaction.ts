@@ -3324,7 +3324,7 @@ export const ComputerOperationObservation = z.union([ComputerNativeResult, Compu
 export type ComputerOperationObservation = z.infer<typeof ComputerOperationObservation>;
 
 // ---------------------------------------------------------------------------
-// Secret references in interaction commands (dossier §10B.4, BR-1..3).
+// Secret references in interaction commands (design §10B.4, BR-1..3).
 //
 // The API resolves `{{secret:…}}` references for agent callers and sends the
 // plaintext beside the command in `secretValues`. The controller materializes
@@ -3525,7 +3525,7 @@ export function redactInteractionSecretValues<T>(
 }
 
 // ---------------------------------------------------------------------------
-// Agent-owned passkeys (dossier §10B.4, BR-5). browserd hosts a CDP WebAuthn
+// Agent-owned passkeys (design §10B.4, BR-5). browserd hosts a CDP WebAuthn
 // virtual authenticator on every page target. The API loads the principal's
 // passkey items into it and pulls registration and assertion events back with
 // one control call around every agent browser action.

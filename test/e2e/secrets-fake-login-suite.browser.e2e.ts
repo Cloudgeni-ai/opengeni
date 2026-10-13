@@ -1,5 +1,5 @@
 /**
- * Proves every fake-login flow (dossier §13B.3) against real Chromium with
+ * Proves every fake-login flow (design §13B.3) against real Chromium with
  * Playwright, including passkeys through the CDP WebAuthn virtual authenticator.
  * This tests the SUITE (the oracle). The product path through browserd is
  * test/e2e/secrets-fake-login.browser.e2e.ts (W4, BR-7).

@@ -32,7 +32,7 @@ export function vaultErrorCodeForProvider(
 }
 
 /**
- * 1Password service-account connections (dossier §10.9). The token lives in
+ * 1Password service-account connections (design §10.9). The token lives in
  * the existing encrypted connection-credential store as `{ token }` (no
  * `headers`, so the egress broker can never inject it); metadata carries only
  * `{ credentialRole, planTier, ownership, accountName, label, verifiedAt }`.

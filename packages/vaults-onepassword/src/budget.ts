@@ -160,7 +160,7 @@ export function resetOnePasswordQuotasForTests() {
   quotas.clear();
 }
 
-/** dossier §10.9 / VAULT_LIMITS.providerReadsPerAttempt */
+/** design §10.9 / VAULT_LIMITS.providerReadsPerAttempt */
 export const PROVIDER_READS_PER_ATTEMPT = 50;
 
 /**

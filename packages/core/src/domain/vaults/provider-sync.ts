@@ -24,7 +24,7 @@ import {
 } from "@opengeni/vaults";
 
 /**
- * Provider vault metadata mirror (dossier §10.9, OP-1/OP-4). A linked
+ * Provider vault metadata mirror (design §10.9, OP-1/OP-4). A linked
  * 1Password or host vault keeps a metadata-only mirror (item names, types,
  * websites, field names and kinds); values are always read live. A sync costs
  * one `listVaults` call and skips `listItems` entirely when the provider's

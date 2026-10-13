@@ -1,5 +1,5 @@
 //! Live X11 proof that desktop typing reaches a real text widget for text the
-//! keyboard layout cannot type (dossier BR-5): `ÆØÅ–π密` and a non-Latin
+//! keyboard layout cannot type (design BR-5): `ÆØÅ–π密` and a non-Latin
 //! password typed into a GTK entry through both XTEST delivery paths, with the
 //! temporary spare-keycode bindings restored afterwards.
 //!

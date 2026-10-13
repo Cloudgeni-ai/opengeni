@@ -113,7 +113,7 @@ describe("run_on secret delivery (DL-9)", () => {
   });
 
   test("Windows exec: PowerShell splice", async () => {
-    const machine = new CapturingMachine("C:/Users/dev/project");
+    const machine = new CapturingMachine("C:/Users/user/project");
     const result = await runOn(machine, { kind: "exec", cmd: 'Write-Output "{{secret:Canary}}"' });
     expect(result.ok).toBe(true);
     const exec = machine.execs[0]!;

@@ -1,6 +1,6 @@
 # Fake-login site suite
 
-A local website for testing agent sign-in. It covers the login methods the secrets work has to handle (dossier §13B.3), and it is the oracle for the BR-\*, E2E-\* and AG-6 checks. It shares no code with the product, so it can be used to test the product's TOTP, WebAuthn and typing code.
+A local website for testing agent sign-in. It covers the login methods the secrets work has to handle (design §13B.3), and it is the oracle for the BR-\*, E2E-\* and AG-6 checks. It shares no code with the product, so it can be used to test the product's TOTP, WebAuthn and typing code.
 
 ```bash
 bun packages/testing/src/fake-login/cli.ts --slot 3   # site http://localhost:47220, cross-origin http://127.0.0.1:47221

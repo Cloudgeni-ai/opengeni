@@ -1,4 +1,4 @@
-// DEV-only fetch interceptor for the vault REST routes (dossier §10B.1.10).
+// DEV-only fetch interceptor for the vault REST routes (design §10B.1.10).
 // On when localStorage "og-dev-secrets-mock" is "1"; never in production
 // bundles (main.tsx imports it behind import.meta.env.DEV).
 //

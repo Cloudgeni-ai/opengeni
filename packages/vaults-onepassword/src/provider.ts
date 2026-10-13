@@ -30,7 +30,7 @@ import {
 } from "./sdk";
 import { describeOnePasswordToken, onePasswordTokenFingerprint } from "./token";
 
-/** dossier §10.9 / VAULT_LIMITS.providerValueCacheMs */
+/** design §10.9 / VAULT_LIMITS.providerValueCacheMs */
 export const ONEPASSWORD_VALUE_CACHE_MS = 60_000;
 /** Items per `items.getAll` request when mirroring metadata. */
 export const ONEPASSWORD_GET_ALL_BATCH = 50;

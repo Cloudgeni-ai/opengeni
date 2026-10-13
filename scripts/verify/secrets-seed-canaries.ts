@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Seed the gate canaries (dossier §13B.2): items `Canary`, `Canary TOTP`,
+ * Seed the gate canaries (design §13B.2): items `Canary`, `Canary TOTP`,
  * `Rotating` and `CanaryFile` in the owner's default vault, each with a fresh
  * `OGCANARY-<uuid>` value, and write the list to a 0600 canaries file that the
  * sweep reads and deletes afterwards.

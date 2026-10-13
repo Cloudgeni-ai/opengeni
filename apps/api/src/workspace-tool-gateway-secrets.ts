@@ -17,7 +17,10 @@ import {
 } from "@opengeni/contracts";
 import { createSecretResolver, hasPermission } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
-import { createSecretArgumentResolver, secretArgumentMode } from "@opengeni/runtime";
+import {
+  createSecretArgumentResolver,
+  secretArgumentMode,
+} from "@opengeni/runtime/workspace-tool-gateway";
 import type { ToolGatewayArgumentResolver } from "@opengeni/tool-gateway";
 
 export type SiteSecretContext = { siteId: string; siteVersion: string };

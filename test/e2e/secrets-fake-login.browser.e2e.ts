@@ -1,6 +1,6 @@
 /**
  * BR-7: every fake-login flow through the PRODUCT path with `{{secret:…}}`
- * references (dossier §10B.4). The test plays the API's part exactly as the
+ * references (design §10B.4). The test plays the API's part exactly as the
  * Browser routes do for an agent attempt: it resolves the references in the
  * action with `resolveInteractionSecretValues`, sends the plaintext to the real
  * browserd HTTP server only in the private `secretValues` side map, and syncs

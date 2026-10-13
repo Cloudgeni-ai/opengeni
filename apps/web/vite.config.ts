@@ -42,6 +42,15 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // Session status badges read this presentation table at module
+              // load. It is pure data; keep it in a leaf chunk so entry-aware
+              // merging cannot place it behind a reciprocal session chunk.
+              name: "session-status-model",
+              test: /packages[\\/]react[\\/]src[\\/]session-status-model\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Session routes register optional peers during module evaluation.
               // Their callbacks are assigned from state objects, not hoisted
               // declarations. Keep this dependency-free state in a leaf chunk

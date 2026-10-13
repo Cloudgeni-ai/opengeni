@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Real-model tool-compatibility probe (dossier §16.4 "use a stronger Gateway
+ * Real-model tool-compatibility probe (design §16.4 "use a stronger Gateway
  * model if the M0 probe shows it is selectable", AG-6 prerequisite).
  *
  * Route: when the stack runs `up.sh --model-key azure` (F598_MODEL_ROUTE=azure)
