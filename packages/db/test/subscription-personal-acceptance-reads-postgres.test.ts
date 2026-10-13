@@ -587,6 +587,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)",
       // 0728
       "subscription_authority_carrier_inserted_now(text, uuid, uuid, bigint)",
+      // 0752
+      "subscription_core_personal_sharing(text, uuid, text, uuid, integer)",
     ].map((routine) => `subscription M3 precursor private routine ${routine} is missing or unsafe`);
     heldBack.push(
       ...MAINTENANCE_WORK_PROBE_ROUTINES.map(
