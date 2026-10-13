@@ -260,8 +260,12 @@ Empty finals after goal completion get one handoff, then a typed notice.
 See [run lifecycle](run-lifecycle.md).
 
 Non-transient preclaim rejection parks accepted work behind a durable admission
-block. Resume/Send/Steer rechecks without granting authority; operational outages
-retain backoff.
+block. Resume/Send/Steer (including queue-row Steer) clears that block atomically
+with the accepted direction and wake, without granting authority; receipt replay
+never clears a newer rejection. Operational outages retain backoff. Migration
+0763 repairs only unchanged, explicitly requested historical queue rechecks.
+Paused recovering turns and capacity waiters remain resumable obligations, not
+age-based cancellation candidates.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
