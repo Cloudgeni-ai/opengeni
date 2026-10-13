@@ -23,6 +23,15 @@ export const SubscriptionPersonalAuthorityV2 = z
             provider: z.enum(["codex", "claude", "xai"]),
             ownerMembershipId: CanonicalUuid,
             authorityGeneration: PositiveSafeInteger,
+            /**
+             * Explicit personal consent accepted in a shared chat. Unlike the
+             * historical private-work pool, this authorizes only this connection
+             * in this session. Copies retain the restriction verbatim.
+             */
+            sharedSessionChoice: z
+              .object({ sessionId: CanonicalUuid, connectionId: CanonicalUuid })
+              .strict()
+              .optional(),
           })
           .strict(),
       )

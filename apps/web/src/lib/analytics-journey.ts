@@ -22,6 +22,7 @@ const PAGES = new Set([
   "machines",
   "files",
   "agents",
+  "secrets",
   "variable-sets",
   "environments",
   "rigs",

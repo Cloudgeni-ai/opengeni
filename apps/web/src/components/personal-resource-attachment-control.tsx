@@ -51,8 +51,8 @@ export function PersonalResourceAttachmentControl(props: {
       {controller.error ? (
         <div className="flex items-center justify-between gap-3" role="alert">
           <span className="text-xs text-danger">
-            The selected personal resource is unavailable. Retry, or open Variable Sets to replace
-            or remove it.
+            The selected personal resource is unavailable. Retry, or pick another environment or
+            machine.
           </span>
           <Button
             type="button"

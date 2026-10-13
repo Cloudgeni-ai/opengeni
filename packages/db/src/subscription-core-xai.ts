@@ -35,6 +35,9 @@ export type SubscriptionCoreXaiTokenSnapshot = {
 const MISSING_IDENTITY_TEXT =
   "The SuperGrok connection is missing a verified token identity. Reconnect the account.";
 
+/** A SuperGrok core turn lease's TTL (the legacy SuperGrok lease's, which it replaced). */
+export const XAI_CREDENTIAL_LEASE_TTL_MS = 5 * 60_000;
+
 export function buildSubscriptionCoreXaiTokenResolver(
   db: Database,
   settings: Settings,

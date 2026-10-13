@@ -19,7 +19,7 @@ import {
   SparklesIcon,
   SquarePenIcon,
   UsersIcon,
-  VariableIcon,
+  LockKeyholeIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -109,10 +109,10 @@ const SETTINGS: Destination[] = [
 
 const RUNTIME: Destination[] = [
   {
-    id: "variable-sets",
-    label: "Variable sets",
-    icon: VariableIcon,
-    description: "Environment variables and secrets your agents get in their sandbox.",
+    id: "secrets",
+    label: "Secrets",
+    icon: LockKeyholeIcon,
+    description: "Vaults of passwords, keys and logins agents use by reference.",
   },
   {
     id: "sandbox-environments",
@@ -239,15 +239,15 @@ function AccessBody() {
   );
 }
 
-function VariableSetsBody() {
+function SecretsBody() {
   return (
-    <RowList label="Variable sets" variant="resource">
+    <RowList label="Vaults" variant="resource">
       {variableSets.slice(0, 4).map((set) => (
         <ListRow
           key={set.id}
-          leading={<LogoTile name={set.name} icon={<VariableIcon />} />}
+          leading={<LogoTile name={set.name} icon={<LockKeyholeIcon />} />}
           title={set.name}
-          meta={[set.variablesLabel, set.usageLabel, `Updated ${set.updatedLabel}`]}
+          meta={[set.usageLabel, `Updated ${set.updatedLabel}`]}
           onOpen={() => undefined}
           indicator="open"
         />
@@ -259,7 +259,7 @@ function VariableSetsBody() {
 function PageBody({ page, variant }: { page: string; variant: SectionVariant }) {
   if (page === "general") return <GeneralBody variant={variant} />;
   if (page === "access") return <AccessBody />;
-  if (page === "variable-sets") return <VariableSetsBody />;
+  if (page === "secrets") return <SecretsBody />;
   return null;
 }
 
@@ -271,11 +271,11 @@ function PageActions({ page }: { page: string }) {
         Add people
       </Button>
     );
-  if (page === "variable-sets")
+  if (page === "secrets")
     return (
       <Button>
         <PlusIcon aria-hidden="true" />
-        New variable set
+        New vault
       </Button>
     );
   return null;

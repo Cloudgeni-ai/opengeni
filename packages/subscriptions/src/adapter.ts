@@ -182,10 +182,10 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   readonly capabilities: ProviderCapabilities;
   /**
    * Capabilities of one credential format, as `credential.format` derives it
-   * from a decoded secret. The stored `credential_format` column is not that
-   * format (the shared writers record the encryption envelope version there),
-   * so callers derive it from the secret. The core never calls `refresh` for
-   * a format whose `autoRenews` is false.
+   * from a decoded secret. Pass that derived value, never the stored
+   * `credential_format` column: the column is informational and may hold the
+   * shared writers' envelope version (`v1`). The core never calls `refresh`
+   * for a format whose `autoRenews` is false.
    */
   capabilitiesFor(credentialFormat: string): ProviderCapabilities;
   readonly credentialKind: CredentialKind;

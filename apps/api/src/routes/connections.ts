@@ -88,6 +88,7 @@ import {
   hasPermission,
   listOwnConnectionAccountsForGrant,
   hasReservedFikenMetadata,
+  ONEPASSWORD_CREDENTIAL_ROLE,
   hasReservedOpenGeniSlackBotMetadata,
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
@@ -309,6 +310,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const persist = async (db: Database) => {
       assertNotReservedSlackBotMetadata(payload.metadata);
       assertNotReservedFikenMetadata(payload.metadata);
+      assertNotReservedOnePasswordMetadata(payload.metadata);
       assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
       assertNotReservedPersonalGitHubMetadata(payload.metadata);
       const key = requireEnvironmentEncryption(settings);
@@ -1032,6 +1034,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           assertNotReservedSlackBotMetadata(payload.metadata);
           assertNotReservedFikenMetadata(payload.metadata);
+          assertNotReservedOnePasswordMetadata(payload.metadata);
           assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
           assertNotReservedPersonalGitHubMetadata(payload.metadata);
           const existing = await getConnectionMetadata(
@@ -1965,6 +1968,14 @@ function assertNotReservedFikenMetadata(metadata: Record<string, unknown> | unde
   if (hasReservedFikenMetadata(metadata)) {
     throw new HTTPException(422, {
       message: "Fiken connection metadata is reserved for the verified Fiken connect flows",
+    });
+  }
+}
+
+function assertNotReservedOnePasswordMetadata(metadata: Record<string, unknown> | undefined): void {
+  if (metadata?.credentialRole === ONEPASSWORD_CREDENTIAL_ROLE) {
+    throw new HTTPException(422, {
+      message: "1Password connections are created by the verified 1Password install flow",
     });
   }
 }

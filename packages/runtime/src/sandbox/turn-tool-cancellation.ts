@@ -37,6 +37,15 @@ import {
 } from "./synchronous-command";
 import type { ChannelASession, ChannelAExecArgs } from "./channel-a";
 import { withNativeSynchronousCommandCollection } from "./native-synchronous-collection";
+import { isSecretReferenceError, type SecretResolver } from "@opengeni/contracts";
+import {
+  prepareSecretExec,
+  prepareSecretStdin,
+  resolveSecretImagePath,
+  resolveSecretPatchText,
+  runWithSecretCarry,
+  type SecretFilesWriter,
+} from "./secret-delivery";
 
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
@@ -190,7 +199,19 @@ type CommandCancellationSession = {
     providerSessionId: number,
     args: TurnSandboxCommandArgs,
   ): Promise<string>;
+  /** Attempt-scoped private secret files (apply_patch / view_image `secretfile`). */
+  writeSecretFiles?(
+    scope: string,
+    files: ReadonlyArray<{ path: string; content: Uint8Array }>,
+  ): Promise<void>;
+  /** Remove this attempt's secret files (attempt end; SEC-4). */
+  clearSecretFilesForAttempt?(scope?: string): Promise<void>;
 };
+
+function secretFilesWriter(session?: CommandCancellationSession): SecretFilesWriter | null {
+  const write = session?.writeSecretFiles;
+  return write ? async (scope, files) => await write.call(session, scope, files) : null;
+}
 
 async function usesRemoteOperationCancellation(
   session: CommandCancellationSession | undefined,
@@ -288,6 +309,12 @@ export type TurnToolCancellationFence = {
     session: ChannelASession,
     args: ChannelAExecArgs,
   ): Promise<SynchronousCommandResult>;
+  /**
+   * Remove every attempt-scoped secret file the wrapped sessions wrote
+   * (`secretfile` paths, leftover env files). Called at attempt end after the
+   * writers drain; rejects with the first failure after trying every session.
+   */
+  clearSecretFiles?(): Promise<void>;
 };
 
 export type TurnToolCancellationController = TurnToolCancellationFence & {
@@ -941,10 +968,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
   private readonly cutPolling: boolean;
+  private readonly secretResolver: SecretResolver | null;
+  private readonly secretFileSessions = new Set<CommandCancellationSession>();
 
   constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
     this.cutPolling = options.cutPolling === true;
+    this.secretResolver = options.secretResolver ?? null;
     if (signal?.aborted) {
       this.cancel(signal.reason);
     } else {
@@ -965,6 +995,18 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   async waitForQuiescence(): Promise<void> {
     this.cancel(this.reason);
     await this.ensureDrain();
+  }
+
+  async clearSecretFiles(): Promise<void> {
+    let failure: unknown = null;
+    for (const session of this.secretFileSessions) {
+      try {
+        await session.clearSecretFilesForAttempt!();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== null) throw failure;
   }
 
   runSandboxCommand(
@@ -1393,6 +1435,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   wrapTools<T>(tools: T[], session?: CommandCancellationSession): T[] {
+    if (this.secretResolver?.enabled && session?.clearSecretFilesForAttempt) {
+      this.secretFileSessions.add(session);
+    }
     const structuralTools = tools as unknown as Array<Record<string, unknown>>;
     for (const tool of structuralTools) {
       if (tool.type !== "function") continue;
@@ -1403,7 +1448,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
     const wrapped = structuralTools.map((tool) => {
       if (tool.type === "function") return this.wrapFunctionTool(tool as FunctionTool, session);
-      if (tool.type === "apply_patch") return this.wrapApplyPatchTool(tool as ApplyPatchTool);
+      if (tool.type === "apply_patch")
+        return this.wrapApplyPatchTool(tool as ApplyPatchTool, session);
       if (tool.type === "computer") return this.wrapComputerTool(tool as ComputerTool);
       return tool;
     });
@@ -1520,6 +1566,27 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             const useRemoteOpCancellation =
               await usesRemoteOperationCancellation(cancellationSession);
             if (this.cancelled) throw cancellationError(this.reason);
+            // Secret references: managed sandboxes always parse the command in
+            // POSIX sh (the wrapper below), so splice now; connected machines
+            // splice in their own dialect at delivery. Resolution failures are
+            // the tool result and nothing is dispatched or recorded.
+            let secret: Awaited<ReturnType<typeof prepareSecretExec>>;
+            try {
+              secret = await prepareSecretExec(parsed.cmd, {
+                resolver: this.secretResolver,
+                dialect: useRemoteOpCancellation ? null : "posix",
+                use: {
+                  surface: "shell",
+                  toolName: "exec_command",
+                  ...(details?.toolCall?.callId ? { sourceCallId: details.toolCall.callId } : {}),
+                },
+              });
+            } catch (error) {
+              if (isSecretReferenceError(error)) return error.toModelOutput();
+              throw error;
+            }
+            if (this.cancelled) throw cancellationError(this.reason);
+            const commandText = secret?.text ?? parsed.cmd;
             const interactive = parsed.tty !== false;
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
@@ -1529,10 +1596,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   )
                 : null;
             const cancellableInput = useRemoteOpCancellation
-              ? input
+              ? commandText === parsed.cmd
+                ? input
+                : JSON.stringify({ ...parsed, cmd: commandText })
               : JSON.stringify({
                   ...parsed,
-                  cmd: cancellableShellCommand(parsed.cmd, markerPath),
+                  cmd: cancellableShellCommand(commandText, markerPath),
                   // Preserve an explicit pipe-mode request. When tty is omitted,
                   // retain the historical PTY default and Ctrl-C fast path. Every
                   // mode keeps the process marker plus TERM/KILL escalation, and
@@ -1555,25 +1624,32 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             const startedAt = performance.now();
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
             try {
-              output = await runWithToolCallCorrelation(
-                correlationId,
-                async () =>
-                  await withPendingCommandSupervision(pendingStart?.supervision, () =>
-                    tool.invoke(runContext, cancellableInput, details),
-                  ),
-                {
-                  onDurableOpOwnershipTransferStarted: (opId) =>
-                    remoteExec?.startOwnershipTransfer(opId),
-                  onDurableOpOwnershipTransferFailed: (opId) =>
-                    remoteExec?.failOwnershipTransfer(opId),
-                  onDurableOpOwnershipTransferred: (opId) =>
-                    remoteExec?.releaseCancellationAuthority(opId),
-                  onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
-                  onRemoteOperationTransportSelected: (transport) =>
-                    remoteExec?.bindTransport(transport),
-                },
+              output = await runWithSecretCarry(secret?.carry ?? null, () =>
+                runWithToolCallCorrelation(
+                  correlationId,
+                  async () =>
+                    await withPendingCommandSupervision(pendingStart?.supervision, () =>
+                      tool.invoke(runContext, cancellableInput, details),
+                    ),
+                  {
+                    onDurableOpOwnershipTransferStarted: (opId) =>
+                      remoteExec?.startOwnershipTransfer(opId),
+                    onDurableOpOwnershipTransferFailed: (opId) =>
+                      remoteExec?.failOwnershipTransfer(opId),
+                    onDurableOpOwnershipTransferred: (opId) =>
+                      remoteExec?.releaseCancellationAuthority(opId),
+                    onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
+                    onRemoteOperationTransportSelected: (transport) =>
+                      remoteExec?.bindTransport(transport),
+                  },
+                ),
               );
             } catch (error) {
+              if (isSecretReferenceError(error)) {
+                // Delivery-time refusal (e.g. cmd.exe on a machine), before dispatch.
+                pendingStart?.settle();
+                return error.toModelOutput();
+              }
               const retainedProcess =
                 !useRemoteOpCancellation && error instanceof RoutingMutationOutcomeUnknownError
                   ? error.retainedProcess
@@ -1704,6 +1780,23 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               Number.isSafeInteger(parsed.session_id)
                 ? parsed.session_id
                 : null;
+            let secretStdin: Awaited<ReturnType<typeof prepareSecretStdin>> = null;
+            if (typeof parsed?.chars === "string") {
+              try {
+                secretStdin = await prepareSecretStdin(parsed.chars, {
+                  resolver: this.secretResolver,
+                  use: {
+                    surface: "stdin",
+                    toolName: "write_stdin",
+                    ...(details?.toolCall?.callId ? { sourceCallId: details.toolCall.callId } : {}),
+                  },
+                });
+              } catch (error) {
+                if (isSecretReferenceError(error)) return error.toModelOutput();
+                throw error;
+              }
+              if (secretStdin) parsed.chars = secretStdin.text;
+            }
             const cappedInput = parsed
               ? JSON.stringify({
                   ...parsed,
@@ -1727,14 +1820,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               // tool error string, never escape as a ToolCallError that fails
               // the whole turn.
               try {
-                output = await directProcessSession.writeStdinForProcessMutation({
-                  sessionId,
-                  ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
-                  yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
-                  ...(typeof parsed?.max_output_tokens === "number"
-                    ? { maxOutputTokens: parsed.max_output_tokens }
-                    : {}),
-                });
+                output = await runWithSecretCarry(secretStdin?.carry ?? null, () =>
+                  directProcessSession.writeStdinForProcessMutation!({
+                    sessionId,
+                    ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
+                    yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
+                    ...(typeof parsed?.max_output_tokens === "number"
+                      ? { maxOutputTokens: parsed.max_output_tokens }
+                      : {}),
+                  }),
+                );
               } catch (error) {
                 if (!(error instanceof ProviderCommandObservationUnavailableError))
                   return renderDirectToolFault(error, sessionId);
@@ -1744,7 +1839,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 output = "";
               }
             } else {
-              output = await tool.invoke(runContext, cappedInput, details);
+              output = await runWithSecretCarry(secretStdin?.carry ?? null, () =>
+                tool.invoke(runContext, cappedInput, details),
+              );
             }
             if (sessionId !== null && typeof output === "string") {
               if (!typedHandleLoss && isExecSessionLostBanner(output, sessionId)) {
@@ -1816,11 +1913,81 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       };
     }
 
+    if (tool.name === "apply_patch" || tool.name === "view_image") {
+      const writeFiles = secretFilesWriter(cancellationSession);
+      return {
+        ...tool,
+        invoke: (runContext, input, details) =>
+          this.track(async () => {
+            let resolvedInput: string | null;
+            try {
+              resolvedInput = await this.resolveSecretToolInput(
+                tool.name,
+                input,
+                writeFiles,
+                details?.toolCall?.callId,
+              );
+            } catch (error) {
+              if (isSecretReferenceError(error)) return error.toModelOutput();
+              throw error;
+            }
+            return await tool.invoke(runContext, resolvedInput ?? input, details);
+          }),
+      };
+    }
+
     return {
       ...tool,
       invoke: (runContext, input, details) =>
         this.track(async () => await tool.invoke(runContext, input, details)),
     };
+  }
+
+  /**
+   * Resolve references in a function `apply_patch` patch (content lines, not
+   * paths) or a `view_image` path (`secretfile` only). The model's arguments
+   * stay unchanged everywhere above this call. Returns null when unchanged.
+   */
+  private async resolveSecretToolInput(
+    toolName: string,
+    input: string,
+    writeFiles: SecretFilesWriter | null,
+    sourceCallId: string | undefined,
+  ): Promise<string | null> {
+    if (!this.secretResolver?.enabled || !input.includes("{{secret")) return null;
+    const use = {
+      surface: toolName === "view_image" ? ("view_image" as const) : ("file_write" as const),
+      toolName,
+      ...(sourceCallId ? { sourceCallId } : {}),
+    };
+    const parsed = parsedObject(input);
+    if (toolName === "view_image") {
+      if (!parsed || typeof parsed.path !== "string") return null;
+      const path = await resolveSecretImagePath(parsed.path, {
+        resolver: this.secretResolver,
+        use,
+        writeFiles,
+      });
+      return path === null ? null : JSON.stringify({ ...parsed, path });
+    }
+    if (parsed && typeof parsed.patch === "string") {
+      const patch = await resolveSecretPatchText(parsed.patch, {
+        resolver: this.secretResolver,
+        use,
+        headers: true,
+        writeFiles,
+      });
+      return patch === null ? null : JSON.stringify({ ...parsed, patch });
+    }
+    if (!parsed && input.trimStart().startsWith("*** Begin Patch")) {
+      return await resolveSecretPatchText(input, {
+        resolver: this.secretResolver,
+        use,
+        headers: true,
+        writeFiles,
+      });
+    }
+    return null;
   }
 
   private async awaitModelFacingShellResult(input: {
@@ -1973,13 +2140,30 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     );
   }
 
-  private wrapApplyPatchTool(tool: ApplyPatchTool): ApplyPatchTool {
+  private wrapApplyPatchTool(
+    tool: ApplyPatchTool,
+    cancellationSession?: CommandCancellationSession,
+  ): ApplyPatchTool {
     const editor = tool.editor;
+    const writeFiles = secretFilesWriter(cancellationSession);
+    // Hosted apply_patch: resolve references in each operation's diff (content
+    // only; the path is never resolved). The model's call keeps references.
+    const resolveDiff = async (operation: unknown): Promise<unknown> => {
+      const diff = (operation as { diff?: unknown } | null)?.diff;
+      if (typeof diff !== "string") return operation;
+      const resolved = await resolveSecretPatchText(diff, {
+        resolver: this.secretResolver,
+        use: { surface: "file_write", toolName: "apply_patch" },
+        headers: false,
+        writeFiles,
+      });
+      return resolved === null ? operation : { ...(operation as object), diff: resolved };
+    };
     const wrappedEditor: ApplyPatchEditor = {
       createFile: (operation, context) =>
-        this.track(async () => await editor.createFile(operation, context)),
+        this.track(async () => await editor.createFile(await resolveDiff(operation), context)),
       updateFile: (operation, context) =>
-        this.track(async () => await editor.updateFile(operation, context)),
+        this.track(async () => await editor.updateFile(await resolveDiff(operation), context)),
       deleteFile: (operation, context) =>
         this.track(async () => await editor.deleteFile(operation, context)),
     };
@@ -2752,6 +2936,13 @@ export type TurnToolCancellationControllerOptions = {
    * Omitted means the ordinary 30-second cap.
    */
   cutPolling?: boolean;
+  /**
+   * The attempt's secret resolver. Commands, stdin, patches and image paths
+   * holding `{{secret:…}}` / `{{secretfile:…}}` references are resolved below
+   * every recorder (design §10.3). Omitted, or `enabled: false`, passes
+   * references through literally.
+   */
+  secretResolver?: SecretResolver | null;
 };
 
 export function createTurnToolCancellationController(

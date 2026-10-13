@@ -53,6 +53,7 @@ import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
 import { ReleaseFollowProvider, withAlpha } from "./primitives";
+import { humanInputAnswerLines } from "./secret-field-model";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
   ActivityRail,
@@ -1220,9 +1221,18 @@ function HumanInputRow({
         : item.response.outcome === "expired"
           ? m.humanInputOutcome.expired
           : m.humanInputOutcome.cancelled;
-  const answerText = item.answers
-    .map((answer) => `${multiple ? `${answer.label}: ` : ""}${answer.values.join(", ")}`)
+  const lines = humanInputAnswerLines(
+    item.answers,
+    item.response,
+    m.humanInputSecretSaved,
+    multiple,
+  );
+  const answerText = lines
+    .filter((line) => !line.secret)
+    .map((line) => line.text)
     .join("\n");
+  const savedLines = lines.filter((line) => line.secret);
+  const copyText = lines.map((line) => line.text).join("\n");
   return (
     <View style={{ gap: 10 }}>
       <View
@@ -1333,9 +1343,28 @@ function HumanInputRow({
               {answerText}
             </Text>
           ) : null}
+          {savedLines.map((line) => (
+            <View
+              key={line.questionId}
+              style={{ marginTop: 4, flexDirection: "row", alignItems: "center", gap: 6 }}
+            >
+              <Icon name="key-round" size={14} color={theme.colors["fg-muted"]} />
+              <Text
+                style={{
+                  ...fontStyle(theme),
+                  flexShrink: 1,
+                  fontSize: theme.size.sm,
+                  lineHeight: 20,
+                  color: theme.colors.fg,
+                }}
+              >
+                {line.text}
+              </Text>
+            </View>
+          ))}
         </View>
         <MessageFooter
-          text={answerText || settled}
+          text={copyText || settled}
           occurredAt={item.occurredAt}
           align="end"
           onCopy={onCopy}

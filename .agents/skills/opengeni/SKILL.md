@@ -58,9 +58,16 @@ Then open the smallest source files that answer the question:
   fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feature subsystems: `docs/secrets.md` (vaults, `{{secret:…}}` references and delivery), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
+- Subscription policy and lifecycle: `packages/subscriptions/` and
+  `packages/db/src/subscription-core/`, with provider bindings registered in
+  `subscription-core-providers.ts`. Session account choice has one transaction
+  in `subscription-core/session-choice.ts`; legacy provider endpoints project
+  their existing receipts, never duplicate its writer. Check the cutover and
+  retirement runbooks before activation; stored legacy rows are not runtime
+  fallbacks. See `docs/subscription-accounts.md`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Command-output collection follows durable custody independently of model
@@ -140,7 +147,7 @@ organization-wide Skill registry or Skill inheritance for this boundary. See
 
 Keep these boundaries explicit:
 
-- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; scoped Variable Sets are selected through that boundary but may be organization-, workspace-, or organization-user-owned.
+- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; vaults are reached through that boundary but may be organization-, workspace-, user- or task-owned.
 - Session authorization classifies model-account writes neutrally inside core,
   but existing host ports receive the legacy operation name until explicitly
   opting in after migrating policy keys. Never retry host denials under aliases;
@@ -193,7 +200,7 @@ Keep these concepts straight while working:
 - **Admission block**: a non-transient preclaim persistence rejection parks accepted work without failing or consuming it. Inspect `sessions.admission_block`, the worker classifier and `docs/run-lifecycle.md`; authorized Resume or new Send/Steer explicitly rechecks, never grants missing authority. Operational DB failures retain timed recovery.
 - **Control observation**: unavailable scoped reads are not deletion or idle truth; exact still-owned attempts are not successor admission. Versioned observers wait on signals/bounded control timers, retain outbox obligations, and inspect exact Temporal identity without replacing physical-writer proof. See `docs/run-lifecycle.md` before changing these paths.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
-- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
+- **Vault**: organization-, workspace-, user- (Only me) or task-owned collection of items with authenticated-encrypted, versioned fields (or a linked 1Password/host provider vault). Agents use values only through `{{secret:…}}` references resolved at the execution boundary under the acting human's reach and the session's vault policy; nothing is injected into sandbox env. Plaintext reveal is a separate `secrets:read` operation with metadata-only audit. See `docs/secrets.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.

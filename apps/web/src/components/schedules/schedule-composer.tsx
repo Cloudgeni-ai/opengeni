@@ -1,18 +1,16 @@
 /**
  * "What should the agent do?", shaped like the chat composer: what the runs
- * work with on top (repositories, variable set, environment, tools), the
+ * work with on top (repositories, environment, tools), the
  * instructions, then "+" for tools and the model with who pays for it. The
  * textarea takes the enclosing Field's label, hint and error.
  */
 import { useId, type ReactNode } from "react";
-import { useVariableSets } from "@opengeni/react";
 import {
   ContainerIcon,
   GitBranchIcon,
   PlugIcon,
   PlusIcon,
   RotateCcwIcon,
-  VariableIcon,
   XIcon,
 } from "lucide-react";
 
@@ -183,9 +181,6 @@ export function ComposerField({
 
   const can = (permission: Parameters<typeof hasWorkspacePermission>[2]) =>
     hasWorkspacePermission(context.accessContext, workspaceId, permission);
-  const canAttachSets = can("variable-sets:attach") && can("variable-sets:use");
-  const canListSets = canAttachSets && can("variable-sets:list");
-  const variableSets = useVariableSets({ enabled: canListSets && !inheritsChatSettings });
   const canUseRigs = can("rigs:use");
   const rigs = useWorkspaceRigs({ enabled: canUseRigs && !inheritsChatSettings });
 
@@ -216,29 +211,6 @@ export function ComposerField({
   };
   const removeRepository = (resource: RepositoryResource) =>
     update({ resources: draft.resources.filter((candidate) => candidate !== resource) });
-
-  /* ----- variable set */
-  const activeSets = variableSets.variableSets.filter((set) => set.status === "active");
-  const selectedSetKnown = activeSets.some((set) => set.id === draft.variableSetId);
-  const setOptions: SelectOption[] = [
-    ...activeSets.map((set) => ({
-      value: set.id,
-      label: set.name,
-      meta: `${set.variables.length} ${set.variables.length === 1 ? "variable" : "variables"}`,
-      description: set.description ?? undefined,
-      leading: <VariableIcon className="size-3.5 text-fg-subtle" />,
-    })),
-    ...(draft.variableSetId && !selectedSetKnown
-      ? [
-          {
-            value: draft.variableSetId,
-            label: variableSets.loading ? "Loading…" : "Attached variable set",
-            leading: <VariableIcon className="size-3.5 text-fg-subtle" />,
-          },
-        ]
-      : []),
-    ...(draft.variableSetId ? [{ value: NONE, label: "No variable set", group: " " }] : []),
-  ];
 
   /* ----- environment */
   const liveRigs = rigs.rigs.filter((rig) => rig.status === "active");
@@ -297,15 +269,12 @@ export function ComposerField({
   const payer = selectedRow ? modelPayerHint(selectedRow) : null;
   const modelMeta = draft.modelFollowsDefault ? (payer ? `Default · ${payer}` : null) : payer;
 
-  const showSetChip =
-    !inheritsChatSettings && canAttachSets && (setOptions.length > 0 || variableSets.loading);
   const showRigChip =
     !inheritsChatSettings && canUseRigs && (rigOptions.length > 0 || rigs.loading);
   const showContext =
     !existingChat &&
     (repositories.length > 0 ||
       repositoryOptions.length > 0 ||
-      showSetChip ||
       showRigChip ||
       (!inheritsChatSettings && selectedTools.length > 0));
   return (
@@ -341,18 +310,6 @@ export function ComposerField({
               onChange={addRepository}
               searchPlaceholder="Search repositories"
               disabled={disabled}
-            />
-          ) : null}
-          {showSetChip ? (
-            <ChipSelect
-              label="Variable set"
-              placeholder="Variable set"
-              options={setOptions}
-              value={draft.variableSetId}
-              onChange={(value) => update({ variableSetId: value === NONE ? null : value })}
-              searchPlaceholder="Search variable sets"
-              disabled={disabled}
-              loading={variableSets.loading && activeSets.length === 0}
             />
           ) : null}
           {showRigChip ? (

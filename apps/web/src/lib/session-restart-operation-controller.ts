@@ -14,7 +14,6 @@ export type SessionRestartOperationScope = {
 export type PendingSessionRestartAttempt = SessionRestartOperationScope & {
   visibility: SessionVisibility;
   rigId: string | null;
-  variableSetIds: string[];
   idempotencyKey: string;
 };
 
@@ -39,7 +38,6 @@ export class SessionRestartOperationController {
     input: {
       visibility: SessionVisibility;
       rigId: string | null;
-      variableSetIds: readonly string[];
     },
     createIdempotencyKey: () => string,
   ): PendingSessionRestartAttempt {
@@ -50,7 +48,6 @@ export class SessionRestartOperationController {
       ...scope,
       visibility: input.visibility,
       rigId: input.rigId,
-      variableSetIds: [...input.variableSetIds],
       idempotencyKey: createIdempotencyKey(),
     };
     this.attempts.set(key, attempt);

@@ -14,7 +14,8 @@ export {
   identityFromLegacyTemplate,
   resolveAgentIdentity,
 } from "./identity";
-export { rigInstructions, workspaceEnvironmentInstructions } from "./modules/environment";
+export { workspaceEnvironmentInstructions } from "./legacy-environment";
+export { rigInstructions } from "./modules/rig";
 export {
   deriveAgentPromptToolAvailability,
   type AgentPromptToolAvailabilityInput,

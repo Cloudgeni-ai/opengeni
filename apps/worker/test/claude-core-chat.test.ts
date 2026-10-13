@@ -17,7 +17,6 @@ import {
   createTurnCredentialLeases,
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
-import * as legacyCapacity from "../src/activities/agent-turn/xai-capacity";
 import {
   buildClaudeCoreRequestAuthorization,
   CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
@@ -107,10 +106,6 @@ function capacityDeps(overrides: { source?: string; isClaudeTurn?: boolean } = {
     eventing: { publish: async () => [], settle: async () => true },
     providerTurn: {
       effectiveClaudeCredentialId: null,
-      effectiveClaudeCredentialVersion: 7,
-      claudeRotationEnabled: true,
-      claudeAuthoritySnapshot: { version: 1, scope: "workspace" },
-      claudeUpstreamModelId: null,
       claudeSubscriptionCore: null,
       xaiSubscriptionCore: null,
       codexSubscriptionCore: null,
@@ -169,45 +164,38 @@ const runPlacement = {
 } as unknown as db.SubscriptionCorePlacement;
 
 describe("Claude capacity by provider route", () => {
-  test("legacy runs the legacy selection unchanged after exactly one route read", async () => {
+  test("the legacy route fails closed after exactly one route read (the legacy selection is deleted)", async () => {
     const read = route("legacy");
-    const legacy = spy(legacyCapacity, "selectClaudeTurnCapacity").mockResolvedValue({ ok: true });
     const { place } = coreTurns(runPlacement);
     const deps = capacityDeps();
-    expect(await selectClaudeTurnCapacityByRoute(deps)).toEqual({ ok: true });
+    await expect(selectClaudeTurnCapacityByRoute(deps)).rejects.toMatchObject({
+      payload: { code: "subscription_core_cutover_disabled", retryable: false },
+    });
     expect(read).toHaveBeenCalledTimes(1);
     expect(read.mock.calls[0]![1]).toEqual({ accountId: "account-1", provider: "claude" });
-    expect(legacy).toHaveBeenCalledTimes(1);
-    expect(legacy.mock.calls[0]![0]).toBe(deps);
     expect(place).not.toHaveBeenCalled();
     expect(deps.leases.claude.holderId).toBeNull();
   });
 
   test("a non-Claude turn reads no route", async () => {
     const read = route("core");
-    const legacy = spy(legacyCapacity, "selectClaudeTurnCapacity");
     expect(await selectClaudeTurnCapacityByRoute(capacityDeps({ isClaudeTurn: false }))).toEqual({
       ok: true,
     });
     expect(read).not.toHaveBeenCalled();
-    expect(legacy).not.toHaveBeenCalled();
   });
 
   test("maintenance fails closed and reads neither selector", async () => {
     route("maintenance");
-    const legacy = spy(legacyCapacity, "selectClaudeTurnCapacity");
     const { place } = coreTurns(runPlacement);
     await expect(selectClaudeTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
       payload: { code: "subscription_core_cutover_disabled", retryable: false },
     });
-    expect(legacy).not.toHaveBeenCalled();
     expect(place).not.toHaveBeenCalled();
   });
 
-  test("core places the accepted turn and adopts the core lease, never the legacy rotation", async () => {
+  test("core places the accepted turn and adopts the core lease", async () => {
     route("core");
-    const legacy = spy(legacyCapacity, "selectClaudeTurnCapacity");
-    const legacyLease = spy(db, "acquireClaudeCredentialLease");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const { place, recover } = coreTurns(runPlacement);
     const deps = capacityDeps();
@@ -221,7 +209,7 @@ describe("Claude capacity by provider route", () => {
         holderId: "claude-turn:session-session-1:turn-1:attempt-1",
         productModelId: PRODUCT_MODEL,
         reasoningLevel: "medium",
-        leaseTtlMs: db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+        leaseTtlMs: db.SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
       });
       expect(deps.providerTurn.claudeSubscriptionCore).toEqual({
         identity,
@@ -233,16 +221,9 @@ describe("Claude capacity by provider route", () => {
       expect(deps.providerTurn.codexSubscriptionCore).toBeNull();
       expect(deps.providerTurn.xaiSubscriptionCore).toBeNull();
       expect(deps.providerTurn.effectiveClaudeCredentialId).toBe("connection-core");
-      expect(deps.providerTurn.effectiveClaudeCredentialVersion).toBeNull();
-      expect(deps.providerTurn.claudeRotationEnabled).toBe(false);
-      expect(deps.providerTurn.claudeAuthoritySnapshot).toBeNull();
-      expect(deps.providerTurn.claudeUpstreamModelId).toBe("claude-sonnet-5");
       expect(deps.leases.claude.subscriptionCoreConnection).toBe("connection-core");
-      expect(deps.leases.claude.subjectId).toBeNull();
       expect(deps.leases.claude.generation).toBe(3);
       expect(deps.leases.claude.held).toBe(true);
-      expect(legacy).not.toHaveBeenCalled();
-      expect(legacyLease).not.toHaveBeenCalled();
     } finally {
       deps.leases.claude.stopHeartbeat();
     }
@@ -312,7 +293,6 @@ describe("Claude capacity by provider route", () => {
       events: [],
     });
     const codexArm = spy(db, "armSubscriptionCoreCodexCapacityWait");
-    const legacyArm = spy(db, "armClaudeCapacityWait");
     spy(db, "getSubscriptionCoreCapacityWaitById").mockResolvedValue(waiter);
     const reconcile = spy(db, "reconcileSubscriptionCoreCapacityWait").mockResolvedValue({
       action: "waiting",
@@ -346,7 +326,6 @@ describe("Claude capacity by provider route", () => {
       String((arm.mock.calls[0]![2] as { failurePayload: { error: string } }).failurePayload.error),
     ).toContain("Claude");
     expect(codexArm).not.toHaveBeenCalled();
-    expect(legacyArm).not.toHaveBeenCalled();
     expect(evaluate).toHaveBeenCalledTimes(1);
     expect(reconcile.mock.calls[0]![1]).toMatchObject({
       waiterId: "waiter-1",
@@ -993,8 +972,9 @@ describe("Claude model scope and provider ids", () => {
 test("no Claude turn on the legacy route touches durable events through the core", async () => {
   route("legacy");
   const publish = spy(events, "publishDurableSessionEvents");
-  spy(legacyCapacity, "selectClaudeTurnCapacity").mockResolvedValue({ ok: true });
-  await selectClaudeTurnCapacityByRoute(capacityDeps());
+  await expect(selectClaudeTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
+    payload: { code: "subscription_core_cutover_disabled" },
+  });
   expect(publish).not.toHaveBeenCalled();
 });
 
@@ -1020,8 +1000,6 @@ test("a core-placed Claude turn is the turn's placement for attribution, checkpo
     modelId: PRODUCT_MODEL,
     codexCredentialId: null,
     xaiCredentialId: null,
-    claudeCredentialId: "connection-core",
-    claudeAuthoritySnapshot: null,
   } as never);
   expect(legacyCheck).not.toHaveBeenCalled();
 });

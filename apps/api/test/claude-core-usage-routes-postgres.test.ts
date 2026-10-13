@@ -3,41 +3,21 @@
  * EP-N24 and EP-S13) through the real app, on real PostgreSQL as the
  * non-owner application role: who may read and refresh which connection.
  *
- * Claude stays unregistered in production until its cutover (C3); this file
- * registers the production binding in its own process and admits it on its
- * own test database. The usage endpoint is scripted through `claudeFetch`;
- * real network is denied.
- *
- * Run this file in its own process: the registration replaces module
- * bindings for the whole process.
+ * The migrated fixture uses the production Claude registration and receipt.
+ * The usage endpoint is scripted through `claudeFetch`; real network is denied.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import {
-  subscriptionCoreClaudeProvider,
-  type SubscriptionCoreClaudeCredential,
-} from "../../../packages/db/src/subscription-core-claude-adapter";
+import type { SubscriptionCoreClaudeCredential } from "../../../packages/db/src/subscription-core-claude-adapter";
 import { encryptEnvironmentValue } from "../../../packages/db/src/environment-crypto";
 import { installNetworkDenialGuard } from "../../../packages/db/test/fixtures/subscription-core-fake-api-key";
-import {
-  admitTestSubscriptionCoreProvider,
-  testSubscriptionCoreProviderModules,
-} from "../../../packages/db/test/helpers/subscription-core-test-provider";
 
 setDefaultTimeout(180_000);
-
-const CLAUDE = subscriptionCoreClaudeProvider({
-  fetch: (async () => {
-    throw new Error("no OAuth refresh is expected in this suite");
-  }) as unknown as typeof fetch,
-});
-for (const [specifier, factory] of testSubscriptionCoreProviderModules(CLAUDE))
-  mock.module(specifier, factory);
 
 const {
   createDb,
@@ -73,7 +53,6 @@ beforeAll(async () => {
   shared = acquired;
   client = createDb(shared.appUrl, { max: 6 });
   network = installNetworkDenialGuard(() => []);
-  await admitTestSubscriptionCoreProvider(shared.admin, CLAUDE);
 }, 180_000);
 
 afterAll(async () => {
@@ -213,18 +192,23 @@ async function connectionVersion(connectionId: string): Promise<number> {
   return row!.version;
 }
 
-const scriptedUsage = (async (input: string | URL | Request) => {
-  const url = String(input instanceof Request ? input.url : input);
-  if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
-  usageCalls.push(url);
-  return new Response(
-    JSON.stringify({
-      five_hour: { utilization: 12, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
-      seven_day: { utilization: 30, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
-    }),
-    { status: 200, headers: { "content-type": "application/json" } },
-  );
-}) as typeof fetch;
+// An injected transport of the administered reads aborts and joins its work
+// for a signal; this one has none in flight after it returns.
+const scriptedUsage = Object.assign(
+  async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
+    usageCalls.push(url);
+    return new Response(
+      JSON.stringify({
+        five_hour: { utilization: 12, resets_at: new Date(Date.now() + 3_600_000).toISOString() },
+        seven_day: { utilization: 30, resets_at: new Date(Date.now() + 86_400_000).toISOString() },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  },
+  { abortAndJoin: async () => {} },
+) as unknown as typeof fetch;
 
 function app() {
   return createApp({
@@ -385,7 +369,7 @@ describe("Claude usage routes on the core route", () => {
     expect(usageCalls).toEqual([]);
   });
 
-  test("the organization path: an administrator reads and gets the stored projection on refresh; a member is refused", async () => {
+  test("the organization path: an administrator reads and refreshes live; a member and another organization are refused", async () => {
     const org = await organization();
     const connection = await sharedConnection(org, "org-admin");
     const path = `/v1/organizations/${org.accountId}/claude/accounts/${connection}/usage`;
@@ -394,12 +378,6 @@ describe("Claude usage routes on the core route", () => {
     expect(((await read.json()) as { credentialVersion: number }).credentialVersion).toBe(
       await connectionVersion(connection),
     );
-    const refresh = await organizationRequest(org, org.ownerSubjectId, `${path}/refresh`, "POST");
-    expect(refresh.status).toBe(200);
-    // No workspace context for the credential seam: nothing is read live.
-    expect(((await refresh.json()) as { refreshStatus: string }).refreshStatus).toBe("unavailable");
-    expect(usageCalls).toEqual([]);
-
     for (const method of ["GET", "POST"] as const) {
       const refused = await organizationRequest(
         org,
@@ -409,6 +387,37 @@ describe("Claude usage routes on the core route", () => {
       );
       expect(refused.status).toBe(403);
     }
+    // Another organization's administrator, on that organization's path.
+    const other = await organization();
+    for (const method of ["GET", "POST"] as const) {
+      const refused = await organizationRequest(
+        other,
+        other.ownerSubjectId,
+        `/v1/organizations/${other.accountId}/claude/accounts/${connection}/usage${method === "POST" ? "/refresh" : ""}`,
+        method,
+      );
+      expect(refused.status).toBe(404);
+    }
+    expect(usageCalls).toEqual([]);
+
+    // The administrator: a live read through the administrator seam.
+    const refresh = await organizationRequest(org, org.ownerSubjectId, `${path}/refresh`, "POST");
+    expect(refresh.status).toBe(200);
+    expect(refresh.headers.get("cache-control")).toBe("private, no-store");
+    const body = (await refresh.json()) as {
+      refreshStatus: string;
+      credentialVersion: number;
+      windows: Array<{ id: string; usedPercent: number | null }>;
+    };
+    expect(body.refreshStatus).toBe("available");
+    expect(body.credentialVersion).toBe(await connectionVersion(connection));
+    expect(body.windows.find((window) => window.id === "five_hour")?.usedPercent).toBe(12);
+    expect(usageCalls).toHaveLength(1);
+    // Within 30 seconds the stored reading answers.
+    const again = await organizationRequest(org, org.ownerSubjectId, `${path}/refresh`, "POST");
+    expect(((await again.json()) as { refreshStatus: string }).refreshStatus).toBe("available");
+    expect(usageCalls).toHaveLength(1);
+    usageCalls.length = 0;
   });
 });
 
@@ -503,12 +512,12 @@ describe("the owner's personal connection on the core route", () => {
     return { org, cookie };
   }
 
-  test("the owner reads it and gets its stored projection on refresh only in their own Personal workspace", async () => {
+  test("the owner refreshes it live only in their own Personal workspace", async () => {
     usageCalls.length = 0;
     const api = managedApp();
     const { org, cookie } = await signedInOwner(api);
     expect(org.personalWorkspaceId).toBeTruthy();
-    const personal = await personalConnection(org, "owner-personal");
+    const personal = await personalConnection(org, "owner-live");
     const browser = {
       cookie,
       origin,
@@ -585,17 +594,10 @@ describe("the owner's personal connection on the core route", () => {
         message: "Private Claude accounts require a verified owning user",
       });
     }
+    expect(usageCalls).toEqual([]);
 
-    // The owner, in their own Personal workspace: GET projects the stored
-    // connection (no 409 from the legacy ordinary-workspace rule).
-    const read = await api.request(usagePath(org.personalWorkspaceId), { headers: browser });
-    expect(read.status).toBe(200);
-    expect(read.headers.get("cache-control")).toBe("private, no-store");
-    const stored = (await read.json()) as { connected: boolean; credentialVersion: number };
-    expect(stored.connected).toBe(true);
-    expect(stored.credentialVersion).toBe(await connectionVersion(personal));
-    // POST answers the stored projection as `unavailable` until the owner-only
-    // live read lands (C2c); nothing is read live.
+    // The owner, in their own Personal workspace: a live read through the
+    // owner-only seam, then the stored reading.
     const refreshed = await api.request(`${usagePath(org.personalWorkspaceId)}/refresh`, {
       method: "POST",
       headers: browser,
@@ -605,12 +607,24 @@ describe("the owner's personal connection on the core route", () => {
     expect(refreshed.headers.get("cache-control")).toBe("private, no-store");
     const body = (await refreshed.json()) as {
       refreshStatus: string;
-      refreshCheckedAt: string | null;
       credentialVersion: number;
+      windows: Array<{ id: string; usedPercent: number | null }>;
     };
-    expect(body.refreshStatus).toBe("unavailable");
-    expect(body.refreshCheckedAt).toBeNull();
+    expect(body.refreshStatus).toBe("available");
     expect(body.credentialVersion).toBe(await connectionVersion(personal));
-    expect(usageCalls).toEqual([]);
+    expect(body.windows.find((window) => window.id === "five_hour")?.usedPercent).toBe(12);
+    expect(usageCalls).toHaveLength(1);
+    const read = await api.request(usagePath(org.personalWorkspaceId), { headers: browser });
+    expect(read.status).toBe(200);
+    expect(read.headers.get("cache-control")).toBe("private, no-store");
+    const stored = (await read.json()) as {
+      connected: boolean;
+      credentialVersion: number;
+      windows: Array<{ id: string }>;
+    };
+    expect(stored.connected).toBe(true);
+    expect(stored.credentialVersion).toBe(await connectionVersion(personal));
+    expect(stored.windows.map((window) => window.id)).toContain("five_hour");
+    usageCalls.length = 0;
   });
 });

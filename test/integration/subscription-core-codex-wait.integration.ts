@@ -273,14 +273,15 @@ describe.skipIf(!realDb)(
       taskQueue: string;
       fixture: Awaited<ReturnType<typeof fixture>>;
       signal: SignalCodexCapacityWorkflow;
+      initialPhase?: "waiting";
       beforeFirstReturn?: () => Promise<void>;
       afterReconcile?: (count: number) => Promise<void>;
     }) {
       const { fixture: state } = input;
-      let phase: "queued" | "waiting" | "recovering" | "done" = "queued";
-      // After a Steer or Cancel the real database peek decides what the
+      let phase: "queued" | "waiting" | "recovering" | "done" = input.initialPhase ?? "queued";
+      // After Pause, Steer or Cancel the real database peek decides what the
       // workflow sees next: a stale core waiter would make it sleep again.
-      let interrupted: "steer" | "cancel" | null = null;
+      let interrupted: "pause" | "steer" | "cancel" | null = null;
       const realPeeks: string[] = [];
       const attempts: string[] = [];
       const reconciliations: Array<{ cause: string; action: string }> = [];
@@ -307,6 +308,7 @@ describe.skipIf(!realDb)(
           if (phase === "waiting" && interrupted) {
             const peek = await peekSessionWork(client!.db, state.workspaceId, state.sessionId);
             realPeeks.push(peek.kind);
+            if (interrupted === "pause") return peek;
             if (peek.kind === "capacity-wait") return peek;
             if (interrupted === "cancel") {
               phase = "done";
@@ -374,15 +376,18 @@ describe.skipIf(!realDb)(
         }),
       ]);
       const running = Promise.all([controlWorker.run(), turnWorker.run()]);
+      let stopped = false;
       return {
         attempts,
         reconciliations,
         realPeeks,
-        interrupt: (kind: "steer" | "cancel") => {
+        interrupt: (kind: "pause" | "steer" | "cancel" | null) => {
           interrupted = kind;
         },
         phase: () => phase,
         stop: async () => {
+          if (stopped) return;
+          stopped = true;
           controlWorker.shutdown();
           turnWorker.shutdown();
           await running;
@@ -411,7 +416,7 @@ describe.skipIf(!realDb)(
     }
 
     test(
-      "the pinned legacy capacity-wait history still replays",
+      "SUB-WAIT-03: the pinned legacy capacity-wait history still replays",
       async () => {
         const history = (await Bun.file(legacySessionCapacityWaitHistoryPath).json()) as {
           events: Array<{
@@ -428,7 +433,7 @@ describe.skipIf(!realDb)(
     );
 
     test(
-      "signal before peek: a core wake committed while the turn is still parking resumes it",
+      "SUB-WAIT-02: signal before peek resumes a core wake committed while the turn is still parking",
       async () => {
         const taskQueue = `core-wait-${crypto.randomUUID()}`;
         const state = await fixture();
@@ -515,7 +520,7 @@ describe.skipIf(!realDb)(
     );
 
     test(
-      "continue-as-new: a wake pending across the boundary is checked at once by the next run",
+      "SUB-WAIT-03: continue-as-new checks a pending wake at once in the next run",
       async () => {
         const taskQueue = `core-wait-${crypto.randomUUID()}`;
         const state = await fixture();
@@ -634,6 +639,52 @@ describe.skipIf(!realDb)(
       testTimeoutMs,
     );
 
+    test(
+      "SUB-WAIT-03: replacement workers reconstruct the same durable waiter without another parking attempt",
+      async () => {
+        const taskQueue = `core-wait-${crypto.randomUUID()}`;
+        const state = await fixture();
+        const signal = signaler(taskQueue);
+        let worker = await startWorker({ taskQueue, fixture: state, signal });
+        try {
+          const handle = await startWorkflow(taskQueue, state, { initialEventId: "event-1" });
+          await waitFor(
+            async () => worker.phase() === "waiting" && (await state.currentRef()) !== null,
+          );
+          const parked = await state.currentRef();
+          const firstAttempts = [...worker.attempts];
+          expect(firstAttempts).toHaveLength(1);
+          await worker.stop();
+          worker = await startWorker({
+            taskQueue,
+            fixture: state,
+            signal,
+            initialPhase: "waiting",
+          });
+          expect(await state.currentRef()).toEqual(parked);
+          expect(await state.turnStatus()).toBe("waiting_capacity");
+          await state.setExhausted(null);
+          await wakeSubscriptionCoreCodexWaitersAndDeliver(
+            { db: client!.db, signalCodexCapacityWorkflow: signal },
+            { accountId: state.accountId, reason: "quota_observed_available" },
+          );
+          await handle.result();
+          expect(worker.attempts).toHaveLength(1);
+          expect(new Set([...firstAttempts, ...worker.attempts]).size).toBe(2);
+          expect(worker.reconciliations).toEqual([{ cause: "signal", action: "resumed" }]);
+          expect(await state.currentRef()).toBeNull();
+          await Worker.runReplayHistory(
+            { workflowsPath: workflowDefinitionsPath },
+            await handle.fetchHistory(),
+            state.workflowId,
+          );
+        } finally {
+          await worker.stop();
+        }
+      },
+      testTimeoutMs,
+    );
+
     /** Run one owner command against the fixture session as the owner (app role, RLS). */
     async function asOwner<T>(
       state: Awaited<ReturnType<typeof fixture>>,
@@ -646,6 +697,104 @@ describe.skipIf(!realDb)(
         fn,
       );
     }
+
+    test(
+      "SUB-WAIT-04: Pause preserves the waiter and available capacity cannot bypass Resume",
+      async () => {
+        const taskQueue = `core-wait-${crypto.randomUUID()}`;
+        const state = await fixture();
+        const signal = signaler(taskQueue);
+        const worker = await startWorker({ taskQueue, fixture: state, signal });
+        try {
+          const handle = await startWorkflow(taskQueue, state, { initialEventId: "event-1" });
+          await waitFor(
+            async () => worker.phase() === "waiting" && (await state.currentRef()) !== null,
+          );
+          const parked = await state.currentRef();
+          await asOwner(state, (tx) =>
+            mutateSessionControlInTransaction(tx, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              sessionId: state.sessionId,
+              actor: { type: "human", subjectId: state.ownerSubjectId },
+              operationKey: crypto.randomUUID(),
+              action: "pause",
+            }),
+          );
+          worker.interrupt("pause");
+          await handle.signal("sessionControl");
+          await handle.result();
+          expect(worker.realPeeks).toContain("idle");
+          expect((await state.currentRef())?.waiterId).toBe(parked?.waiterId);
+          expect(await state.turnStatus()).toBe("waiting_capacity");
+          await state.setExhausted(null);
+          const pausedResult = await createCodexCapacityActivities(
+            async () =>
+              ({
+                db: client!.db,
+                bus: { publish: async () => undefined },
+                settings,
+                signalCodexCapacityWorkflow: signal,
+                wakeSessionWorkflow: undefined,
+              }) as never,
+          ).reconcileCodexCapacityWait({
+            accountId: state.accountId,
+            workspaceId: state.workspaceId,
+            sessionId: state.sessionId,
+            ...parked!,
+            cause: "signal",
+          });
+          expect(pausedResult.action).not.toBe("resumed");
+          expect(worker.attempts).toHaveLength(1);
+          expect((await state.currentRef())?.waiterId).toBe(parked?.waiterId);
+          await asOwner(state, (tx) =>
+            mutateSessionControlInTransaction(tx, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              sessionId: state.sessionId,
+              actor: { type: "human", subjectId: state.ownerSubjectId },
+              operationKey: crypto.randomUUID(),
+              action: "resume",
+            }),
+          );
+          worker.interrupt(null);
+          const resumed = await new Client({ connection }).workflow.signalWithStart(
+            "sessionWorkflow",
+            {
+              taskQueue,
+              workflowId: state.workflowId,
+              workflowIdReusePolicy: "ALLOW_DUPLICATE",
+              args: [
+                {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  sessionId: state.sessionId,
+                  capacityWakeJitterMaxMs: 0,
+                },
+              ],
+              signal: "sessionControl",
+              signalArgs: [],
+            },
+          );
+          await wakeSubscriptionCoreCodexWaitersAndDeliver(
+            { db: client!.db, signalCodexCapacityWorkflow: signal },
+            { accountId: state.accountId, reason: "quota_observed_available" },
+          );
+          await resumed.result();
+          expect(worker.attempts).toHaveLength(2);
+          expect(await state.currentRef()).toBeNull();
+          for (const history of [await handle.fetchHistory(), await resumed.fetchHistory()])
+            await Worker.runReplayHistory(
+              { workflowsPath: workflowDefinitionsPath },
+              history,
+              state.workflowId,
+            );
+        } finally {
+          await worker.stop();
+        }
+      },
+      testTimeoutMs,
+    );
 
     test(
       "Steer: the steered turn runs at once instead of sleeping on the old core waiter",
@@ -700,7 +849,7 @@ describe.skipIf(!realDb)(
     );
 
     test(
-      "Cancel: no core waiter is left behind to receive wakes, and the workflow ends",
+      "SUB-WAIT-04: Cancel removes the core waiter and ends the workflow",
       async () => {
         const taskQueue = `core-wait-${crypto.randomUUID()}`;
         const state = await fixture();

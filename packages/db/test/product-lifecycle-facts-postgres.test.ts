@@ -26,7 +26,6 @@ import {
   createEnrollment,
   createOrganizationInvitation,
   createScheduledTask,
-  createXaiSubscriptionCredential,
   deadLetterHostExportHead,
   disableHostExportConsumer,
   installPortableSkill,
@@ -36,9 +35,24 @@ import {
   revokeConnection,
   saveSlackBotUserLink,
   upsertOrganizationModelProviderConnection,
-  upsertOrganizationClaudeSubscription,
   type DbClient,
 } from "../src";
+import { upsertOrganizationClaudeSubscription } from "./fixtures/legacy-claude/accounts";
+import postgres from "postgres";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
+
+// The model-setup facts are written through the legacy SuperGrok and Claude
+// connect paths, which run only before their drained subscription-core
+// cutovers: the ledger records those migrations, and the retirement migration
+// that requires them, without running them. Removed with the legacy runtimes.
+const LEGACY_SUBSCRIPTION_CUTOVERS = [
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+];
 import { upsertCodexSubscriptionCredential } from "./fixtures/legacy-codex";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
@@ -48,6 +62,7 @@ import {
 } from "../src/canonical-human-identities";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 
 // Replaying the full migration ledger is slow and grows with every migration.
 setDefaultTimeout(180_000);
@@ -189,8 +204,19 @@ beforeAll(async () => {
   }
   // Migrate as the NOSUPERUSER NOBYPASSRLS owner so the capture triggers run
   // under FORCE RLS exactly as they do in production.
+  const ledger = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+  try {
+    await ledger`create table if not exists schema_migrations (
+      name text primary key, applied_at timestamptz not null default now())`;
+    await ledger`insert into schema_migrations (name)
+      select unnest(${LEGACY_SUBSCRIPTION_CUTOVERS}::text[])`;
+  } finally {
+    await ledger.end();
+  }
   await migrate(owned.ownerUrl);
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
+  // The legacy connect paths run before the retirement, under that release's grants.
+  await restorePreRetirementGrants(owned.adminUrl);
   const appUrl = new URL(owned.ownerUrl);
   appUrl.username = "opengeni_app";
   appUrl.password = owned.appPassword;
@@ -920,3 +946,5 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
     expect(await lifecycleRows()).toHaveLength(before);
   });
 });
+
+import { createXaiSubscriptionCredential } from "./fixtures/legacy-xai";

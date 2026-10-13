@@ -385,6 +385,27 @@ export {
   type MaterializeRunCredentialsOptions,
 } from "./run-credentials";
 
+// Secret references delivered at the physical exec boundary (W1). Values ride
+// an in-memory carry to the provider call; recorders keep references.
+export {
+  SECRET_ENV_TOTAL_MAX_BYTES,
+  SECRET_ENV_VALUE_MAX_BYTES,
+  SECRET_FILE_ROOT,
+  clearSecretFilesCommand,
+  prepareSecretExec,
+  prepareSecretStdin,
+  resolveSecretImagePath,
+  resolveSecretLiteralText,
+  resolveSecretPatchText,
+  runWithSecretCarry,
+  secretExecCarryFor,
+  secretFilePath,
+  secretScopeFor,
+  type SecretCarry,
+  type SecretExecCarry,
+  type SecretStdinCarry,
+} from "./secret-delivery";
+
 // Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
 // hashed token file off-manifest.
@@ -955,7 +976,15 @@ async function connectDockerNetwork(network: string, containerId: string): Promi
  * for storage decoupled from the RunState blob (issue #35). Encapsulates the
  * underscore-internal `_sandbox` read in exactly one place.
  */
-export function sandboxStateEntryFromRunState(state: unknown): Record<string, unknown> | null {
+export function sandboxStateEntryFromRunState(
+  state: unknown,
+  options: {
+    /** W1 defensive strip: when set, persisted manifest/state env keeps only
+     *  names this predicate accepts (deployment constants), so a legacy box
+     *  whose live state still carries user values never re-persists them. */
+    keepEnvironmentName?: (name: string) => boolean;
+  } = {},
+): Record<string, unknown> | null {
   const sandboxState = (state as any)?._sandbox;
   if (!sandboxState) {
     return null;
@@ -973,10 +1002,50 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
   if (!entry || !entry.sessionState) {
     return null;
   }
+  const persisted = sandboxEntryForPersistence(entry as Record<string, unknown>);
   return normalizeProtocolJsonValue(
-    sandboxEntryForPersistence(entry as Record<string, unknown>),
+    options.keepEnvironmentName
+      ? sandboxEntryWithConstantEnvironment(persisted, options.keepEnvironmentName)
+      : persisted,
     '$["sandboxSessionEnvelope"]',
   ) as Record<string, unknown>;
+}
+
+function filterEnvironmentRecord(value: unknown, keep: (name: string) => boolean): unknown {
+  if (!isObjectRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([name]) => keep(name)));
+}
+
+/** Copy of a persisted entry whose `sessionState.manifest.environment`,
+ *  `sessionState.environment` and `sessionState.providerState.environment` keep
+ *  only accepted names. Values are never inspected. */
+export function sandboxEntryWithConstantEnvironment(
+  entry: Record<string, unknown>,
+  keep: (name: string) => boolean,
+): Record<string, unknown> {
+  const sessionState = entry.sessionState;
+  if (!isObjectRecord(sessionState)) return entry;
+  const next: Record<string, unknown> = { ...sessionState };
+  const manifest = sessionState.manifest;
+  if (isObjectRecord(manifest) && Object.hasOwn(manifest, "environment")) {
+    const plain =
+      Object.getPrototypeOf(manifest) === Object.prototype ||
+      Object.getPrototypeOf(manifest) === null
+        ? manifest
+        : (serializeSdkManifestForEnvelope(manifest) as Record<string, unknown>);
+    next.manifest = { ...plain, environment: filterEnvironmentRecord(plain.environment, keep) };
+  }
+  if (Object.hasOwn(sessionState, "environment")) {
+    next.environment = filterEnvironmentRecord(sessionState.environment, keep);
+  }
+  const providerState = sessionState.providerState;
+  if (isObjectRecord(providerState) && Object.hasOwn(providerState, "environment")) {
+    next.providerState = {
+      ...providerState,
+      environment: filterEnvironmentRecord(providerState.environment, keep),
+    };
+  }
+  return { ...entry, sessionState: next };
 }
 
 /**

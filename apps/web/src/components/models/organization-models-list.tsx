@@ -35,6 +35,11 @@ import {
 } from "@/components/model-access-policy";
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { compactionSummary } from "@/components/models/model-compaction-page";
+import {
+  AccountRulesOverviewSection,
+  OrganizationAccountRulesSection,
+  type ModelAccountSettingsOverviewState,
+} from "@/components/models/model-account-settings";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 import { ACCOUNT_COLUMNS } from "@/components/models/codex-models";
 import {
@@ -250,6 +255,8 @@ function useWorkspaceSnapshots(
 export function OrganizationModelsList({
   client,
   organizationDefaults,
+  accountRules,
+  modelLabel,
   onEditAllowed,
   onEditCompaction,
   organizationName,
@@ -273,6 +280,10 @@ export function OrganizationModelsList({
   client: OpenGeniBrowserClient;
   /** The defaults every workspace follows; owners and admins only, otherwise null. */
   organizationDefaults: OrganizationModelDefaultsState | null;
+  /** The organization's account rules and every workspace's; owners and admins only, otherwise null. */
+  accountRules?: ModelAccountSettingsOverviewState | null;
+  /** A model's name, for the fallback order. */
+  modelLabel?: (id: string) => string;
   onEditAllowed: () => void;
   onEditCompaction: () => void;
   organizationName: string;
@@ -313,27 +324,53 @@ export function OrganizationModelsList({
     );
   const loadingWorkspaces = Object.values(snapshots).some((value) => value === "loading");
 
-  /* Each workspace's own accounts, tagged with the workspace. */
+  /* Each workspace's own accounts, tagged with the workspace. A shared
+     workspace's Codex account is an organization account, listed (and its
+     reach edited) with the organization's; it isn't listed twice. */
+  const organizationCodexIds = new Set(
+    administrator ? orgCodex.accounts.map((account) => account.id) : [],
+  );
+  /* For a workspace admin: where else their workspace's own account is used,
+     once the organization shares it. It stays one row, opened as their own. */
+  const sharedCodexWhere = new Map<string, string[]>();
+  if (!administrator)
+    for (const { workspace, snapshot } of ready)
+      for (const account of snapshot.codexShared)
+        sharedCodexWhere.set(account.id, [
+          ...(sharedCodexWhere.get(account.id) ?? []),
+          workspace.personal ? "your Personal workspace" : workspace.name,
+        ]);
+  const ownCodexIds = new Set(ready.flatMap(({ snapshot }) => snapshot.codexOwn.map((a) => a.id)));
+  // Until the organization's list says which Codex accounts it shares wider,
+  // a shared workspace's Codex account carries no "<workspace> only" tag. A
+  // Personal workspace's never is an organization account.
+  const codexReachUnknown = administrator && (orgCodex.loading || Boolean(orgCodex.loadError));
   const ownRows = ready.flatMap(({ workspace, snapshot }) => {
     const tag = workspace.personal ? "Personal workspace only" : `${workspace.name} only`;
     return [
-      ...snapshot.codexOwn.map((account) => (
-        <ListRow
-          key={`${workspace.id}:codex:${account.id}`}
-          leading={<ProviderTile provider="codex" size="lg" />}
-          title={codexAccountName(account)}
-          meta={[
-            tag,
-            planLabel(account.plan, "ChatGPT"),
-            account.appsDesignated ? "Codex Apps" : null,
-          ]}
-          cells={snapshot.codexOff ? { usage: NOT_IN_USE } : { usage: cachedCodexUsage(account) }}
-          indicator={
-            account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
-          }
-          onOpen={() => onOpenWorkspace(workspace.id, accountKey("codex", account.id))}
-        />
-      )),
+      ...snapshot.codexOwn
+        .filter((account) => !organizationCodexIds.has(account.id))
+        .map((account) => (
+          <ListRow
+            key={`${workspace.id}:codex:${account.id}`}
+            leading={<ProviderTile provider="codex" size="lg" />}
+            title={codexAccountName(account)}
+            meta={[
+              sharedCodexWhere.has(account.id)
+                ? `Used in ${[workspace.name, ...sharedCodexWhere.get(account.id)!].join(", ")}`
+                : codexReachUnknown && !workspace.personal
+                  ? null
+                  : tag,
+              planLabel(account.plan, "ChatGPT"),
+              account.appsDesignated ? "Codex Apps" : null,
+            ]}
+            cells={snapshot.codexOff ? { usage: NOT_IN_USE } : { usage: cachedCodexUsage(account) }}
+            indicator={
+              account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
+            }
+            onOpen={() => onOpenWorkspace(workspace.id, accountKey("codex", account.id))}
+          />
+        )),
       ...snapshot.grokOwn.map((account) => (
         <ListRow
           key={`${workspace.id}:supergrok:${account.id}`}
@@ -375,7 +412,7 @@ export function OrganizationModelsList({
   });
 
   /* What the organization shares, as the workspaces of a workspace admin use it. */
-  const sharedRows = administrator ? [] : sharedAccountRows(ready, labels);
+  const sharedRows = administrator ? [] : sharedAccountRows(ready, labels, ownCodexIds);
 
   const orgRows = administrator ? (
     <>
@@ -454,11 +491,26 @@ export function OrganizationModelsList({
           onEditCompaction={onEditCompaction}
         />
       ) : null}
+      {accountRules ? (
+        <>
+          <OrganizationAccountRulesSection
+            organizationName={organizationName}
+            state={accountRules}
+            modelLabel={modelLabel}
+          />
+          <AccountRulesOverviewSection
+            organizationName={organizationName}
+            state={accountRules}
+            modelLabel={modelLabel}
+            onOpenWorkspace={(id) => onOpenWorkspace(id)}
+          />
+        </>
+      ) : null}
       <Section
         title="Accounts"
         description={
           administrator
-            ? "Subscriptions, API keys and credits that pay for models. Each account is available in all workspaces or the ones you choose."
+            ? "Subscriptions, API keys and credits that pay for models."
             : workspaces.some((workspace) => !workspace.personal)
               ? "Subscriptions, API keys and credits that pay for models in your workspaces."
               : "Subscriptions, API keys and credits that pay for models in your Personal workspace."
@@ -472,7 +524,7 @@ export function OrganizationModelsList({
             title="No accounts connected"
             description={
               administrator
-                ? "Connect a subscription or an API key, then choose which workspaces use it."
+                ? "Connect a subscription or an API key, then choose who can use it."
                 : "Nothing pays for models in your workspaces yet."
             }
             action={administrator ? connect : null}
@@ -526,7 +578,7 @@ export function OrganizationModelsList({
         ) : null}
       </Section>
 
-      {administrator && orgCodex.accounts.length >= 2 ? (
+      {!accountRules && administrator && orgCodex.accounts.length >= 2 ? (
         <Section title="Codex">
           <SettingRowGroup>
             <SettingRow
@@ -550,12 +602,12 @@ export function OrganizationModelsList({
           </SettingRowGroup>
         </Section>
       ) : null}
-      {administrator && claudeEnabled && orgClaude.accounts.length > 1 ? (
+      {!accountRules && administrator && claudeEnabled && orgClaude.accounts.length > 1 ? (
         <Section title="Claude">
           <ClaudeSettingRows claude={orgClaude} />
         </Section>
       ) : null}
-      {administrator && superGrokSectionVisible(orgGrok) ? (
+      {!accountRules && administrator && superGrokSectionVisible(orgGrok) ? (
         <Section title="SuperGrok">
           <SuperGrokSettingRows grok={orgGrok} label="Sharing work between accounts" />
         </Section>
@@ -646,6 +698,8 @@ function cachedCodexUsage(account: CodexAccount): ReactNode {
 function sharedAccountRows(
   ready: { workspace: ModelsWorkspace; snapshot: WorkspaceModelsSnapshot }[],
   labels: ModelsScopeLabels,
+  /** Accounts already listed as one of these workspaces' own. */
+  ownCodexIds: ReadonlySet<string> = new Set(),
 ): ReactNode[] {
   const codex = new Map<string, { account: CodexAccount; where: string[] }>();
   const grok = new Map<string, { account: SuperGrokAccount; where: string[] }>();
@@ -654,6 +708,7 @@ function sharedAccountRows(
   for (const { workspace, snapshot } of ready) {
     const where = workspace.personal ? "your Personal workspace" : workspace.name;
     for (const account of snapshot.codexShared) {
+      if (ownCodexIds.has(account.id)) continue;
       const entry = codex.get(account.id) ?? { account, where: [] };
       entry.where.push(where);
       codex.set(account.id, entry);

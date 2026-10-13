@@ -440,6 +440,7 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
     if (id === "builtin:opengeni-video-generation") {
       return context.mediaAttachments?.get(session.id)?.video === true;
     }
+    if (id === "builtin:opengeni-secrets") return tools.has("secret_search");
     return true;
   });
 }

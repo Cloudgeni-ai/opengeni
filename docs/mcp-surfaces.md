@@ -388,6 +388,19 @@ The exact result, including `_meta`, stays in the run item's custom data and in
 the durable `agent.toolCall.output` event (inline media there becomes a
 `media_preview`), so audit, approvals and nested prefixed servers are unchanged.
 
+### Secret references in tool arguments
+
+`{{secret:…}}` references in arguments to connector MCP tools, Codex Apps and
+Codemode calls are resolved by the shared gateway after argument validation and
+approval, and only the call handed to the provider holds the values. The
+journal, approval payload, lifecycle rows and returned receipts keep the
+references. Workspace HTTP/SDK calls resolve under the calling person (who needs
+`secrets:use`), and Site tool calls under the viewer, without a task vault.
+`{{secretfile:…}}` is refused on these surfaces. First-party Opengeni tools
+store references verbatim; interaction tools resolve them in the API. A
+reference that cannot be resolved fails the whole call before dispatch with a
+422 that names the references. See [`secrets.md`](secrets.md).
+
 ### Tool argument errors
 
 First-party structured inputs reuse the native contract schemas, including

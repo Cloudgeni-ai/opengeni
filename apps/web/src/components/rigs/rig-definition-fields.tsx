@@ -1,50 +1,33 @@
-// The shared environment definition editor: setup script, checks, and default
-// variable sets. Every environment layers on the deployment-owned platform
+// The shared environment definition editor: setup script and checks. Secrets
+// come from vaults through {{secret:...}} references, never from the
+// environment definition. Every environment layers on the deployment-owned platform
 // image; the editable image field is intentionally absent so Computer/Browser/
 // Terminal cannot be replaced by an environment definition.
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useRef } from "react";
 
 import { Button } from "@/components/ui/button";
-import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import type { ResourceAuthorityScope, RigCheck, VariableSet } from "@/types";
+import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
+import type { RigCheck } from "@/types";
 
 export type RigDefinitionDraft = {
   setupScript: string;
   checks: RigCheck[];
-  defaultVariableSetIds: string[];
 };
 
 export function emptyRigDefinitionDraft(): RigDefinitionDraft {
-  return { setupScript: "", checks: [], defaultVariableSetIds: [] };
-}
-
-/** Variable sets an environment of this scope may add by default. */
-export function compatibleVariableSets(
-  variableSets: VariableSet[],
-  rigScope: ResourceAuthorityScope,
-): VariableSet[] {
-  return variableSets.filter(
-    (variableSet) =>
-      rigScope === "user" ||
-      variableSet.scope === "organization" ||
-      (rigScope === "workspace" && variableSet.scope === "workspace"),
-  );
+  return { setupScript: "", checks: [] };
 }
 
 export function RigDefinitionFields({
   value,
   onChange,
-  variableSets,
   disabled,
-  rigScope = "user",
   idPrefix = "rig",
 }: {
   value: RigDefinitionDraft;
   onChange: (next: RigDefinitionDraft) => void;
-  variableSets: VariableSet[];
   disabled?: boolean;
-  rigScope?: ResourceAuthorityScope;
   idPrefix?: string;
 }) {
   const checkKeys = useRef<string[]>([]);
@@ -57,11 +40,6 @@ export function RigDefinitionFields({
     checkKeys.current.length = value.checks.length;
   }
   const setChecks = (checks: RigCheck[]) => onChange({ ...value, checks });
-  const toggleVariableSet = (id: string, checked: boolean) => {
-    const without = value.defaultVariableSetIds.filter((current) => current !== id);
-    onChange({ ...value, defaultVariableSetIds: checked ? [...without, id] : without });
-  };
-  const compatible = compatibleVariableSets(variableSets, rigScope);
 
   return (
     <FieldStack>
@@ -158,38 +136,6 @@ export function RigDefinitionFields({
           </div>
         ) : null}
       </div>
-
-      {compatible.length > 0 ? (
-        <div
-          role="group"
-          aria-labelledby={`${idPrefix}-default-sets`}
-          className="flex min-w-0 flex-col gap-3"
-        >
-          <div className="min-w-0">
-            <p id={`${idPrefix}-default-sets`} className="text-sm leading-5 font-medium text-fg">
-              Default variable sets
-              <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
-            </p>
-            <p className="text-xs leading-4.5 text-fg-muted">
-              Added to new sessions that use this environment. A session can still change them.
-            </p>
-          </div>
-          {compatible.map((variableSet) => (
-            <CheckboxField
-              key={variableSet.id}
-              label={variableSet.name}
-              description={
-                variableSet.variables.length === 1
-                  ? "1 variable"
-                  : `${variableSet.variables.length} variables`
-              }
-              checked={value.defaultVariableSetIds.includes(variableSet.id)}
-              disabled={disabled}
-              onCheckedChange={(checked) => toggleVariableSet(variableSet.id, checked)}
-            />
-          ))}
-        </div>
-      ) : null}
     </FieldStack>
   );
 }

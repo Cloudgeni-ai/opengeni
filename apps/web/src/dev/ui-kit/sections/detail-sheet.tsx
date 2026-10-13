@@ -53,8 +53,6 @@ import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeter } from "@/components/ui/usage-meter";
-import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
-import type { WorkspaceVariableSet } from "@/types";
 
 import {
   KIT_NOW,
@@ -230,17 +228,6 @@ function VariableSetMenu({ set }: { set: VariableSet }) {
   );
 }
 
-/** As in the product: one variable is added inline under the list. */
-function AddVariableInline({ set }: { set: VariableSet }) {
-  return (
-    <AddVariableRow
-      set={set as unknown as WorkspaceVariableSet}
-      onAdd={() => new Promise<void>((resolve) => setTimeout(resolve, 500))}
-      onPaste={() => {}}
-    />
-  );
-}
-
 function scopeText(set: VariableSet): string {
   return set.scope === "organization"
     ? `Everyone in ${organization.name}`
@@ -305,7 +292,6 @@ function VariableSetPage({ set, onBack }: { set: VariableSet; onBack: () => void
             description="Secrets are write-only. Agents get them in their sandbox."
           >
             <VariablesList set={set} table />
-            <AddVariableInline set={set} />
           </DetailSection>
         ) : (
           <DetailSection
@@ -337,7 +323,6 @@ function VariableSetCompact({ set }: { set: VariableSet }) {
       <DetailBody>
         <DetailSection title={`Variables (${set.variables.length})`}>
           <VariablesList set={set} />
-          <AddVariableInline set={set} />
         </DetailSection>
         <DetailSection title="Used by">
           <UsedByList set={set} />

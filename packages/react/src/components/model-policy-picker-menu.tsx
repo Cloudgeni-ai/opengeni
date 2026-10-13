@@ -181,14 +181,16 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
           <p className={MENU_NOTE_CLASS}>{messages.noModels}</p>
         )}
       </div>
-      {view.anySelectable && selected && (view.unsupportedAttachments || view.thinking) ? (
+      {view.anySelectable &&
+      selected &&
+      (view.unsupportedAttachments || (props.allowModelOptions !== false && view.thinking)) ? (
         <div className="border-t border-og-border px-2.5 py-2.5">
           {view.unsupportedAttachments ? (
             <p className="pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
               {messages.unsupportedAttachments}
             </p>
           ) : null}
-          <ModelThinkingControls {...props} />
+          {props.allowModelOptions !== false ? <ModelThinkingControls {...props} /> : null}
         </div>
       ) : null}
     </div>

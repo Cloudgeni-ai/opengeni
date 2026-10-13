@@ -17,6 +17,7 @@ import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { listWorkspaceProviderCustomModelsByKind } from "./model-catalog";
+import { listOrganizationModelProviderCustomModels } from "./organization-model-providers";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
 import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
 import {
@@ -35,7 +36,9 @@ import {
 import {
   subscriptionCoreOperationConnections,
   type SubscriptionCoreConnectionProbeDeps,
+  type SubscriptionCoreUsageProbe,
 } from "./subscription-core/operation-connections";
+import { subscriptionCoreAdministeredConnections } from "./subscription-core/administered-connections";
 import { subscriptionCoreOperations } from "./subscription-core/operations";
 import {
   subscriptionCoreProviderId,
@@ -211,11 +214,12 @@ export async function listSubscriptionCoreClaudeCatalogModelIds(
 type RefreshAttempt = { at: number; refresh: SubscriptionCoreClaudeUsageRefresh };
 const MAX_REMEMBERED_ATTEMPTS = 1024;
 /**
- * The last live read per workspace, connection and row version in this
- * process: the legacy throttle also holds back a read that failed (the core
- * stores readings, not failed attempts). Per replica: another API replica
- * may read once more within the interval. A reconnect moves the row
- * version, so a remembered outcome never outlives the credential it read.
+ * The last live read per organization, workspace (none on the organization
+ * route), connection and row version in this process: the legacy throttle
+ * also holds back a read that failed (the core stores readings, not failed
+ * attempts). Per replica: another API replica may read once more within the
+ * interval. A reconnect moves the row version, so a remembered outcome
+ * never outlives the credential it read.
  */
 const lastAttempts = new Map<string, RefreshAttempt>();
 
@@ -235,12 +239,29 @@ export function resetSubscriptionCoreClaudeUsageThrottle(): void {
 }
 
 /**
- * A live usage refresh of one shared Claude connection of the workspace's
- * pool, through the core connection seam (workspace scope; a personal
- * connection is not readable there). Returns the connection's projected
- * usage after the read and whether the reading ended a stored exhaustion
- * (the caller wakes the Claude core waiters; a failed wake never fails the
- * committed read).
+ * The stored projection of a connection a refresh could not read (C2a's
+ * rule): `unavailable` with no check time, never `available` for a read that
+ * did not happen, unless the connection itself needs a new sign-in or lacks
+ * the usage scope.
+ */
+function unreadableClaudeUsage(
+  row: SubscriptionCoreConnectionRow,
+  now: number,
+): ClaudeSubscriptionUsage {
+  const stored = projectSubscriptionCoreClaudeUsage(row, undefined, { now });
+  return stored.refreshStatus === "reconnect" || stored.refreshStatus === "scope_required"
+    ? stored
+    : projectSubscriptionCoreClaudeUsage(row, { status: "unavailable", checkedAt: null }, { now });
+}
+
+/**
+ * A live usage refresh of one Claude connection a usage route may refresh:
+ * a shared connection of the workspace's pool through the core connection
+ * seam (workspace scope), or the caller's own personal connection in their
+ * own Personal workspace through the owner-only seam (design 5.3, C2c).
+ * Returns the connection's projected usage after the read and whether the
+ * reading ended a stored exhaustion (the caller wakes the Claude core
+ * waiters; a failed wake never fails the committed read).
  *
  * Throttle (legacy: one read per 30 seconds): a stored usage-endpoint
  * reading younger than the interval answers first; else this replica's
@@ -261,15 +282,129 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
     now?: () => number;
   } = {},
 ): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
-  const now = deps.now ?? Date.now;
   const { target } = input;
-  const stored = projectSubscriptionCoreClaudeUsage(target.row, undefined, { now: now() });
-  const key = [
-    input.accountId,
-    input.workspaceId,
-    target.connectionId,
-    subscriptionCoreClaudeUsageVersion(target.row),
-  ].join(":");
+  const binding = claudeBinding();
+  return await refreshClaudeUsage({
+    key: [input.accountId, input.workspaceId, target.connectionId],
+    row: target.row,
+    now: deps.now ?? Date.now,
+    probe: async () => {
+      const modelIds = await listSubscriptionCoreClaudeCatalogModelIds(db, input);
+      if (target.scope === "user")
+        return await subscriptionCoreAdministeredConnections(
+          binding,
+        ).probeSubscriptionCoreAdministeredConnectionUsage(
+          db,
+          settings,
+          {
+            kind: "personal_owner",
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+          },
+          target.connectionId,
+          { ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}), modelIds },
+        );
+      return await subscriptionCoreOperationConnections(
+        binding,
+      ).probeSubscriptionCoreConnectionUsage(
+        db,
+        settings,
+        {
+          kind: "workspace",
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+        },
+        target.connectionId,
+        {
+          ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+          ...(deps.requestFetch ? { requestFetch: deps.requestFetch } : {}),
+          ...(deps.resolver ? { resolver: deps.resolver } : {}),
+          modelIds,
+        },
+      );
+    },
+    readBack: async () =>
+      (
+        await readSubscriptionCoreClaudeWorkspaceUsageTarget(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          accountIdParam: target.connectionId,
+        })
+      )?.row ?? null,
+  });
+}
+
+/**
+ * A live usage refresh of one organization-pool Claude connection on the
+ * organization route, for an organization administrator, through the
+ * administrator seam (design 5.3, C2c). The same throttle, projection and
+ * wake rule as the workspace path. The decoder knows the organization's
+ * Claude models (the organization route has no workspace catalog; a
+ * workspace's own models get their cooldowns from that workspace's reads,
+ * and a stored cooldown is never shortened by a later reading). When the
+ * administrator's model list cannot be read, nothing is read live.
+ */
+export async function refreshSubscriptionCoreClaudeOrganizationUsage(
+  db: Database,
+  settings: Settings,
+  input: { organizationId: string; subjectId: string; row: SubscriptionCoreConnectionRow },
+  deps: { fetchImpl?: SubscriptionCoreConnectionProbeDeps["fetchImpl"]; now?: () => number } = {},
+): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
+  return await refreshClaudeUsage({
+    key: [input.organizationId, "organization", input.row.id],
+    row: input.row,
+    now: deps.now ?? Date.now,
+    probe: async () => {
+      const models = await listOrganizationModelProviderCustomModels(db, {
+        organizationId: input.organizationId,
+        actorSubjectId: input.subjectId,
+        providerKind: "claude_subscription",
+      }).catch(() => null);
+      if (!models) return { kind: "not_visible" };
+      return await subscriptionCoreAdministeredConnections(
+        claudeBinding(),
+      ).probeSubscriptionCoreAdministeredConnectionUsage(
+        db,
+        settings,
+        {
+          kind: "organization_administrator",
+          accountId: input.organizationId,
+          subjectId: input.subjectId,
+        },
+        input.row.id,
+        {
+          ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+          modelIds: [
+            ...new Set(models.map((model) => `${ORGANIZATION_PREFIX}/${model.upstreamModelId}`)),
+          ].sort(),
+        },
+      );
+    },
+    readBack: async () =>
+      await readSubscriptionCoreClaudeOrganizationUsageRow(db, {
+        organizationId: input.organizationId,
+        subjectId: input.subjectId,
+        accountIdParam: input.row.id,
+      }),
+  });
+}
+
+/** The throttled live read, its projection and the committed read-back, for either route. */
+async function refreshClaudeUsage(plan: {
+  /** The throttle key's scope: organization, workspace (or the organization route) and connection. */
+  key: readonly string[];
+  row: SubscriptionCoreConnectionRow;
+  now: () => number;
+  probe: () => Promise<SubscriptionCoreUsageProbe>;
+  /** The connection as the caller sees it after the read (null: no longer visible). */
+  readBack: () => Promise<SubscriptionCoreConnectionRow | null>;
+}): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
+  const { now } = plan;
+  const stored = projectSubscriptionCoreClaudeUsage(plan.row, undefined, { now: now() });
+  const key = [...plan.key, subscriptionCoreClaudeUsageVersion(plan.row)].join(":");
   // The connection needs a new sign-in: no read until it reconnects.
   if (stored.refreshStatus === "reconnect") return { usage: stored, recovered: false };
   const storedAt =
@@ -285,25 +420,17 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
     (storedAt === null || last.at > storedAt)
   )
     return {
-      usage: projectSubscriptionCoreClaudeUsage(target.row, last.refresh, { now: now() }),
+      usage: projectSubscriptionCoreClaudeUsage(plan.row, last.refresh, { now: now() }),
       recovered: false,
     };
-  const binding = claudeBinding();
-  const scope = {
-    kind: "workspace" as const,
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-  };
-  const modelIds = await listSubscriptionCoreClaudeCatalogModelIds(db, input);
-  const probe = await subscriptionCoreOperationConnections(
-    binding,
-  ).probeSubscriptionCoreConnectionUsage(db, settings, scope, target.connectionId, {
-    ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-    ...(deps.requestFetch ? { requestFetch: deps.requestFetch } : {}),
-    ...(deps.resolver ? { resolver: deps.resolver } : {}),
-    modelIds,
-  });
+  const probe = await plan.probe();
+  // A seam that refuses (not visible here: another scope, maintenance, a
+  // revoked authority, personal connections switched off) or cannot read
+  // reads nothing: the stored projection, `unavailable` with no check time
+  // unless the row itself needs a new sign-in or the usage scope. Nothing
+  // was sent, so the refusal is not remembered and never outlives its cause.
+  if (probe.kind === "not_visible" || probe.kind === "unsupported")
+    return { usage: unreadableClaudeUsage(plan.row, now()), recovered: false };
   const checkedAt = new Date(now()).toISOString();
   const reading =
     probe.kind === "read" ? (probe.response as SubscriptionCoreClaudeUsageReading) : null;
@@ -316,23 +443,19 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
         }
       : probe.kind === "relogin"
         ? { status: "reconnect", checkedAt }
-        : // Not readable here, unsupported, or a refresh or transport failure.
+        : // A credential or transport failure: a remembered failed attempt.
           { status: "unavailable", checkedAt };
   rememberAttempt(key, { at: now(), refresh });
   // The reading (or a relogin the refresh seam recorded) is read back as
-  // committed. When the read-back fails (or the connection left the pool),
-  // the row read before is answered, never as a fresh `available` reading.
-  const after = await readSubscriptionCoreClaudeWorkspaceUsageTarget(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    accountIdParam: target.connectionId,
-  }).catch(() => null);
+  // committed. When the read-back fails (or the connection is no longer
+  // visible), the row read before is answered, never as a fresh
+  // `available` reading.
+  const after = await plan.readBack().catch(() => null);
   return {
     usage: after
-      ? projectSubscriptionCoreClaudeUsage(after.row, refresh, { now: now() })
+      ? projectSubscriptionCoreClaudeUsage(after, refresh, { now: now() })
       : projectSubscriptionCoreClaudeUsage(
-          target.row,
+          plan.row,
           refresh.status === "available" ? { status: "unavailable", checkedAt } : refresh,
           { now: now() },
         ),

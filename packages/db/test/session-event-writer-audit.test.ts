@@ -110,11 +110,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
-  // The shared-core session pin (M3 PR 2b) keeps the legacy pin's contract.
-  "packages/db/src/index.ts#pinSubscriptionCoreSessionCodexAccount": {
-    inserts: 1,
-    contract: "canonical",
-  },
   // Provider-neutral account choice uses the same preference-write lock contract.
   "packages/db/src/subscription-core/session-choice.ts#chooseOnce": {
     inserts: 1,
@@ -138,20 +133,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#reconcileCompletedSandboxSetup": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
-  "packages/db/src/index.ts#armXaiCapacityWait": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
-  "packages/db/src/index.ts#supersedeXaiCapacityWaitInTransaction": {
-    inserts: 1,
-    contract: "owned_suffix",
-  },
-  "packages/db/src/index.ts#reconcileXaiCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -186,10 +167,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   },
   "packages/db/src/index.ts#updateSessionGoalWithEvent": {
     inserts: 3,
-    contract: "canonical",
-  },
-  "packages/db/src/index.ts#updateSessionVariableSets": {
-    inserts: 1,
     contract: "canonical",
   },
   "packages/db/src/index.ts#updateSessionTitleWithEvent": {
@@ -375,7 +352,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
 
 const genericControlWriters = new Set([
   // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
-  "packages/db/src/index.ts#pinSubscriptionCoreSessionCodexAccount",
   "packages/db/src/subscription-core/session-choice.ts#chooseOnce",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
@@ -395,7 +371,6 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
     "reconcileSubscriptionCoreCapacityWait",
   ],
-  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   recordSessionAttemptQuiescenceInTransaction: [
     "commitSessionAttemptQuiescence",
@@ -408,7 +383,6 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armSubscriptionCoreCapacityWait",
-    "armXaiCapacityWait",
     "cancelSessionSubtreeInTransaction",
     "failSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
@@ -479,7 +453,7 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "failSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait", "armXaiCapacityWait"],
+  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
@@ -905,7 +879,9 @@ function subscriptionWaiterBindings(): Map<string, string[]> {
     visit(sourceFile.program);
   }
   for (const [factory, tables] of factories) {
-    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters", "xai_capacity_waiters"]);
+    // All providers use shared-core waiters. Reintroducing a legacy runtime
+    // factory is forbidden even if its old lock contract would still pass.
+    expect(tables.sort(), factory).toEqual([]);
   }
   return factories;
 }
@@ -1133,8 +1109,11 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
-  test("scoped capacity waiters retain activity admission in both authority branches", () => {
-    const source = readFileSync(join(repoRoot, "packages/db/src/index.ts"), "utf8");
+  test("the historical scoped-waiter fixture proves activity-gate detection in both branches", () => {
+    const source = readFileSync(
+      join(repoRoot, "packages/db/test/fixtures/legacy-codex.ts"),
+      "utf8",
+    );
     const wrapper = expectScopedCapacityWaiterActivityBoundary(source);
     const fixture = `function createScopedSubscriptionCapacityWaiters() { ${wrapper} }`;
     for (const [gated, ungated] of [
@@ -1176,10 +1155,7 @@ describe("session_events writer inventory", () => {
     const violations: string[] = [];
     const aliasedWriters: Record<string, string[]> = {};
     const bindings = new Map([
-      [
-        "createScopedSubscriptionCapacityWaiters",
-        ["claude_capacity_waiters", "xai_capacity_waiters"],
-      ],
+      ["createScopedSubscriptionCapacityWaiters", ["xai_capacity_waiters"]],
     ]);
     const visit = (node: t.Node): void => {
       if (isCallExpression(node) && insertsSessionEvents(node)) {
@@ -1197,8 +1173,8 @@ describe("session_events writer inventory", () => {
     visit(sourceFile.program);
     expect(violations).toEqual(["unprotectedWriter"]);
     expect(aliasedWriters).toEqual({
-      protectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
-      unprotectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+      protectedWriter: ["xai_capacity_waiters"],
+      unprotectedWriter: ["xai_capacity_waiters"],
     });
     expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
     const factory = sourceFile.program.body[0]!;
@@ -1296,9 +1272,13 @@ describe("session_events writer inventory", () => {
       };
       visit(sourceFile.program);
     }
-    // The legacy Codex waiter table stays fenced in the database, but the
-    // retired runtime no longer writes it from TypeScript.
-    const retiredTables = new Set<string>([tenancyQuiescenceTables.codexCapacityWaiters]);
+    // All legacy provider waiter tables stay fenced in the database,
+    // but the retired runtimes no longer write them from TypeScript.
+    const retiredTables = new Set<string>([
+      tenancyQuiescenceTables.codexCapacityWaiters,
+      tenancyQuiescenceTables.xaiCapacityWaiters,
+      tenancyQuiescenceTables.claudeCapacityWaiters,
+    ]);
     expect([...discovered].sort()).toEqual(
       Object.values(tenancyQuiescenceTables)
         .filter((table) => !retiredTables.has(table))

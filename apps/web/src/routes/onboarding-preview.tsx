@@ -184,8 +184,12 @@ const previewMethods = {
   async createWorkspace() {
     return { id: "preview-setup-workspace" };
   },
-  async createVariableSet() {
-    return { id: "preview-variable-set" };
+  vaults() {
+    return {
+      listVaults: async () => [],
+      createVault: async () => ({ id: "preview-vault" }),
+      createItem: async () => ({ id: "preview-item" }),
+    };
   },
   async createSession() {
     await new Promise((resolve) => setTimeout(resolve, 600));

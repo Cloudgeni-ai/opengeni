@@ -139,10 +139,10 @@ describe("system prompt cache split experiment", () => {
     expect(breakpoints(request)).toHaveLength(4);
   });
 
-  test("on: workspace environment and turn attachments move after the stable prefix", () => {
+  test("on: the sandbox environment and turn attachments move after the stable prefix", () => {
     const plain = instructions(true, "Policy.");
     const withEnvironment = instructions(true, "Policy.", {
-      workspaceEnvironment: { name: "prod-env-42", variableNames: ["DB_PORT"] },
+      rig: { name: "prod-env-42", version: 3 },
       fileResourceDownloads: [{}],
     });
     const stable = splitStableSystemPromptPrefix(withEnvironment)![0];

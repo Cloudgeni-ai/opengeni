@@ -30,7 +30,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { modelDisplayName, useVariableSets } from "@opengeni/react";
+import { modelDisplayName } from "@opengeni/react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -63,7 +63,6 @@ import { Switch } from "@/components/ui/switch";
 import { modelPayerHint } from "@/lib/model-payer";
 import { useAppContext } from "@/context";
 import { formatElapsedSeconds } from "@/lib/format";
-import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   markScheduledTaskAttentionSeen,
   notifyScheduledTaskAttentionUpdated,
@@ -746,11 +745,7 @@ function Setup({
   description: string;
   onOpenSession: (sessionId: string) => void;
 }) {
-  const { accessContext, client, toolMcpServers } = useAppContext();
-  const canListSets =
-    hasWorkspacePermission(accessContext, workspaceId, "variable-sets:list") &&
-    Boolean(task.variableSetId);
-  const variableSets = useVariableSets({ enabled: canListSets });
+  const { client, toolMcpServers } = useAppContext();
   const rigs = useWorkspaceRigs({ enabled: Boolean(task.rigId) });
   const [chat, setChat] = useState<Session | null>(null);
   const inheritsChatSettings = scheduleInheritsChatSettings(task);
@@ -775,9 +770,6 @@ function Setup({
     };
   }, [access.canTargetSessions, client, targetId, workspaceId]);
 
-  const setName = task.variableSetId
-    ? variableSets.variableSets.find((set) => set.id === task.variableSetId)?.name
-    : undefined;
   const rigName = task.rigId ? rigs.rigs.find((rig) => rig.id === task.rigId)?.name : undefined;
   const repositories = task.agentConfig.resources.filter(
     (resource): resource is Extract<typeof resource, { kind: "repository" }> =>
@@ -810,17 +802,6 @@ function Setup({
       ) : null}
       {task.runMode !== "new_session_per_run" ? (
         <DetailFact label="If still running">{IF_STILL_RUNNING[task.overlapPolicy]}</DetailFact>
-      ) : null}
-      {!inheritsChatSettings && task.variableSetId ? (
-        <DetailFact label="Variable set">
-          <Link
-            to="/workspaces/$workspaceId/variable-sets/$variableSetId"
-            params={{ workspaceId, variableSetId: task.variableSetId }}
-            className="rounded-[6px] font-medium og-link"
-          >
-            {setName ?? (variableSets.loading ? "Loading…" : "Attached variable set")}
-          </Link>
-        </DetailFact>
       ) : null}
       {repositories.length > 0 ? (
         <DetailFact label={repositories.length === 1 ? "Repository" : "Repositories"}>

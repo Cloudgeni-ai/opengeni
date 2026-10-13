@@ -210,7 +210,7 @@ describe("settings rail", () => {
         "API keys",
         "Developer",
         "Insights",
-        "Variable sets",
+        "Secrets",
         "Sandbox environments",
         "Machines",
       ]);
@@ -509,7 +509,7 @@ describe("settings rail", () => {
       kind: "organization",
       section: null,
     });
-    for (const route of ["insights", "variable-sets", "rigs", "machines"]) {
+    for (const route of ["insights", "secrets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
     expect(workspaceManagementLocation(`${base}/rigs/rig-123`, workspaceId)).toEqual({
@@ -568,7 +568,7 @@ describe("settings rail", () => {
         `${base}/organization`,
       );
       expect(rendered.rail().textContent).not.toContain("API keys");
-      expect(rendered.rail().textContent).not.toContain("Variable sets");
+      expect(rendered.rail().textContent).not.toContain("Secrets");
     } finally {
       await rendered.unmount();
     }

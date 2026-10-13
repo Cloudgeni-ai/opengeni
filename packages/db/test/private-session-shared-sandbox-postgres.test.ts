@@ -19,7 +19,6 @@ import {
   submitHumanPromptInTransaction,
   transitionSessionVisibility,
   updateSessionTitle,
-  updateSessionVariableSets,
   withSessionRlsActorContext,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceRls,
@@ -401,22 +400,5 @@ describe("Only-me sessions on a shared sandbox", () => {
     const [members] = await shared.admin<Array<{ count: number }>>`
       select count(*)::int as count from sessions where sandbox_group_id = ${ownerOnly.sandboxGroupId}`;
     expect(members?.count).toBe(1);
-  }, 180_000);
-
-  test("Variable Sets stay fixed on a shared box even when the other sessions are private", async () => {
-    const org = await organization();
-    const { parent, child } = await sharedBox(org);
-    await makePrivate(org, parent.id);
-    // The member sees only the child, but the box is still shared with the
-    // owner's private session, so its Variable Sets cannot change.
-    expect(
-      await updateSessionVariableSets(client.db, {
-        accountId: org.accountId,
-        workspaceId: org.workspaceId,
-        sessionId: child.id,
-        subjectId: org.member,
-        variableSets: [],
-      }),
-    ).toEqual({ status: "blocked", reason: "shared_sandbox_group" });
   }, 180_000);
 });

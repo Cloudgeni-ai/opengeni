@@ -20,8 +20,8 @@ import {
   subscriptionCoreModelPolicyProviderIds,
 } from "@opengeni/subscriptions";
 import { subscriptionCoreProviderIds } from "../src/subscription-core-providers";
-import { ClaudeSubscriptionReconnectRequired } from "../src/claude-subscription-tokens";
-import { LEGACY_CLAUDE_CACHE_TTL_MS } from "../src/legacy-subscription-world";
+import { ClaudeSubscriptionReconnectRequired } from "../src/subscription-core-claude-oauth";
+import { SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS } from "../src/subscription-core-claude-adapter";
 import {
   decodeSubscriptionCoreClaudeCredential,
   decodeSubscriptionCoreClaudeQuota,
@@ -83,8 +83,8 @@ function scriptedTokenEndpoint(replies: Array<() => Response>) {
 }
 
 describe("Claude adapter", () => {
-  test("is not registered on the core before its cutover", () => {
-    expect(subscriptionCoreProviderIds()).not.toContain("claude");
+  test("is registered on the core with its cutover (0730)", () => {
+    expect(subscriptionCoreProviderIds()).toContain("claude");
     expect(SUBSCRIPTION_CORE_CLAUDE.adapter.provider).toBe("claude");
     expect(SUBSCRIPTION_CORE_CLAUDE.settings.primaryColumn).toBe("claude_primary_connection_id");
     expect(SUBSCRIPTION_CORE_CLAUDE.sessionCompactionLock).toBeNull();
@@ -103,7 +103,10 @@ describe("Claude adapter", () => {
     expect(adapter.refresh?.windowMs).toBe(60_000);
     expect(adapter.refresh?.fallbackMs).toBe(60 * 60_000);
     // The prompt-cache lifetime the legacy path sends (`cacheTtl: "5m"`).
-    expect(adapter.cacheFacts).toEqual({ kind: "exact_ttl", ttlMs: LEGACY_CLAUDE_CACHE_TTL_MS });
+    expect(adapter.cacheFacts).toEqual({
+      kind: "exact_ttl",
+      ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS,
+    });
     expect(adapter.health).toEqual({
       // Claude's 403 never rotates accounts; this only bounds a forbidden
       // outcome another path reports.

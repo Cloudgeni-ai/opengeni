@@ -8,6 +8,33 @@ import {
 const membershipId = "11111111-1111-4111-8111-111111111111";
 
 describe("subscription personal authority v2", () => {
+  test("shared consent is an exact session and connection restriction, retained verbatim", () => {
+    const entry = {
+      provider: "codex" as const,
+      ownerMembershipId: membershipId,
+      authorityGeneration: 7,
+      sharedSessionChoice: {
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        connectionId: "33333333-3333-4333-8333-333333333333",
+      },
+    };
+    const snapshot: SubscriptionPersonalAuthorityV2 = { version: 2, personal: [entry] };
+    expect(SubscriptionPersonalAuthorityV2.parse(snapshot)).toEqual(snapshot);
+    for (const sharedSessionChoice of [
+      null,
+      {},
+      { sessionId: entry.sharedSessionChoice.sessionId },
+      { ...entry.sharedSessionChoice, connectionId: "not-an-id" },
+      { ...entry.sharedSessionChoice, anySession: true },
+    ]) {
+      expect(
+        SubscriptionPersonalAuthorityV2.safeParse({
+          version: 2,
+          personal: [{ ...entry, sharedSessionChoice }],
+        }).success,
+      ).toBe(false);
+    }
+  });
   test("accepts an empty shared-only snapshot and exact personal authority entries", () => {
     expect(SubscriptionPersonalAuthorityV2.parse(EMPTY_SUBSCRIPTION_PERSONAL_AUTHORITY_V2)).toEqual(
       {

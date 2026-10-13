@@ -65,20 +65,8 @@ export function assignedConnectionDefault(
 }
 
 function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition: SQL } {
-  if (target.kind === "codex") throw new Error("Codex access policies use the shared core");
-  if (target.kind === "supergrok" || target.kind === "claude_subscription")
-    return {
-      table: sql.identifier(
-        target.kind === "supergrok"
-          ? "xai_subscription_credentials"
-          : "claude_subscription_credentials",
-      ),
-      condition: sql`id = ${target.connectionId}::uuid AND account_id = ${target.accountId}::uuid AND ${
-        target.workspaceId === null
-          ? sql`authority_scope = 'organization'`
-          : sql`workspace_id = ${target.workspaceId}::uuid AND authority_scope <> 'organization'`
-      }`,
-    };
+  if (subscriptionCoreProviderOfKind(target.kind))
+    throw new Error("Subscription access policies use the shared core");
   if (target.workspaceId === null)
     return {
       table: sql.identifier("organization_model_provider_connections"),
@@ -99,8 +87,8 @@ export async function getModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
-  if (target.kind === "codex")
-    return await getSubscriptionCoreCodexModelConnectionAccess(db, target);
+  if (subscriptionCoreProviderOfKind(target.kind))
+    return await getSubscriptionCoreProviderModelConnectionAccess(db, target);
   return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     const [row] = await rawRows<ModelConnectionAccess>(
@@ -218,7 +206,7 @@ export async function updateModelConnectionAccess(
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
-  if (target.kind === "codex") return null;
+  if (subscriptionCoreProviderOfKind(target.kind)) return null;
   if (policy.allowedPeople != null)
     throw new Error("Only accounts on the shared subscription core can be limited to people");
   return await withModelConnectionAccessScope(db, target, async (tx) => {

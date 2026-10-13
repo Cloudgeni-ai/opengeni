@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
-  detectConnectPlatform,
+  detectConnectOs,
   deviceVerificationUri,
+  installCommandFor,
   installOneLiner,
   installOneLinerWindows,
 } from "./deployment";
@@ -42,9 +43,18 @@ describe("Connected Machine deployment URLs", () => {
     );
   });
 
-  test("defaults Windows browsers to the PowerShell command", () => {
-    expect(detectConnectPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
-    expect(detectConnectPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)")).toBe("unix");
-    expect(detectConnectPlatform(undefined)).toBe("unix");
+  test("selects the browser's own OS, with Windows on the PowerShell command", () => {
+    expect(detectConnectOs("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
+    expect(detectConnectOs("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)")).toBe("macos");
+    expect(detectConnectOs("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")).toBe("linux");
+    expect(detectConnectOs("Mozilla/5.0 (X11; CrOS x86_64 14541.0.0)")).toBe("linux");
+    expect(detectConnectOs("Mozilla/5.0 (Linux; Android 14; Pixel 8)")).toBe("macos");
+    expect(detectConnectOs(undefined)).toBe("macos");
+    expect(installCommandFor("windows", "https://app.example", { enrollToken: "t" })).toContain(
+      "install.ps1",
+    );
+    expect(installCommandFor("linux", "https://app.example", { enrollToken: "t" })).toContain(
+      "install.sh",
+    );
   });
 });

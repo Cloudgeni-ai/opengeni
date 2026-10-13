@@ -10,6 +10,7 @@ import postgres from "postgres";
 import { claimSessionWorkForAttempt, createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { stageVaultPolicyColumns } from "./vault-policy-column-fixture";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const REPAIR = "0343_personal_document_force_rls_lock_repair.sql";
@@ -28,6 +29,7 @@ async function applyBelow(url: string, upperBound: string): Promise<void> {
       await ledger`insert into schema_migrations (name) values (${file}) on conflict do nothing`;
     }
     await migrate(url);
+    await stageVaultPolicyColumns(url);
     await ledger`delete from schema_migrations where name >= ${upperBound}`;
   } finally {
     await ledger.end({ timeout: 5 });

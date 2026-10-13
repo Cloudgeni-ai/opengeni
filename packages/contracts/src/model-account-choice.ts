@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LatencyMode, ReasoningEffort } from "./index";
 
 /**
  * A person's explicit model-account choice for a session and their own
@@ -9,8 +10,9 @@ import { z } from "zod";
  * The picker lists the shared accounts of the workspace's pool and the
  * caller's own personal accounts (never another person's). A personal
  * account can be chosen only by its owner, in their private session or
- * Personal workspace, while personal accounts are allowed there; the
- * database enforces the same rule when the choice is written.
+ * Personal workspace, or for their own newly accepted sends in a shared
+ * session, while personal accounts are allowed there. Choosing never widens
+ * already accepted work; the database enforces the same authority boundary.
  */
 const ProviderId = z.string().regex(/^[a-z][a-z0-9_]{1,31}$/);
 
@@ -73,6 +75,18 @@ const SessionModelAccountBinding = z.object({
   choice: z.enum(["explicit", "automatic"]),
 });
 
+/** Last lease-backed selection, not a queued choice or an unplaced proposal. */
+export const SessionModelAccountServing = z.object({
+  turnId: z.string().uuid(),
+  provider: ProviderId,
+  connectionId: z.string().uuid().nullable(),
+  modelId: z.string().min(1),
+  preferredModelId: z.string().min(1),
+  reasoningEffort: z.lazy(() => ReasoningEffort),
+  latencyMode: z.lazy(() => LatencyMode),
+});
+export type SessionModelAccountServing = z.infer<typeof SessionModelAccountServing>;
+
 export const SessionModelAccountChoiceResponse = z.object({
   /**
    * The session's current account when it has bindings for one provider
@@ -84,6 +98,8 @@ export const SessionModelAccountChoiceResponse = z.object({
   binding: SessionModelAccountBinding.nullable(),
   /** One binding per provider: a session keeps each provider's choice separately. */
   bindings: z.array(SessionModelAccountBinding),
+  /** Omitted by older servers. Account identity is withheld under the same visibility rule. */
+  serving: SessionModelAccountServing.nullable().optional(),
   accounts: z.array(ModelAccountChoiceOption),
   personal: z.object({
     /** Personal accounts are allowed in this workspace (effective setting). */
