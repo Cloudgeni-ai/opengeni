@@ -66,6 +66,8 @@ pub struct BrowserSidecarManager {
     binary: PathBuf,
     sidecars: Mutex<HashMap<String, Sidecar>>,
     update_drain: Arc<crate::uploads::update_drain::UpdateDrain>,
+    /// The local attached-Chrome inventory, once the bridge is listening.
+    attached: std::sync::OnceLock<crate::browser_bridge::BrowserBridgeInventory>,
 }
 
 impl BrowserSidecarManager {
@@ -100,6 +102,7 @@ impl BrowserSidecarManager {
             binary,
             sidecars: Mutex::new(HashMap::new()),
             update_drain: Arc::default(),
+            attached: std::sync::OnceLock::new(),
         })
     }
 
@@ -110,6 +113,15 @@ impl BrowserSidecarManager {
     ) -> Self {
         self.update_drain = drain;
         self
+    }
+
+    /// Lets the update gate see which attached-Chrome placements would not
+    /// survive a restart of this process.
+    pub fn observe_attached_inventory(
+        &self,
+        inventory: crate::browser_bridge::BrowserBridgeInventory,
+    ) {
+        let _ = self.attached.set(inventory);
     }
 
     /// Gracefully stops every scoped browser controller so it can terminate
@@ -331,6 +343,14 @@ impl BrowserControlBackend for BrowserSidecarManager {
                     return Err(PlatformError::os("browser controller is no longer running"));
                 }
                 if !sidecar_is_idle(&client, sidecar).await? {
+                    return Ok(false);
+                }
+                // A controller bound to an older extension's per-port
+                // placement would see it change when the bridge restarts,
+                // ending that profile's sessions. Wait for idle instead.
+                if self.attached.get().is_some_and(|attached| {
+                    attached.placement_ends_on_reconnect(&sidecar.scope_generation)
+                }) {
                     return Ok(false);
                 }
             }
@@ -1111,6 +1131,64 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_older_extensions_attached_controller_holds_back_an_update() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        let idle = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true}}"#;
+        let server = tokio::spawn(serve_idle_proofs(
+            listener,
+            vec![(200, idle.into()), (200, idle.into()), (200, idle.into())],
+        ));
+        ensure_idle_fixture(&manager, "attached").await;
+        let bridge_directory = tempfile::tempdir().unwrap();
+        let bridge = crate::browser_bridge::BrowserBridgeServer::start(bridge_directory.path())
+            .await
+            .unwrap();
+        manager.observe_attached_inventory(bridge.inventory());
+        let device = "11111111-1111-4111-8111-111111111111";
+        // An older extension: its placement is the port the controller is
+        // bound to, which a restart replaces.
+        let legacy = crate::browser_bridge::test_support::connect_extension(
+            bridge_directory.path(),
+            device,
+            "fixture-generation",
+            None,
+        )
+        .await;
+        while bridge.inventory().snapshot().devices.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            !manager.is_idle().await.unwrap(),
+            "a restart would end the older extension's sessions"
+        );
+        drop(legacy);
+        while !bridge.inventory().snapshot().devices.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // A current extension keeps its placement across reconnects.
+        let current = crate::browser_bridge::test_support::connect_extension(
+            bridge_directory.path(),
+            device,
+            "port-2",
+            Some("fixture-generation"),
+        )
+        .await;
+        while bridge.inventory().snapshot().devices.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(manager.is_idle().await.unwrap());
+        drop(current);
+        manager.shutdown().await;
+        bridge.shutdown().await.unwrap();
+        server.abort();
     }
 
     #[cfg(unix)]

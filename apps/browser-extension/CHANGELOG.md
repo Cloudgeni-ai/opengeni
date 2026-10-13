@@ -1,5 +1,11 @@
 # @opengeni/browser-extension
 
+## 0.1.4
+
+### Patch Changes
+
+- Report a state generation that stays the same for the extension worker's lifetime, across native reconnects. Agents that understand it keep the profile's attached browser sessions alive through agent restarts, agent updates and native-host reconnects instead of ending them; each native port is still fenced by its own connection generation.
+
 ## 0.1.3
 
 ### Patch Changes
