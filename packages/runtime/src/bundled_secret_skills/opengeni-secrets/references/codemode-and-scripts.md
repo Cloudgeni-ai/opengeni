@@ -19,6 +19,10 @@ the tool gateway resolves it when the tool runs, and the Codemode journal
 keeps the reference. Without the backslash the shell splices the value into
 the arguments and it lands in the Codemode journal.
 
+Use one backslash even though the reference sits inside JSON (`ogtool` also
+accepts a doubled one). Never spell the backslash as `\u005c`: the shell does
+not see that as an escape and splices the value in.
+
 ## Script files
 
 File writes resolve references too. In a Bun or Node script that calls tools
