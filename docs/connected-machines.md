@@ -1155,6 +1155,12 @@ The API is the same flow:
   `details.reason: "blocked"` with the preview while a duplicate connection
   remains.
 
+A person makes this change, in the app, through the API, or through an agent
+they gave their full access: a session with admin access or a connected agent
+with full access calls the same two routes as them (the `previewMachineAudience`
+and `changeMachineAudience` admin actions). An agent acting as itself, or one
+with less than the person's full access, is refused.
+
 ### Zero-click token (fleet / headless)
 
 Agents with the existing `enrollments:manage` permission can call the first-party
