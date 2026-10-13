@@ -29,6 +29,90 @@ function restore(args: Record<string, unknown>) {
 }
 
 describe("restoreDeferredToolArgumentTypes", () => {
+  test("restores common properties inside exact platform alternatives", () => {
+    const platformSchema = {
+      type: "object",
+      anyOf: [
+        {
+          type: "object",
+          properties: {
+            computerSessionId: { type: "string" },
+            pid: { type: "integer" },
+            include_screenshot: { type: "boolean" },
+            debug_image_out: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            computerSessionId: { type: "string" },
+            pid: { type: "integer" },
+            include_screenshot: { type: "boolean" },
+            cursor_id: { type: "integer" },
+          },
+          additionalProperties: false,
+        },
+      ],
+    };
+    const input = {
+      computerSessionId: "123",
+      pid: "707",
+      include_screenshot: "false",
+      cursor_id: "2",
+      unknown: "true",
+    };
+    expect(
+      JSON.parse(restoreDeferredToolArgumentTypes(JSON.stringify(input), platformSchema)!),
+    ).toEqual({ ...input, pid: 707, include_screenshot: false, cursor_id: 2 });
+  });
+
+  test("does not reinterpret strings admitted by another alternative", () => {
+    for (const alternative of [
+      { type: "object", properties: { value: { type: "string" } } },
+      { type: "object" },
+    ]) {
+      const union = {
+        type: "object",
+        oneOf: [{ type: "object", properties: { value: { type: "boolean" } } }, alternative],
+      };
+      expect(restoreDeferredToolArgumentTypes('{"value":"false"}', union)).toBeNull();
+    }
+  });
+
+  test("restores nested structures inside decoded containers and array items", () => {
+    const batch = {
+      type: "object",
+      properties: {
+        action: {
+          anyOf: [
+            {
+              type: "object",
+              properties: {
+                actions: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: { enabled: { type: "boolean" }, text: { type: "string" } },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+    };
+    for (const action of [
+      { actions: [{ enabled: "false", text: "123" }] },
+      { actions: '[{"enabled":"false","text":"123"}]' },
+      '{"actions":"[{\\"enabled\\":\\"false\\",\\"text\\":\\"123\\"}]"}',
+    ]) {
+      expect(
+        JSON.parse(restoreDeferredToolArgumentTypes(JSON.stringify({ action }), batch)!),
+      ).toEqual({ action: { actions: [{ enabled: false, text: "123" }] } });
+    }
+  });
+
   test("preserves unknown own keys during sibling and nested coercion", () => {
     const input =
       '{"limit":"3","__proto__":{"unused":true},"constructor":"kept","nested":{"count":"4","__proto__":{"extra":true}}}';

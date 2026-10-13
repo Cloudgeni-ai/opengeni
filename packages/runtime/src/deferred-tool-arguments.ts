@@ -35,8 +35,8 @@ function parseFiniteJson(text: string): unknown {
 }
 
 /** Declared JSON types of a schema, including simple anyOf/oneOf unions; null when unknown. */
-function declaredTypes(schema: unknown): Set<string> | null {
-  if (!isRecord(schema)) return null;
+function declaredTypes(schema: unknown, depth = 0): Set<string> | null {
+  if (!isRecord(schema) || depth > MAX_DEPTH) return null;
   const types = new Set<string>();
   const type = schema.type;
   if (typeof type === "string") types.add(type);
@@ -45,7 +45,7 @@ function declaredTypes(schema: unknown): Set<string> | null {
     const variants = schema[key];
     if (!Array.isArray(variants)) continue;
     for (const variant of variants) {
-      const nested = declaredTypes(variant);
+      const nested = declaredTypes(variant, depth + 1);
       if (!nested) return null;
       for (const t of nested) types.add(t);
     }
@@ -83,10 +83,49 @@ function coerceValue(value: unknown, schema: unknown, depth: number): unknown {
     } catch {
       return value;
     }
-    return matchesAny(parsed, types) ? parsed : value;
+    if (!matchesAny(parsed, types)) return value;
+    value = parsed;
   }
-  if (isRecord(value)) return coerceObject(value, schema, depth + 1);
+  if (isRecord(value)) return coerceObject(value, schema, depth);
+  if (Array.isArray(value)) {
+    const items = childSchema(schema, null, depth);
+    if (items === undefined || items === FORBIDDEN) return value;
+    let changed = false;
+    const next = value.map((item) => {
+      const coerced = coerceValue(item, items, depth + 1);
+      changed ||= coerced !== item;
+      return coerced;
+    });
+    return changed ? next : value;
+  }
   return value;
+}
+
+const FORBIDDEN = Symbol("property forbidden by this alternative");
+
+/** Resolve only declared child types without flattening platform constraints.
+ * A permissive alternative or a string-typed alternative must retain text.
+ * An alternative forbidding a key cannot admit it and contributes no type.
+ * The original schema still validates the entire restored call afterwards. */
+function childSchema(schema: unknown, key: string | null, depth: number): unknown {
+  if (!isRecord(schema) || depth > MAX_DEPTH) return undefined;
+  if (key === null) {
+    if (isRecord(schema.items)) return schema.items;
+  } else if (isRecord(schema.properties) && Object.hasOwn(schema.properties, key)) {
+    return schema.properties[key];
+  }
+  for (const keyword of ["anyOf", "oneOf"] as const) {
+    const variants = schema[keyword];
+    if (!Array.isArray(variants)) continue;
+    const children: unknown[] = [];
+    for (const variant of variants) {
+      const child = childSchema(variant, key, depth + 1);
+      if (child === undefined) return undefined;
+      if (child !== FORBIDDEN) children.push(child);
+    }
+    return children.length > 0 ? { anyOf: children } : FORBIDDEN;
+  }
+  return key !== null && schema.additionalProperties === false ? FORBIDDEN : undefined;
 }
 
 function coerceObject(
@@ -94,16 +133,15 @@ function coerceObject(
   schema: unknown,
   depth: number,
 ): Record<string, unknown> {
-  if (!isRecord(schema) || !isRecord(schema.properties)) return value;
-  const properties = schema.properties;
+  if (!isRecord(schema) || depth > MAX_DEPTH) return value;
   let changed = false;
   // Unknown own keys must survive for downstream validation. In particular,
   // assigning __proto__ to a normal object would invoke its inherited setter.
   const next: Record<string, unknown> = Object.create(null);
   for (const [key, current] of Object.entries(value)) {
-    const coerced = Object.hasOwn(properties, key)
-      ? coerceValue(current, properties[key], depth)
-      : current;
+    const child = childSchema(schema, key, depth);
+    const coerced =
+      child === undefined || child === FORBIDDEN ? current : coerceValue(current, child, depth + 1);
     changed ||= coerced !== current;
     next[key] = coerced;
   }

@@ -6,6 +6,7 @@ import {
   BrowserSession as BrowserSessionSchema,
   EPHEMERAL_CHROMIUM_DRIVER_ID,
   ComputerSession as ComputerSessionSchema,
+  cuaDesktopToolVariants,
 } from "@opengeni/contracts";
 import type {
   AuthRun,
@@ -22,6 +23,7 @@ import type {
   InteractionIntervention,
 } from "@opengeni/contracts";
 import { OpenGeniApiError, type InteractionTransport } from "@opengeni/sdk";
+import { restoreDeferredToolArgumentTypes } from "../src/deferred-tool-arguments";
 import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
@@ -177,6 +179,114 @@ describe("interaction attempt tools", () => {
       }),
     ).rejects.toThrow();
     expect(calls).toBe(1);
+  });
+  test("search-disclosed native window reads restore exact platform argument types", async () => {
+    let calls = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async (_workspace, _computer, request) => {
+          calls++;
+          expect(request.arguments).toEqual({
+            pid: 707,
+            window_id: 31,
+            include_screenshot: false,
+            include_accessibility_tree: true,
+          });
+          return {
+            protocolVersion: 1,
+            operationId: request.operationId,
+            computerSessionId,
+            controllerGeneration: "fixture",
+            targetId: null,
+            state: "failed",
+            dispatchedAt: null,
+            settledAt: now,
+            observation: null,
+            error: { code: "unsupported", message: "Synthetic fixture", retryable: false },
+          };
+        },
+      }),
+    });
+    const definition = definitions.find(
+      (tool) => tool.modelName === "interaction__cua_get_window_state",
+    )!;
+    const text = restoreDeferredToolArgumentTypes(
+      JSON.stringify({
+        computerSessionId,
+        pid: "707",
+        window_id: "31",
+        include_screenshot: "false",
+        include_accessibility_tree: "true",
+      }),
+      definition.inputSchema,
+    );
+    expect(text).not.toBeNull();
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+      generation: 1,
+      definitions,
+    });
+    await environment.callModel({
+      operationId: randomUUID(),
+      subjectId: "model:fixture",
+      modelName: definition.modelName,
+      arguments: JSON.parse(text!),
+    });
+    expect(calls).toBe(1);
+    await expect(
+      environment.callModel({
+        operationId: randomUUID(),
+        subjectId: "model:fixture",
+        modelName: definition.modelName,
+        arguments: { ...JSON.parse(text!), session: "another-session" },
+      }),
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  test("every native platform schema restores its declared scalar parameters", () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async () => {
+          throw new Error("not called");
+        },
+      }),
+    });
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      const definition = definitions.find(
+        (item) => item.modelName === `interaction__cua_${tool.name}`,
+      )!;
+      for (const variant of cuaDesktopToolVariants(tool.name)) {
+        const args: Record<string, unknown> = { computerSessionId };
+        const expected: Record<string, unknown> = { computerSessionId };
+        for (const [key, property] of Object.entries(
+          variant.inputSchema.properties as Record<string, { type?: string }>,
+        )) {
+          if (key === "session") continue;
+          if (property.type === "boolean") {
+            args[key] = "false";
+            expected[key] = false;
+          } else if (property.type === "integer" || property.type === "number") {
+            args[key] = "707";
+            expected[key] = 707;
+          } else if (property.type === "string") {
+            args[key] = expected[key] = "123";
+          }
+        }
+        const restored = restoreDeferredToolArgumentTypes(
+          JSON.stringify(args),
+          definition.inputSchema,
+        );
+        expect(restored === null ? args : JSON.parse(restored)).toEqual(expected);
+      }
+    }
   });
   test("oversized native output retains completed operation evidence through the prepared gateway", async () => {
     const definitions = createInteractionAttemptToolDefinitions({
