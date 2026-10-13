@@ -11,6 +11,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
+  acceptSessionApprovalDecision,
   bootstrapWorkspace,
   createDb,
   createSession,
@@ -18,6 +19,7 @@ import {
   getSession,
   getSessionGoal,
   initializeSessionStartAtomically,
+  listOutstandingSessionSystemUpdates,
   listSessionEvents,
   readSessionUsageLimit,
   setSessionUsageLimitInTransaction,
@@ -27,6 +29,8 @@ import { DrizzleQueryError } from "drizzle-orm";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivityTestHarness } from "../src/activities";
 import { POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE } from "../src/activities/types";
+import type { ControlActivityServices } from "../src/activities/types";
+import { createGoalActivities } from "../src/activities/goals";
 import {
   heldSessionUsageReceiptCount,
   resetSessionUsageReceiptCustodyForTests,
@@ -134,7 +138,7 @@ async function receipts(sessionId: string) {
 }
 
 /** Offline runtime: the production SDK call flow over a ScriptedModel plus one local tool. */
-function scriptedRuntime(scripted: ScriptedModel): OpenGeniRuntime {
+function scriptedRuntime(scripted: ScriptedModel, gated = false): OpenGeniRuntime {
   const production = createProductionAgentRuntime({ model: scripted });
   return {
     ...production,
@@ -167,6 +171,18 @@ function scriptedRuntime(scripted: ScriptedModel): OpenGeniRuntime {
           execute: async () => "local result",
         }),
       );
+      if (gated) {
+        agent.tools.push(
+          tool({
+            name: "gated_fixture",
+            description: "Offline no-op that needs a person's approval",
+            parameters: { type: "object", properties: {}, additionalProperties: false },
+            strict: false,
+            needsApproval: true,
+            execute: async () => "gated result",
+          }),
+        );
+      }
       return agent;
     },
   };
@@ -367,6 +383,176 @@ test("AC02/AC05: a child's usage counts against its root, and a reached root sto
 });
 
 test("AC13: a configured $0 model is known free; an unpriced call is disclosed and excluded", async () => {
+  // Shared body below so the test reads top-down.
+  await knownFreeAndUnpriced();
+});
+
+test("AC07/AC10: a root's active goal pauses through the real continuation path after a descendant exhausts the shared limit, without a wake loop or auto-resume", async () => {
+  const ctx = await fixture();
+  const root = await startSession(ctx, { goal: "Coordinate the child", message: "Root task" });
+  await setLimit(ctx, root.id, 250);
+  const rootModel = new ScriptedModel([{ inputTokens: 100, output: [assistantMessage("ok")] }]);
+  expect((await runTurn(ctx, root.id, rootModel)).status).toBe("idle");
+  expect(await getSessionGoal(app.db, ctx.workspaceId, root.id)).toMatchObject({
+    status: "active",
+  });
+  const child = await startSession(ctx, { parentSessionId: root.id, message: "Child work" });
+  const childModel = new ScriptedModel([
+    paidToolCall(`goal-child-${child.id}`),
+    { inputTokens: 100, output: [assistantMessage("child done")] },
+  ]);
+  await runTurn(ctx, child.id, childModel);
+  expect(await usage(ctx, root.id)).toMatchObject({ usedMicros: 300, status: "reached" });
+
+  const services = {
+    db: app.db,
+    bus: new MemoryEventBus(),
+    settings: testSettings({
+      databaseUrl: shared.appUrl,
+      billingMode: "disabled",
+      usageLimitsMode: "none",
+      goalIdleBackoffMs: [0],
+      goalIdleBackoffMaxMs: 0,
+    }),
+    entitlements: null,
+  } as unknown as ControlActivityServices;
+  const goals = createGoalActivities(async () => services);
+  const continueRoot = () =>
+    goals.maybeContinueGoal({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: root.id,
+      workflowId: `session-${root.id}`,
+    });
+  expect(await continueRoot()).toEqual({ action: "paused" });
+  expect(await getSessionGoal(app.db, ctx.workspaceId, root.id)).toMatchObject({
+    status: "paused",
+    pausedReason: "session_usage_limit",
+  });
+  const continuations = async () =>
+    (await listOutstandingSessionSystemUpdates(app.db, ctx.workspaceId, root.id)).filter(
+      (update) => update.kind === "goal_continuation",
+    );
+  expect(await continuations()).toEqual([]);
+  // A repeated wake neither re-pauses noisily nor queues work.
+  const pausedEvents = async () =>
+    (await events(ctx, root.id)).filter((event) => event.type === "goal.paused").length;
+  const pausedOnce = await pausedEvents();
+  expect((await continueRoot()).action).not.toBe("continue");
+  expect(await pausedEvents()).toBe(pausedOnce);
+  expect(await continuations()).toEqual([]);
+  // Raising the limit does not resume the goal by itself.
+  await setLimit(ctx, root.id, 10_000);
+  expect((await continueRoot()).action).not.toBe("continue");
+  expect(await getSessionGoal(app.db, ctx.workspaceId, root.id)).toMatchObject({
+    status: "paused",
+    pausedReason: "session_usage_limit",
+  });
+  expect(rootModel.calls).toBe(1);
+});
+
+test("AC09: an approval given after the limit is reached resumes into a stop without another model request, keeping history paired and the goal paused", async () => {
+  const ctx = await fixture();
+  const session = await startSession(ctx, {
+    goal: "Needs an approval",
+    message: "Use the gated tool",
+  });
+  await setLimit(ctx, session.id, 1_000_000);
+  const scripted = new ScriptedModel([
+    {
+      id: `gated-${session.id}`,
+      inputTokens: 100,
+      outputText: "x",
+      output: [functionCall("gated_fixture", {}, `gated-call-${session.id}`)],
+    },
+    { inputTokens: 100, output: [assistantMessage("must not dispatch after the limit")] },
+  ]);
+  const activities = createActivityTestHarness({
+    settings: settingsFor("priced"),
+    db: app.db,
+    bus: new MemoryEventBus(),
+    runtime: scriptedRuntime(scripted, true),
+  });
+  const first = await activities.runAgentTurn({
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(first.status).toBe("requires_action");
+  expect(scripted.calls).toBe(1);
+  // While waiting, another part of the task uses the rest of the limit.
+  await setLimit(ctx, session.id, 100);
+  expect(await usage(ctx, session.id)).toMatchObject({ status: "reached", usedMicros: 100 });
+  const requested = (await events(ctx, session.id)).find(
+    (event) => event.type === "session.requiresAction",
+  );
+  const approvalId = (requested?.payload as { approvals?: Array<{ id: string }> }).approvals?.[0]
+    ?.id;
+  expect(approvalId).toBeTruthy();
+  const decision = await acceptSessionApprovalDecision(app.db, {
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId: session.id,
+    subjectId: ctx.subjectId,
+    payload: { approvalId, decision: "approve" },
+    clientEventId: crypto.randomUUID(),
+  });
+  if (decision.action !== "accepted") throw new Error(`decision ${decision.action}`);
+  const resumed = await activities.runAgentTurn({
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    trigger: { kind: "approval", triggerEventId: decision.event.id },
+  });
+  expect(resumed.status).toBe("idle");
+  // No model request after the limit; usage unchanged.
+  expect(scripted.calls).toBe(1);
+  expect(await usage(ctx, session.id)).toMatchObject({ usedMicros: 100, pricedCalls: 1 });
+  const timeline = await events(ctx, session.id);
+  expect(timeline.some((event) => event.type === "turn.failed")).toBe(false);
+  expect(
+    timeline.filter(
+      (event) =>
+        event.type === "turn.completed" &&
+        (event.payload as { segmentLimit?: string }).segmentLimit === "session_usage_limit",
+    ),
+  ).toHaveLength(1);
+  // The approved call is not run after the limit (the resume stopped at its
+  // first admission); the timeline keeps the request and the decision, and
+  // model history holds no orphaned call, so a later message continues cleanly.
+  expect(timeline.some((event) => event.type === "user.approvalDecision")).toBe(true);
+  expect(timeline.some((event) => event.type === "agent.toolCall.output")).toBe(false);
+  const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);
+  const items = history.map(
+    (row) => row.item as { type?: string; callId?: string; call_id?: string },
+  );
+  const callIds = items
+    .filter((item) => item.type === "function_call")
+    .map((item) => item.callId ?? item.call_id);
+  const resultIds = new Set(
+    items
+      .filter((item) => item.type === "function_call_result")
+      .map((item) => item.callId ?? item.call_id),
+  );
+  for (const id of callIds) expect(resultIds.has(id)).toBe(true);
+  expect(await getSessionGoal(app.db, ctx.workspaceId, session.id)).toMatchObject({
+    status: "paused",
+    pausedReason: "session_usage_limit",
+  });
+  expect(await getSession(app.db, ctx.workspaceId, session.id)).toMatchObject({
+    status: "idle",
+    activeTurnId: null,
+  });
+});
+
+async function knownFreeAndUnpriced() {
   const ctx = await fixture();
   const free = await startSession(ctx);
   await setLimit(ctx, free.id, 1);
@@ -411,7 +597,7 @@ test("AC13: a configured $0 model is known free; an unpriced call is disclosed a
     [null, null],
     [null, null],
   ]);
-});
+}
 
 function connectionClosed() {
   return new DrizzleQueryError(

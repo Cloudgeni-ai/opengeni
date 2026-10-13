@@ -1945,6 +1945,9 @@ export async function runTurnStreamAttempt(
       // History plus the exact approval suffix now own the complete response.
       await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
       await finishParallelSessionTitle();
+      // Held task-usage receipts are durable before the attempt waits on a
+      // person (the resume may run in another worker process).
+      await flushHeldSessionUsageReceipts(db, input.sessionId);
       if (
         !(await eventing.settle!({
           events: [
