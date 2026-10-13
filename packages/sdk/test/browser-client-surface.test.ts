@@ -34,7 +34,6 @@ const legacyBrowserUnusedMethods = [
   "getCompanyProfileRevision",
   "getDocumentBase",
   "getDocumentOriginalFile",
-  "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
   // Shared Insights methods are adopted by the separately owned Insights UI.
