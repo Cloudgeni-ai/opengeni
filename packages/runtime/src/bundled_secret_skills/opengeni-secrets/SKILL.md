@@ -22,11 +22,11 @@ it resolves where it runs.
 | `{{secretfile:Item}}` | a temporary file path holding the value (shell commands) |
 | `\{{secret:Item}}` | the literal text, left unresolved |
 
-References resolve where something executes: shell commands, browser and
-desktop typing, file writes, and tool calls (MCP, connectors, Codemode). They
-stay references in chat, messages, schedule prompts, goals, Knowledge and
-artifacts, so write them anywhere, including prompts for schedules and child
-sessions.
+A reference resolves wherever it is used: shell commands, typing, file writes
+and every tool call, including Opengeni's own tools. To hand one on for later
+work (a schedule prompt, a message to another session, a goal, a note or
+comment), escape it as `\{{secret:Item}}`; it arrives as `{{secret:Item}}`.
+The `secret_*` tools take references as names and never resolve them.
 
 ## Tools
 
