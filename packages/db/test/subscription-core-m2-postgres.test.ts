@@ -94,6 +94,18 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       await tx.unsafe(
         `grant execute on function opengeni_private.subscription_core_owner_capability_held(text,uuid,text[],text,uuid,boolean) to ${probeRole}`,
       );
+      // ... and the people-picker read policy (migration 0757), which reads
+      // the person's own assignments under that table's own read policies.
+      await tx.unsafe(`grant select on subscription_connection_people to ${probeRole}`);
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_own_person_membership_id(uuid) to ${probeRole}`,
+      );
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_people_assignment_visible(uuid,uuid,uuid,text,text) to ${probeRole}`,
+      );
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_people_designation_visible(uuid,uuid,uuid) to ${probeRole}`,
+      );
       await tx.unsafe(`set local role ${probeRole}`);
       await tx.unsafe("set local search_path = pg_catalog, public, opengeni_private, pg_temp");
       const [attributes] = await tx<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
@@ -131,6 +143,16 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       );
       await tx.unsafe(
         `revoke execute on function opengeni_private.subscription_core_owner_capability_held(text,uuid,text[],text,uuid,boolean) from ${probeRole}`,
+      );
+      await tx.unsafe(`revoke select on subscription_connection_people from ${probeRole}`);
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_own_person_membership_id(uuid) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_people_assignment_visible(uuid,uuid,uuid,text,text) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_people_designation_visible(uuid,uuid,uuid) from ${probeRole}`,
       );
       await tx.unsafe(
         `alter function finalize_organization_retention_deletion(uuid,uuid,uuid,text) owner to ${owners!.function_owner}`,

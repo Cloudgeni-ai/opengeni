@@ -333,11 +333,18 @@ describe("0547 idle command containment", () => {
         ],
         [
           "pending machine input",
-          () => admin`insert into session_system_updates (
-              account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
-            ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId},
-              'agent_message', ${crypto.randomUUID()}, ${`probe-${crypto.randomUUID()}`},
-              'probe', ${admin.json({ type: "agent_message" })})`,
+          // The subscription authority compat check reads the new row back
+          // under FORCE RLS, whose session visibility requires the runtime's
+          // 0352 protocol marker; stamp it exactly as the runtime does.
+          () =>
+            admin.begin(async (tx) => {
+              await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+              await tx`insert into session_system_updates (
+                account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
+              ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId},
+                'agent_message', ${crypto.randomUUID()}, ${`probe-${crypto.randomUUID()}`},
+                'probe', ${tx.json({ type: "agent_message" })})`;
+            }),
           () =>
             admin`update session_system_updates set state = 'superseded'
               where session_id = ${fixture.sessionId}`,
