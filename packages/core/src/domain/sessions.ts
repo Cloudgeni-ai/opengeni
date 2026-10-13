@@ -3195,9 +3195,6 @@ async function createSessionForRequestInFileScope(
         accountId: grant.accountId,
         workspaceId,
         subjectId: personalResourceSubjectId ?? grant.subjectId,
-        ...(xaiProviderAccountAuthoritySnapshot
-          ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
-          : {}),
         ...(claudeProviderAccountAuthoritySnapshot
           ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
           : {}),

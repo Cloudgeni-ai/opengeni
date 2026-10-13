@@ -434,7 +434,14 @@ let foreign: { grant: Grant; caller: Agent; target: { id: string } } | null = nu
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-claude-copy-paths");
+  shared = await acquireSharedTestDatabase("subscription-core-claude-copy-paths", {
+    // This suite constructs pre-cutover carriers, then installs its own
+    // receipt. Neither provider cutover may pre-mark those source rows.
+    withheldMigrations: [
+      "0747_subscription_core_xai_cutover.sql",
+      "0748_subscription_core_claude_cutover.sql",
+    ],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
   // Every source is accepted before the receipt.
@@ -504,7 +511,7 @@ describe.skipIf(!realDb)("Claude compatibility copies on every path (M4 C2b)", (
     const expected = () => (name === "recorded" ? SHARED : MISSING);
     const current = () => (name === "recorded" ? recorded! : missed!);
 
-    test(`${name}: Agent message, Steer and their delivering turn copy the receiving source`, async () => {
+    test(`SUB-ACCESS-01 ${name}: Agent message, Steer and their delivering turn copy the receiving source`, async () => {
       const { grant, caller, target } = current();
       await withWorkspaceRls(client!.db, grant.workspaceId, (db) =>
         db.transaction((tx) =>

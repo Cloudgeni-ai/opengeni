@@ -1,8 +1,7 @@
 // Claude's account routes on the shared subscription core (design
 // docs/design/subscription-core-2026-10-07.md, 5.3 "Claude track", C2b).
-// Dormant: every caller first reads the organization's `claude` provider
-// route (`claudeCoreRoute`); without the Claude cutover receipt it is
-// `legacy` and the legacy handlers run unchanged.
+// Every caller requires the organization's Claude cutover receipt. Missing
+// or disabled receipts fail closed; legacy tables are never a runtime fallback.
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -19,13 +18,13 @@ import {
   canonicalConnectionId,
   coreConnectRefused,
   deliverPoolCoreWake,
-  subscriptionCoreRoute,
+  requireSubscriptionCoreRoute,
   type SubscriptionPoolCore,
 } from "./routes/subscription-pool-core";
 
 /** The runtime serving Claude for the organization (one receipt read; maintenance is a typed 503). */
 export const claudeCoreRoute = (deps: ApiRouteDeps, accountId: () => Promise<string>) =>
-  subscriptionCoreRoute(deps, "claude", "Claude", accountId);
+  requireSubscriptionCoreRoute(deps, "claude", "Claude", accountId);
 
 /** Deliver a core Claude wake after commit (best effort, as every pool wake). */
 export const deliverClaudeCoreWake = (

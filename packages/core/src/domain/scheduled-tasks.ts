@@ -1,7 +1,6 @@
 import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
-  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
 } from "@opengeni/db";
 import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
@@ -19,6 +18,7 @@ import {
   type FirstPartyMcpToolPolicySettings,
   type Settings,
 } from "@opengeni/config";
+import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import type { VaultPolicy } from "@opengeni/contracts";
 import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
@@ -80,7 +80,6 @@ import {
   updateScheduledTask,
   ScheduledTaskHeadChangedError,
   withWorkspaceSubjectRls,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
   type ScheduledTaskCreatorPolicy,
   type SessionCommandActor,
@@ -540,10 +539,10 @@ export async function createValidatedScheduledTask(input: {
           creationInitiator.actor.sessionId,
           creationInitiator.actor.turnId,
         )
-      : await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(input.db, {
-          workspaceId: input.grant.workspaceId,
-          subjectId: input.grant.subjectId,
-        });
+      : // SuperGrok's v1 value is never computed from live state after its
+        // cutover: new work writes the column default (design 5.3, "v1
+        // columns after a provider's cutover").
+        WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
   const claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
       ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
@@ -552,10 +551,7 @@ export async function createValidatedScheduledTask(input: {
           creationInitiator.actor.sessionId,
           creationInitiator.actor.turnId,
         )
-      : await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(input.db, {
-          workspaceId: input.grant.workspaceId,
-          subjectId: input.grant.subjectId,
-        });
+      : { version: 1 as const, scope: "workspace" as const };
   const beforeCreateCommit =
     input.payload.runMode !== "existing_session"
       ? workspaceCustomModelCommitGuard({
@@ -1693,6 +1689,12 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     });
     if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
   }
+  // A task accepted with a user-scoped SuperGrok v1 snapshot keeps its
+  // causal human: the scheduled dispatch and the deployed admission fence
+  // (`admit_scheduled_agent_run_execution`) still take the run's causal
+  // subject from that stored snapshot, so a material edit by anyone else
+  // would leave every later occurrence refused. Reading the stored value is
+  // not deriving it from live state; it retires with that fence.
   const existingXaiAuthority = await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
     input.db,
     input.existing.workspaceId,

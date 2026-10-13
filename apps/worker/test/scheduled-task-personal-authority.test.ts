@@ -1,5 +1,6 @@
 import { migrate } from "@opengeni/db/migrate";
 import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
+import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
@@ -31,7 +32,6 @@ import {
   appendSessionEvents,
   enqueueSessionTurn,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   bindScheduledTaskRunSessionInTransaction,
   createDb,
   createRig,
@@ -39,8 +39,6 @@ import {
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
   createSession,
-  createXaiSubscriptionCredential,
-  disconnectXaiSubscriptionCredential,
   getScheduledTaskRunAcceptedExecution,
   getScheduledTask,
   getNestedAgentDepthDeploymentPolicy,
@@ -51,8 +49,6 @@ import {
   persistSlackBotInstallationWithSuccessAudit,
   requestSessionTurnRecovery,
   requireSession,
-  setInitialActiveClaudeCredential,
-  setInitialActiveXaiCredential,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
@@ -69,6 +65,30 @@ import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import { MockAgentResponder, subjectFor } from "@opengeni/runtime";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
+import {
+  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "@opengeni/db";
+import {
+  createXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredential,
+} from "../../../packages/db/test/fixtures/legacy-xai";
+import {
+  createClaudeSubscriptionAccount,
+  setInitialActiveClaudeCredential,
+} from "../../../packages/db/test/fixtures/legacy-claude/accounts";
+
+// Characterizes the legacy Claude runtime, which runs only before the drained
+// Claude cutover: the database withholds that migration. Removed with the
+// legacy runtime.
+const LEGACY_CLAUDE_WORLD = {
+  // These cases characterize accepted legacy pools for both providers.
+  withheldMigrations: [
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
+    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
+    SUBSCRIPTION_RETIREMENT_MIGRATION,
+  ],
+};
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -76,7 +96,10 @@ let admin: postgres.Sql;
 let client: DbClient;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-scheduled-personal-authority");
+  shared = await acquireSharedTestDatabase(
+    "worker-scheduled-personal-authority",
+    LEGACY_CLAUDE_WORLD,
+  );
   if (!shared) {
     available = false;
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
@@ -86,6 +109,7 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
+  await restorePreRetirementGrants(shared.adminUrl);
   client = createDb(shared.appUrl);
 }, 180_000);
 
@@ -285,39 +309,33 @@ async function scheduledRuntimeMcpIds(
 
 describe("scheduled task personal MCP authority", () => {
   test.each(["organization", "personal"] as const)(
-    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude and SuperGrok %s pool snapshots into the generated turn",
+    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude %s pool snapshot and SuperGrok's default v1 carrier into the generated turn",
     async (scope) => {
       if (!available) return;
       const workspace = await workspaceFixture();
-      let claudeSnapshot:
-        | {
-            version: 1;
-            scope: "organization";
-          }
-        | {
-            version: 1;
-            scope: "user";
-            authorityGeneration: number;
-          };
-      let xaiSnapshot: typeof claudeSnapshot;
+      // This task already accepted its legacy pool before migration. The
+      // dispatcher copies it verbatim even though fresh selection uses v2.
+      let claudeSnapshot =
+        scope === "personal"
+          ? { version: 1 as const, scope: "user" as const, authorityGeneration: 1 }
+          : { version: 1 as const, scope: "organization" as const };
+      // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
+      // workspace default, never computed from live pools, and copied verbatim.
+      const xaiSnapshot = { version: 1, scope: "workspace" } as const;
       if (scope === "personal") {
-        await admin`insert into workspace_memberships (
-        account_id, workspace_id, subject_id, role, permissions
-      ) values (
-        ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-        'owner', '[]'::jsonb
-      ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
-        const claudeIdentity = crypto.randomUUID();
-        const claude = await createClaudeSubscriptionAccount(client.db, {
+        await admin`update workspace_memberships set role = 'owner'
+          where workspace_id = ${workspace.workspaceId} and subject_id = ${workspace.subjectId}`;
+        const accountUuid = crypto.randomUUID();
+        const credential = await createClaudeSubscriptionAccount(client.db, {
           ...workspace,
           scope: "user",
           encryptionKey: new Uint8Array(32).fill(23),
           secret: {
             version: 1,
             token: "sk-ant-oat01-scheduled-personal",
-            identity: { accountUuid: claudeIdentity, deviceId: "c".repeat(64) },
+            identity: { accountUuid, deviceId: "c".repeat(64) },
           },
-          providerAccountId: claudeIdentity,
+          providerAccountId: accountUuid,
           label: null,
           accountEmail: null,
           planType: "claude_max",
@@ -325,27 +343,12 @@ describe("scheduled task personal MCP authority", () => {
         });
         await setInitialActiveClaudeCredential(client.db, {
           ...workspace,
-          authoritySnapshot: claude.authoritySnapshot,
-          credentialId: claude.account.id,
+          authoritySnapshot: credential.authoritySnapshot,
+          credentialId: credential.account.id,
         });
-        const xai = await createXaiSubscriptionCredential(client.db, {
-          ...workspace,
-          scope: "user",
-          encryptionKey: new Uint8Array(32).fill(23),
-          secret: { version: 1, accessToken: "scheduled-personal-access" },
-          providerAccountId: `scheduled-personal-${crypto.randomUUID()}`,
-        });
-        await setInitialActiveXaiCredential(client.db, {
-          ...workspace,
-          authoritySnapshot: xai.authoritySnapshot,
-          credentialId: xai.account.id,
-        });
-        claudeSnapshot = claude.authoritySnapshot;
-        xaiSnapshot = xai.authoritySnapshot;
-        expect(xaiSnapshot).toEqual(claudeSnapshot);
-      } else {
-        claudeSnapshot = { version: 1, scope: "organization" };
-        xaiSnapshot = claudeSnapshot;
+        if (credential.authoritySnapshot.scope !== "user")
+          throw new Error("Expected personal fixture");
+        claudeSnapshot = credential.authoritySnapshot;
       }
       const task = await createScheduledTask(client.db, {
         ...workspace,
@@ -363,7 +366,6 @@ describe("scheduled task personal MCP authority", () => {
           tools: [],
           metadata: {},
         },
-        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
         claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
         metadata: {},
       });
@@ -382,7 +384,6 @@ describe("scheduled task personal MCP authority", () => {
       select accepted_execution_snapshot from scheduled_task_runs
       where workspace_id = ${workspace.workspaceId} and session_id = ${dispatched.sessionId}`;
       expect(run?.accepted_execution_snapshot).toMatchObject({
-        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
         claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
       });
       const [session] = await admin<
@@ -1633,10 +1634,16 @@ describe("scheduled task personal MCP authority", () => {
       // These later migrations require the post-0461 Knowledge/file policies.
       // 0561 and 0582 also extend the producer fence beyond this replay boundary.
       // So does 0717 (the generated session's Claude snapshot comparison).
-      // 0730 resolves the Knowledge claim installed by withheld 0461/0510.
-      // 0738 rewrites the visibility transition installed by withheld 0501.
+      // The maintenance probes compile against post-0461 Knowledge routines.
+      // Withhold them with that schema instead of changing published SQL.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0730_maintenance_work_probes.sql'),('0738_private_sessions_share_sandboxes.sql')`;
+        ('0730_maintenance_work_probes.sql'),
+        ('0732_sandbox_maintenance_work_probes.sql')`;
+      // Main's later visibility transition also depends on withheld 0501.
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
+        ('0738_private_sessions_share_sandboxes.sql')`;
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql'), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
       // Allowance policy/attribution compiles against the same withheld
       // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
       for (const name of allowanceMigrationTail)

@@ -54,7 +54,7 @@ async function buildSuperGrokTurn(
     spyOn(db, "readSubscriptionCoreSessionOwner").mockResolvedValue({
       ownerSubjectId: "user:owner",
     } as Awaited<ReturnType<typeof db.readSubscriptionCoreSessionOwner>>),
-    // xai stays unregistered until X3, so the runtime is stubbed, not wrapped.
+    // Stub the core operation runtime; no provider call is made.
     spyOn(db, "subscriptionCoreOperationConnections").mockReturnValue({
       listSubscriptionCoreOperationCandidates: async () => {
         coreFundingCalls.push("candidates");
@@ -197,16 +197,17 @@ test("a core-placed SuperGrok turn never reaches the legacy video credential, wh
   for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });
 
-test("a legacy SuperGrok turn keeps its connected image tool", async () => {
+test("an unplaced SuperGrok turn cannot regain a retired connected image tool", async () => {
   const { built, options, legacyReaders } = await buildSuperGrokTurn(false, "opengeni_credits");
   await built;
-  expect(options[0]?.imageGeneration).toMatchObject({ kind: "provider_adapter" });
+  expect(options[0]?.imageGeneration).toBeUndefined();
   for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });
 
-test("a legacy SuperGrok turn reaches the legacy video credential", async () => {
-  const { built, legacyReaders } = await buildSuperGrokTurn(false);
-  // The legacy path reads the subject's v1 authority for SuperGrok-funded video.
-  await expect(built).rejects.toThrow(LEGACY_REACHED);
-  expect(legacyReaders[0]).toHaveBeenCalledTimes(1);
+test("an unplaced SuperGrok turn cannot regain the retired video credential route", async () => {
+  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(false);
+  await built;
+  expect(options[0]?.videoGeneration).toBeUndefined();
+  expect(coreFundingCalls).toEqual([]);
+  for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });

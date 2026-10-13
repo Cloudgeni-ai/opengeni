@@ -1,12 +1,11 @@
-// The Codex-named twins of the migration 0707 neutral routines (design
-// docs/design/subscription-core-2026-10-07.md, 5.3 "R. Retirement"). No
-// runtime code calls them and no retained policy, trigger, view or routine
-// depends on them, so the retirement migration may drop them while this
-// release runs. On a real, fully migrated database whose owner is NOSUPERUSER
-// and NOBYPASSRLS, this test checks that inventory, then drops the twins as
-// the owner and evaluates the runtime posture as the restricted application
-// role: the drop must not break readiness, and the owner-implementation checks
-// must keep running without the Codex twin writers.
+// The Codex-named twins of the migration 0707 neutral routines after the
+// drained retirement (design docs/design/subscription-core-2026-10-07.md, 5.3
+// "R. Retirement"; migration SUBSCRIPTION_RETIREMENT_MIGRATION). On a real,
+// fully migrated database whose owner is NOSUPERUSER and NOBYPASSRLS, the
+// twins and the owner-only internals only they called are gone, the runtime
+// posture of this release requires them absent and is clean as the restricted
+// application role, and the owner-implementation checks keep running without
+// the Codex twin writers.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
@@ -17,6 +16,7 @@ import {
   createDb,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectViolation,
   SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
   type DbClient,
 } from "../src";
@@ -30,10 +30,15 @@ const options = {
   expectedRole: "opengeni_app",
   targetSchema: "public",
 };
-/** The twins' owner-only internals, called only by the twins themselves. */
+/**
+ * The twins' owner-only internals (the writer context four twins called and
+ * the connection target) and 0689's Codex auto-assignment apply path, which
+ * nothing called after 0713.
+ */
 const TWIN_OWNER_ROUTINES = [
   "opengeni_subscription_internal.subscription_codex_writer_context(uuid, uuid, text)",
   "opengeni_private.subscription_codex_connection_target(uuid, uuid, uuid, uuid, uuid, text, bigint)",
+  "opengeni_private.apply_subscription_codex_auto_assignments(uuid, uuid, boolean)",
 ] as const;
 const twinSignatures = [
   ...SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES.map((name) => `opengeni_private.${name}`),
@@ -73,7 +78,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe.skipIf(!realDb)("retiring the Codex twin routines (M4 step R)", () => {
+describe.skipIf(!realDb)("the retired Codex twin routines (M4 step R)", () => {
   test("the posture is evaluated as the restricted application role over a NOBYPASSRLS owner", async () => {
     const [roles] = await database!.admin<
       { owner_super: boolean; owner_bypass: boolean; app_super: boolean; app_bypass: boolean }[]
@@ -93,60 +98,26 @@ describe.skipIf(!realDb)("retiring the Codex twin routines (M4 step R)", () => {
     expect(await postureViolations()).toEqual([]);
   }, 180_000);
 
-  test("every twin exists today and nothing retained depends on one", async () => {
+  test("the retirement dropped every twin, its owner-only internals and every overload of their names", async () => {
     for (const signature of twinSignatures) {
       const [found] = await database!.admin<{ present: boolean }[]>`
         select to_regprocedure(${signature}) is not null as present`;
-      expect({ signature, ...found }).toEqual({ signature, present: true });
+      expect({ signature, ...found }).toEqual({ signature, present: false });
     }
     const names = twinSignatures.map((signature) =>
       signature.slice(signature.indexOf(".") + 1, signature.indexOf("(")),
     );
-    // Catalog dependencies (SQL-standard bodies, views, policies, triggers,
-    // defaults) on any twin from an object that is not itself a twin.
-    const catalogDependents = await database!.admin<{ dependent: string; twin: string }[]>`
-      select pg_describe_object(d.classid, d.objid, d.objsubid) as dependent,
-        d.refobjid::regprocedure::text as twin
-      from pg_depend d
-      join pg_proc p on p.oid = d.refobjid
-      where d.refclassid = 'pg_proc'::regclass
-        and p.proname = any(${names}::text[])
-        and d.deptype = 'n'
-        and not (d.classid = 'pg_proc'::regclass
-          and (select proname from pg_proc where oid = d.objid) = any(${names}::text[]))`;
-    expect([...catalogDependents]).toEqual([]);
-    // PL/pgSQL bodies, policy expressions and trigger functions are not in
-    // pg_depend: search them by name.
-    const textualDependents = await database!.admin<{ dependent: string }[]>`
-      select 'routine ' || p.oid::regprocedure::text as dependent
-      from pg_proc p
-      join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname not in ('pg_catalog', 'information_schema')
-        and not (p.proname = any(${names}::text[]))
-        and exists (
-          select 1 from unnest(${names}::text[]) as twin
-          where p.prosrc ~ ('\\m' || twin || '\\M'))
-      union all
-      select 'policy ' || pol.tablename || '.' || pol.policyname
-      from pg_policies pol
-      where exists (
-        select 1 from unnest(${names}::text[]) as twin
-        where coalesce(pol.qual, '') || ' ' || coalesce(pol.with_check, '') ~ ('\\m' || twin || '\\M'))
-      union all
-      select 'trigger ' || t.tgname
-      from pg_trigger t
-      join pg_proc p on p.oid = t.tgfoid
-      where not t.tgisinternal and p.proname = any(${names}::text[])`;
-    expect([...textualDependents]).toEqual([]);
+    const [left] = await database!.admin<{ total: number }[]>`
+      select count(*)::int as total from pg_proc where proname = any(${names}::text[])`;
+    expect(left!.total).toBe(0);
   }, 180_000);
 
-  test("every subscription_codex private routine the application role can execute is classified", async () => {
-    // A runtime-executable M3 Codex routine is either a retiring twin (checked
-    // while present) or still required by the posture: none goes unchecked.
-    // The pre-core Codex factory helpers (every Codex-named routine without
-    // "subscription_codex" in its name, such as codex_*, enforce_*codex*,
-    // clear_workspace_codex_* and prevent_organization_codex_*) belong to the
-    // retained legacy Codex tables and are outside this step.
+  test("every subscription_codex private routine the application role can execute is still required", async () => {
+    // With the twins gone, a runtime-executable M3 Codex routine is one the
+    // posture requires: none goes unchecked. The pre-core Codex factory
+    // helpers (every Codex-named routine without "subscription_codex" in its
+    // name) belong to the retained legacy Codex tables and are outside this
+    // step.
     const executable = await app!<{ name: string }[]>`
       select p.proname || '(' || array_to_string(array(
           select format_type(argument.type, null)
@@ -158,46 +129,36 @@ describe.skipIf(!realDb)("retiring the Codex twin routines (M4 step R)", () => {
         and p.proname like '%subscription\\_codex%'
         and has_function_privilege(p.oid, 'EXECUTE')
       order by 1`;
-    const classified = new Set<string>([
-      ...SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
-      ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
-    ]);
-    expect(executable.length).toBeGreaterThan(SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES.length);
-    expect(executable.map(({ name }) => name).filter((name) => !classified.has(name))).toEqual([]);
+    const required = new Set<string>(SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES);
+    expect(executable.length).toBeGreaterThan(0);
+    expect(executable.map(({ name }) => name).filter((name) => !required.has(name))).toEqual([]);
   }, 180_000);
 
-  test("a present twin is still held to the precursor hardening", async () => {
-    const twin = SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES[0];
-    await owner!.unsafe(`GRANT EXECUTE ON FUNCTION opengeni_private.${twin} TO PUBLIC`);
+  test("a twin created again by hand fails the posture until it is dropped", async () => {
+    const twin = "subscription_codex_reach(uuid, uuid)";
+    expect(SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES).toContain(twin);
+    await owner!.unsafe(
+      `CREATE FUNCTION opengeni_private.subscription_codex_reach(uuid, uuid) RETURNS boolean
+        LANGUAGE sql SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS 'SELECT false'`,
+    );
     try {
-      expect(await postureViolations()).toContain(
-        `retiring Codex twin private routine ${twin} is unsafe`,
-      );
+      expect(await postureViolations()).toEqual([
+        retiredSubscriptionObjectViolation(`routine opengeni_private.${twin}`),
+      ]);
     } finally {
-      await owner!.unsafe(`REVOKE EXECUTE ON FUNCTION opengeni_private.${twin} FROM PUBLIC`);
+      await owner!.unsafe(`DROP FUNCTION opengeni_private.${twin}`);
     }
     expect(await postureViolations()).toEqual([]);
   }, 180_000);
 
-  test("dropping the twins keeps the runtime posture and its owner-implementation checks", async () => {
-    // Exact signatures, no CASCADE: the writers before their owner-only
-    // internals, as the retirement migration will.
-    for (const signature of twinSignatures) {
-      await owner!.unsafe(`DROP FUNCTION ${signature}`);
-    }
-    for (const signature of twinSignatures) {
-      const [found] = await database!.admin<{ present: boolean }[]>`
-        select to_regprocedure(${signature}) is not null as present`;
-      expect({ signature, ...found }).toEqual({ signature, present: false });
-    }
+  test("the owner-implementation checks keep running without the Codex twin writers", async () => {
     // Readiness of this release, before and after provisioning roles again.
     expect(await postureViolations()).toEqual([]);
     await provisionRoles(database!.adminUrl, { appPassword: database!.appPassword });
     expect(await postureViolations()).toEqual([]);
 
     // The neutral writers' owner-only internals are still checked for their
-    // fixed search path (only the owner-implementation check looks at it),
-    // even though the Codex twin writers are gone.
+    // fixed search path (only the owner-implementation check looks at it).
     const neutralInternal =
       "opengeni_subscription_internal.subscription_core_writer_context(text, uuid, uuid, text)";
     const [configured] = await owner!<{ search_path: string }[]>`

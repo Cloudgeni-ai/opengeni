@@ -88,11 +88,11 @@ for it until the matching requirement below is implemented:
   never owns a connection. Verification: pending (data-model).
 - **SUB-OWN-02** A connection's scope is one of: the whole organization,
   a set of chosen workspaces (with a separate switch for Personal workspaces),
-  or a set of chosen people. Verification: pending (data-model).
+  or a set of chosen people. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-OWN-03** A personal connection is scoped to one person and is usable
   in every workspace that person can use, including their Personal workspace,
   without exposing private workspace inventory to administrators.
-  Verification: pending (personal-connections).
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-OWN-04** An organization administrator can delegate management of a
   connection to a workspace administrator; ownership stays with the
   organization. Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`, `packages/db/test/subscription-core-m2-postgres.test.ts`.
@@ -103,9 +103,13 @@ for it until the matching requirement below is implemented:
 - **SUB-OWN-06** Widening a personal connection to workspaces or the
   organization turns it into a shared connection and shows a short notice
   that consumer plans may limit use to the account holder.
-  Verification: pending (personal-connections).
+  Only its exact owner who is also an organization administrator can perform
+  this explicit transition; organization inventory never lists personal accounts.
+  Verification: `packages/db/test/subscription-personal-sharing-postgres.test.ts`,
+  `apps/api/test/model-account-choice-routes-postgres.test.ts`,
+  `apps/web/src/components/connection-access-settings.test.tsx`.
 - **SUB-OWN-07** Who connected an account is audit metadata, never
-  ownership or authority. Verification: pending (data-model).
+  ownership or authority. Verification: `packages/db/test/subscription-personal-sharing-postgres.test.ts`.
 - **SUB-OWN-08** One upstream provider account is one connection per owner,
   however many workspaces it serves, so its quota is counted once.
   Verification: `packages/db/test/subscription-core-m2-postgres.test.ts`
@@ -137,7 +141,7 @@ for it until the matching requirement below is implemented:
   source, with a one-step reset to the organization default.
   Verification: pending (product-surface).
 - **SUB-SET-05** One organization overview lists every workspace's effective
-  settings and highlights overrides. Verification: pending (product-surface).
+  settings and highlights overrides. Verification: `packages/db/test/subscription-settings-postgres.test.ts`.
 - **SUB-SET-06** Per workspace and provider, effective settings can turn the
   provider off or stop using organization accounts, without changing any
   connection's scope or the workspace model allowlist. Verification:
@@ -148,38 +152,45 @@ for it until the matching requirement below is implemented:
 
 - **SUB-ELIG-01** Work may use only connections whose scope includes the
   work's workspace (or, for a personal connection, its owner under
-  SUB-ELIG-05). Verification: pending (data-model).
+  SUB-ELIG-05). Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ELIG-02** Workspace model restrictions are a ceiling on every
   selection, including failover. When the session's preferred model is
   outside the restriction, selection uses the first allowed model in its
   failover order, under the same rules as any other failover; it waits on the
   restriction only when no candidate model is allowed, for example under
-  "only this model" (D-17). Verification: pending (failover).
+  "only this model" (D-17). Verification: `packages/subscriptions/test/policy.test.ts`.
 - **SUB-ELIG-03** An account is eligible for a model only when its plan
   entitles it to that model, it is not cooling down for that model, and the
   connection's access policy allows the model. This is automatic filtering,
-  not a user setting. Verification: pending (shared-core).
+  not a user setting. Verification: `packages/subscriptions/test/policy.test.ts`.
 - **SUB-ELIG-04** Credential health and allocator eligibility are separate.
   Reconnecting restores health without silently changing allocator
-  eligibility. Verification: pending (shared-core).
+  eligibility. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ELIG-05** A personal connection serves only its owner's own work in
-  their private sessions and Personal workspace. Shared team work is funded by
-  organization connections. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
+  their private sessions and Personal workspace, or their own newly accepted
+  work after an explicit choice in a shared session they participate in. The
+  account owner need not be the session creator. Shared consent is restricted
+  to the exact session and connection; another sender never inherits it.
+  Live membership, resource generation and effective personal-account policy
+  still apply. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ELIG-06** Unknown or stale quota stays unknown. Missing metadata never
   manufactures exhaustion: an account with unknown quota is eligible and
   counts as able to serve. Ordinary primary/spread ordering applies equally
   to known and unknown capacity; telemetry is not a ranking preference
-  (D-29). Verification: pending (verification-suite).
+  (D-29). Verification: `packages/subscriptions/test/policy.test.ts`.
 
 ### Selection
 
 - **SUB-SEL-01** Automatic selection prefers organization connections.
-  Verification: pending (shared-core).
+  Verification: `packages/subscriptions/test/reference-conformance.test.ts`.
 - **SUB-SEL-02** A connected personal account participates automatically in
   its owner's Personal workspace. In other workspaces, private sessions need
   an explicit account choice or permitted, per-person fallback opt-in (off by
   default). Live ownership, organization permission and accepted-turn personal
-  authority remain required in every case (D-28).
+  authority remain required in every case (D-28). In a shared session a person
+  may explicitly choose their own personal account, but shared visibility
+  never permits automatic personal fallback. Already accepted work keeps its
+  frozen pool; a new choice cannot grant it missing authority.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `apps/api/test/model-account-choice-routes-postgres.test.ts`.
 - **SUB-SEL-03** Primary first places new work on the primary account while
   it can serve the work (unknown quota counts as able to serve,
@@ -187,7 +198,7 @@ for it until the matching requirement below is implemented:
   account (SUB-FAIL-02). Spread distributes new sessions fairly across
   eligible accounts. Both preserve warm bindings except when an included
   allowance can replace automatic extra-credit spending.
-  Verification: pending (shared-core).
+  Verification: `packages/subscriptions/test/policy.test.ts`.
 - **SUB-SEL-04** A manual pin to an account is binding: the session waits for
   that account instead of moving. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-SEL-05** Selection is atomic and concurrency-safe: concurrent
@@ -226,17 +237,20 @@ for it until the matching requirement below is implemented:
 - **SUB-STICK-07** A session that was started on a personal account and is
   later shared stops using that account at once, even while its cache is
   warm: SUB-ELIG-05 takes precedence over stickiness, so the personal account
-  is out of scope for the shared session (SUB-STICK-03). Its next turn moves
-  to an eligible organization account, or waits if none can serve.
+  is out of scope for previously accepted private work (SUB-STICK-03). A new
+  human acceptance may capture the owner's explicit shared-session choice
+  under SUB-ELIG-05; merely sharing a session never rewrites an accepted pool.
+  Otherwise it moves to an eligible organization account, or waits if none can serve.
   Verification: `packages/subscriptions/test/policy.test.ts`, `packages/db/test/helpers/subscription-core-conformance.ts`.
 
 ### Exhaustion and failover
 
 - **SUB-FAIL-01** Failover is automatic. No person has to press a button for
   work to continue on another eligible account.
-  Verification: pending (failover).
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`,
+  `apps/worker/test/subscription-serving-runtime.test.ts`.
 - **SUB-FAIL-02** Failover first tries another eligible account of the same
-  provider. Verification: pending (failover).
+  provider. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-FAIL-03** When the effective setting allows it, failover then moves to
   another provider using the organization's fallback order for the model,
   mapping the reasoning level to the nearest level the target supports:
@@ -245,22 +259,22 @@ for it until the matching requirement below is implemented:
   closest to the requested level's position on the preferred model's ladder,
   with a tie going to the lower level. A level the preferred model does not
   list maps to the middle of the target's ladder (the lower middle when there
-  are two) (D-16). Verification: pending (failover).
+  are two) (D-16). Verification: `packages/subscriptions/test/failover-policy.test.ts`, `apps/worker/test/subscription-serving-runtime.test.ts`, `packages/db/test/subscription-serving-runtime-postgres.test.ts`.
 - **SUB-FAIL-04** Failover never widens access: it uses only allowed models
-  and in-scope connections. Verification: pending (failover).
+  and in-scope connections. Verification: `packages/subscriptions/test/failover-policy.test.ts`.
 - **SUB-FAIL-05** A session explicitly limited to one account or model ("only
-  this") waits instead of failing over. Verification: pending (failover).
+  this") waits instead of failing over. Verification: `packages/subscriptions/test/failover-policy.test.ts`.
 - **SUB-FAIL-06** Every switch is recorded as a visible session event with the
   reason, and the session model indicator shows what is running.
-  Verification: pending (failover).
+  Verification: `packages/db/test/subscription-failover-wait-recovery-postgres.test.ts`, `apps/web/src/components/session/model-account-indicator.test.tsx`.
 - **SUB-FAIL-07** After a cross-provider failover, the session returns to the
   preferred model once that model has capacity and the current cache is cold.
-  Verification: pending (failover).
+  Verification: `packages/subscriptions/test/failover-policy.test.ts`.
 - **SUB-FAIL-08** Exhaustion in the middle of a turn continues the same
   accepted turn on the fallback at the next model-call boundary, re-checking
   funding for the new provider and dropping provider-specific history items
   from the request copy, while keeping completed tool calls and accounting
-  entries without repeating them. Verification: pending (failover).
+  entries without repeating them. Verification: `packages/db/test/subscription-serving-runtime-postgres.test.ts`, `apps/worker/test/run-input-serving-runtime.test.ts`.
 - **SUB-FAIL-09** New sessions whose model has an effective cross-provider
   fallback use portable compaction. An existing Codex remote-compaction session
   converts to portable compaction at its next compaction while Codex has
@@ -278,19 +292,19 @@ for it until the matching requirement below is implemented:
   across providers in the first release. Verification: pending (consumers).
 - **SUB-FAIL-11** Failover within one turn is bounded and recorded per account,
   so a turn cannot alternate between failing accounts indefinitely.
-  Verification: pending (failover).
+  Verification: `packages/db/test/subscription-core-serving-policy-postgres.test.ts`, `apps/worker/test/claude-core-settlement.test.ts`.
 
 ### Durable waits and recovery
 
 - **SUB-WAIT-01** Work waits only when nothing eligible has capacity, or when
-  SUB-SEL-04 or SUB-FAIL-05 forbids moving. Verification: pending (failover).
+  SUB-SEL-04 or SUB-FAIL-05 forbids moving. Verification: `packages/db/test/subscription-core-waiter-candidates-postgres.test.ts`.
 - **SUB-WAIT-02** A wait is durable, explains its reason and expected reset
   where known, and resumes automatically when capacity returns or the pool
-  changes. Verification: pending (verification-suite).
+  changes. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`, `test/integration/subscription-core-codex-wait.integration.ts`.
 - **SUB-WAIT-03** Waits survive worker loss, workflow continue-as-new and
-  replay of existing workflow histories. Verification: pending (verification-suite).
+  replay of existing workflow histories. Verification: `test/integration/subscription-core-codex-wait.integration.ts`.
 - **SUB-WAIT-04** Pause, resume and cancel are respected while waiting.
-  Verification: pending (verification-suite).
+  Verification: `test/integration/subscription-core-codex-wait.integration.ts`.
 - **SUB-WAIT-05** A wait that cannot be armed surfaces as an explicit,
   retryable state, never as a generic activity failure. Database outages keep
   their exact-attempt recovery path. Verification: `apps/worker/test/subscription-capacity-arming.test.ts`.
@@ -303,7 +317,7 @@ for it until the matching requirement below is implemented:
   message or Agent Steer takes the receiving session's pool, not the
   sender's, and non-human acceptance resolves the workspace or organization
   pool instead of assuming workspace scope.
-  Verification: `packages/db/test/subscription-pool-receiver-authority.test.ts`,
+  Verification: `packages/db/test/subscription-core-claude-copy-paths-postgres.test.ts`,
   `apps/worker/test/parent-wake-postgres.test.ts`,
   `apps/worker/test/scheduled-task-personal-authority.test.ts`, and
   `packages/db/test/codex-credential-leases.test.ts`.
@@ -312,7 +326,7 @@ for it until the matching requirement below is implemented:
   Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-03** A private session arms, waits, is observed by the
   workflow, recovers and keeps pins exactly like a shared session.
-  Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ACCESS-04** A pool worker never gains visibility of another member's
   private session. Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
 - **SUB-ACCESS-05** Revoking a connection or a person's access is enforced on
@@ -327,18 +341,18 @@ for it until the matching requirement below is implemented:
 
 - **SUB-LEASE-01** Each executing turn holds a lease on exactly one account.
   Leases fence turn ownership; they do not limit an account's concurrency.
-  Verification: pending (shared-core).
+  Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-LEASE-02** A stale worker cannot renew, release or settle its
-  successor's lease. Verification: pending (verification-suite).
+  successor's lease. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-LEASE-03** Release is idempotent and expired leases are reaped.
   Verification: pending (shared-core).
 
 ### Usage and accounting
 
 - **SUB-ACCT-01** Usage is attributed to the account, workspace, session and
-  initiating person. Verification: pending (consumers).
+  initiating person. Verification: `packages/db/test/subscription-serving-runtime-postgres.test.ts`.
 - **SUB-ACCT-02** Retries and failover never duplicate usage or accounting
-  entries. Verification: pending (verification-suite).
+  entries. Verification: `packages/db/test/subscription-serving-runtime-postgres.test.ts`.
 
 ### Provider adapters
 
@@ -350,7 +364,7 @@ for it until the matching requirement below is implemented:
 - **SUB-PROV-02** Provider differences are expressed as capability flags
   (for example: credential cannot auto-renew, has reset credits,
   model-specific entitlements, supports realtime, funds media generation),
-  not as provider conditionals in shared code. Verification: pending (provider-migration).
+  not as provider conditionals in shared code. Verification: `packages/subscriptions/test/failover-policy.test.ts`.
 - **SUB-PROV-03** Every provider passes the same lifecycle conformance
   scenarios against scripted local upstreams, with no external network
   traffic. Verification: pending (verification-suite).
@@ -395,14 +409,17 @@ for it until the matching requirement below is implemented:
 - **SUB-COMPAT-01** Migration preserves existing credentials, scopes, pins,
   settings, accepted authority, live waits and workflow histories.
   Verification: `packages/db/test/migration-0689-subscription-core-codex-cutover.test.ts`,
-  `test/integration/subscription-core-codex-cutover.integration.ts` (Codex,
-  migration 0689; Claude and SuperGrok move at M4).
+  `test/integration/subscription-core-codex-cutover.integration.ts`,
+  `test/integration/subscription-core-claude-cutover.integration.ts`,
+  `test/integration/subscription-core-xai-cutover.integration.ts`.
 - **SUB-COMPAT-02** Existing per-provider API and SDK shapes keep working as
   aliases that delegate to the core until they are versioned out.
-  Verification: pending (rollout).
-- **SUB-COMPAT-03** Cutover runs in shadow first (the old path decides, the
-  core records its decision, and they are compared), behind a per-provider
-  switch with a documented rollback. Verification: pending (rollout).
+  Verification: `packages/db/test/migration-0747-subscription-core-xai-cutover.test.ts`, `packages/db/test/migration-0748-subscription-core-claude-cutover.test.ts`.
+- **SUB-COMPAT-03** Historical shadow comparison precedes one drained move
+  per provider, with no dual writes. Preflight failure rolls back the migration
+  transaction; after activation, recovery is forward-only and an old binary
+  must not restart. Disabling a cutover fails closed, never back to the legacy
+  path. Verification: pending (rollout).
 
 ### Security and observability
 
@@ -458,13 +475,13 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-15 | 2026-10-07 | Implementer decision, precedence between D-13 and D-14: in Primary first, the primary takes new work whenever it can serve it, and unknown quota counts as able to serve. The known-capacity ranking of D-14 orders only the other accounts (and, in Spread, applies before load balancing), so a primary with unknown quota is not passed over for a backup. |
 | D-16 | 2026-10-07 | Implementer decision: reasoning levels map by name first, then by closest relative position on the two ladders; a tie goes to the lower level (cheaper and less likely to exceed the target's plan), and an unlisted level maps to the lower middle. |
 | D-17 | 2026-10-07 | Implementer decision: a preferred model that the workspace does not allow is treated like one without capacity. Work uses the first allowed model in the failover order (SUB-WAIT-01 permits no wait while an allowed model can serve) and waits on the restriction only when no candidate model is allowed. |
-| D-18 | 2026-10-07 | Implementer decision: accounts connected in a Personal workspace migrate to personal connections of that workspace's owner, with their personal fallback switched on so their Personal-workspace sessions keep working. |
+| D-18 | 2026-10-07 | Accounts connected in a Personal workspace migrate to personal connections of that workspace's owner. Historical Codex migration 0689 also switched on personal fallback to preserve those sessions. After D-28 made the owner's own Personal workspace automatic, that consent backfill is unnecessary: the Claude and SuperGrok cutovers preserve existing absent, false and true fallback preferences rather than enabling fallback in the owner's other workspaces. Published 0689 remains unchanged. |
 | D-19 | 2026-10-07 | Historical Q-01 resolution relied on the remote replacement having no cleartext to convert. Superseded by D-40: Opengeni retains the original inactive cleartext rows, so supported sessions can convert at failover through complete-coverage summarization. Cross-provider history still requires portable compaction (SUB-FAIL-09); unsupported reconstruction fails closed. |
-| D-20 | 2026-10-07 | Q-03 resolved after design review: any in-scope connection can be designated for Codex Apps by an organization administrator or the connection's delegated manager, in every routing mode; reset-credit redemption stays human-only from a browser session for those same people, not "whoever connected it". |
+| D-20 | 2026-10-07 | Q-03 resolved after design review: any in-scope connection can be designated for Codex Apps by an organization administrator or the connection's delegated manager, in every routing mode. Reset-credit redemption requires explicit human control and those live management checks, not merely "whoever connected it". The repository's supported signed-in owning-person organization-MCP path remains, alongside browser redemption; earlier browser-only prose did not match that explicit repository rule. No automatic allocator/worker redemption is permitted. |
 | D-21 | 2026-10-07 | Implementer decision: Spread uses a deterministic hash of the session id over eligible accounts (known capacity first), so placement needs no lock across sessions and a session lands on the same account every time. |
 | D-22 | 2026-10-07 | Implementer decision: a wait reports the earliest future time at which something the session may use (its explicit choice, or an account it may use automatically) can serve it, counting quota resets and per-model cooldowns. Resets that have passed, and resets of accounts that could not serve the work anyway, are never reported. |
 | D-23 | 2026-10-07 | Implementer decision: the Spread hash of D-21 is 32-bit FNV-1a over the UTF-16 code units of `<session id>\|<connection id>`, finished with the murmur3 32-bit finalizer, and the lowest value wins. Raw FNV-1a split three sequentially named accounts 50/25/25, which is not fair spreading. |
-| D-24 | 2026-10-07 | Implementer decision: an explicit choice that can never serve the session's model waits with its own reason (`pinned_account_ineligible`) instead of looking like a temporary outage. That covers an account that is gone, no longer authorized for this work, of another provider, or not entitled or allowed for the model (SUB-ACCESS-06). An unhealthy, paused, exhausted or cooling-down chosen account waits as `pinned_account_unavailable` (SUB-SEL-04). |
+| D-24 | 2026-10-07 | Implementer decision: an explicit choice that can never serve the session's model waits with its own reason (`pinned_account_ineligible`) instead of looking like a temporary outage. That covers an account that is gone, no longer authorized for this work, of another provider (superseded by D-32), or not entitled or allowed for the model (SUB-ACCESS-06). An unhealthy, paused, exhausted or cooling-down chosen account waits as `pinned_account_unavailable` (SUB-SEL-04). |
 | D-25 | 2026-10-07 | Implementer decision: workspace overrides of per-provider and per-model settings (rotation, provider switches, fallback order) apply entry by entry, and provider switches field by field, so overriding one provider never resets another. |
 | D-26 | 2026-10-07 | Implementer decision: a provider switched off for the workspace (SUB-SET-06) and a compaction mode that ties a session to one provider (SUB-FAIL-09) restrict models exactly like the workspace model restriction of D-17. When the lock is what keeps a usable model away, the wait says so. |
 | D-27 | 2026-10-07 | Implementer decision, following SUB-STICK-02 and SUB-STICK-03: turning personal fallback off (by the owner or the organization) stops new automatic selections of personal accounts but is not a forced move. A session whose cache is warm on its owner's personal account keeps it and moves at its next re-selection point. Sharing the session (SUB-STICK-07), revoking the account or the owner leaving (SUB-STICK-03, SUB-ACCESS-06) still move it at once, and disabling personal connections (SUB-OWN-05) moves it at its next safe point. |
@@ -536,17 +553,16 @@ frozen personal authority, compaction locks, quota shapes), bridged to the
 model. Requirements stay `pending` until production placement runs on the
 core.
 
-### Shadow comparison
+### Historical pre-cutover shadow comparison
 
-Before any provider moves to the core (SUB-COMPAT-03), every Codex, Claude and
-SuperGrok turn compares the core with the legacy selector. Right after the
-legacy selection, the worker
-(`apps/worker/src/activities/agent-turn/subscription-core-shadow.ts`) loads the
-placement world for that session and turn from today's tables through the
-legacy adapter (`packages/db/src/legacy-subscription-world.ts`). It then runs
-the core's placement and the reference model's `checkDecision` on it.
+Before the provider cutovers (SUB-COMPAT-03), the worker compared each legacy
+selection with the core and the reference model's `checkDecision`. That
+production shadow and its legacy readers are deleted after migration. The
+retained comparison fixture is
+`packages/db/test/fixtures/legacy-subscription-world.ts`; current production
+placement runs directly through the shared core, not a second selector.
 
-It never changes placement and never delays the turn:
+The former shadow protocol had these isolation guarantees:
 
 - it starts in the background after the legacy selection, and at most two run
   at once per worker process; further turns skip it (`busy`);

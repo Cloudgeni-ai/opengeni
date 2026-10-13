@@ -107,6 +107,8 @@ export type Session = {
   visibility: "private" | "shared";
   /** Null only for a deliberately ownerless service session; it can use shared pools only. */
   ownerId: string | null;
+  /** Exact accepted shared-chat consent; not a new account pool. */
+  sharedPersonalChoices?: readonly { connectionId: string; ownerId: string }[];
   /** The model the session asked for. */
   preferredModelId: ModelId;
   reasoningLevel: string;
@@ -255,9 +257,13 @@ export function authorizationFailure(
     const settings = effectiveSettings(world.settings, workspace.id).values;
     const owner = byId(world.people, connection.ownership.ownerId);
     const ownersOwnWork =
-      session.ownerId === connection.ownership.ownerId &&
-      (session.visibility === "private" ||
-        (workspace.kind === "personal" && workspace.ownerId === connection.ownership.ownerId));
+      (session.ownerId !== null &&
+        session.sharedPersonalChoices?.some(
+          (choice) => choice.connectionId === connection.id && choice.ownerId === owner?.id,
+        )) ||
+      (session.ownerId === connection.ownership.ownerId &&
+        (session.visibility === "private" ||
+          (workspace.kind === "personal" && workspace.ownerId === connection.ownership.ownerId)));
     if (!settings.personalConnectionsAllowed) {
       return failure("SUB-OWN-05", "personal connections are disabled here");
     }
@@ -594,6 +600,11 @@ export function earliestRunnableAt(
 
 function personalFallbackFor(world: World, session: Session): boolean {
   if (session.ownerId === null) return false;
+  if (
+    session.visibility === "shared" &&
+    byId(world.workspaces, session.workspaceId)?.kind === "shared"
+  )
+    return false;
   const settings = effectiveSettings(world.settings, session.workspaceId).values;
   return (
     (byId(world.workspaces, session.workspaceId)?.kind === "personal" &&

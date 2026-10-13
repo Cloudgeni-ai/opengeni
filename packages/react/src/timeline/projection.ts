@@ -1131,6 +1131,25 @@ export function buildTimeline(
         break;
       }
 
+      case "subscription.account.switched": {
+        // One neutral receipt, not its provider-specific compatibility alias.
+        // Never expose connection ids, personal labels, or provider error text.
+        const text =
+          payload.reason === "return_to_preferred"
+            ? "Returned to your preferred model."
+            : payload.reason === "failover_cross_provider"
+              ? "Switched to a fallback model."
+              : "Switched to another subscription account.";
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "input",
+          text,
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "codex.capacity.waiting":
       case "turn.capacity_waiting": {
         const capacityWait = capacityWaitPresentation(event.type, payload, turnId);
@@ -2881,7 +2900,12 @@ function pushInsertion(
 }
 
 function isAgentActivityEvent(type: string): boolean {
-  return type.startsWith("agent.") || type.startsWith("sandbox.");
+  return (
+    type.startsWith("agent.") ||
+    type.startsWith("sandbox.") ||
+    type === "subscription.account.selected" ||
+    type === "subscription.account.switched"
+  );
 }
 
 /**

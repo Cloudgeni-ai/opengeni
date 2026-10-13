@@ -1,18 +1,17 @@
 /**
  * Claude on the shared subscription core (design 5.3, Claude track C1a): the
  * provider-neutral chat placement and request custody bound to Claude, and
- * the turn's route between the legacy Claude path and the core. Dormant: the
- * route is `core` only after the Claude drained cutover commits its receipt
- * (C3), and the binding is unregistered until then, so every core entry
- * point fails closed.
+ * the turn's route. The route is `core` only after the Claude drained cutover
+ * commits its receipt (C3); the legacy Claude path is deleted (C4), so any
+ * other route fails closed.
  */
 import {
   buildSubscriptionCoreClaudeTokenResolver,
-  CLAUDE_CREDENTIAL_LEASE_TTL_MS,
   CodexCredentialLeaseAttemptFencedError,
   decodeSubscriptionCoreClaudeQuota,
   readSubscriptionCoreProviderRoute,
   SUBSCRIPTION_CORE_CLAUDE,
+  SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
   SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   SubscriptionCoreError,
   subscriptionCoreRequests,
@@ -58,7 +57,6 @@ import {
   waitForTurnFinalizerStep,
 } from "./quiescence";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
-import { selectClaudeTurnCapacity } from "./xai-capacity";
 import {
   recoverCoreHealthAndWake,
   wakeSubscriptionCoreWaitersAndDeliver,
@@ -77,7 +75,7 @@ export const CLAUDE_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   id: "claude",
   displayName: DISPLAY_NAME,
   startupPhaseProvider: "claude-subscription",
-  leaseTtlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+  leaseTtlMs: SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
   lease: (deps) => deps.leases.claude,
   place: (db, request) => subscriptionCoreTurns(CLAUDE).placeSubscriptionCoreTurn(db, request),
   // A recovery wakes the account's other Claude waiters too.
@@ -93,12 +91,6 @@ export const CLAUDE_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
     core.productModelId = turnExecutionPolicy.productModelId;
     providerTurn.claudeSubscriptionCore = core;
     providerTurn.effectiveClaudeCredentialId = placement.connectionId;
-    providerTurn.claudeUpstreamModelId = turnExecutionPolicy.upstreamModelId;
-    // Rotation is the core's placement policy, never the legacy rotation,
-    // and no legacy authority or credential version applies to the turn.
-    providerTurn.claudeRotationEnabled = false;
-    providerTurn.claudeAuthoritySnapshot = null;
-    providerTurn.effectiveClaudeCredentialVersion = null;
   },
   // A wait parks the same turn on the durable core waiter (EP-T09).
   park: (deps, wait) =>
@@ -114,9 +106,9 @@ export const CLAUDE_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
 };
 
 /**
- * The Claude capacity phase by the organization's Claude route: `legacy`
- * runs the legacy selection unchanged (one added route read), `maintenance`
- * fails closed, `core` places on the shared core.
+ * The Claude capacity phase by the Claude route: `core` places on the shared
+ * core; `maintenance` and `legacy` (no committed receipt) fail closed, since
+ * the legacy Claude selection is deleted.
  */
 export async function selectClaudeTurnCapacityByRoute(
   deps: CapacityPhaseDeps,
@@ -129,8 +121,7 @@ export async function selectClaudeTurnCapacityByRoute(
     (scoped) =>
       readSubscriptionCoreProviderRoute(scoped, { accountId: input.accountId, provider: "claude" }),
   );
-  if (route === "legacy") return await selectClaudeTurnCapacity(deps);
-  if (route === "maintenance") throw subscriptionCoreCutoverDisabledFailure(DISPLAY_NAME);
+  if (route !== "core") throw subscriptionCoreCutoverDisabledFailure(DISPLAY_NAME);
   const turnId = deps.attempt.turnId;
   if (!turnId) throw new Error("Turn id was not initialized");
   deps.leases.claude.holderId ??= subscriptionTurnLeaseHolderId(

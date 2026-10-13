@@ -1,9 +1,5 @@
 import { type Settings } from "@opengeni/config";
-import {
-  type TranscriptionAvailabilityContext,
-  type TranscriptionProvider,
-  TranscriptionServiceError,
-} from "@opengeni/core";
+import { type TranscriptionAvailabilityContext, type TranscriptionProvider } from "@opengeni/core";
 import {
   getWorkspace,
   readSubscriptionCoreProviderRouteForWorkspace,
@@ -17,10 +13,7 @@ import {
   XAI_CLIENT_MODE,
   XAI_CLIENT_VERSION,
   XAI_PUBLIC_API_BASE_URL,
-  type XaiFetch,
 } from "@opengeni/xai-subscription";
-import { buildXaiSubscriptionAuthorization } from "../../xai-subscription-auth";
-import { fetchError, responseError } from "./openai";
 import { workspaceXaiOperationAvailable } from "../../xai-subscription-core";
 import { coreTranscriptionUnavailable, transcribeOnSubscriptionCore } from "./subscription-core";
 
@@ -72,76 +65,25 @@ export function createXaiSubscriptionTranscriptionProvider(input: {
         workspaceId,
         provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
       });
-      if (route === "maintenance") throw coreTranscriptionUnavailable();
-      if (route === "core") {
-        // Decision 3: shared organization- or workspace-scoped connections
-        // only; personal SuperGrok accounts never transcribe on the core.
-        return await transcribeOnSubscriptionCore({
-          db: input.db,
-          settings: input.settings,
-          provider: SUBSCRIPTION_CORE_XAI,
-          fetch: fetchImpl,
-          accountId,
-          workspaceId,
-          subjectId,
-          requestId,
-          send: async (token, requestFetch) =>
-            await send(requestFetch, subscriptionCoreXaiBearer(token).accessToken),
-          unauthorized: async (response) =>
-            response.status === 401 || (await isXaiInvalidCredentialResponse(response)),
-        });
-      }
-      let auth: Awaited<ReturnType<typeof buildXaiSubscriptionAuthorization>>;
-      try {
-        auth = await buildXaiSubscriptionAuthorization({
-          db: input.db,
-          settings: input.settings,
-          accountId,
-          workspaceId,
-          subjectId,
-          shardKey: requestId,
-          sessionId: requestId,
-          ...(input.fetch ? { fetch: input.fetch as XaiFetch } : {}),
-        });
-      } catch {
-        throw new TranscriptionServiceError({
-          code: "unavailable",
-          fallbackSafe: true,
-          message: "Transcription is unavailable.",
-        });
-      }
-      const request = async (accessToken: string) => await send(fetchImpl, accessToken);
-      const tokenForRequest = async (refresh: boolean) => {
-        try {
-          return await (refresh ? auth.context.refresh() : auth.context.getToken());
-        } catch {
-          throw new TranscriptionServiceError({
-            code: "unavailable",
-            message: "Reconnect the SuperGrok account to use transcription.",
-            fallbackSafe: true,
-          });
-        }
-      };
-      let response: Response;
-      try {
-        let token = await tokenForRequest(false);
-        response = await request(token.accessToken);
-        if (response.status === 401 || (await isXaiInvalidCredentialResponse(response))) {
-          await response.body?.cancel().catch(() => undefined);
-          token = await tokenForRequest(true);
-          response = await request(token.accessToken);
-        }
-      } catch (error) {
-        if (error instanceof TranscriptionServiceError) throw error;
-        throw fetchError(error);
-      }
-      if (!response.ok) throw responseError(response.status);
-      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!body || typeof body.text !== "string") throw responseError(502);
-      return {
-        text: body.text,
-        languages: typeof body.language === "string" && body.language ? [body.language] : [],
-      };
+      // SuperGrok transcribes only on the shared core; any other route
+      // (maintenance, or no receipt) is unavailable.
+      if (route !== "core") throw coreTranscriptionUnavailable();
+      // Decision 3: shared organization- or workspace-scoped connections
+      // only; personal SuperGrok accounts never transcribe on the core.
+      return await transcribeOnSubscriptionCore({
+        db: input.db,
+        settings: input.settings,
+        provider: SUBSCRIPTION_CORE_XAI,
+        fetch: fetchImpl,
+        accountId,
+        workspaceId,
+        subjectId,
+        requestId,
+        send: async (token, requestFetch) =>
+          await send(requestFetch, subscriptionCoreXaiBearer(token).accessToken),
+        unauthorized: async (response) =>
+          response.status === 401 || (await isXaiInvalidCredentialResponse(response)),
+      });
     },
   };
 }

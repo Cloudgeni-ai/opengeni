@@ -790,13 +790,18 @@ Its tests use fake credentials and local transports; no live subscription probes
 without explicit user approval. Account/device identity belongs in the encrypted
 connection bundle, never in source or model-admission metadata.
 
-Individual Claude subscriptions activate at maintenance migration 0598. Use the
+The historical Claude activation at 0598 is followed by the shared-core
+SuperGrok and Claude cutovers and the legacy-runtime retirement. Use the
 codec-aware migrator with drained runtime roles and the existing environments
-encryption key; never restart pre-cutover binaries. Account scope and quota
-rotation reuse the shared SuperGrok repository and durable capacity protocol.
-Never infer private authority from a session creator or present browser user,
-and never rotate permission, suspension, safety or validation failures. See
-docs/model-providers.md and docs/deployment.md.
+encryption key; never restart pre-cutover binaries. All three subscription
+providers use `packages/db/src/subscription-core/` and small registered adapters.
+Legacy repositories, synthetic pool/session subjects and routine twins are
+test-only or stored history, never runtime fallbacks. Account choice has one
+transaction in `subscription-core/session-choice.ts`; retained provider APIs
+only project their existing wire receipts. Never infer private authority from
+a session creator or present browser user, or widen accepted work after an
+account-choice change. Never rotate permission, suspension, safety or validation
+failures. See docs/model-providers.md and docs/deployment.md.
 
 Codex moves onto the shared subscription core at maintenance migration 0689.
 Drain every old and new runtime login, run the codec-aware migrator with the
@@ -805,7 +810,8 @@ existing environments encryption key, and start only binaries that carry the
 organization is born with an enabled Codex cutover row; turning it off is
 fail-closed maintenance, never the legacy tables. M3 PR 4 removes the runtime
 legacy selector, stores and no-row fallback; a missing gate also fails closed.
-Run `bun run check:no-legacy-codex-runtime` after subscription changes. Keep the
+Run `bun run check:no-legacy-subscription-runtime` after subscription changes
+(one entry per retired provider in `scripts/legacy-subscription-runtime/`). Keep the
 codec-aware migration, schema/posture history, reset-redemption live ledger and
 Temporal names/omitted-provider decoding. Historical fixtures are test-only.
 Source merge is not activation: the PR 4 binary requires drained 0689 receipt

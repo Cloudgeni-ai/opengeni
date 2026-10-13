@@ -61,6 +61,13 @@ Then open the smallest source files that answer the question:
 - Feature subsystems: `docs/secrets.md` (vaults, `{{secret:…}}` references and delivery), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
+- Subscription policy and lifecycle: `packages/subscriptions/` and
+  `packages/db/src/subscription-core/`, with provider bindings registered in
+  `subscription-core-providers.ts`. Session account choice has one transaction
+  in `subscription-core/session-choice.ts`; legacy provider endpoints project
+  their existing receipts, never duplicate its writer. Check the cutover and
+  retirement runbooks before activation; stored legacy rows are not runtime
+  fallbacks. See `docs/subscription-accounts.md`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Command-output collection follows durable custody independently of model

@@ -6,7 +6,14 @@ import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { createDb, refreshSubscriptionCoreCodexCredential, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { runtimeDatabaseReadyCheck } from "../src/runtime-posture";
+import {
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  runtimeDatabaseReadyCheck,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
+} from "../src/runtime-posture";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
 import {
   ownerlessRefreshFixture,
@@ -14,6 +21,9 @@ import {
 } from "./fixtures/ownerless-codex-refresh";
 
 const migration = "0700_codex_ownerless_person_refresh.sql";
+// The drained retirement later drops the Codex-named routine 0700 patches: it
+// is withheld until the end, where it runs after the rolling upgrade.
+const retirement = SUBSCRIPTION_RETIREMENT_MIGRATION;
 const signature =
   "opengeni_private.begin_subscription_codex_refresh(uuid,uuid,uuid,uuid,text,text,uuid,text,bigint)";
 const oldGuard =
@@ -21,7 +31,7 @@ const oldGuard =
 const newGuard = "authorized := opengeni_private.authorize_subscription_ownerless_session_access(";
 
 test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-  "0700 rolls forward under the non-bypass owner, keeps live app readiness/posture and repairs only the ownerless refresh guard",
+  "0700 rolls forward under the non-bypass owner, keeps the live app posture and repairs only the ownerless refresh guard",
   async () => {
     const database = await acquireOwnerMigratedTestDatabase("ownerless-refresh-0699-upgrade");
     if (!database) throw new Error("Real PostgreSQL required");
@@ -32,18 +42,25 @@ test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
         await owner`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
       expect(role).toMatchObject({ rolsuper: false, rolbypassrls: false });
       await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-      await owner`insert into schema_migrations(name) values (${migration})`;
+      await owner`insert into schema_migrations(name) values (${migration}), (${retirement})`;
       await migrate(database.ownerUrl);
       await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
       const appUrl = new URL(database.ownerUrl);
       appUrl.username = "opengeni_app";
       appUrl.password = database.appPassword;
       client = createDb(appUrl.toString(), { max: 1 });
-      const ready = runtimeDatabaseReadyCheck(client.db, {
-        rlsStrategy: "force",
-        expectedRole: "opengeni_app",
-      });
-      await ready();
+      const options = { rlsStrategy: "force" as const, expectedRole: "opengeni_app" };
+      // This release is ready once the drained retirement has run; until then
+      // its posture names exactly the objects the retirement drops.
+      const pendingRetirement = retiredSubscriptionObjectDescriptions().map(
+        retiredSubscriptionObjectViolation,
+      );
+      const violations = async () =>
+        evaluateRuntimeDatabasePosture(
+          await inspectRuntimeDatabasePosture(client!.db, options),
+          options,
+        );
+      expect(await violations()).toEqual(pendingRetirement);
 
       const routine = async () => {
         const [row] =
@@ -92,7 +109,7 @@ test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
       // replaces the function. No re-provisioning is needed after the patch.
       await owner`delete from schema_migrations where name = ${migration}`;
       await migrate(database.ownerUrl);
-      await ready();
+      expect(await violations()).toEqual(pendingRetirement);
       const after = await routine();
       const { definition: beforeDefinition, ...beforePosture } = before;
       const { definition: afterDefinition, ...afterPosture } = after;
@@ -130,6 +147,17 @@ test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
         "Ownerless Codex refresh authorization source changed",
       );
       expect((await routine()).definition).toBe(afterDefinition);
+
+      // The drained retirement drops the Codex-named routine; the binary is
+      // then ready and keeps refreshing through the provider-neutral routine.
+      await client.close();
+      client = undefined;
+      await owner`delete from schema_migrations where name = ${retirement}`;
+      await migrate(database.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
+      const [dropped] = await owner`select to_regprocedure(${signature}) is null as dropped`;
+      expect(dropped).toEqual({ dropped: true });
+      client = createDb(appUrl.toString(), { max: 1 });
+      await runtimeDatabaseReadyCheck(client.db, options)();
     } finally {
       await client?.close();
       await owner.end();

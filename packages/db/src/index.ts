@@ -63,6 +63,7 @@ import {
   WorkspaceModelCompactionThresholdsPatch,
   cleanStoredSessionTitle,
   workspaceSettingsAllowCreditModels,
+  readTurnServingPolicyV1,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -139,12 +140,6 @@ export {
   type EffectiveSubscriptionSettingsRow,
 } from "./subscription-core-repository";
 export {
-  isSubscriptionPoolWorkerSubject,
-  subscriptionPoolWorkerSubject,
-  withSubscriptionPoolSessionAccess,
-  type SubscriptionPoolProvider,
-} from "./subscription-session-access";
-export {
   assertSubscriptionCoreAcceptedTurn,
   withSubscriptionCoreAcceptedTurn,
   type SubscriptionCoreAcceptedTurnAccessResult,
@@ -166,10 +161,6 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
-import {
-  claudeSubscriptionAccountRepository,
-  claudeSubscriptionTables,
-} from "./claude-subscription-accounts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
   db: Database,
@@ -188,7 +179,6 @@ export const getSessionParentClaudeProviderAccountAuthority = (
   childSessionId: string,
 ) => getAcceptedSubscriptionParentAuthority(db, "claude", workspaceId, childSessionId);
 import { WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
-import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
 import {
   getAcceptedSubscriptionTaskAuthority,
   getAcceptedSubscriptionTurnAuthority,
@@ -199,9 +189,6 @@ export {
   getScheduledTaskSubscriptionAuthority,
   receiverCodexSubscriptionAuthorityV2InTransaction,
 } from "./accepted-subscription-authority";
-export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
-export * from "./claude-subscription-accounts";
-export * from "./claude-subscription-account-usage";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
@@ -308,7 +295,6 @@ export const retryFailedSessionInTransaction = createRetryFailedSessionInTransac
 );
 
 export * from "./codex-plan-entitlement";
-export * from "./legacy-subscription-world";
 export * from "./subscription-core-codex";
 export * from "./subscription-core-codex-apps";
 export * from "./subscription-core-codex-compat";
@@ -416,6 +402,12 @@ export {
   type SubscriptionCoreAdministeredProbeDeps,
   type SubscriptionCoreAdministeredScope,
 } from "./subscription-core/administered-connections";
+// A person's own personal connections outside placement: stored status for
+// status reads and the live re-read of a stored exhaustion (design 5.3).
+export {
+  subscriptionCorePersonalConnections,
+  type SubscriptionCorePersonalConnection,
+} from "./subscription-core/personal-connections";
 import {
   listSubscriptionCoreCodexServingConnections,
   readCodexCutoverDispositionForWorkspace,
@@ -426,6 +418,7 @@ import {
   projectSubscriptionCoreCodexWorkspace,
   type SubscriptionCoreCodexWake,
 } from "./subscription-core-codex-compat";
+export { pinSubscriptionCoreSessionCodexAccount } from "./subscription-core-codex-compat";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
@@ -450,23 +443,16 @@ import {
 import { ResolvedAgentConfig } from "@opengeni/contracts";
 import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
-import {
-  subscriptionPoolWorkerSubject,
-  withPoolWakeServiceScopeInTransaction,
-  withSubscriptionPoolSessionAccess,
-  withTemporaryPoolSessionAccessInTransaction,
-} from "./subscription-session-access";
+import { withPoolWakeServiceScopeInTransaction } from "./subscription-session-access";
 import {
   readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
   readSubscriptionSessionBinding as readCoreSessionBinding,
-  isSubscriptionSessionBindingRollingConflict,
-  resolveSubscriptionConnectionId as resolveCoreConnectionId,
-  writeSubscriptionSessionBinding as writeCoreSessionBinding,
 } from "./subscription-core-repository";
 import {
   wakeSubscriptionCoreCapacityWaiters,
   type SubscriptionCoreWakeScope,
 } from "./subscription-core/waiters";
+import { capacityWaitCandidateProviders } from "./subscription-core/waiter-candidates";
 export {
   chooseSubscriptionCoreSessionAccount,
   readSubscriptionCoreSessionAccountChoice,
@@ -530,8 +516,6 @@ import {
   type ModelConnectionAccess,
   type ModelConnectionTarget,
 } from "./model-connection-access";
-import { withOrganizationXaiCapacityMutation } from "./organization-xai-subscriptions";
-import { withOrganizationClaudeCapacityMutation } from "./claude-subscription-accounts";
 export {
   assertModelConnectionAllowsTurn,
   modelAllowedByConnections,
@@ -550,7 +534,7 @@ export {
   SubscriptionCoreAccessPersonNotInOrganizationError,
   type SubscriptionCoreAccess,
 } from "./subscription-core/access";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
   scheduledRunHumanWaitsInRlsContext,
@@ -875,7 +859,6 @@ import {
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
-  ClaudeSubscriptionCredential,
   environmentsEncryptionKeyBytes,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
@@ -1162,8 +1145,6 @@ export * from "./video-generation";
 export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 export * from "./connection-authority";
-export * from "./xai-subscription";
-export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -1300,12 +1281,6 @@ import {
   type ConnectionTokenResolverOptions,
 } from "./connection-token-resolver";
 import { resolveAcceptedConnectionUse } from "./connection-authority";
-import {
-  xaiSubscriptionRepository,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
-  xaiCredentialWorkspacePredicate,
-  xaiRotationWorkspacePredicate,
-} from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
   value: unknown,
@@ -24171,6 +24146,8 @@ export type SubscriptionCoreCodexCapacityWait = {
   waiterId: string;
   /** The provider whose turn waits (the Codex-named readers return only Codex rows). */
   provider: SubscriptionCoreWaiterProvider;
+  /** Fresh evaluation hints only; null denotes a legacy home-only waiter. */
+  candidateProviders: string[] | null;
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -24198,6 +24175,7 @@ export type SubscriptionCoreCodexCapacityWait = {
 type SubscriptionCoreCodexWaiterRow = {
   waiter_id: string;
   provider: string;
+  candidate_providers: string[] | null;
   account_id: string;
   workspace_id: string;
   session_id: string;
@@ -24219,7 +24197,7 @@ type SubscriptionCoreCodexWaiterRow = {
 };
 
 const SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS = sql.raw(`waiter_id::text as waiter_id,
-  provider, account_id::text as account_id, workspace_id::text as workspace_id,
+  provider, candidate_providers, account_id::text as account_id, workspace_id::text as workspace_id,
   session_id::text as session_id, turn_id::text as turn_id, blocked_turn_generation,
   generation, wake_revision, observed_wake_revision, wait_reason, reset_kind,
   refresh_attempt, earliest_reset_at, next_check_at, goal_id::text as goal_id,
@@ -24247,6 +24225,7 @@ function mapSubscriptionCoreCodexWaiter(
   return {
     waiterId: row.waiter_id,
     provider: subscriptionCoreWaiterProvider(row.provider),
+    candidateProviders: row.candidate_providers,
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
@@ -24404,12 +24383,14 @@ export function subscriptionCoreCodexNextCheckAt(input: {
   refreshAttempt: number;
   now: Date;
   rechecksBeforeReset?: boolean;
+  /** Also refresh an empty candidate set after settings/pool/cutover changes. */
+  failoverAware?: boolean;
 }): { nextCheckAt: Date; resetKind: CodexCapacityResetKind } {
   const { now } = input;
   const retryAt = input.healthRetryAt?.getTime();
   const futureRetryAt = retryAt !== undefined && retryAt > now.getTime() ? retryAt : null;
   if (input.earliestResetAt && input.earliestResetAt.getTime() > now.getTime()) {
-    if (input.rechecksBeforeReset === true) {
+    if (input.rechecksBeforeReset === true || input.failoverAware === true) {
       // A quarantine that ends sooner than the bounded check moves it earlier.
       const backoff = now.getTime() + codexCapacityRefreshBackoffMs(input.refreshAttempt);
       const bounded = futureRetryAt !== null ? Math.min(futureRetryAt, backoff) : backoff;
@@ -24457,6 +24438,11 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
   waitReason: string;
   earliestResetAt: Date | null;
   healthRetryAt?: Date | null;
+  /** From a fresh failover-aware accepted-turn evaluation; never caller authority.
+   * Supply [] when that evaluation currently has no alternative providers.
+   * Omission preserves the legacy home-only path until worker integration.
+   */
+  candidateProviders?: readonly string[];
   failurePayload: Record<string, unknown>;
   /** The live core lease a reactive refusal still holds; released atomically. */
   leaseFence?: { connectionId: string; holderId: string; generation: number };
@@ -24473,6 +24459,7 @@ export async function armSubscriptionCoreCapacityWait(
   input: ArmSubscriptionCoreCapacityWaitInput,
 ): Promise<ArmSubscriptionCoreCodexCapacityWaitResult> {
   const vocabulary = subscriptionCoreWaitVocabulary(provider);
+  const candidateProviders = capacityWaitCandidateProviders(input.candidateProviders);
   const label = vocabulary.label;
   const now = input.now ?? new Date();
   const goalId = input.goalId ?? null;
@@ -24646,6 +24633,7 @@ export async function armSubscriptionCoreCapacityWait(
           refreshAttempt: 0,
           now,
           rechecksBeforeReset: vocabulary.recheckBeforeReset,
+          failoverAware: candidateProviders !== null,
         });
         const nextCheckAt = new Date(
           Math.max(
@@ -24671,13 +24659,22 @@ export async function armSubscriptionCoreCapacityWait(
           const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
             tx,
             sql`insert into subscription_capacity_waiters (
-                account_id, workspace_id, session_id, turn_id, provider, wait_reason,
+                account_id, workspace_id, session_id, turn_id, provider, candidate_providers, wait_reason,
                 policy_hash, reset_kind, refresh_attempt, resumed_update_id, earliest_reset_at,
                 generation, wake_revision, observed_wake_revision, next_check_at,
                 blocked_turn_generation, goal_id, goal_version, last_wake_reason, updated_at
               ) values (
                 ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
-                ${input.turnId}::uuid, ${provider}, ${input.waitReason}, null,
+                ${input.turnId}::uuid, ${provider},
+                ${
+                  candidateProviders === null
+                    ? sql`null`
+                    : sql`array[${sql.join(
+                        candidateProviders.map((id) => sql`${id}`),
+                        sql`, `,
+                      )}]::text[]`
+                },
+                ${input.waitReason}, null,
                 ${scheduled.resetKind}, 0, null,
                 ${input.earliestResetAt?.toISOString() ?? null}::timestamptz,
                 ${generation}, ${wakeRevision}, ${wakeRevision},
@@ -24687,6 +24684,7 @@ export async function armSubscriptionCoreCapacityWait(
               )
               on conflict (workspace_id, session_id) do update
                 set turn_id = excluded.turn_id, provider = excluded.provider,
+                    candidate_providers = excluded.candidate_providers,
                     wait_reason = excluded.wait_reason, policy_hash = null,
                     reset_kind = excluded.reset_kind, refresh_attempt = 0,
                     resumed_update_id = null, earliest_reset_at = excluded.earliest_reset_at,
@@ -24880,12 +24878,14 @@ export async function armSubscriptionCoreCapacityWait(
 
 /** What core placement says about a blocked turn, evaluated before the reconcile transaction. */
 export type SubscriptionCoreCodexWaitEvaluation =
-  | { kind: "run" }
+  | { kind: "run"; candidateProviders?: readonly string[] }
   | {
       kind: "wait";
       waitReason: string;
       earliestResetAt: Date | null;
       healthRetryAt: Date | null;
+      /** Entire freshly derived candidate set, not a union with stored hints. */
+      candidateProviders?: readonly string[];
     }
   /** The accepted turn can no longer use the core under its frozen authority. */
   | { kind: "revoked" }
@@ -25049,6 +25049,14 @@ export async function reconcileSubscriptionCoreCapacityWait(
         const observed = Math.min(waiter.wakeRevision, input.evaluatedWakeRevision);
         const recovery = readCodexCapacityRecovery(blockedTurn.metadata);
         const evaluation = input.evaluation;
+        // A legacy evaluation cannot leave a previously failover-aware waiter
+        // asleep until a distant reset. Discard its old hints and keep the
+        // bounded recheck; the next full evaluation rebuilds eligibility.
+        const candidateProviders = capacityWaitCandidateProviders(
+          evaluation.kind === "wait" || evaluation.kind === "run"
+            ? (evaluation.candidateProviders ?? (waiter.candidateProviders === null ? null : []))
+            : waiter.candidateProviders,
+        );
         if (
           evaluation.kind !== "run" ||
           (recovery.retryNotBefore && Date.parse(recovery.retryNotBefore) > now.getTime())
@@ -25067,13 +25075,16 @@ export async function reconcileSubscriptionCoreCapacityWait(
             waitEvaluation.earliestResetAt.getTime() > now.getTime();
           // A provider that rechecks before its reset backs off across checks.
           const refreshAttempt =
-            authoritative && !vocabulary.recheckBeforeReset ? 0 : waiter.refreshAttempt + 1;
+            authoritative && !vocabulary.recheckBeforeReset && candidateProviders === null
+              ? 0
+              : waiter.refreshAttempt + 1;
           const scheduled = subscriptionCoreCodexNextCheckAt({
             earliestResetAt: waitEvaluation.earliestResetAt,
             healthRetryAt: waitEvaluation.healthRetryAt,
             refreshAttempt,
             now,
             rechecksBeforeReset: vocabulary.recheckBeforeReset,
+            failoverAware: candidateProviders !== null,
           });
           // Capacity changes can prompt a recheck but never bypass a persisted
           // false-resumption delay.
@@ -25087,6 +25098,14 @@ export async function reconcileSubscriptionCoreCapacityWait(
             tx,
             sql`update subscription_capacity_waiters
               set wait_reason = ${waitEvaluation.waitReason},
+                  candidate_providers = ${
+                    candidateProviders === null
+                      ? sql`null`
+                      : sql`array[${sql.join(
+                          candidateProviders.map((id) => sql`${id}`),
+                          sql`, `,
+                        )}]::text[]`
+                  },
                   earliest_reset_at = ${waitEvaluation.earliestResetAt?.toISOString() ?? null}::timestamptz,
                   next_check_at = ${nextCheckAt.toISOString()}::timestamptz,
                   reset_kind = ${scheduled.resetKind},
@@ -25404,50 +25423,10 @@ export async function wakeSubscriptionCoreProviderCapacityWaiters(
 }
 
 // ---------------------------------------------------------------------------
-// Durable xAI subscription capacity wait / wake state machine.
+// Durable scoped-subscription (legacy Claude) capacity wait / wake state
+// machine. SuperGrok's legacy instance was deleted with its runtime (M4 X4):
+// SuperGrok waits park on the shared core waiter.
 // ---------------------------------------------------------------------------
-
-export type XaiCapacityWait = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  goalId: string | null;
-  goalVersion: number | null;
-  blockedTurnId: string;
-  blockedTurnGeneration: number;
-  workflowId: string;
-  authorityScope: "workspace" | "user" | "organization";
-  ownerOrganizationMembershipId: string | null;
-  status: CodexCapacityWaitStatus;
-  generation: number;
-  earliestResetAt: Date | null;
-  nextCheckAt: Date;
-  wakeRevision: number;
-  observedWakeRevision: number;
-  lastWakeReason: string;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-export type XaiCredentialLeaseQuarantine =
-  | {
-      kind: "status";
-      status: "needs_relogin" | "error";
-      lastError: string;
-    }
-  | { kind: "cooldown"; until: Date };
-
-export type ArmXaiCapacityWaitResult =
-  | { action: "waiting"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: XaiCapacityWait | null; events: SessionEvent[] };
-
-export type ReconcileXaiCapacityWaitResult =
-  | { action: "waiting"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "resumed"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "paused"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "superseded"; waiter: XaiCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: XaiCapacityWait | null; events: SessionEvent[] };
 
 async function withTemporarySubjectRls<T>(
   tx: Database,
@@ -25483,1260 +25462,6 @@ async function withTemporarySubjectRls<T>(
 }
 
 /** Shared durable scoped-subscription waiter state machine. */
-function createScopedSubscriptionCapacityWaiters(options: {
-  provider: "xai" | "claude";
-  label: string;
-  wireProvider: string;
-  workerSubject: string;
-  snapshotColumn: "xaiProviderAccountAuthoritySnapshot" | "claudeProviderAccountAuthoritySnapshot";
-  resolvePoolFunction: "resolve_xai_authority_pool" | "resolve_claude_authority_pool";
-  tables: import("./subscription-pool-schema").SubscriptionPoolTables;
-  rotationWorkspacePredicate: typeof xaiRotationWorkspacePredicate;
-  credentialWorkspacePredicate: typeof xaiCredentialWorkspacePredicate;
-  selectAvailable: typeof xaiSubscriptionRepository.selectSubscriptionCredentialForUse;
-}) {
-  const { tables } = options;
-  function mapXaiCapacityWaiter(row: typeof tables.capacityWaiters.$inferSelect): XaiCapacityWait {
-    return {
-      id: row.id,
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
-      sessionId: row.sessionId,
-      goalId: row.goalId,
-      goalVersion: row.goalVersion,
-      blockedTurnId: row.blockedTurnId,
-      blockedTurnGeneration: row.blockedTurnGeneration,
-      workflowId: row.workflowId,
-      authorityScope: row.authorityScope as "workspace" | "user" | "organization",
-      ownerOrganizationMembershipId: row.ownerOrganizationMembershipId,
-      status: row.status as CodexCapacityWaitStatus,
-      generation: row.generation,
-      earliestResetAt: row.earliestResetAt,
-      nextCheckAt: row.nextCheckAt,
-      wakeRevision: row.wakeRevision,
-      observedWakeRevision: row.observedWakeRevision,
-      lastWakeReason: row.lastWakeReason,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    };
-  }
-
-  function xaiCapacityNextCheckAt(earliestResetAt: Date | null, now: Date): Date {
-    return earliestResetAt && earliestResetAt.getTime() > now.getTime()
-      ? new Date(Math.min(earliestResetAt.getTime(), now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS))
-      : new Date(now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS);
-  }
-
-  async function resolveXaiWaiterSubject(
-    db: Database,
-    workspaceId: string,
-    sessionId: string,
-  ): Promise<{
-    subjectId: string;
-    snapshot: XaiProviderAccountAuthoritySnapshotV1;
-    turnId: string;
-  } | null> {
-    return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-      const [turn] = await scopedDb
-        .select({
-          id: schema.sessionTurns.id,
-          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-          snapshot: schema.sessionTurns[options.snapshotColumn],
-        })
-        .from(schema.sessions)
-        .innerJoin(
-          schema.sessionTurns,
-          and(
-            eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
-            eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            eq(schema.sessions.id, sessionId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.status, "waiting_capacity"),
-          ),
-        )
-        .limit(1);
-      if (!turn) return null;
-      const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(turn.snapshot);
-      const subjectId =
-        snapshot.scope === "user" ? turn.initiatingHumanSubjectId : options.workerSubject;
-      if (!subjectId) return null;
-      return { subjectId, snapshot, turnId: turn.id };
-    });
-  }
-
-  async function getXaiCapacityWaitForSessionInTransaction(
-    tx: Database,
-    workspaceId: string,
-    sessionId: string,
-  ): Promise<XaiCapacityWait | null> {
-    const [turn] = await tx
-      .select({
-        id: schema.sessionTurns.id,
-        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-        snapshot: schema.sessionTurns[options.snapshotColumn],
-      })
-      .from(schema.sessions)
-      .innerJoin(
-        schema.sessionTurns,
-        and(
-          eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
-          eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.id, sessionId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "waiting_capacity"),
-        ),
-      )
-      .limit(1);
-    if (!turn) return null;
-    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(turn.snapshot);
-    const subjectId =
-      snapshot.scope === "user" ? turn.initiatingHumanSubjectId : options.workerSubject;
-    if (!subjectId) return null;
-    // The pool-worker subject must not hide the caller's own private session:
-    // keep the turn's initiating human, which the caller just read itself.
-    return await withTemporarySubjectRls(
-      tx,
-      subjectId,
-      async () =>
-        await withTemporaryPoolSessionAccessInTransaction(
-          tx,
-          subjectId === options.workerSubject ? turn.initiatingHumanSubjectId : null,
-          async () => {
-            const [row] = await tx
-              .select()
-              .from(tables.capacityWaiters)
-              .where(
-                and(
-                  eq(tables.capacityWaiters.workspaceId, workspaceId),
-                  eq(tables.capacityWaiters.sessionId, sessionId),
-                  eq(tables.capacityWaiters.blockedTurnId, turn.id),
-                  eq(tables.capacityWaiters.status, "waiting"),
-                ),
-              )
-              .limit(1);
-            return row ? mapXaiCapacityWaiter(row) : null;
-          },
-        ),
-    );
-  }
-
-  async function resolveXaiPoolMembershipInTransaction(
-    tx: Database,
-    input: {
-      accountId: string;
-      workspaceId: string;
-      subjectId: string;
-      authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-    },
-  ): Promise<string | null> {
-    if (input.authoritySnapshot.scope !== "user") return null;
-    const rows = await rawRows<{ membership_id: string }>(
-      tx,
-      sql`select organization_membership_id as membership_id
-      from ${sql.identifier(options.resolvePoolFunction)}(
-        ${input.accountId}::uuid,
-        ${input.workspaceId}::uuid,
-        ${input.subjectId},
-        ${JSON.stringify(input.authoritySnapshot)}::jsonb
-      )`,
-    );
-    return rows[0]?.membership_id ?? null;
-  }
-
-  function xaiSnapshotMatchesTurn(
-    turn: typeof schema.sessionTurns.$inferSelect,
-    snapshot: XaiProviderAccountAuthoritySnapshotV1,
-    subjectId: string,
-  ): boolean {
-    const current = XaiProviderAccountAuthoritySnapshotV1.safeParse(turn[options.snapshotColumn]);
-    return (
-      current.success &&
-      stableJson(current.data) === stableJson(snapshot) &&
-      (snapshot.scope !== "user" || turn.initiatingHumanSubjectId === subjectId)
-    );
-  }
-
-  /**
-   * Open one waiter transaction. A user pool acts as its initiating human, who
-   * owns any private session that runs on it. Workspace and organization pool
-   * policies do not read the subject, and their synthetic worker subject would
-   * make session-visibility RLS hide a member's private session (and its
-   * waiter rows) from that session's own turn, so they run without one.
-   */
-  async function withScopedCapacityWaiterRls<T>(
-    db: Database,
-    workspaceId: string,
-    subjectId: string,
-    snapshot: XaiProviderAccountAuthoritySnapshotV1,
-    fn: (db: SessionActivityDatabase) => Promise<T>,
-  ): Promise<T> {
-    if (!subjectId.trim()) {
-      throw new Error(options.label + " capacity waiter requires a non-empty subjectId");
-    }
-    return snapshot.scope === "user"
-      ? await withWorkspaceSubjectSessionActivityRls(db, workspaceId, subjectId, fn)
-      : await withWorkspaceSessionActivityRls(db, workspaceId, fn);
-  }
-
-  /**
-   * Atomically close one exact xAI attempt and preserve its logical turn behind a
-   * durable provider-capacity waiter. The immutable authority snapshot and, for
-   * private pools, exact initiating human are revalidated under FORCE RLS before
-   * any session/turn projection changes.
-   */
-  async function armXaiCapacityWait(
-    db: Database,
-    input: {
-      accountId: string;
-      workspaceId: string;
-      subjectId: string;
-      sessionId: string;
-      turnId: string;
-      attemptId: string;
-      workflowId: string;
-      authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-      goalId?: string | null;
-      goalVersion?: number | null;
-      earliestResetAt: Date | null;
-      failurePayload: Record<string, unknown>;
-      leaseFence?: { holderId: string; generation: number };
-      credentialQuarantine?: XaiCredentialLeaseQuarantine;
-      expectedCredentialVersion?: number;
-      credentialTokenFence?: { encryptionKey: Uint8Array; observedAccessToken: string };
-      now?: Date;
-    },
-  ): Promise<ArmXaiCapacityWaitResult> {
-    const now = input.now ?? new Date();
-    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
-    const goalId = input.goalId ?? null;
-    const goalVersion = input.goalVersion ?? null;
-    if (
-      (goalId === null) !== (goalVersion === null) ||
-      (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
-    ) {
-      throw new Error(
-        options.label + " capacity goal fence must be absent or contain a positive version",
-      );
-    }
-    if (input.credentialQuarantine && !input.leaseFence) {
-      throw new Error(options.label + " credential quarantine requires an exact lease fence");
-    }
-    if (options.provider === "claude" && input.credentialQuarantine && !input.credentialTokenFence)
-      throw new Error("Claude credential quarantine requires the exact dispatched token");
-    if (
-      input.credentialQuarantine?.kind === "cooldown" &&
-      (!Number.isFinite(input.credentialQuarantine.until.getTime()) ||
-        input.credentialQuarantine.until.getTime() <= now.getTime())
-    ) {
-      throw new Error(options.label + " credential cooldown must end in the future");
-    }
-    return await withScopedCapacityWaiterRls(
-      db,
-      input.workspaceId,
-      input.subjectId,
-      snapshot,
-      async (scopedDb) =>
-        await withSessionActivitySavepoint(scopedDb, async (tx) => {
-          const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            authoritySnapshot: snapshot,
-          });
-          if (snapshot.scope === "user" && !ownerOrganizationMembershipId) {
-            return { action: "stale", waiter: null, events: [] } as const;
-          }
-          if (snapshot.scope !== "organization")
-            await tx
-              .insert(tables.rotationSettings)
-              .values({
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                authorityScope: snapshot.scope,
-                ownerOrganizationMembershipId,
-              })
-              .onConflictDoNothing();
-          const [rotation] = await tx
-            .select()
-            .from(tables.rotationSettings)
-            .where(
-              and(
-                options.rotationWorkspacePredicate(input.workspaceId),
-                eq(tables.rotationSettings.authorityScope, snapshot.scope),
-                ownerOrganizationMembershipId === null
-                  ? isNull(tables.rotationSettings.ownerOrganizationMembershipId)
-                  : eq(
-                      tables.rotationSettings.ownerOrganizationMembershipId,
-                      ownerOrganizationMembershipId,
-                    ),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          if (!rotation || rotation.accountId !== input.accountId) {
-            return { action: "stale", waiter: null, events: [] } as const;
-          }
-          // Child-lifecycle prefix: the parent session is locked with the child
-          // so the capacity-wait notice can be enqueued in this same commit.
-          const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            attemptId: input.attemptId,
-          });
-          const session = locks.session;
-          const turn = locks.turns[0];
-          const attempt = locks.attempts[0];
-          const effectiveControl = session
-            ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-                workspaceControl: locks.control ?? undefined,
-              })
-            : null;
-          const [goal] = goalId
-            ? await tx
-                .select()
-                .from(schema.sessionGoals)
-                .where(
-                  and(
-                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                    eq(schema.sessionGoals.id, goalId),
-                    eq(schema.sessionGoals.sessionId, input.sessionId),
-                  ),
-                )
-                .for("update")
-                .limit(1)
-            : [];
-          const [lease] = input.leaseFence
-            ? await tx
-                .select()
-                .from(tables.credentialLeases)
-                .where(
-                  and(
-                    eq(tables.credentialLeases.workspaceId, input.workspaceId),
-                    eq(tables.credentialLeases.turnId, input.turnId),
-                  ),
-                )
-                .for("update")
-                .limit(1)
-            : [];
-          const [existing] = await tx
-            .select()
-            .from(tables.capacityWaiters)
-            .where(
-              and(
-                eq(tables.capacityWaiters.workspaceId, input.workspaceId),
-                eq(tables.capacityWaiters.sessionId, input.sessionId),
-                eq(tables.capacityWaiters.authorityScope, snapshot.scope),
-                ownerOrganizationMembershipId === null
-                  ? isNull(tables.capacityWaiters.ownerOrganizationMembershipId)
-                  : eq(
-                      tables.capacityWaiters.ownerOrganizationMembershipId,
-                      ownerOrganizationMembershipId,
-                    ),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          const exactRowsMatch =
-            session?.accountId === input.accountId &&
-            turn?.accountId === input.accountId &&
-            turn?.sessionId === input.sessionId &&
-            attempt?.accountId === input.accountId &&
-            attempt?.sessionId === input.sessionId &&
-            attempt?.turnId === input.turnId;
-          if (!exactRowsMatch || !turn) {
-            return {
-              action: "stale",
-              waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-              events: [],
-            } as const;
-          }
-          if (
-            existing?.status === "waiting" &&
-            existing.blockedTurnId === input.turnId &&
-            existing.blockedTurnGeneration === turn.executionGeneration &&
-            turn.status === "waiting_capacity" &&
-            session?.status === "waiting_capacity" &&
-            session.activeTurnId === input.turnId
-          ) {
-            return {
-              action: "waiting",
-              waiter: mapXaiCapacityWaiter(existing),
-              events: [],
-            } as const;
-          }
-          const leaseFenceValid =
-            !input.leaseFence ||
-            (lease?.accountId === input.accountId &&
-              lease.workspaceId === input.workspaceId &&
-              lease.authorityScope === snapshot.scope &&
-              lease.ownerOrganizationMembershipId === ownerOrganizationMembershipId &&
-              lease.holderId === input.leaseFence.holderId &&
-              lease.generation === input.leaseFence.generation);
-          const leaseStillLive = async () => {
-            if (!input.leaseFence) return true;
-            if (!lease) return false;
-            const [clock] = await rawRows<{ live: boolean }>(
-              tx,
-              sql`select ${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp() as live`,
-            );
-            return clock?.live === true;
-          };
-          if (
-            !session ||
-            !attempt ||
-            effectiveControl?.state !== "active" ||
-            effectiveControl.settlement !== null ||
-            session.activeTurnId !== input.turnId ||
-            session.status !== "running" ||
-            turn.status !== "running" ||
-            turn.activeAttemptId !== input.attemptId ||
-            (goalId !== null &&
-              (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
-            !leaseFenceValid ||
-            !(await leaseStillLive()) ||
-            !xaiSnapshotMatchesTurn(turn, snapshot, input.subjectId)
-          ) {
-            return {
-              action: "stale",
-              waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-              events: [],
-            } as const;
-          }
-
-          if (input.credentialQuarantine) {
-            if (!lease)
-              throw new Error(options.label + " credential quarantine lost its lease fence");
-            const [credential] = await tx
-              .select({ encrypted: tables.credentials.credentialEncrypted })
-              .from(tables.credentials)
-              .where(
-                and(
-                  eq(tables.credentials.accountId, input.accountId),
-                  eq(tables.credentials.id, lease.credentialId),
-                ),
-              )
-              .for("update")
-              .limit(1);
-            if (!credential || !(await leaseStillLive()))
-              return {
-                action: "stale",
-                waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-                events: [],
-              } as const;
-            if (options.provider === "claude" && input.credentialTokenFence) {
-              const fence = input.credentialTokenFence;
-              const token = credential
-                ? ClaudeSubscriptionCredential.parse(
-                    JSON.parse(decryptEnvironmentValue(fence.encryptionKey, credential.encrypted)),
-                  ).token
-                : null;
-              const current = Buffer.from(token ?? ""),
-                observed = Buffer.from(fence.observedAccessToken);
-              if (
-                !token ||
-                current.length !== observed.length ||
-                !timingSafeEqual(current, observed)
-              )
-                return {
-                  action: "stale",
-                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-                  events: [],
-                } as const;
-            }
-            const updated = await tx
-              .update(tables.credentials)
-              .set(
-                input.credentialQuarantine.kind === "status"
-                  ? {
-                      status: input.credentialQuarantine.status,
-                      lastError: input.credentialQuarantine.lastError,
-                      exhaustedUntil: null,
-                      updatedAt: now,
-                    }
-                  : {
-                      exhaustedUntil: input.credentialQuarantine.until,
-                      updatedAt: now,
-                    },
-              )
-              .where(
-                and(
-                  eq(tables.credentials.accountId, input.accountId),
-                  options.credentialWorkspacePredicate(input.workspaceId),
-                  eq(tables.credentials.id, lease.credentialId),
-                  sql`${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp()`,
-                  ...(input.expectedCredentialVersion === undefined
-                    ? []
-                    : [eq(tables.credentials.version, input.expectedCredentialVersion)]),
-                ),
-              )
-              .returning({ id: tables.credentials.id });
-            if (updated.length !== 1) {
-              if (input.leaseFence)
-                return {
-                  action: "stale",
-                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-                  events: [],
-                } as const;
-              throw new Error(options.label + " credential quarantine lost its credential fence");
-            }
-          }
-
-          await closeSessionTurnAttemptInTransaction(tx, {
-            id: input.attemptId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            executionGeneration: turn.executionGeneration,
-            outcome: "waiting_capacity",
-            closedAt: now,
-          });
-          const generation = (existing?.generation ?? 0) + 1;
-          const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
-          const nextCheckAt = xaiCapacityNextCheckAt(input.earliestResetAt, now);
-          const values = {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            goalId,
-            goalVersion,
-            blockedTurnId: input.turnId,
-            blockedTurnGeneration: turn.executionGeneration,
-            workflowId: input.workflowId,
-            authorityScope: snapshot.scope,
-            ownerOrganizationMembershipId,
-            status: "waiting",
-            generation,
-            earliestResetAt: input.earliestResetAt,
-            nextCheckAt,
-            wakeRevision,
-            observedWakeRevision: wakeRevision,
-            lastWakeReason: "capacity_wait_armed",
-            updatedAt: now,
-          } as const;
-          const [waiterRow] = existing
-            ? await tx
-                .update(tables.capacityWaiters)
-                .set(values)
-                .where(eq(tables.capacityWaiters.id, existing.id))
-                .returning()
-            : await tx.insert(tables.capacityWaiters).values(values).returning();
-          if (!waiterRow)
-            throw new Error(options.label + " capacity wait arm returned no waiter row");
-
-          let sequence = session.lastSequence;
-          const closedTools = await closePendingSessionToolCallsInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            reason: options.provider + "_capacity_wait",
-            sequence,
-            now,
-            preserveInterruptionRows: true,
-          });
-          sequence = closedTools.sequence;
-          const inserted = await tx
-            .insert(schema.sessionEvents)
-            .values(
-              withLosslessContentWriteVersion(
-                [
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    sequence: ++sequence,
-                    type: "turn.capacity_waiting",
-                    payload: {
-                      ...input.failurePayload,
-                      provider: options.wireProvider,
-                      recovery: "provider_capacity",
-                      retryable: true,
-                      waiterId: waiterRow.id,
-                      generation: waiterRow.generation,
-                      goalId,
-                      goalVersion,
-                      blockedTurnGeneration: turn.executionGeneration,
-                      earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
-                      nextCheckAt: nextCheckAt.toISOString(),
-                    },
-                    turnId: input.turnId,
-                    turnGeneration: turn.executionGeneration,
-                    turnAttemptId: input.attemptId,
-                    turnAssociation: "current",
-                    occurredAt: now,
-                  },
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    sequence: ++sequence,
-                    type: "session.status.changed",
-                    payload: {
-                      status: "waiting_capacity",
-                      reason: options.provider + "_capacity",
-                    },
-                    turnId: input.turnId,
-                    turnGeneration: turn.executionGeneration,
-                    turnAttemptId: input.attemptId,
-                    turnAssociation: "current",
-                    occurredAt: now,
-                  },
-                ],
-                "payload",
-                "payloadCodecVersion",
-              ),
-            )
-            .returning();
-          const [waitingTurn] = await tx
-            .update(schema.sessionTurns)
-            .set({
-              status: "waiting_capacity",
-              activeAttemptId: null,
-              metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
-              version: turn.version + 1,
-              finishedAt: null,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.id, input.turnId),
-                eq(schema.sessionTurns.status, "running"),
-                eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-              ),
-            )
-            .returning({ id: schema.sessionTurns.id });
-          if (!waitingTurn)
-            throw new Error(options.label + " capacity blocked turn changed during atomic arm");
-          const [waitingSession] = await tx
-            .update(schema.sessions)
-            .set({
-              status: "waiting_capacity",
-              activeTurnId: input.turnId,
-              lastSequence: sequence,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                eq(schema.sessions.id, input.sessionId),
-                eq(schema.sessions.status, "running"),
-                eq(schema.sessions.activeTurnId, input.turnId),
-              ),
-            )
-            .returning({ id: schema.sessions.id });
-          if (!waitingSession)
-            throw new Error(options.label + " capacity session changed during atomic arm");
-          await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
-            turnId: input.turnId,
-            waiterId: waiterRow.id,
-            provider: options.provider,
-            nextCheckAt,
-          });
-          if (input.leaseFence) {
-            await tx
-              .delete(tables.credentialLeases)
-              .where(
-                and(
-                  eq(tables.credentialLeases.workspaceId, input.workspaceId),
-                  eq(tables.credentialLeases.turnId, input.turnId),
-                  eq(tables.credentialLeases.holderId, input.leaseFence.holderId),
-                  eq(tables.credentialLeases.generation, input.leaseFence.generation),
-                ),
-              );
-          }
-          return {
-            action: "waiting",
-            waiter: mapXaiCapacityWaiter(waiterRow),
-            events: [...closedTools.events, ...inserted.map(mapEvent)],
-          } as const;
-        }),
-    );
-  }
-
-  async function getXaiCapacityWaitForSession(
-    db: Database,
-    workspaceId: string,
-    sessionId: string,
-  ): Promise<XaiCapacityWait | null> {
-    const authority = await resolveXaiWaiterSubject(db, workspaceId, sessionId);
-    if (!authority) return null;
-    return await withSubscriptionPoolSessionAccess(
-      db,
-      { workspaceId, subjectId: authority.subjectId, sessionId, turnId: authority.turnId },
-      async () =>
-        await withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (scopedDb) => {
-          const [row] = await scopedDb
-            .select()
-            .from(tables.capacityWaiters)
-            .where(
-              and(
-                eq(tables.capacityWaiters.workspaceId, workspaceId),
-                eq(tables.capacityWaiters.sessionId, sessionId),
-                eq(tables.capacityWaiters.blockedTurnId, authority.turnId),
-                eq(tables.capacityWaiters.status, "waiting"),
-              ),
-            )
-            .limit(1);
-          return row ? mapXaiCapacityWaiter(row) : null;
-        }),
-    );
-  }
-
-  async function supersedeXaiCapacityWaitInTransaction(
-    tx: SessionActivityDatabase,
-    input: {
-      session: typeof schema.sessions.$inferSelect;
-      blockedTurn: typeof schema.sessionTurns.$inferSelect;
-      waiter: typeof tables.capacityWaiters.$inferSelect;
-      reason: string;
-      now: Date;
-    },
-  ): Promise<{ waiter: XaiCapacityWait; events: SessionEvent[] }> {
-    const [updated] = await tx
-      .update(tables.capacityWaiters)
-      .set({
-        status: "superseded",
-        observedWakeRevision: input.waiter.wakeRevision,
-        lastWakeReason: input.reason,
-        updatedAt: input.now,
-      })
-      .where(
-        and(
-          eq(tables.capacityWaiters.id, input.waiter.id),
-          eq(tables.capacityWaiters.status, "waiting"),
-        ),
-      )
-      .returning();
-    if (!updated) return { waiter: mapXaiCapacityWaiter(input.waiter), events: [] };
-    const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
-    const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
-    if (input.blockedTurn.status === "waiting_capacity") {
-      const [settledTurn] = await tx
-        .update(schema.sessionTurns)
-        .set({
-          status: terminalTurnStatus,
-          activeAttemptId: null,
-          cancelledBy: options.provider + "_capacity_reconcile",
-          cancelReason: input.reason,
-          version: input.blockedTurn.version + 1,
-          finishedAt: input.now,
-          updatedAt: input.now,
-        })
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-            eq(schema.sessionTurns.id, input.blockedTurn.id),
-            eq(schema.sessionTurns.status, "waiting_capacity"),
-            isNull(schema.sessionTurns.activeAttemptId),
-            eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration),
-          ),
-        )
-        .returning({ id: schema.sessionTurns.id });
-      if (!settledTurn)
-        throw new Error(options.label + " capacity blocked turn changed during supersession");
-    }
-    const [queued] = turnWasCurrent
-      ? await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.session.id),
-              eq(schema.sessionTurns.status, "queued"),
-            ),
-          )
-          .limit(1)
-      : [];
-    const nextSessionStatus =
-      input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
-    const values: SessionEventInsertWithPayload[] = [
-      {
-        accountId: input.session.accountId,
-        workspaceId: input.session.workspaceId,
-        sessionId: input.session.id,
-        sequence: input.session.lastSequence + 1,
-        type: "turn.superseded",
-        payload: {
-          provider: options.wireProvider,
-          waiterId: updated.id,
-          generation: updated.generation,
-          reason: input.reason,
-        },
-        turnId: updated.blockedTurnId,
-        turnGeneration: input.blockedTurn.executionGeneration,
-        ...(turnWasCurrent ? { turnAssociation: "current" as const } : {}),
-        occurredAt: input.now,
-      },
-    ];
-    if (turnWasCurrent && input.session.status !== nextSessionStatus) {
-      values.push({
-        accountId: input.session.accountId,
-        workspaceId: input.session.workspaceId,
-        sessionId: input.session.id,
-        sequence: input.session.lastSequence + 2,
-        type: "session.status.changed",
-        payload: { status: nextSessionStatus, reason: input.reason },
-        turnId: updated.blockedTurnId,
-        turnGeneration: input.blockedTurn.executionGeneration,
-        turnAssociation: "current",
-        occurredAt: input.now,
-      });
-    }
-    const inserted = await tx
-      .insert(schema.sessionEvents)
-      .values(
-        withLosslessContentWriteVersion(
-          withBoundSessionEventPayloads(values),
-          "payload",
-          "payloadCodecVersion",
-        ),
-      )
-      .returning();
-    const [updatedSession] = await tx
-      .update(schema.sessions)
-      .set({
-        ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
-        lastSequence: input.session.lastSequence + inserted.length,
-        updatedAt: input.now,
-      })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.session.workspaceId),
-          eq(schema.sessions.id, input.session.id),
-          ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
-        ),
-      )
-      .returning({ id: schema.sessions.id });
-    if (!updatedSession)
-      throw new Error(options.label + " capacity session changed during supersession");
-    return {
-      waiter: mapXaiCapacityWaiter(updated),
-      events: inserted.map(mapEvent),
-    };
-  }
-
-  async function reconcileXaiCapacityWait(
-    db: Database,
-    input: {
-      accountId: string;
-      workspaceId: string;
-      sessionId: string;
-      waiterId: string;
-      generation: number;
-      now?: Date;
-    },
-  ): Promise<ReconcileXaiCapacityWaitResult> {
-    const now = input.now ?? new Date();
-    const authority = await resolveXaiWaiterSubject(db, input.workspaceId, input.sessionId);
-    if (!authority) return { action: "stale", waiter: null, events: [] };
-    return await withScopedCapacityWaiterRls(
-      db,
-      input.workspaceId,
-      authority.subjectId,
-      authority.snapshot,
-      async (scopedDb) =>
-        await withSessionActivitySavepoint(scopedDb, async (tx) => {
-          const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: authority.subjectId,
-            authoritySnapshot: authority.snapshot,
-          });
-          if (authority.snapshot.scope === "user" && !ownerOrganizationMembershipId) {
-            return { action: "stale", waiter: null, events: [] } as const;
-          }
-          const [rotation] = await tx
-            .select()
-            .from(tables.rotationSettings)
-            .where(
-              and(
-                options.rotationWorkspacePredicate(input.workspaceId),
-                eq(tables.rotationSettings.authorityScope, authority.snapshot.scope),
-                ownerOrganizationMembershipId === null
-                  ? isNull(tables.rotationSettings.ownerOrganizationMembershipId)
-                  : eq(
-                      tables.rotationSettings.ownerOrganizationMembershipId,
-                      ownerOrganizationMembershipId,
-                    ),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          if (!rotation || rotation.accountId !== input.accountId) {
-            return { action: "stale", waiter: null, events: [] } as const;
-          }
-          const prefix = await lockSessionEventWriteRows(tx, {
-            workspaceId: input.workspaceId,
-            controlLock: "share",
-          });
-          const [waiterRead] = await tx
-            .select()
-            .from(tables.capacityWaiters)
-            .where(
-              and(
-                eq(tables.capacityWaiters.workspaceId, input.workspaceId),
-                eq(tables.capacityWaiters.id, input.waiterId),
-                eq(tables.capacityWaiters.sessionId, input.sessionId),
-              ),
-            )
-            .limit(1);
-          if (!waiterRead || waiterRead.generation !== input.generation) {
-            return {
-              action: "stale",
-              waiter: waiterRead ? mapXaiCapacityWaiter(waiterRead) : null,
-              events: [],
-            } as const;
-          }
-          const locks = await lockSessionEventWriteRows(tx, {
-            workspaceId: input.workspaceId,
-            controlLock: "already_locked",
-            workspaceLock: "already_locked",
-            sessionIds: [input.sessionId],
-            turnIds: [waiterRead.blockedTurnId],
-          });
-          const session = locks.sessions[0];
-          const blockedTurn = locks.turns[0];
-          const effectiveControl = session
-            ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-                workspaceControl: prefix.control ?? undefined,
-              })
-            : null;
-          const [goal] = waiterRead.goalId
-            ? await tx
-                .select()
-                .from(schema.sessionGoals)
-                .where(
-                  and(
-                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                    eq(schema.sessionGoals.id, waiterRead.goalId),
-                    eq(schema.sessionGoals.sessionId, input.sessionId),
-                  ),
-                )
-                .for("update")
-                .limit(1)
-            : [];
-          const [waiter] = await tx
-            .select()
-            .from(tables.capacityWaiters)
-            .where(eq(tables.capacityWaiters.id, input.waiterId))
-            .for("update")
-            .limit(1);
-          if (
-            !session ||
-            !blockedTurn ||
-            !waiter ||
-            session.accountId !== input.accountId ||
-            blockedTurn.accountId !== input.accountId ||
-            blockedTurn.sessionId !== input.sessionId ||
-            waiter.accountId !== input.accountId ||
-            waiter.workspaceId !== input.workspaceId ||
-            waiter.sessionId !== input.sessionId ||
-            waiter.blockedTurnId !== blockedTurn.id ||
-            waiter.generation !== input.generation ||
-            waiter.status !== "waiting"
-          ) {
-            return {
-              action: "stale",
-              waiter: waiter ? mapXaiCapacityWaiter(waiter) : null,
-              events: [],
-            } as const;
-          }
-          if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
-            return {
-              action: "paused",
-              waiter: mapXaiCapacityWaiter(waiter),
-              events: [],
-            } as const;
-          }
-          let supersedeReason: string | null = null;
-          if (session.status === "cancelled") {
-            supersedeReason = "session_cancelled";
-          } else if (
-            waiter.goalId !== null &&
-            (!goal || goal.status !== "active" || goal.version !== waiter.goalVersion)
-          ) {
-            supersedeReason = "goal_changed";
-          } else if (
-            !xaiSnapshotMatchesTurn(blockedTurn, authority.snapshot, authority.subjectId)
-          ) {
-            supersedeReason = "provider_authority_changed";
-          } else if (
-            waiter.authorityScope !== authority.snapshot.scope ||
-            waiter.ownerOrganizationMembershipId !== ownerOrganizationMembershipId
-          ) {
-            supersedeReason = "provider_authority_pool_changed";
-          } else if (session.activeTurnId !== blockedTurn.id) {
-            supersedeReason = "active_turn_changed";
-          } else if (session.status !== "waiting_capacity") {
-            supersedeReason = "session_not_waiting_capacity";
-          } else if (
-            blockedTurn.status !== "waiting_capacity" ||
-            blockedTurn.activeAttemptId !== null ||
-            blockedTurn.executionGeneration !== waiter.blockedTurnGeneration
-          ) {
-            supersedeReason = "blocked_turn_changed";
-          }
-          if (supersedeReason) {
-            const superseded = await supersedeXaiCapacityWaitInTransaction(tx, {
-              session,
-              blockedTurn,
-              waiter,
-              reason: supersedeReason,
-              now,
-            });
-            return { action: "superseded", ...superseded } as const;
-          }
-
-          await tx
-            .delete(tables.credentialLeases)
-            .where(
-              and(
-                eq(tables.credentialLeases.workspaceId, input.workspaceId),
-                lte(tables.credentialLeases.leasedUntil, now),
-              ),
-            );
-          const [pin] = await tx
-            .select()
-            .from(tables.sessionAccountPins)
-            .where(
-              and(
-                eq(tables.sessionAccountPins.workspaceId, input.workspaceId),
-                eq(tables.sessionAccountPins.sessionId, input.sessionId),
-                eq(tables.sessionAccountPins.authorityScope, authority.snapshot.scope),
-                ownerOrganizationMembershipId === null
-                  ? isNull(tables.sessionAccountPins.ownerOrganizationMembershipId)
-                  : eq(
-                      tables.sessionAccountPins.ownerOrganizationMembershipId,
-                      ownerOrganizationMembershipId,
-                    ),
-              ),
-            )
-            .limit(1);
-          const policy = readTurnExecutionPolicyV1(blockedTurn.metadata);
-          if (options.provider === "claude" && policy.kind !== "valid")
-            throw new Error("Claude capacity reconciliation requires its accepted model policy");
-          const selection = await options.selectAvailable(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: authority.subjectId,
-            authoritySnapshot: authority.snapshot,
-            shardKey: input.sessionId,
-            modelId: policy.kind === "valid" ? policy.policy.productModelId : blockedTurn.model,
-            ...(policy.kind === "valid" ? { upstreamModelId: policy.policy.upstreamModelId } : {}),
-            pinnedCredentialId: pin?.pinnedCredentialId ?? null,
-            pinSource:
-              pin?.pinSource === "manual" || pin?.pinSource === "policy" ? pin.pinSource : null,
-            now,
-          });
-          const selected = selection.credentialId;
-          if (!selected) {
-            const earliestResetAt = selection.nextCheckAt ?? null;
-            const [updated] = await tx
-              .update(tables.capacityWaiters)
-              .set({
-                earliestResetAt,
-                nextCheckAt: xaiCapacityNextCheckAt(earliestResetAt, now),
-                observedWakeRevision: waiter.wakeRevision,
-                updatedAt: now,
-              })
-              .where(
-                and(
-                  eq(tables.capacityWaiters.id, waiter.id),
-                  eq(tables.capacityWaiters.status, "waiting"),
-                  eq(tables.capacityWaiters.generation, waiter.generation),
-                ),
-              )
-              .returning();
-            if (!updated) return { action: "stale", waiter: null, events: [] } as const;
-            return {
-              action: "waiting",
-              waiter: mapXaiCapacityWaiter(updated),
-              events: [],
-            } as const;
-          }
-
-          const inserted = await tx
-            .insert(schema.sessionEvents)
-            .values(
-              withLosslessContentWriteVersion(
-                [
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    sequence: session.lastSequence + 1,
-                    type: "turn.recovery.requested",
-                    payload: {
-                      reason: options.provider + "_capacity_available",
-                      provider: options.wireProvider,
-                      waiterId: waiter.id,
-                      generation: waiter.generation,
-                      wakeRevision: waiter.wakeRevision,
-                    },
-                    turnId: blockedTurn.id,
-                    turnGeneration: blockedTurn.executionGeneration,
-                    turnAssociation: "current",
-                    occurredAt: now,
-                  },
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    sequence: session.lastSequence + 2,
-                    type: "session.status.changed",
-                    payload: { status: "recovering", reason: options.provider + "_capacity" },
-                    turnId: blockedTurn.id,
-                    turnGeneration: blockedTurn.executionGeneration,
-                    turnAssociation: "current",
-                    occurredAt: now,
-                  },
-                ],
-                "payload",
-                "payloadCodecVersion",
-              ),
-            )
-            .returning();
-          const [updatedWaiter] = await tx
-            .update(tables.capacityWaiters)
-            .set({
-              status: "resumed",
-              observedWakeRevision: waiter.wakeRevision,
-              lastWakeReason: "capacity_available",
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(tables.capacityWaiters.id, waiter.id),
-                eq(tables.capacityWaiters.status, "waiting"),
-                eq(tables.capacityWaiters.generation, waiter.generation),
-              ),
-            )
-            .returning();
-          if (!updatedWaiter)
-            throw new Error(options.label + " capacity waiter changed during atomic resume");
-          const [recoveringTurn] = await tx
-            .update(schema.sessionTurns)
-            .set({
-              status: "recovering",
-              activeAttemptId: null,
-              metadata: metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
-              version: blockedTurn.version + 1,
-              finishedAt: null,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.id, blockedTurn.id),
-                eq(schema.sessionTurns.status, "waiting_capacity"),
-                isNull(schema.sessionTurns.activeAttemptId),
-                eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration),
-              ),
-            )
-            .returning({ id: schema.sessionTurns.id });
-          if (!recoveringTurn)
-            throw new Error(options.label + " capacity blocked turn changed during resume");
-          const [recoveringSession] = await tx
-            .update(schema.sessions)
-            .set({
-              status: "recovering",
-              activeTurnId: blockedTurn.id,
-              lastSequence: session.lastSequence + 2,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                eq(schema.sessions.id, input.sessionId),
-                eq(schema.sessions.status, "waiting_capacity"),
-                eq(schema.sessions.activeTurnId, blockedTurn.id),
-              ),
-            )
-            .returning({ id: schema.sessions.id });
-          if (!recoveringSession)
-            throw new Error(options.label + " capacity session changed during resume");
-          return {
-            action: "resumed",
-            waiter: mapXaiCapacityWaiter(updatedWaiter),
-            events: inserted.map(mapEvent),
-          } as const;
-        }),
-    );
-  }
-
-  return {
-    resolveWaiterSubject: resolveXaiWaiterSubject,
-    getWaitForSessionInTransaction: getXaiCapacityWaitForSessionInTransaction,
-    armCapacityWait: armXaiCapacityWait,
-    getWaitForSession: getXaiCapacityWaitForSession,
-    reconcileCapacityWait: reconcileXaiCapacityWait,
-  };
-}
-const xaiCapacityRepository = createScopedSubscriptionCapacityWaiters({
-  provider: "xai",
-  label: "SuperGrok",
-  wireProvider: "supergrok-subscription",
-  workerSubject: subscriptionPoolWorkerSubject("xai"),
-  snapshotColumn: "xaiProviderAccountAuthoritySnapshot",
-  resolvePoolFunction: "resolve_xai_authority_pool",
-  tables: {
-    credentials: schema.xaiSubscriptionCredentials,
-    rotationSettings: schema.xaiRotationSettings,
-    credentialLeases: schema.xaiCredentialLeases,
-    sessionAccountPins: schema.xaiSessionAccountPins,
-    capacityWaiters: schema.xaiCapacityWaiters,
-  },
-  rotationWorkspacePredicate: xaiRotationWorkspacePredicate,
-  credentialWorkspacePredicate: xaiCredentialWorkspacePredicate,
-  selectAvailable: xaiSubscriptionRepository.selectSubscriptionCredentialForUse,
-});
-const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
-  provider: "claude",
-  label: "Claude",
-  wireProvider: "claude-subscription",
-  workerSubject: subscriptionPoolWorkerSubject("claude"),
-  snapshotColumn: "claudeProviderAccountAuthoritySnapshot",
-  resolvePoolFunction: "resolve_claude_authority_pool",
-  tables: claudeSubscriptionTables,
-  rotationWorkspacePredicate:
-    claudeSubscriptionAccountRepository.subscriptionRotationWorkspacePredicate,
-  credentialWorkspacePredicate:
-    claudeSubscriptionAccountRepository.subscriptionCredentialWorkspacePredicate,
-  selectAvailable: claudeSubscriptionAccountRepository.selectSubscriptionCredentialForUse,
-});
-export const {
-  resolveWaiterSubject: resolveXaiWaiterSubject,
-  armCapacityWait: armXaiCapacityWait,
-  getWaitForSession: getXaiCapacityWaitForSession,
-  reconcileCapacityWait: reconcileXaiCapacityWait,
-} = xaiCapacityRepository;
-export const {
-  resolveWaiterSubject: resolveClaudeWaiterSubject,
-  armCapacityWait: armClaudeCapacityWait,
-  getWaitForSession: getClaudeCapacityWaitForSession,
-  reconcileCapacityWait: reconcileClaudeCapacityWait,
-} = claudeCapacityRepository;
-const getXaiCapacityWaitForSessionInTransaction =
-  xaiCapacityRepository.getWaitForSessionInTransaction;
-const getClaudeCapacityWaitForSessionInTransaction =
-  claudeCapacityRepository.getWaitForSessionInTransaction;
-export type ClaudeCapacityWait = XaiCapacityWait;
-export type ArmClaudeCapacityWaitResult = ArmXaiCapacityWaitResult;
-export type ReconcileClaudeCapacityWaitResult = ReconcileXaiCapacityWaitResult;
-export type ClaudeCredentialLeaseQuarantine = XaiCredentialLeaseQuarantine;
 
 export type CodexCredentialLeaseQuarantine =
   | { kind: "included_usage"; until: Date }
@@ -26786,26 +25511,13 @@ export async function updateModelConnectionAccess(
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
-  if (
-    target.workspaceId !== null ||
-    (target.kind !== "codex" &&
-      target.kind !== "supergrok" &&
-      target.kind !== "claude_subscription")
-  ) {
+  // A Claude policy has no legacy pool to write (C4): the relation refuses it.
+  if (target.workspaceId !== null || (target.kind !== "codex" && target.kind !== "supergrok")) {
     return await updateModelConnectionAccessPolicy(db, target, policy);
   }
   const actor = { organizationId: target.accountId, actorSubjectId: target.subjectId };
-  return await withOrganizationCodexAdministrator(db, actor, async (tx) => {
-    if (target.kind === "claude_subscription") {
-      return await withOrganizationClaudeCapacityMutation(tx, actor, (scopedDb) =>
-        updateModelConnectionAccessPolicy(scopedDb, target, policy),
-      );
-    }
-    if (target.kind === "supergrok") {
-      return await withOrganizationXaiCapacityMutation(tx, actor, (scopedDb) =>
-        updateModelConnectionAccessPolicy(scopedDb, target, policy),
-      );
-    }
+  return await withOrganizationCodexAdministrator(db, actor, async (_tx) => {
+    // Subscription access policies live on the shared core.
     return null;
   });
 }
@@ -26815,7 +25527,6 @@ export async function getWorkspaceConnectionModelRestrictions(
   db: Database,
   workspaceId: string,
   subjectId: string,
-  authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
   claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
 ) {
@@ -26824,7 +25535,6 @@ export async function getWorkspaceConnectionModelRestrictions(
     workspaceId,
     subjectId,
     await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
-    authoritySnapshot,
     claudeAuthoritySnapshot,
     claudeCoreRestrictions,
   );
@@ -27935,12 +26645,153 @@ export type SetSessionCodexPinOptions = {
   expected?: Pick<SessionCodexState, "pinnedCredentialId" | "pinSource">;
 };
 
-/**
- * The core counterpart of `recordSessionCodexSelectionForTurnAttempt`: the
- * same attempt-fenced, idempotent `codex.credential.selected` (and
- * `codex.account.switched`) events, but the previous account comes from the
- * session's core binding and the legacy `sessions.codex_last_credential_id`
- * pointer is never written with a core connection id.
+/** Lease-backed serving audit, written after placement in its own fenced
+ * transaction. Proposals and claim-time provenance alone emit no transition.
+ */
+export async function recordSubscriptionCoreServingSelectionForTurnAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    provider: string;
+    connectionId: string;
+    modelId: string;
+    reason: import("@opengeni/contracts").TurnServingPolicyV1["reason"];
+  },
+): Promise<{ events: SessionEvent[]; previousProvider: string | null }> {
+  return withWorkspaceSessionEventActivityRls(db, input.workspaceId, true, async (tx) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, sessionLock: "no_key_update" });
+    if (!fence.allowed || !fence.session || fence.turn.accountId !== input.accountId)
+      throw new Error("Subscription selection attempt fenced");
+    const stored = readTurnServingPolicyV1(fence.turn.metadata);
+    const revision = stored.kind === "valid" ? stored.revisions.at(-1) : undefined;
+    if (
+      !revision ||
+      revision.executionGeneration !== input.executionGeneration ||
+      revision.policy.productModelId !== input.modelId
+    )
+      throw new Error("Subscription selection requires this generation's serving revision");
+    const key = `opengeni:subscription-selection:${input.attemptId}`;
+    const prior = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          inArray(schema.sessionEvents.clientEventId, [key, `${key}:switch`]),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    if (prior.length) {
+      const selected = prior.find((event) => event.type === "subscription.account.selected");
+      if (!selected) throw new Error("Subscription selection receipt missing");
+      const payload = sessionEventPayloadRecord(selected.payload, selected.payloadCodecVersion);
+      if (
+        payload.connectionId !== input.connectionId ||
+        payload.provider !== input.provider ||
+        payload.modelId !== input.modelId
+      )
+        throw new Error("An attempt cannot record conflicting subscription selections");
+      return {
+        events: prior.map(mapEvent),
+        previousProvider:
+          typeof payload.previousProvider === "string" ? payload.previousProvider : null,
+      };
+    }
+    // Provenance is not dispatch permission. An event describes only a live,
+    // committed placement of this exact generation, never a pending proposal.
+    const [lease] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select exists (
+      select 1 from subscription_leases where account_id=${input.accountId}::uuid
+        and workspace_id=${input.workspaceId}::uuid and session_id=${input.sessionId}::uuid
+        and turn_id=${input.turnId}::uuid and provider=${input.provider}
+        and connection_id=${input.connectionId}::uuid and generation=${input.executionGeneration}
+        and leased_until > clock_timestamp()
+    ) as present`,
+    );
+    if (!lease?.present) throw new Error("Subscription selection requires its live placed lease");
+    const [last] = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "subscription.account.selected"),
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    const previous = last
+      ? sessionEventPayloadRecord(last.payload, last.payloadCodecVersion)
+      : null;
+    const previousProvider = typeof previous?.provider === "string" ? previous.provider : null;
+    const fromAccountId = typeof previous?.connectionId === "string" ? previous.connectionId : null;
+    const accepted = readTurnExecutionPolicyV1(fence.turn.metadata);
+    const fromModelId =
+      typeof previous?.modelId === "string"
+        ? previous.modelId
+        : accepted.kind === "valid"
+          ? accepted.policy.productModelId
+          : input.modelId;
+    const common = {
+      provider: input.provider,
+      executionGeneration: input.executionGeneration,
+      servingHistoryPosition: revision.historyPosition,
+      reason: input.reason,
+      preferredModelId: accepted.kind === "valid" ? accepted.policy.productModelId : input.modelId,
+      reasoningEffort: revision.policy.reasoningEffort,
+      latencyMode: revision.policy.latencyMode,
+    };
+    const events: AppendEventInput[] = [];
+    if (
+      (fromAccountId !== null && fromAccountId !== input.connectionId) ||
+      fromModelId !== input.modelId
+    )
+      events.push({
+        type: "subscription.account.switched",
+        clientEventId: `${key}:switch`,
+        payload: {
+          ...common,
+          fromProvider: previousProvider,
+          fromAccountId,
+          toAccountId: input.connectionId,
+          fromModelId,
+          toModelId: input.modelId,
+        },
+      });
+    events.push({
+      type: "subscription.account.selected",
+      clientEventId: key,
+      payload: {
+        ...common,
+        previousProvider,
+        connectionId: input.connectionId,
+        modelId: input.modelId,
+      },
+    });
+    const appended = await appendSessionEventsForTurnAttempt(
+      tx,
+      input.workspaceId,
+      input.sessionId,
+      input.turnId,
+      input.executionGeneration,
+      input.attemptId,
+      events,
+    );
+    if (!appended.accepted) throw new Error("Subscription selection attempt fenced");
+    return { events: appended.events, previousProvider };
+  });
+}
+
+/** Legacy Codex audit/alias, projected from core placement without writing
+ * the old session credential pointer. Idempotent under the same attempt fence.
  */
 export async function recordSubscriptionCoreCodexSelectionForTurnAttempt(
   db: Database,
@@ -28239,192 +27090,6 @@ export async function getSubscriptionCoreCodexCurrentSelections(
     });
   }
   return selections;
-}
-
-/**
- * Explicit session account choice on the core: a uuid makes the session's
- * binding `explicit` on that connection; `null` ("auto") returns it to
- * automatic placement. The binding guard enforces that the connection is
- * active and eligible for this session (personal connections only in their
- * owner's own session). Emits the legacy `codex.account.selection.changed`
- * receipt. A waiting turn re-places at its next check, which the returned
- * wake triggers; a running attempt keeps its account.
- */
-export async function pinSubscriptionCoreSessionCodexAccount(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    connectionId: string | null;
-    subjectId: string;
-  },
-): Promise<{
-  result: { changed: boolean; appliedTo: "waiting_turn" | "next_turn"; events: SessionEvent[] };
-  wake: SubscriptionCoreCodexWake | null;
-}> {
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (scopedDb) => {
-      const tx = scopedDb as unknown as Database;
-      // The binding guard authorizes the choosing human.
-      await tx.execute(
-        sql`select set_config('opengeni.initiating_human_subject_id', ${input.subjectId}, true)`,
-      );
-      // The legacy pin's lock contract: a preference change admits no
-      // inference (waiter reconciliation rechecks Pause), so the canonical
-      // session-events lock is taken without the workspace control prefix.
-      const locks = await lockSessionEventWriteRows(tx, {
-        workspaceId: input.workspaceId,
-        controlLock: "none",
-        sessionIds: [input.sessionId],
-        sessionLock: "no_key_update",
-      });
-      const session = locks.sessions.find((row) => row.id === input.sessionId);
-      const unchanged = {
-        result: { changed: false, appliedTo: "next_turn" as const, events: [] },
-        wake: null,
-      };
-      if (!session || session.accountId !== input.accountId) return unchanged;
-      // Lock the session's Codex binding (a session keeps one binding per
-      // provider, D-32; another provider's is never read or written here):
-      // a running turn's placement
-      // (`writeSubscriptionSessionBinding`) advances its version, and an
-      // unlocked read would lose the version compare-and-swap below to it and
-      // report the choice as not found. Cache-clock advances do not bump it.
-      const [lockedBinding] = await rawRows<{ choice: string; version: number | string }>(
-        tx,
-        sql`select choice, version from subscription_session_bindings
-          where workspace_id = ${input.workspaceId}::uuid and session_id = ${input.sessionId}::uuid
-            and provider = 'codex'
-          for update`,
-      );
-      const binding = lockedBinding
-        ? { choice: lockedBinding.choice, version: Number(lockedBinding.version) }
-        : null;
-      let connectionId: string | null = null;
-      if (input.connectionId !== null) {
-        // Canonical or visible alias; otherwise the raw id, which the binding
-        // guard alone judges (a personal connection is invisible here until
-        // the guard grants this exact session's owner access to it).
-        connectionId =
-          (await resolveCoreConnectionId(tx, {
-            accountId: input.accountId,
-            provider: "codex",
-            connectionId: input.connectionId,
-          })) ?? input.connectionId;
-      }
-      try {
-        const written = await tx.transaction(async (savepoint) => {
-          const scoped = savepoint as unknown as Database;
-          if (connectionId === null) {
-            if (!binding || binding.choice !== "explicit") return true;
-            // Leave connection_id alone: only the choice changes, so the
-            // connection guard (which needs an active connection) is not run.
-            const rows = await rawRows<{ version: number | string }>(
-              scoped,
-              sql`update subscription_session_bindings
-                set choice = 'automatic', version = version + 1
-                where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
-                  and version = ${binding.version}
-                returning version`,
-            );
-            return rows.length > 0;
-          }
-          if (binding) {
-            const rows = await rawRows<{ version: number | string }>(
-              scoped,
-              sql`update subscription_session_bindings
-                set connection_id = ${connectionId}::uuid,
-                    choice = 'explicit', last_switch_reason = 'explicit_choice',
-                    version = version + 1
-                where workspace_id = ${input.workspaceId}::uuid
-                  and session_id = ${input.sessionId}::uuid and provider = 'codex'
-                  and version = ${binding.version}
-                returning version`,
-            );
-            return rows.length > 0;
-          }
-          const version = await writeCoreSessionBinding(scoped, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            provider: "codex",
-            connectionId,
-            modelId: session.model,
-            choice: "explicit",
-            onlyThisModel: false,
-            lastModelCallAt: null,
-            lastSwitchReason: "explicit_choice",
-          });
-          return version !== null;
-        });
-        if (!written) return unchanged;
-      } catch (error) {
-        const code =
-          (error as { code?: unknown } | null)?.code ??
-          (error as { cause?: { code?: unknown } } | null)?.cause?.code;
-        // The guard refuses a connection this session may not use.
-        if (code === "42501") return unchanged;
-        // A racing first binding of the session met 0733's rolling index (a
-        // lost compare-and-swap); the savepoint rolled it back.
-        if (isSubscriptionSessionBindingRollingConflict(error)) return unchanged;
-        throw error;
-      }
-      const appliedTo: "waiting_turn" | "next_turn" =
-        session.status === "waiting_capacity" && session.activeTurnId
-          ? "waiting_turn"
-          : "next_turn";
-      const inserted = await tx
-        .insert(schema.sessionEvents)
-        .values(
-          withLosslessContentWriteVersion(
-            [
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                sequence: session.lastSequence + 1,
-                type: "codex.account.selection.changed",
-                payload: {
-                  credentialId: connectionId,
-                  appliedTo,
-                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
-                  subjectId: input.subjectId,
-                },
-                occurredAt: new Date(),
-              },
-            ],
-            "payload",
-            "payloadCodecVersion",
-          ),
-        )
-        .returning();
-      await tx
-        .update(schema.sessions)
-        .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        );
-      return {
-        result: { changed: true, appliedTo, events: inserted.map(mapEvent) },
-        // Legacy woke only this session: a pin changes nothing another
-        // session's waiter can place on.
-        wake: {
-          accountId: input.accountId,
-          reason: "core_codex_session_pin_changed",
-          workspaceIds: [input.workspaceId],
-          sessionIds: [input.sessionId],
-        },
-      };
-    },
-  );
 }
 
 /**
@@ -31032,34 +29697,22 @@ async function createSessionInTransaction(
   // resolves the organization or workspace pool and never a personal pool.
   const subjectCreatorId =
     frozenCreator.initiator.kind === "subject" && input.subjectId ? input.subjectId : null;
-  const sharedCreatorPool =
-    !subjectCreatorId &&
-    (input.initialXaiProviderAccountAuthoritySnapshot === undefined ||
-      input.initialClaudeProviderAccountAuthoritySnapshot === undefined)
-      ? await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(tx, input.workspaceId)
-      : null;
-  let initialXaiProviderAccountAuthoritySnapshot =
+  // SuperGrok's v1 value is never computed from live state after its cutover:
+  // new work writes the column default and a child copies its parent's value
+  // (design 5.3, "v1 columns after a provider's cutover").
+  const initialXaiProviderAccountAuthoritySnapshot =
     input.initialXaiProviderAccountAuthoritySnapshot ??
-    sharedCreatorPool?.xai ??
     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (input.initialXaiProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
+  // The creator's subject RLS context, which the SuperGrok acceptance
+  // resolver used to set as a side effect when the caller supplied no
+  // accepted snapshot (a fresh session, not a copy of a parent's). The
+  // session insert below relies on it, so whoever retires this v1 input must
+  // keep setting the context for that same case.
+  if (input.initialXaiProviderAccountAuthoritySnapshot === undefined && subjectCreatorId)
     await setSubjectRlsContext(tx, subjectCreatorId);
-    initialXaiProviderAccountAuthoritySnapshot =
-      await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
-        workspaceId: input.workspaceId,
-      });
-  }
-  let initialClaudeProviderAccountAuthoritySnapshot =
+  const initialClaudeProviderAccountAuthoritySnapshot =
     input.initialClaudeProviderAccountAuthoritySnapshot ??
-    sharedCreatorPool?.claude ??
     WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  if (input.initialClaudeProviderAccountAuthoritySnapshot === undefined && subjectCreatorId) {
-    await setSubjectRlsContext(tx, subjectCreatorId);
-    initialClaudeProviderAccountAuthoritySnapshot =
-      await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
-        workspaceId: input.workspaceId,
-      });
-  }
   const parentTurnId = input.parentSessionId
     ? input.createdByActor?.sessionId === input.parentSessionId
       ? input.createdByActor.turnId
@@ -64801,16 +63454,7 @@ export async function getSessionGoalWithContinuation(
         coreCapacityWait.goalVersion === goal.version
           ? { nextCheckAt: coreCapacityWait.nextCheckAt }
           : undefined;
-      const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
-        tx,
-        workspaceId,
-        sessionId,
-      );
-      const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
-        tx,
-        workspaceId,
-        sessionId,
-      );
+
       const [wake] = await tx
         .select({
           wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
@@ -64840,8 +63484,6 @@ export async function getSessionGoalWithContinuation(
         observedRevision: goal.continuationObservedRevision,
         nextAttemptAt:
           capacityWait?.nextCheckAt.toISOString() ??
-          xaiCapacityWait?.nextCheckAt.toISOString() ??
-          claudeCapacityWait?.nextCheckAt.toISOString() ??
           pendingWorkflowWake?.nextAttemptAt.toISOString() ??
           null,
         // Delivery errors belong to one still-undelivered workflow-wake
@@ -64865,12 +63507,7 @@ export async function getSessionGoalWithContinuation(
           reason: "session_cancelled",
           ...base,
         };
-      } else if (
-        capacityWait ||
-        xaiCapacityWait ||
-        claudeCapacityWait ||
-        turn?.status === "waiting_capacity"
-      ) {
+      } else if (capacityWait || turn?.status === "waiting_capacity") {
         continuation = {
           state: "blocked",
           reason: "provider_backpressure",
@@ -67753,17 +66390,8 @@ export async function materializeGoalContinuation(
             sessionId: input.sessionId,
           },
         );
-        const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
-          tx,
-          input.workspaceId,
-          input.sessionId,
-        );
-        const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
-          tx,
-          input.workspaceId,
-          input.sessionId,
-        );
-        if (coreCapacityWait || xaiCapacityWait || claudeCapacityWait) {
+
+        if (coreCapacityWait) {
           return { action: "none", events: [] } as const;
         }
 
@@ -72128,17 +70756,8 @@ export async function claimSessionWorkForAttempt(
                   sessionId,
                 },
               );
-              const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                sessionId,
-              );
-              const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                sessionId,
-              );
-              if (coreWaiter || xaiWaiter || claudeWaiter) {
+
+              if (coreWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
             }
@@ -75108,48 +73727,6 @@ export async function peekSessionWork(
       };
     }
 
-    const xaiCapacityWait = await getXaiCapacityWaitForSessionInTransaction(
-      scopedDb,
-      workspaceId,
-      sessionId,
-    );
-    const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
-      scopedDb,
-      workspaceId,
-      sessionId,
-    );
-    if (xaiCapacityWait) {
-      return {
-        kind: "capacity-wait",
-        ref: {
-          provider: "xai",
-          waiterId: xaiCapacityWait.id,
-          generation: xaiCapacityWait.generation,
-          nextCheckAt:
-            xaiCapacityWait.wakeRevision > xaiCapacityWait.observedWakeRevision
-              ? new Date(0).toISOString()
-              : xaiCapacityWait.nextCheckAt.toISOString(),
-          wakeRevision: xaiCapacityWait.wakeRevision,
-        },
-      };
-    }
-
-    if (claudeCapacityWait) {
-      return {
-        kind: "capacity-wait",
-        ref: {
-          provider: "claude",
-          waiterId: claudeCapacityWait.id,
-          generation: claudeCapacityWait.generation,
-          nextCheckAt:
-            claudeCapacityWait.wakeRevision > claudeCapacityWait.observedWakeRevision
-              ? new Date(0).toISOString()
-              : claudeCapacityWait.nextCheckAt.toISOString(),
-          wakeRevision: claudeCapacityWait.wakeRevision,
-        },
-      };
-    }
-
     if (session.activeTurnId) {
       const [turn] = await scopedDb
         .select()
@@ -75966,17 +74543,8 @@ export async function failSessionWorkBeforeAttemptClaim(
                   sessionId: input.sessionId,
                 },
               );
-              const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                input.sessionId,
-              );
-              const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
-                tx as unknown as Database,
-                workspaceId,
-                input.sessionId,
-              );
-              if (coreWaiter || xaiWaiter || claudeWaiter) {
+
+              if (coreWaiter) {
                 return { action: "stale", turnId: null, events: [] } as const;
               }
             }
@@ -79195,7 +77763,18 @@ export type SettleCodexCredentialLeaseLossResult =
   | { action: "failed"; events: SessionEvent[] }
   | { action: "stale"; events: [] };
 
+import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";
+import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
+
 export type RequestSessionTurnRecoveryInput = {
+  /** C2 only: proposal is persisted atomically with recovery, never placement. */
+  subscriptionServingTarget?: {
+    crossProviderFailoverEnabled: true;
+    executionGeneration: number;
+    policy: import("@opengeni/contracts").TurnServingPolicyV1["policy"];
+    connectionId: string;
+    reason: import("@opengeni/contracts").TurnServingPolicyV1["reason"];
+  };
   sessionId: string;
   turnId: string;
   triggerEventId: string;
@@ -79210,8 +77789,6 @@ export type RequestSessionTurnRecoveryInput = {
   providerRecoveryCount?: number;
   /** In-flight calls with call-scoped proof that their command never started. */
   notStartedToolCallIds?: readonly string[];
-  /** One rejected-token renewal per serving account generation on this turn. */
-  claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
   /**
    * The consecutive shared-core lease-busy chain this recovery continues: when
    * it started and the execution generation that recorded it. The worker
@@ -79310,15 +77887,6 @@ export async function requestSessionTurnRecovery(
   workspaceId: string,
   input: RequestSessionTurnRecoveryInput,
 ): Promise<RequestSessionTurnRecoveryResult> {
-  if (
-    input.claudeAuthRecovery &&
-    (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      input.claudeAuthRecovery.credentialId,
-    ) ||
-      !Number.isSafeInteger(input.claudeAuthRecovery.credentialVersion) ||
-      input.claudeAuthRecovery.credentialVersion < 1)
-  )
-    throw new Error("Invalid Claude authentication recovery identity");
   if (
     input.subscriptionLeaseBusy &&
     (!Number.isFinite(Date.parse(input.subscriptionLeaseBusy.startedAt)) ||
@@ -79494,6 +78062,33 @@ export async function requestSessionTurnRecovery(
           };
         }
       }
+      let servingTarget: import("@opengeni/contracts").TurnPendingServingPolicyV1 | null = null;
+      if (input.subscriptionServingTarget) {
+        const target = input.subscriptionServingTarget;
+        if (
+          target.crossProviderFailoverEnabled !== true ||
+          session.codexCompactionMode !== "portable"
+        )
+          throw new Error("Serving recovery requires enabled failover and portable history");
+        const scope = {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+        };
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          ...scope,
+          attemptId: input.attemptId,
+          executionGeneration: target.executionGeneration,
+        });
+        if (!fence.allowed) throw new Error(`Serving recovery fenced: ${fence.reason}`);
+        await assertSubscriptionServingRecoverySettledTx(tx as unknown as Database, scope);
+        servingTarget = await stageSubscriptionCorePendingServingPolicyTx(
+          tx as unknown as Database,
+          { ...scope, ...target, attemptId: input.attemptId },
+          fence,
+        );
+      }
       await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
         id: input.attemptId,
         accountId: session.accountId,
@@ -79581,7 +78176,7 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
-            ...(input.claudeAuthRecovery ? { claudeAuthRecovery: input.claudeAuthRecovery } : {}),
+            ...(servingTarget ? { turnPendingServingPolicyV1: servingTarget } : {}),
             ...(input.subscriptionLeaseBusy
               ? {
                   subscriptionLeaseBusy: {
@@ -86579,8 +85174,7 @@ export * from "./automations";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
-export * from "./claude-subscription-usage";
-export * from "./claude-subscription-tokens";
+export * from "./subscription-core-claude-oauth";
 
 export {
   setWorkspacePauseTimerInTransaction,
@@ -86787,3 +85381,22 @@ export async function loadDirectModelProviderConnection(
   return { ...metadata, apiKey: connection.credential.apiKey };
 }
 export { apiIntegrationToolEffect } from "./api-integration-approvals";
+export {
+  subscriptionCoreProvider,
+  subscriptionCoreProviderIds,
+} from "./subscription-core-providers";
+export {
+  placeSubscriptionCoreTurnWithFailover,
+  evaluateSubscriptionCorePlacementWithFailover,
+  type SubscriptionCoreFailoverPlacement,
+} from "./subscription-core/failover";
+export { type SubscriptionCoreFailoverModel } from "./subscription-core/failover-world";
+export { readSubscriptionCoreFailoverProvider } from "./subscription-core/failover-readiness";
+export {
+  recordSubscriptionCoreServingPolicyForTurnAttempt,
+  readSubscriptionCoreServingPolicyForTurn,
+  readSubscriptionCoreTurnFailoverBudget,
+  SubscriptionCoreServingFailoverLimitError,
+  SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
+} from "./subscription-core/serving-policy";
+export { readSubscriptionHistoryProvenance } from "./subscription-core/serving-runtime";

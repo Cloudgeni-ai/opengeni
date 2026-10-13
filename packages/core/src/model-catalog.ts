@@ -55,8 +55,8 @@ import {
   getOrganizationModelProviderCustomModelForExecution,
   getOrganizationModelProviderCatalogForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
-  type OrganizationClaudeModelAdmissionAuthority,
   type Database,
+  type OrganizationClaudeModelAdmissionAuthority,
   type WorkspaceCustomModelProviderKind,
   type WorkspaceGatewayCustomModel,
   type WorkspaceOpenRouterCustomModel,
@@ -188,8 +188,8 @@ export async function lockActiveCustomModelForAdmission(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         providerKind: input.reference.providerKind,
-        upstreamModelId: input.reference.upstreamModelId,
         ...(input.claudeAuthority ? { claudeAuthority: input.claudeAuthority } : {}),
+        upstreamModelId: input.reference.upstreamModelId,
       }),
     );
   }

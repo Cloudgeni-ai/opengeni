@@ -11,19 +11,10 @@ import type { AccessGrant, WorkspaceModelPolicyContract } from "@opengeni/contra
 import {
   applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
-  createClaudeSubscriptionAccount,
+  connectSubscriptionCoreXaiConnection,
   createDb,
-  createXaiSubscriptionCredential,
-  disconnectClaudeSubscriptionAccount,
-  disconnectXaiSubscriptionCredential,
   encryptEnvironmentValue,
-  ensureXaiRotationSettings,
-  setInitialActiveClaudeCredential,
-  setInitialActiveXaiCredential,
   saveNewSessionDraftInTransaction,
-  workspaceXaiSubscriptionActiveForAuthority,
-  XaiAuthorityPoolInactiveError,
-  upsertOrganizationClaudeSubscription,
   withWorkspaceSubjectRls,
   type Database,
   type DbClient,
@@ -496,83 +487,44 @@ async function addTrialCredit(grant: AccessGrant & { workspaceId: string }) {
 }
 
 /** Give a subject an active organization membership with its own Personal workspace. */
-async function organizationMember(accountId: string, subjectId: string) {
+async function organizationMember(accountId: string, subjectId: string): Promise<string> {
   const [personal] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
     values (${accountId}, ${`personal ${subjectId}`}) returning id`;
   await shared!.admin`
     insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
     values (${accountId}, ${subjectId}, 'active', ${personal!.id})`;
+  await shared!.admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${personal!.id}, ${accountId})`;
+  await shared!.admin`
+    insert into workspace_memberships (workspace_id, account_id, subject_id, role)
+    values (${personal!.id}, ${accountId}, ${subjectId}, 'owner')`;
+  return personal!.id;
 }
 
+/**
+ * Connect a personal SuperGrok account on the shared core, the way the
+ * SuperGrok connect route does: only in the person's own Personal workspace.
+ */
 async function connectPersonalSupergrok(
   settings: Settings,
   grant: AccessGrant & { workspaceId: string },
+  personalWorkspaceId: string,
 ) {
-  // The same steps the SuperGrok connect route takes.
-  const created = await createXaiSubscriptionCredential(db, {
+  return await connectSubscriptionCoreXaiConnection(db, {
     accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
+    workspaceId: personalWorkspaceId,
     subjectId: grant.subjectId,
-    scope: "user",
+    personal: true,
     encryptionKey: Buffer.from(settings.environmentsEncryptionKey!, "base64"),
-    secret: { version: 1, accessToken: `default-model-${crypto.randomUUID()}` },
-    providerAccountId: `default-model-${crypto.randomUUID()}`,
+    tokens: { accessToken: `default-model-${crypto.randomUUID()}`, refreshToken: "refresh" },
+    identitySubject: `default-model-${crypto.randomUUID()}`,
+    accountEmail: null,
     label: "personal SuperGrok",
+    expiresAt: new Date(Date.now() + 86_400_000),
+    connectedBySubjectId: grant.subjectId,
   });
-  const authority = {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    subjectId: grant.subjectId,
-    authoritySnapshot: created.authoritySnapshot,
-  };
-  const rotation = await ensureXaiRotationSettings(db, authority);
-  if (rotation.activeCredentialId === null) {
-    await setInitialActiveXaiCredential(db, { ...authority, credentialId: created.account.id });
-  }
-  return created;
-}
-
-async function connectClaudePool(
-  settings: Settings,
-  grant: AccessGrant & { workspaceId: string },
-  scope: "workspace" | "user" | "organization",
-) {
-  const secret = {
-    version: 1 as const,
-    token: "sk-ant-oat01-readiness-fixture",
-    identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-  };
-  const encryptionKey = Buffer.from(settings.environmentsEncryptionKey!, "base64");
-  if (scope === "organization") {
-    await shared!.admin`
-      update organization_memberships set role = 'owner'
-      where account_id = ${grant.accountId} and subject_id = ${grant.subjectId}`;
-    await upsertOrganizationClaudeSubscription(db, {
-      organizationId: grant.accountId,
-      actorSubjectId: grant.subjectId,
-      encryptionKey,
-      secret,
-      providerAccountId: secret.identity.accountUuid,
-      label: null,
-      accountEmail: null,
-      expiresAt: null,
-    });
-    return { authoritySnapshot: { version: 1, scope: "organization" } as const };
-  }
-  const created = await createClaudeSubscriptionAccount(db, {
-    ...grant,
-    scope,
-    encryptionKey,
-    secret,
-    providerAccountId: secret.identity.accountUuid,
-  });
-  await setInitialActiveClaudeCredential(db, {
-    ...grant,
-    credentialId: created.account.id,
-    authoritySnapshot: created.authoritySnapshot,
-  });
-  return created;
 }
 
 function routeDeps(settings: Settings): ApiRouteDeps {
@@ -598,91 +550,13 @@ function routeDeps(settings: Settings): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-describe("canonical Claude pool readiness", () => {
-  test.each(["workspace", "user", "organization"] as const)(
-    "current and frozen %s authority use metadata-only canonical readiness",
-    async (scope) => {
-      if (!available) return;
-      const settings = hostedSettings({ claudeSubscriptionEnabled: true });
-      const grant = await workspaceFixture();
-      await organizationMember(grant.accountId, grant.subjectId);
-      expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, grant)).toEqual({
-        workspace: false,
-        organization: false,
-      });
-      const connected = await connectClaudePool(settings, grant, scope);
-      // Readiness cannot depend on decrypting credential material with this key.
-      const metadataSettings = {
-        ...settings,
-        environmentsEncryptionKey: Buffer.alloc(32, 8).toString("base64"),
-      };
-      const expected = {
-        workspace: scope !== "organization",
-        organization: scope === "organization",
-      };
-      expect(await loadWorkspaceClaudeSubscriptionReadiness(db, metadataSettings, grant)).toEqual(
-        expected,
-      );
-      expect(
-        await loadWorkspaceClaudeSubscriptionReadiness(db, metadataSettings, {
-          ...grant,
-          claudeAuthoritySnapshot: connected.authoritySnapshot,
-        }),
-      ).toEqual(expected);
-    },
-    180_000,
-  );
-
-  test("private authority never borrows another member's pool or replaces a stale frozen pool", async () => {
+describe("Claude pool readiness on the shared core", () => {
+  test("the shared core answers readiness; an organization without a Claude pool is not ready", async () => {
     if (!available) return;
     const settings = hostedSettings({ claudeSubscriptionEnabled: true });
-    const owner = await workspaceFixture();
-    const other = { ...owner, subjectId: `user:default-model-${crypto.randomUUID()}` };
-    const service = { ...owner, subjectId: `service:claude-readiness-${crypto.randomUUID()}` };
-    await shared!.admin`
-      insert into workspace_memberships (workspace_id, account_id, subject_id, role)
-      values (${owner.workspaceId}, ${owner.accountId}, ${other.subjectId}, 'member'),
-             (${owner.workspaceId}, ${owner.accountId}, ${service.subjectId}, 'member')`;
-    await organizationMember(owner.accountId, owner.subjectId);
-    await organizationMember(other.accountId, other.subjectId);
-    const personal = await connectClaudePool(settings, owner, "user");
-    const frozen = { ...owner, claudeAuthoritySnapshot: personal.authoritySnapshot };
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, frozen)).toEqual({
-      workspace: true,
-      organization: false,
-    });
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, other)).toEqual({
-      workspace: false,
-      organization: false,
-    });
-    expect(
-      await loadWorkspaceClaudeSubscriptionReadiness(db, settings, {
-        ...other,
-        claudeAuthoritySnapshot: personal.authoritySnapshot,
-      }),
-    ).toEqual({ workspace: false, organization: false });
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, service)).toEqual({
-      workspace: false,
-      organization: false,
-    });
-    expect(
-      await loadWorkspaceClaudeSubscriptionReadiness(db, settings, {
-        ...service,
-        claudeAuthoritySnapshot: personal.authoritySnapshot,
-      }),
-    ).toEqual({ workspace: false, organization: false });
-    if (!("account" in personal)) throw new Error("Expected a private Claude account");
-    await disconnectClaudeSubscriptionAccount(db, {
-      ...owner,
-      credentialId: personal.account.id,
-      authoritySnapshot: personal.authoritySnapshot,
-    });
-    await connectClaudePool(settings, owner, "workspace");
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, owner)).toEqual({
-      workspace: true,
-      organization: false,
-    });
-    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, frozen)).toEqual({
+    const grant = await workspaceFixture();
+    await organizationMember(grant.accountId, grant.subjectId);
+    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, grant)).toEqual({
       workspace: false,
       organization: false,
     });
@@ -699,15 +573,13 @@ describe("canonical Claude pool readiness", () => {
       workspaceId: crypto.randomUUID(),
       subjectId: "user:disabled-claude",
     };
-    for (const frozen of [undefined, { version: 1, scope: "workspace" } as const]) {
-      expect(
-        await loadWorkspaceClaudeSubscriptionReadiness(
-          unreadableDb,
-          hostedSettings({ claudeSubscriptionEnabled: false }),
-          { ...context, claudeAuthoritySnapshot: frozen },
-        ),
-      ).toEqual({ workspace: false, organization: false });
-    }
+    expect(
+      await loadWorkspaceClaudeSubscriptionReadiness(
+        unreadableDb,
+        hostedSettings({ claudeSubscriptionEnabled: false }),
+        context,
+      ),
+    ).toEqual({ workspace: false, organization: false });
   });
 });
 
@@ -1040,23 +912,26 @@ describe("server-side default model resolution", () => {
     await shared!.admin`
       insert into workspace_memberships (workspace_id, account_id, subject_id, role)
       values (${owner.workspaceId}, ${owner.accountId}, ${other.subjectId}, 'member')`;
-    await organizationMember(owner.accountId, owner.subjectId);
+    const ownerPersonal = await organizationMember(owner.accountId, owner.subjectId);
     await organizationMember(owner.accountId, other.subjectId);
-    await connectPersonalSupergrok(settings, owner);
-    const contextFor = (grant: typeof owner) => ({
+    await connectPersonalSupergrok(settings, owner, ownerPersonal);
+    const contextFor = (grant: typeof owner, workspaceId = grant.workspaceId) => ({
       accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
+      workspaceId,
       subjectId: grant.subjectId,
     });
 
-    expect(await resolveDefaultSessionModel(db, settings, contextFor(owner))).toMatchObject({
-      model: "supergrok/grok-4.7",
-      source: "subscription",
-    });
-    expect(await resolveDefaultSessionModel(db, settings, contextFor(other))).toMatchObject({
-      model: DEFAULT_OPENROUTER_MODEL_ID,
-      source: "deployment",
-    });
+    // The core projects a personal connection only in its owner's Personal
+    // workspace: never in a shared workspace, and never for another member.
+    expect(
+      await resolveDefaultSessionModel(db, settings, contextFor(owner, ownerPersonal)),
+    ).toMatchObject({ model: "supergrok/grok-4.7", source: "subscription" });
+    for (const grant of [owner, other]) {
+      expect(await resolveDefaultSessionModel(db, settings, contextFor(grant))).toMatchObject({
+        model: DEFAULT_OPENROUTER_MODEL_ID,
+        source: "deployment",
+      });
+    }
     await addCredits(owner);
     expect(await resolveDefaultSessionModel(db, settings, contextFor(other))).toMatchObject({
       model: "gpt-6-luna",
@@ -1077,52 +952,6 @@ describe("server-side default model resolution", () => {
       idempotencyKey: crypto.randomUUID(),
     });
     expect(created.model).toBe("gpt-6-luna");
-  }, 180_000);
-
-  test("a stale frozen SuperGrok snapshot means SuperGrok is not ready", async () => {
-    if (!available) return;
-    const settings = hostedSettings();
-    const grant = await workspaceFixture();
-    await organizationMember(grant.accountId, grant.subjectId);
-    const personal = await connectPersonalSupergrok(settings, grant);
-    const frozen = {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      xaiAuthoritySnapshot: personal.authoritySnapshot,
-    };
-    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
-      model: "supergrok/grok-4.7",
-      source: "subscription",
-    });
-    await disconnectXaiSubscriptionCredential(db, {
-      ...grant,
-      credentialId: personal.account.id,
-      authoritySnapshot: personal.authoritySnapshot,
-    });
-    // The frozen pool no longer resolves: execution paths still fail closed.
-    await expect(
-      workspaceXaiSubscriptionActiveForAuthority(db, settings, {
-        workspaceId: grant.workspaceId,
-        subjectId: grant.subjectId,
-        authoritySnapshot: personal.authoritySnapshot,
-      }),
-    ).rejects.toBeInstanceOf(XaiAuthorityPoolInactiveError);
-    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
-      model: DEFAULT_OPENROUTER_MODEL_ID,
-      source: "deployment",
-    });
-    await addCredits(grant);
-    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
-      model: "gpt-6-luna",
-      source: "credits",
-    });
-    // Reconnecting the same personal pool makes the frozen authority ready again.
-    await connectPersonalSupergrok(settings, grant);
-    expect(await resolveDefaultSessionModel(db, settings, frozen)).toMatchObject({
-      model: "supergrok/grok-4.7",
-      source: "subscription",
-    });
   }, 180_000);
 
   test("a keyed retry of an uninitialized shell keeps the shell's model", async () => {

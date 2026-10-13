@@ -96,6 +96,17 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
+For an account-aware header, `useLastStartedTurnPolicy(sessionId, { events,
+includeServingModel: true })` overlays the latest lease-backed serving receipt
+only when it belongs to the last started turn. This requires the optional
+`getSessionModelAccount` client method. Without the option, the hook continues
+to return the accepted turn policy. Neither mode changes the composer's
+preferred model. `useSessionModelAccount` reads authorized accounts and choices;
+pass `provider` so Automatic resets only that provider's choice. Its optional
+`choice.serving` is the last committed placement, not a queued next-turn choice.
+The timeline renders neutral account-switch events without exposing account
+identity or duplicating provider compatibility events.
+
 `OpenGeniChat` and `SessionConversation` are the default product integration.
 Back them with `createSessionProxyHandler` from `@opengeni/sdk`, mounted on your
 server, and pass its mount as `baseUrl`. No provider, client, or workspace id
@@ -1415,6 +1426,10 @@ nested page. Model changes preserve supported reasoning effort and latency;
 unsupported effort falls back to the new model's default, and unsupported speed
 returns to Standard. Thinking uses inline radio choices and is hidden when the
 model has no adjustable reasoning levels. Availability and Codex-only session restrictions still disable choices.
+
+Use `allowModelOptions={false}` for policies that save only a model identity,
+such as a fallback order. This hides effort and speed controls without changing
+the catalog, payment-source labels, or model eligibility.
 
 The trigger renders immediately; the searchable popover loads when opened. Hosts
 can translate its search, current-selection, empty-result, attachment-warning, and

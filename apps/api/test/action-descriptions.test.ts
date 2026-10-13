@@ -70,6 +70,7 @@ describe("action descriptions", () => {
       "allowedModels",
       "allowedPeople",
       "allowedWorkspaces",
+      "sharePersonal",
       "version",
     ]);
   });

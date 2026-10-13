@@ -1,17 +1,17 @@
 /**
  * M4 X2b: the SuperGrok routes on the shared subscription core, on real
- * PostgreSQL as the application role. Without the SuperGrok (`xai`) cutover
- * receipt the legacy routes answer; with the receipt and no switch row every
- * route fails closed with the typed 503; with an enabled switch row the same
- * paths, verbs and response shapes are served from core connections
- * (connect, list, rename, allocator, activate, rotation, reconnect,
- * disconnect, the access policy).
+ * PostgreSQL as the application role. SuperGrok's legacy runtime is deleted
+ * (M4 X4): a route other than the core (no receipt, or no enabled switch row)
+ * fails closed with the typed 503; with an enabled switch row the same paths,
+ * verbs and response shapes are served from core connections (connect, list,
+ * rename, allocator, activate, rotation, reconnect, disconnect, the access
+ * policy).
  *
- * X3 ships SuperGrok's registry entry; this process registers it (the module
- * binding below) and the test database gets its registry row. Run this file in
+ * X3 ships SuperGrok's registry entry; this historical fixture withholds its
+ * migration and then inserts the receipt explicitly. Run this file in
  * its own process: the registration replaces module bindings process-wide.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
@@ -23,24 +23,6 @@ import type { Context, Hono as HonoApp } from "hono";
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-const registryPath = Bun.resolveSync(
-  "../../../packages/db/src/subscription-core-providers.ts",
-  import.meta.dir,
-);
-const realRegistry = await import(registryPath);
-const { SUBSCRIPTION_CORE_XAI } = await import(
-  Bun.resolveSync("../../../packages/db/src/subscription-core-xai-adapter.ts", import.meta.dir)
-);
-const productionIds: string[] = realRegistry.subscriptionCoreProviderIds();
-const realProvider = realRegistry.subscriptionCoreProvider;
-const lookup = (providerId: string) =>
-  providerId === "xai" ? SUBSCRIPTION_CORE_XAI : realProvider(providerId);
-mock.module(registryPath, () => ({
-  ...realRegistry,
-  subscriptionCoreProviderIds: () => [...productionIds, "xai"].sort(),
-  subscriptionCoreProvider: lookup,
-  subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
-}));
 const opengeniDb = await import("@opengeni/db");
 const { resolveCatalogSettings } = await import("@opengeni/core");
 const { Hono } = await import("hono");
@@ -84,6 +66,8 @@ let workspaceId = "";
 let subjectId = "";
 let deviceSequence = 0;
 let providerSubject = "xai-core-user-1";
+let failDatabaseAfterLogin = false;
+let databaseFailure: Error | null = null;
 
 function jwt(payload: Record<string, unknown>): string {
   return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
@@ -103,6 +87,11 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
     });
   }
   if (url.endsWith("/oauth2/token")) {
+    if (failDatabaseAfterLogin) {
+      databaseFailure = Object.assign(new Error("synthetic database connection loss"), {
+        code: "08006",
+      });
+    }
     return Response.json({
       access_token: jwt({
         principal_type: "User",
@@ -124,7 +113,9 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("api-supergrok-core-routes");
+  shared = await acquireSharedTestDatabase("api-supergrok-core-routes", {
+    withheldMigrations: ["0747_subscription_core_xai_cutover.sql"],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = opengeniDb.createDb(shared.appUrl);
   // An organization administrator in a shared workspace: on the core only
@@ -149,8 +140,20 @@ beforeAll(async () => {
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspaceId}::uuid, ${accountId}::uuid)`;
   app = new Hono();
+  // Fail only the persistence transaction after OAuth succeeds; admission
+  // and all ordinary route assertions still use the restricted real-PG role.
+  const routeDb = new Proxy(client.db, {
+    get(target, property, receiver) {
+      if (property === "transaction")
+        return (...args: Parameters<typeof target.transaction>) => {
+          if (databaseFailure) throw databaseFailure;
+          return target.transaction(...args);
+        };
+      return Reflect.get(target, property, receiver);
+    },
+  });
   const deps = {
-    db: client.db,
+    db: routeDb,
     settings,
     resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, settings),
     githubStateSecret: STATE_SECRET,
@@ -163,9 +166,21 @@ beforeAll(async () => {
   // app's central settings-lock mapping.
   const renderTyped = (raw: Error, c: Context) => {
     const error: Error = subscriptionSettingsLockedHttpError(raw) ?? raw;
-    const typed = error as { status?: number; code?: string; details?: Record<string, unknown> };
+    const typed = error as {
+      status?: number;
+      code?: string;
+      retryable?: boolean;
+      outcomeUnknown?: boolean;
+      details?: Record<string, unknown>;
+    };
     return c.json(
-      { code: typed.code ?? null, message: error.message, ...(typed.details ?? {}) },
+      {
+        code: typed.code ?? null,
+        message: error.message,
+        ...(typed.details ?? {}),
+        ...(typed.retryable === undefined ? {} : { retryable: typed.retryable }),
+        ...(typed.outcomeUnknown === undefined ? {} : { outcomeUnknown: typed.outcomeUnknown }),
+      },
       (typed.status ?? 500) as 500,
     );
   };
@@ -386,8 +401,28 @@ async function listed() {
   };
 }
 
-let legacyEmpty: unknown = null;
-let legacyShape: { top: string[]; account: string[]; settings: string[] } | null = null;
+const PUBLIC_SHAPE = {
+  top: ["accounts", "activeAccountId", "organizationId", "settings", "source"],
+  account: [
+    "active",
+    "allocatorEnabled",
+    "allocatorUpdatedAt",
+    "allocatorVersion",
+    "email",
+    "exhaustedUntil",
+    "expiresAt",
+    "id",
+    "label",
+    "lastError",
+    "lastRefreshAt",
+    "plan",
+    "quota",
+    "scope",
+    "status",
+    "subject",
+  ],
+  settings: ["activeCredentialId", "rotationEnabled", "rotationStrategy"],
+};
 
 function shapeOf(body: Awaited<ReturnType<typeof listed>>) {
   return {
@@ -395,6 +430,24 @@ function shapeOf(body: Awaited<ReturnType<typeof listed>>) {
     account: Object.keys(body.accounts[0]!).sort(),
     settings: Object.keys(body.settings).sort(),
   };
+}
+
+const FAIL_CLOSED_ROUTES = [
+  ["/supergrok/accounts", "GET", undefined],
+  ["/supergrok/connect/start", "POST", {}],
+  ["/supergrok/settings", "PATCH", { rotationEnabled: false }],
+  [`/supergrok/accounts/${crypto.randomUUID()}`, "DELETE", undefined],
+] as const;
+
+async function expectEveryRouteFailsClosed(): Promise<void> {
+  for (const [path, method, body] of FAIL_CLOSED_ROUTES) {
+    const response = await request(path, { method, ...(body ? { body } : {}) });
+    expect({ path, status: response.status, body: await response.json() }).toMatchObject({
+      path,
+      status: 503,
+      body: { reason: "subscription_core_cutover_disabled" },
+    });
+  }
 }
 
 describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
@@ -411,56 +464,73 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     ]);
   });
 
-  test("without the receipt the legacy routes answer", async () => {
-    legacyEmpty = await listed();
-    expect(legacyEmpty).toMatchObject({ accounts: [], activeAccountId: null });
-    // The legacy connect, listing and disconnect: the shape the core must keep.
-    const connected = await connectWorkspaceAccount();
-    expect(connected.isActive).toBe(true);
-    const listing = await listed();
-    expect(listing.accounts).toHaveLength(1);
-    legacyShape = shapeOf(listing);
-    const disconnected = await request(`/supergrok/accounts/${connected.accountId}`, {
-      method: "DELETE",
-    });
-    expect(disconnected.status).toBe(200);
-    expect(await listed()).toEqual(legacyEmpty as never);
+  test("without the receipt every route fails closed exactly as maintenance does", async () => {
+    // A binary without SuperGrok's receipt is refused by readiness; the
+    // routes still never fall back to the deleted legacy runtime.
+    const route = spyOn(
+      opengeniDb,
+      "readSubscriptionCoreProviderRouteForRequest",
+    ).mockResolvedValue("legacy");
+    try {
+      await expectEveryRouteFailsClosed();
+      expect(route).toHaveBeenCalled();
+    } finally {
+      route.mockRestore();
+    }
     const [core] = await shared!.admin<{ count: number }[]>`
       select count(*)::int as count from subscription_connections where provider = 'xai'`;
     expect(core!.count).toBe(0);
   });
 
+  async function expectRetryableConnectPollDatabaseFailure() {
+    const start = await request("/supergrok/connect/start", { method: "POST", body: {} });
+    expect(start.status).toBe(200);
+    failDatabaseAfterLogin = true;
+    try {
+      const poll = await request("/supergrok/connect/poll", {
+        method: "POST",
+        body: { state: (await start.json()).state },
+      });
+      expect({ status: poll.status, body: await poll.json() }).toMatchObject({
+        status: 503,
+        body: { code: "DATABASE_UNAVAILABLE", retryable: true, outcomeUnknown: true },
+      });
+    } finally {
+      failDatabaseAfterLogin = false;
+      databaseFailure = null;
+    }
+  }
+
+  test(
+    "legacy connect-poll database loss is a retryable 503 with unknown mutation outcome",
+    expectRetryableConnectPollDatabaseFailure,
+  );
+
   test("after the receipt, without an enabled switch row, every route fails closed", async () => {
+    // A fresh install ships SuperGrok's registry row and cutover receipt.
     await shared!.admin`
       insert into opengeni_private.subscription_core_providers (provider, extra_credits,
         primary_setting_column)
-      values ('xai', false, 'xai_primary_connection_id')`;
+      values ('xai', false, 'xai_primary_connection_id') on conflict do nothing`;
     await shared!.admin`
       insert into opengeni_private.subscription_provider_cutover_receipts (
         provider, migration, committed_at, seed_rotation
-      ) values ('xai', '0799_subscription_core_xai_cutover.sql', clock_timestamp(),
-        '{"mode":"spread"}')`;
-    for (const [path, method, body] of [
-      ["/supergrok/accounts", "GET", undefined],
-      ["/supergrok/connect/start", "POST", {}],
-      ["/supergrok/settings", "PATCH", { rotationEnabled: false }],
-      [`/supergrok/accounts/${crypto.randomUUID()}`, "DELETE", undefined],
-    ] as const) {
-      const response = await request(path, { method, ...(body ? { body } : {}) });
-      expect({ path, status: response.status, body: await response.json() }).toMatchObject({
-        path,
-        status: 503,
-        body: { reason: "subscription_core_cutover_disabled" },
-      });
-    }
+      ) values ('xai', '0721_subscription_core_xai_cutover.sql', clock_timestamp(),
+        '{"mode":"spread"}') on conflict do nothing`;
+    // The organization's switch row is disabled: the maintenance state.
+    await shared!.admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${accountId}::uuid, 'xai', false)
+      on conflict (account_id, provider) do update set enabled = false`;
+    await expectEveryRouteFailsClosed();
   });
 
   test("with the switch row the same routes answer from core connections", async () => {
     await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'xai', true)`;
-    // An empty pool reads as the legacy empty pool.
-    expect(await listed()).toEqual(legacyEmpty as never);
+      values (${accountId}::uuid, 'xai', true)
+      on conflict (account_id, provider) do update set enabled = true`;
+    expect(await listed()).toMatchObject({ accounts: [], activeAccountId: null });
 
     // The core leaves the primary unset on a first connect (as for Codex): the
     // pool fails over across every eligible account until one is activated,
@@ -483,8 +553,9 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       active: false,
       allocatorEnabled: true,
     });
-    // The legacy account shape: the same keys, no secrets.
-    expect(shapeOf(first)).toEqual(legacyShape!);
+    // The public account shape the SuperGrok routes have always served, with
+    // no secrets.
+    expect(shapeOf(first)).toEqual(PUBLIC_SHAPE);
     const serialized = JSON.stringify(first);
     expect(serialized).not.toContain("refresh-");
     expect(serialized).not.toContain("credentialEncrypted");
@@ -647,6 +718,11 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     expect(await disconnected.json()).toEqual({ disconnected: true, newActiveId: null });
     expect(await listed()).toMatchObject({ accounts: [], activeAccountId: null });
   });
+
+  test(
+    "core connect-poll database loss is a retryable 503 with unknown mutation outcome",
+    expectRetryableConnectPollDatabaseFailure,
+  );
 
   test("organization routes: maintenance fails closed, then they answer from core connections", async () => {
     // The receipt exists (above); this organization has no switch row.
@@ -870,6 +946,34 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
       await browserWorkspaceRequest(personalWorkspaceId, "/accounts")
     ).json();
     expect(overridden.settings).toMatchObject({ rotationEnabled: false });
+
+    // Owner routes may write Personal overrides; organization locks still
+    // refuse both activate and rotation without changing the stored values.
+    await shared!.admin`UPDATE subscription_settings SET locked_settings = ARRAY['rotation']
+      WHERE account_id = ${organizationId}::uuid AND workspace_id IS NULL`;
+    try {
+      const overrideBefore = await shared!.admin`SELECT to_jsonb(setting) AS value
+        FROM subscription_settings setting WHERE account_id = ${organizationId}::uuid
+          AND workspace_id = ${personalWorkspaceId}::uuid`;
+      for (const [path, method, body] of [
+        ["/settings", "PATCH", { rotationEnabled: true }],
+        [`/accounts/${personalId}/activate`, "POST", {}],
+      ] as const) {
+        const refused = await browserWorkspaceRequest(personalWorkspaceId, path, method, body);
+        expect({ status: refused.status, body: await refused.json() }).toMatchObject({
+          status: 409,
+          body: { code: "conflict", reason: "setting_locked", settings: ["rotation"] },
+        });
+      }
+      expect(
+        await shared!.admin`SELECT to_jsonb(setting) AS value
+        FROM subscription_settings setting WHERE account_id = ${organizationId}::uuid
+          AND workspace_id = ${personalWorkspaceId}::uuid`,
+      ).toEqual(overrideBefore);
+    } finally {
+      await shared!.admin`UPDATE subscription_settings SET locked_settings = '{}'
+        WHERE account_id = ${organizationId}::uuid AND workspace_id IS NULL`;
+    }
 
     // Reconnecting the same login updates the same personal connection.
     const restart = await browserWorkspaceRequest(personalWorkspaceId, "/connect/start", "POST", {

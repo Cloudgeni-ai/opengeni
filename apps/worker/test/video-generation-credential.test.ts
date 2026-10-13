@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { encryptEnvironmentValue } from "@opengeni/db";
 import {
   decryptVideoGenerationCredential,
   decryptVideoGenerationApiKey,
   encryptVideoGenerationApiKey,
-  encryptVideoGenerationXaiCredential,
+  encryptVideoGenerationConnectionReference,
 } from "../src/activities/video-generation-credential";
 
 describe("video generation credential envelope", () => {
@@ -30,24 +29,40 @@ describe("video generation credential envelope", () => {
     expect(message).not.toContain(secret);
   });
 
-  test("freezes a complete refreshable SuperGrok lease", () => {
-    const encrypted = encryptVideoGenerationXaiCredential(key, {
-      accessToken: "xai-access",
-      refreshToken: "xai-refresh",
-      userId: "xai-user",
-      credentialId: "11111111-1111-4111-8111-111111111111",
-      subjectId: "user:owner",
-      authoritySnapshot: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+  test("round-trips a subscription connection reference without token material", () => {
+    const encrypted = encryptVideoGenerationConnectionReference(key, {
+      provider: "xai",
+      connectionId: "11111111-1111-4111-8111-111111111111",
     });
-    expect(encrypted).not.toContain("xai-refresh");
     expect(decryptVideoGenerationCredential(key, encrypted)).toEqual({
-      kind: "xai-subscription",
-      accessToken: "xai-access",
-      refreshToken: "xai-refresh",
-      userId: "xai-user",
-      credentialId: "11111111-1111-4111-8111-111111111111",
-      subjectId: "user:owner",
-      authoritySnapshot: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+      kind: "subscription-connection",
+      provider: "xai",
+      connectionId: "11111111-1111-4111-8111-111111111111",
     });
+  });
+
+  test("refuses a retired SuperGrok token envelope without echoing its tokens", () => {
+    // The legacy SuperGrok runtime (deleted in M4 X4) froze tokens into the
+    // envelope; nothing decodes that shape any more.
+    const encrypted = encryptEnvironmentValue(
+      key,
+      JSON.stringify({
+        kind: "xai-subscription",
+        accessToken: "xai-access",
+        refreshToken: "xai-refresh",
+        userId: "xai-user",
+        credentialId: "11111111-1111-4111-8111-111111111111",
+        subjectId: "user:owner",
+        authoritySnapshot: { version: 1, scope: "workspace" },
+      }),
+    );
+    let message = "";
+    try {
+      decryptVideoGenerationCredential(key, encrypted);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe("Video provider credential lease is malformed");
+    expect(message).not.toContain("xai-refresh");
   });
 });

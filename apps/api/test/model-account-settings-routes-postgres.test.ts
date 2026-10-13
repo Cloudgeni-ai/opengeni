@@ -186,10 +186,17 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
       (await call(owner, "PATCH", organizationPath, { fallbackOrder: { "codex/a": ["codex/a"] } }))
         .status,
     ).toBe(422);
-    // Rotation only for providers whose accounts run on the shared core.
+    // All registered subscription providers now run on the shared core.
     expect(
       (await call(owner, "PATCH", organizationPath, { rotation: { xai: { mode: "spread" } } }))
         .status,
+    ).toBe(200);
+    expect(
+      (
+        await call(owner, "PATCH", organizationPath, {
+          rotation: { unregistered: { mode: "spread" } },
+        })
+      ).status,
     ).toBe(422);
 
     // A member (even a workspace administrator) is not an organization administrator.

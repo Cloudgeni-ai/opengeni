@@ -114,6 +114,15 @@ Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
+Subscription serving revisions are attempt-scoped; the accepted model and
+frozen connection authority remain the logical turn's contract. Shared-core
+placement, candidate-aware capacity waits and lease-backed switch events use
+the same provider-neutral eligibility rules. The worker's serving hooks live
+in `apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts`;
+the metadata-only catalog helper also serves control-worker recovery without
+loading provider credentials. Remote-compaction conversion and UI activation
+remain separately gated; see [subscription accounts](subscription-accounts.md).
+
 **Turns** are accepted work; replaceable **attempts** append ordered,
 exactly-once atomic history batches.
 
@@ -1236,9 +1245,12 @@ Workspace Insights and Organization settings > Insights render one dashboard
 adapter in `usage-adapter.ts` serves the older endpoints until every
 deployment answers it.
 
-Codex/SuperGrok pools preserve logical turns. Shared/Personal workspaces inherit
-same-organization pools as separate allocator boundaries, not access grants.
-SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter/Opper BYOK keys
+Codex, Claude and SuperGrok use the provider-neutral subscription core for
+selection, leases, quota, waits and recovery. Organization-owned connections
+are scoped to the organization, selected workspaces or selected people;
+pool eligibility is not a session-access grant. Accepted work keeps its frozen
+authority through recovery. Legacy tables and snapshots are historical evidence,
+not alternate runtime selectors. Vercel AI Gateway/OpenRouter/Opper BYOK keys
 belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
 inherit into same-organization shared workspaces, retain payer identity, and
 never fall back across rails.
@@ -2209,8 +2221,8 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/chat-reasoning.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/agent-turn/codex-core-capacity.ts`, `packages/db/src/subscription-core-codex.ts`, `packages/db/src/subscription-core-codex-adapter.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
-| Shared subscription core (policy, reference model, runtime, adapters) | `packages/subscriptions/` (`src/reference-model.ts`, `src/adapter.ts`), `packages/db/src/subscription-core/`, `packages/db/src/subscription-core-providers.ts`, `packages/db/src/legacy-subscription-world.ts`, `apps/worker/src/activities/agent-turn/subscription-core-shadow.ts` | [`subscription-accounts.md`](subscription-accounts.md), [`design/subscription-core-2026-10-07.md`](design/subscription-core-2026-10-07.md) |
-| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
+| Shared subscription core (policy, reference model, runtime, adapters) | `packages/subscriptions/` (`src/reference-model.ts`, `src/adapter.ts`), `packages/db/src/subscription-core/`, `packages/db/src/subscription-core-providers.ts`, `apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts` | [`subscription-accounts.md`](subscription-accounts.md), [`design/subscription-core-2026-10-07.md`](design/subscription-core-2026-10-07.md) |
+| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/subscription-core-xai.ts`, `packages/db/src/subscription-core-xai-adapter.ts`, `packages/db/src/subscription-core-xai-compat.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
@@ -2333,11 +2345,11 @@ catalogue does not confer installation compatibility. See [plugin catalogue](plu
 
 [Headless-shell](headless-shell.md).
 
-Claude subscription accounts reuse the scoped SuperGrok repository, individual
-account UI, credential lease and durable provider-capacity wait/resume seams.
+Claude subscription accounts use the shared core through the Claude adapter,
+with provider-specific authentication, transport and usage decoding.
 The encrypted account bundle owns token/account/device identity; public account
 rows expose only permitted display metadata. Acceptance freezes workspace,
 organization or explicit user authority independently of the current browser
-user. Execution rechecks that frozen pool, live owner authority and the exact
+user. Execution rechecks that frozen authority, live owner authority and the exact
 serving account generation before every physical request. See the native Claude
 section in model-providers.md and the maintenance activation in deployment.md.

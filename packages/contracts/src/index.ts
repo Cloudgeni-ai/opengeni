@@ -14492,6 +14492,10 @@ export const SessionEventType = z.enum([
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
   "codex.account.switched",
+  // Provider-neutral, lease-backed serving selection and actual transitions.
+  // Accepted model settings stay unchanged; payloads contain opaque ids only.
+  "subscription.account.selected",
+  "subscription.account.switched",
   "codex.account.selection.changed",
   // A person chose the account a session runs on (any provider's shared
   // connection or their own personal one), or returned it to automatic
@@ -14793,6 +14797,8 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   provider_account: [
     "agent.model.usage",
     "codex.account.switched",
+    "subscription.account.selected",
+    "subscription.account.switched",
     "codex.account.selection.changed",
     "model_account.selection.changed",
     "codex.credential.selected",

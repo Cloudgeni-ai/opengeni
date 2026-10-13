@@ -418,9 +418,9 @@ function safePosture(): RuntimeDatabasePosture {
     ownedSchemas: [],
     ownedRelations: [],
     sessionVariableSetAttachmentsCutoverPresent: true,
-    claudeSubscriptionPoolActivationPresent: true,
+    retiredSubscriptionObjects: [],
     subscriptionCodexCutoverActivationPresent: true,
-    subscriptionProviderCutoverReceipts: ["codex"],
+    subscriptionProviderCutoverReceipts: ["claude", "codex", "xai"],
     tables: [
       {
         name: "tenant_rows",
@@ -677,48 +677,50 @@ describe("runtime database posture evaluator", () => {
     }
   });
 
-  test("tolerates an absent Codex twin routine but holds a present one to the precursor hardening", () => {
-    const hardenedTwin = (name: string) => ({
-      name,
-      owner: "opengeni_migrator",
-      execute: true,
-      publicExecute: false,
-      securityDefiner: true,
-      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
-    });
-    for (const name of SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES) {
-      expect(SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).not.toContain(name);
-      // Absent (after the retirement migration) and present (before it).
-      expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
-      const present = safePosture();
-      present.privateRoutines.push(hardenedTwin(name));
-      expect(evaluateRuntimeDatabasePosture(present, options)).toEqual([]);
-      for (const unsafe of [
-        { execute: false },
-        { publicExecute: true },
-        { securityDefiner: false },
-        { owner: "opengeni_app" },
-        { configuration: ["search_path=public"] },
-      ]) {
-        const posture = safePosture();
-        posture.privateRoutines.push({ ...hardenedTwin(name), ...unsafe });
-        expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-          `retiring Codex twin private routine ${name} is unsafe`,
-        );
-      }
-      const duplicated = safePosture();
-      duplicated.privateRoutines.push(hardenedTwin(name), hardenedTwin(name));
-      expect(evaluateRuntimeDatabasePosture(duplicated, options)).toContain(
-        `retiring Codex twin private routine ${name} is unsafe`,
+  test("requires every retired subscription object absent (migration 0751)", () => {
+    const retiredRoutines = runtimePosture.SUBSCRIPTION_RETIRED_ROUTINES;
+    // The exact inventory the retirement migration drops.
+    expect(retiredRoutines).toHaveLength(42);
+    expect(runtimePosture.SUBSCRIPTION_RETIRED_POLICIES).toHaveLength(21);
+    expect(runtimePosture.SUBSCRIPTION_RETIRED_TRIGGERS).toHaveLength(14);
+    const retired = new Set(retiredRoutines.map(({ signature }) => signature));
+    expect(retired.size).toBe(retiredRoutines.length);
+    for (const twin of SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES)
+      expect(retired.has(twin)).toBe(true);
+    // No retired routine is still required, forbidden or owner-checked.
+    for (const kept of [
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+      ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+      ...RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+      ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
+      ...SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
+      ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+    ]) {
+      expect({ kept, retired: retired.has(kept) }).toEqual({ kept, retired: false });
+    }
+    expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+    for (const object of [
+      "routine public.resolve_xai_authority_pool(uuid, uuid, text, jsonb)",
+      "routine opengeni_private.subscription_codex_reach(uuid, uuid)",
+      "routine opengeni_subscription_internal.subscription_codex_writer_context(uuid, uuid, text)",
+      "policy claude_capacity_waiters.claude_subscription_pool_scope",
+      "trigger xai_credential_leases.xai_lease_credential_pool_guard",
+    ]) {
+      const posture = safePosture();
+      posture.retiredSubscriptionObjects = [object];
+      const violation = `retired subscription ${object} is present; apply the drained retirement migration 0751_subscription_core_legacy_retirement.sql`;
+      expect(runtimePosture.SUBSCRIPTION_RETIREMENT_MIGRATION).toBe(
+        "0751_subscription_core_legacy_retirement.sql",
+      );
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([violation]);
+      // The embedded (scoped) topology holds the same exact schema contract.
+      expect(evaluateRuntimeDatabasePosture(posture, { rlsStrategy: "scoped" })).toContain(
+        violation,
       );
     }
   });
 
-  test("keeps the subscription owner implementation checks once the Codex twin writers are gone", () => {
-    const codexWriterContext = "subscription_codex_writer_context(uuid, uuid, text)";
-    const codexConnect = SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES.find((name) =>
-      name.startsWith("connect_subscription_codex_personal("),
-    )!;
+  test("keeps the subscription owner implementation checks without the Codex twin writers", () => {
     const ownerRoutine = (name: string) => ({
       name,
       owner: "opengeni_migrator",
@@ -736,23 +738,19 @@ describe("runtime database posture evaluator", () => {
     ];
     // The safe posture carries the neutral writers and no Codex twin writer.
     // Every other owner-only routine is present and safe too, so owner
-    // requirements other PRs add to the same block stay satisfied; only the
-    // Codex writer context is left out, since it is asserted separately below.
+    // requirements other PRs add to the same block stay satisfied.
     const withoutTwins = () => {
       const posture = safePosture();
       posture.subscriptionOwnerRoutines = [
-        ...new Set([
-          ...ownerRoutines,
-          ...SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES.filter(
-            (name) => name !== codexWriterContext,
-          ),
-        ]),
+        ...new Set([...ownerRoutines, ...SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES]),
       ].map(ownerRoutine);
       return posture;
     };
-    expect(withoutTwins().privateRoutines.some((routine) => routine.name === codexConnect)).toBe(
-      false,
-    );
+    expect(
+      withoutTwins().privateRoutines.some((routine) =>
+        (SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES as readonly string[]).includes(routine.name),
+      ),
+    ).toBe(false);
     expect(evaluateRuntimeDatabasePosture(withoutTwins(), options)).toEqual([]);
     for (const name of ownerRoutines) {
       const missing = withoutTwins();
@@ -769,17 +767,6 @@ describe("runtime database posture evaluator", () => {
         `subscription owner implementation ${name} is missing or unsafe`,
       );
     }
-    // The Codex writer context is required exactly while a Codex twin writer exists.
-    const twinWriter = withoutTwins();
-    twinWriter.privateRoutines.push({
-      ...ownerRoutine(codexConnect),
-      execute: true,
-    });
-    expect(evaluateRuntimeDatabasePosture(twinWriter, options)).toContain(
-      `subscription owner implementation ${codexWriterContext} is missing or unsafe`,
-    );
-    twinWriter.subscriptionOwnerRoutines!.push(ownerRoutine(codexWriterContext));
-    expect(evaluateRuntimeDatabasePosture(twinWriter, options)).toEqual([]);
   });
 
   test("requires exact private M3 precursor capabilities and hardened ownership/ACL/search path", () => {
@@ -819,7 +806,6 @@ describe("runtime database posture evaluator", () => {
     const withOwnerRoutines = (names: readonly string[]) => {
       const posture = safePosture();
       posture.subscriptionOwnerRoutines = [
-        "subscription_codex_writer_context(uuid, uuid, text)",
         "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
         "drop_subscription_codex_owner_capabilities(uuid)",
         "derive_scheduled_revision_subscription_authority()",
@@ -863,14 +849,6 @@ describe("runtime database posture evaluator", () => {
     }
   });
 
-  test("requires the individual Claude account activation before starting a runtime", () => {
-    const posture = safePosture();
-    posture.claudeSubscriptionPoolActivationPresent = false;
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the Claude subscription account activation receipt",
-    );
-  });
-
   test("requires the drained Codex subscription-core cutover before starting a runtime", () => {
     const posture = safePosture();
     posture.subscriptionCodexCutoverActivationPresent = false;
@@ -885,10 +863,46 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
     );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+    );
     // Each listed cutover migration is in this binary's ledger.
     for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
       expect(existsSync(new URL(`../drizzle/${migration}`, import.meta.url))).toBe(true);
     }
+  });
+
+  test("a provider's legacy tables are read-only once its receipt exists", () => {
+    const posture = safePosture();
+    const existing = posture.tables.find((table) => table.name === "xai_subscription_credentials");
+    const legacy =
+      existing ??
+      xaiAuthorityTables().find((table) => table.name === "xai_subscription_credentials")!;
+    if (!existing) posture.tables.push(legacy);
+    Object.assign(legacy, { select: true, insert: true, update: true, delete: true });
+    const legacyOptions = {
+      ...options,
+      tablePrivileges: {
+        ...options.tablePrivileges,
+        xai_subscription_credentials: ["SELECT"] as const,
+      },
+    };
+    expect(evaluateRuntimeDatabasePosture(posture, legacyOptions)).toContain(
+      "table xai_subscription_credentials grants excess runtime privileges: INSERT, UPDATE, DELETE",
+    );
+    // Before the receipt provisioning still grants full DML; only the missing
+    // receipt is reported.
+    posture.subscriptionProviderCutoverReceipts = ["codex"];
+    const before = evaluateRuntimeDatabasePosture(posture, legacyOptions);
+    expect(
+      before.filter((violation) => violation.includes("xai_subscription_credentials")),
+    ).toEqual([]);
+    expect(before).toContain(
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+    );
   });
 
   const modelFactCapabilities = [
@@ -1639,7 +1653,11 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_READ_INSERT_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
-            : 0) +
+            : 0) -
+          // 0747: the five legacy SuperGrok tables become read-only forensics.
+          (tables === RUNTIME_FULL_DML_TABLES ? 5 : 0) -
+          // 0748: the five legacy Claude pool tables and its usage table too.
+          (tables === RUNTIME_FULL_DML_TABLES ? 6 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -2787,16 +2805,6 @@ describe("runtime database posture evaluator", () => {
       "another_owner";
     expect(evaluateRuntimeDatabasePosture(invalidRoutine, options)).toContain(
       `target-schema runtime capability ${routineName} owner another_owner does not match authority table owner opengeni_migrator`,
-    );
-  });
-
-  test("rejects xAI authority routine and table owner mismatch", () => {
-    const posture = safePosture();
-    posture.tables.find((table) => table.name === "xai_subscription_credentials")!.owner =
-      "another_owner";
-
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "target-schema runtime capability create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone) authority table owners do not match: organization_memberships=opengeni_migrator, organization_user_resource_authorities=opengeni_migrator, workspace_memberships=opengeni_migrator, xai_subscription_credentials=another_owner",
     );
   });
 

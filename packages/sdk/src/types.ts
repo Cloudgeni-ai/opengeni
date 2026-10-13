@@ -2381,6 +2381,8 @@ export const SESSION_EVENT_TYPES = [
   "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  "subscription.account.selected",
+  "subscription.account.switched",
   "codex.account.selection.changed",
   // A person chose the session's account (any provider) or returned it to
   // automatic placement.
@@ -4173,7 +4175,7 @@ export type ModelAccountSettingValues = {
   /** Ordered fallback models for a preferred model. */
   fallbackOrder: Record<string, string[]>;
   personalConnectionsAllowed: boolean;
-  /** Use the person's own account when shared accounts are exhausted (never in background work). */
+  /** Permit a person's opt-in fallback; accepted background work retains its captured authority. */
   personalFallbackAllowed: boolean;
 };
 
@@ -4295,6 +4297,19 @@ export type ModelAccountChoiceOption = {
 
 /** A session's current account, what it may switch to, and the effective personal settings. */
 export type SessionModelAccountChoiceResponse = {
+  /** Last committed placement; neither queued account choices nor unplaced proposals are serving truth. */
+  serving?:
+    | {
+        turnId: string;
+        provider: string;
+        connectionId: string | null;
+        modelId: string;
+        preferredModelId: string;
+        reasoningEffort: ReasoningEffort;
+        latencyMode: LatencyMode;
+      }
+    | null
+    | undefined;
   /** The session's account when it has bindings for one provider only; else null (see `bindings`). */
   binding: {
     provider: string;
@@ -4463,6 +4478,13 @@ export type WorkspaceCodexSubscriptionSource = {
   effectiveSource: "workspace" | "organization" | "disabled";
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
+  /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
+  workspaceSetAside?: boolean;
+  /**
+   * How many organization accounts other than the workspace's own reach this
+   * workspace (accounts limited to chosen people aside). Absent from older servers.
+   */
+  organizationCount?: number;
 };
 
 /**
@@ -4524,6 +4546,11 @@ export type CodexPlanExcludedModel = {
 export type CodexAccount = {
   id: string;
   source?: "workspace" | "organization";
+  /**
+   * Organization list only: shared workspaces that list the account among
+   * their own (it was connected there).
+   */
+  ownInWorkspaceIds?: string[];
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -9823,6 +9850,8 @@ export type ModelConnectionAccessPolicy = {
    * `allowPersonalWorkspaces: false`.
    */
   allowedPeople?: string[] | null;
+  /** Explicit owner consent to share a personal subscription with the organization. */
+  sharePersonal?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {
@@ -9838,6 +9867,7 @@ export type ModelConnectionAccessResponse = {
   localWorkspaceIds?: string[];
   /** The workspace whose administrators also manage the account, if any. */
   managedByWorkspaceId?: string | null;
+  personalSharingSupported?: boolean;
 };
 
 export type ConnectorToolPermission = "allow" | "ask" | "block";
