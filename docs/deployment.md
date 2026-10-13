@@ -1743,6 +1743,13 @@ selects managed access or a remote sandbox does not require sharing API signing,
 email or sandbox-provider secrets with either sidecar. API and ordinary worker
 authentication and provider validation are unchanged.
 
+Artifact sidecar images use slim Bun runtime stages. Neither ships the
+development checkout or npm dependency tree: the outbox needs only its bundled
+entrypoint, while the materializer also carries the verified read-only native
+runtime and isolated executable. The materializer identity/ABI probe runs in the
+final image as the unprivileged runtime user. API/worker image capabilities and
+the sidecars' separate database roles, health ports and sandboxing are unchanged.
+
 Native dependencies remain running after `Ctrl-C`, matching Compose's warm
 restart behavior. `bun run dev:down` stops only the infrastructure recorded for
 this worktree. `bun run dev:clean -- --yes` also removes its PostgreSQL/object

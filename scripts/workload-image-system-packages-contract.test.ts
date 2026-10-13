@@ -58,7 +58,7 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
     worker.includes("/usr/bin/python3 -c 'import pty'") &&
     aptTransactions(materializer) === 1 &&
     materializer.includes(
-      "apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux",
+      "apt-get install -y --no-install-recommends bubblewrap ca-certificates util-linux",
     )
   );
 }

@@ -183,24 +183,30 @@ RUN bun scripts/build-runtime-processes.ts api
 EXPOSE 8000
 CMD ["bun", "apps/api/dist/process/index.js"]
 
+# These sidecar bundles have no runtime npm externals. Keep the full frozen
+# dependency install and source tree in builders, not in deployed images.
+FROM source-base AS artifact-outbox-build
+RUN bun scripts/build-runtime-processes.ts artifact-outbox
+
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact
 # runtime and authenticates with the narrow dispatcher-only PostgreSQL role.
-FROM base AS artifact-outbox-dispatcher
+FROM oven/bun:${BUN_VERSION}-slim AS artifact-outbox-dispatcher
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 ENV OPENGENI_ARTIFACT_OUTBOX_ENABLED=true \
   OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE=opengeni_artifact_outbox_dispatcher \
   OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=9466
-RUN bun scripts/build-runtime-processes.ts artifact-outbox
+COPY --from=artifact-outbox-build --chown=bun:bun /app/apps/worker/dist/process/artifact-outbox/ ./apps/worker/dist/process/artifact-outbox/
+USER bun
 EXPOSE 9466
 CMD ["bun", "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js"]
 
-# Dedicated artifact materializer image. It inherits the same exact runtime
-# authority as API and never compiles, downloads, or substitutes kernel bytes.
-FROM artifact-runtime-base AS artifact-materializer
+# Build against the same verified native runtime authority as API. Compilation
+# of the subprocess stays out of the final image; kernel bytes are never rebuilt.
+FROM artifact-runtime-base AS artifact-materializer-build
 USER root
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux \
-  && rm -rf /var/lib/apt/lists/* \
-  && install -d -o bun -g bun -m 0755 /opt/opengeni/bin
+RUN install -d -o bun -g bun -m 0755 /opt/opengeni/bin
 USER bun
 RUN bun build --compile packages/artifact-tool/src/materializer-cli-entry.ts \
   --outfile /opt/opengeni/bin/opengeni-artifact-materializer
@@ -208,6 +214,25 @@ USER root
 RUN chown root:root /opt/opengeni/bin/opengeni-artifact-materializer \
   && chmod 0555 /opt/opengeni/bin/opengeni-artifact-materializer
 USER bun
+RUN bun scripts/build-runtime-processes.ts artifact-materializer
+
+# The runtime installation includes its own exact file closure. Preserve its
+# root-owned/read-only permissions and recheck its native ABI in the slim image.
+FROM oven/bun:${BUN_VERSION}-slim AS artifact-materializer
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bubblewrap ca-certificates util-linux \
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
+COPY --from=artifact-materializer-build --chown=root:root /app/artifact-runtime/ ./artifact-runtime/
+COPY --from=artifact-materializer-build --chown=root:root /opt/opengeni/bin/opengeni-artifact-materializer /opt/opengeni/bin/opengeni-artifact-materializer
+COPY --from=artifact-materializer-build --chown=bun:bun /app/apps/worker/dist/process/artifact-materializer/ ./apps/worker/dist/process/artifact-materializer/
+USER bun
+ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
 ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
   OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE=/opt/opengeni/bin/opengeni-artifact-materializer \
   OPENGENI_ARTIFACT_MATERIALIZER_BWRAP=/usr/bin/bwrap \
@@ -216,7 +241,6 @@ ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
   OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=9465
 # Build-time load verifies the complete manifest/file chain and native ABI.
 RUN /opt/opengeni/bin/opengeni-artifact-materializer --opengeni-materializer-identity-v1
-RUN bun scripts/build-runtime-processes.ts artifact-materializer
 EXPOSE 9465
 CMD ["bun", "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js"]
 
