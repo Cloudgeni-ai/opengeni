@@ -20,12 +20,16 @@ import {
   hasLiteralPermission,
   isVaultError,
   requireLiveAgentAttemptAuthorization,
+  vaultErrorCodeForProvider,
   vaultErrorFromDatabase,
   type ApiRouteDeps,
   type VaultService,
 } from "@opengeni/core";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { isVaultProviderError } from "@opengeni/vaults";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+import { vaultProviderRegistryFor } from "../routes/vault-providers";
 
 type AttemptPrincipal = Extract<SecretPrincipal, { kind: "attempt" }>;
 
@@ -50,20 +54,30 @@ export function registerSecretTools(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   sessionId: string,
-  options: { vaults?: () => VaultService } = {},
+  options: { vaults?: (subjectId: string | null) => VaultService } = {},
 ): void {
   // Vault reach is the live attempt's; humans and operators use the vault API.
   if (grant.principalKind !== "agent_attempt") return;
-  let service: VaultService | null = null;
+  // Connected vaults (1Password, host) read and write under the acting human,
+  // the same subject the worker's attempt resolver uses.
+  const services = new Map<string, VaultService>();
   const vaults =
     options.vaults ??
-    (() =>
-      (service ??= createVaultService({
-        db: deps.db,
-        encryptionKey: environmentsEncryptionKeyBytes(deps.settings) ?? null,
-      })));
+    ((subjectId: string | null) => {
+      const key = subjectId ?? "";
+      let service = services.get(key);
+      if (!service) {
+        service = createVaultService({
+          db: deps.db,
+          encryptionKey: environmentsEncryptionKeyBytes(deps.settings) ?? null,
+          providers: vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+        });
+        services.set(key, service);
+      }
+      return service;
+    });
 
-  async function run(fn: (principal: AttemptPrincipal) => Promise<unknown>) {
+  async function run(fn: (principal: AttemptPrincipal, service: VaultService) => Promise<unknown>) {
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
       const principal: AttemptPrincipal = {
@@ -75,8 +89,15 @@ export function registerSecretTools(
         attemptId: attempt.attemptId,
         executionGeneration: attempt.executionGeneration,
       };
-      return result(await fn(principal));
+      return result(await fn(principal, vaults(attempt.initiatingHumanSubjectId)));
     } catch (error) {
+      if (isVaultProviderError(error)) {
+        return toolError(vaultErrorCodeForProvider(error.code, "write"), error.message, {
+          ...(error.retryAfterMs
+            ? { retryAt: new Date(Date.now() + error.retryAfterMs).toISOString() }
+            : {}),
+        });
+      }
       const vaultError = isVaultError(error) ? error : vaultErrorFromDatabase(error);
       if (vaultError) return toolError(vaultError.code, vaultError.message, vaultError.details);
       throw error;
@@ -91,7 +112,9 @@ export function registerSecretTools(
       inputSchema: SecretSearchInput.shape,
     },
     (input) =>
-      run((principal) => vaults().searchForAgent(principal, SecretSearchInput.parse(input))),
+      run((principal, service) =>
+        service.searchForAgent(principal, SecretSearchInput.parse(input)),
+      ),
   );
 
   server.registerTool(
@@ -101,7 +124,8 @@ export function registerSecretTools(
         'Save or update a secret item (login, API key, note) and get its references back. For a new password use a field with `generate` (for example {name: "password", generate: {length: 24}}) and save it before typing it anywhere; copy an existing secret with `fromReference`. Put a username in `username`. saveTo picks the vault: user (Only me), task (this task) or workspace; it defaults to Only me when a person started this work, otherwise the workspace. Values are never echoed; avoid putting a literal `value` here unless the task gave you that exact value.',
       inputSchema: SecretSaveInput.shape,
     },
-    (input) => run((principal) => vaults().saveForAgent(principal, SecretSaveInput.parse(input))),
+    (input) =>
+      run((principal, service) => service.saveForAgent(principal, SecretSaveInput.parse(input))),
   );
 
   if (hasLiteralPermission(grant.permissions, "secrets:read")) {
@@ -113,8 +137,8 @@ export function registerSecretTools(
         inputSchema: SecretGetInput.shape,
       },
       (input) =>
-        run((principal) =>
-          vaults().readForAgent(principal, SecretGetInput.parse(input), grant.permissions),
+        run((principal, service) =>
+          service.readForAgent(principal, SecretGetInput.parse(input), grant.permissions),
         ),
     );
   }
@@ -126,7 +150,8 @@ export function registerSecretTools(
         "Move or copy a saved item to another vault you can write (for example from this task's vault to Only me or the workspace). Returns the item's new references.",
       inputSchema: SecretMoveInput.shape,
     },
-    (input) => run((principal) => vaults().moveForAgent(principal, SecretMoveInput.parse(input))),
+    (input) =>
+      run((principal, service) => service.moveForAgent(principal, SecretMoveInput.parse(input))),
   );
 
   server.registerTool(
@@ -137,6 +162,8 @@ export function registerSecretTools(
       inputSchema: SecretDeleteInput.shape,
     },
     (input) =>
-      run((principal) => vaults().archiveForAgent(principal, SecretDeleteInput.parse(input))),
+      run((principal, service) =>
+        service.archiveForAgent(principal, SecretDeleteInput.parse(input)),
+      ),
   );
 }
