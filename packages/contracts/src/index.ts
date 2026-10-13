@@ -9531,7 +9531,7 @@ const SESSION_GOAL_CONTEXT_PREFIX = `${SESSION_GOAL_CONTEXT_LABEL}\n`;
 const SESSION_GOAL_CONTEXT_HEADER =
   /^(?:Standing|Previous) session goal \(frozen at logical-turn acceptance; objective revision (\d+); status ([a-z_]+)\)/;
 const SESSION_GOAL_CONTEXT_UNCHANGED =
-  /^Unchanged since the session goal context above \(objective revision (\d+); status ([a-z_]+)\)\.$/;
+  /^Standing session goal unchanged: identical to the full goal text shown earlier \(objective revision (\d+); status ([a-z_]+)\)\.$/;
 const SESSION_SYSTEM_UPDATE_BATCH_BODY_LABELS = [
   "[Opengeni internal updates]",
   SCHEDULED_OCCURRENCE_TASK_LABEL,
@@ -9560,7 +9560,7 @@ function unchangedSessionGoalContextIdentity(block: string): SessionGoalContextI
 export function renderUnchangedSessionGoalContext(goalContextBlock: string): string | undefined {
   const identity = sessionGoalContextIdentity(goalContextBlock);
   if (!identity) return undefined;
-  return `${SESSION_GOAL_CONTEXT_PREFIX}Unchanged since the session goal context above (objective revision ${identity.objectiveRevision}; status ${identity.state}).`;
+  return `${SESSION_GOAL_CONTEXT_PREFIX}Standing session goal unchanged: identical to the full goal text shown earlier (objective revision ${identity.objectiveRevision}; status ${identity.state}).`;
 }
 
 /** Split a durable system-batch string into its leading goal block and body. */

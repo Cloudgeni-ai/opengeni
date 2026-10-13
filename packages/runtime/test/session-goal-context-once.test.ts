@@ -106,12 +106,12 @@ describe("session goal context is sent once per distinct goal", () => {
     expect(collapsed[0]).toBe(items[0]);
     const second = JSON.stringify(collapsed[2]);
     expect(second).toContain(
-      "Unchanged since the session goal context above (objective revision 1; status active).",
+      "Standing session goal unchanged: identical to the full goal text shown earlier (objective revision 1; status active).",
     );
     expect(second).toContain("Second");
     const batchContent = collapsed[3]!.content as string;
     expect(batchContent).toStartWith(
-      `${SESSION_GOAL_CONTEXT_LABEL}\nUnchanged since the session goal context above (objective revision 1; status active).\n\n[Opengeni internal updates]\n`,
+      `${SESSION_GOAL_CONTEXT_LABEL}\nStanding session goal unchanged: identical to the full goal text shown earlier (objective revision 1; status active).\n\n[Opengeni internal updates]\n`,
     );
     const goalChars = renderSessionGoalContext(g1)!.length;
     expect(JSON.stringify(collapsed).length).toBeLessThan(
@@ -214,7 +214,7 @@ describe("session goal context is sent once per distinct goal", () => {
       // is present in full in the retained window.
       expect(goalBlockCount(retained, g)).toBeGreaterThanOrEqual(1);
       expect(JSON.stringify(expandUnchangedSessionGoalContexts(retained))).not.toContain(
-        "Unchanged since the session goal context above",
+        "Standing session goal unchanged: identical to the full goal text shown earlier",
       );
     });
   }
