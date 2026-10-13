@@ -131,6 +131,19 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers owner pending update tenancy quiescence as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) =>
+          migration.path === "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+      ),
+    ).toMatchObject({
+      path: "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers private sessions on shared sandboxes as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2276,6 +2289,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
       "0758_connection_account_intent_grants.sql",
       "0757_subscription_people_picker_reads.sql",
       "0756_turn_connection_account_intent_schema.sql",
