@@ -22,6 +22,14 @@ const scope = () => ({
   sessionId: crypto.randomUUID(),
 });
 
+// Another test file in the same worker process may leave one of these module
+// exports spied; spyOn then returns that spy with its earlier calls. Clear the
+// counts so each assertion only sees calls made by this test.
+function fresh<T extends { mockClear(): unknown }>(spy: T): T {
+  spy.mockClear();
+  return spy;
+}
+
 function reachedRefusal(rootSessionId: string) {
   return {
     code: "session_usage_limit_reached" as const,
@@ -36,11 +44,13 @@ function reachedRefusal(rootSessionId: string) {
 test("the remote compaction boundary turns a reached limit into the typed between-request stop", async () => {
   const input = scope();
   const refusal = reachedRefusal(input.sessionId);
-  const check = spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
-    allowed: false,
-    refusal,
-    state: null,
-  } as never);
+  const check = fresh(
+    spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
+      allowed: false,
+      refusal,
+      state: null,
+    } as never),
+  );
   try {
     let error: unknown;
     try {
@@ -87,7 +97,7 @@ test("a between-request call (and the compaction summarizer) checks the task lim
     refusal,
     state: null,
   } as never);
-  const allowance = spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null);
+  const allowance = fresh(spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null));
   try {
     let error: unknown;
     try {
@@ -133,12 +143,14 @@ test("a reached limit refuses the first request and the parallel title request b
   } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>);
   const position = spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2);
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
-  const check = spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
-    allowed: false,
-    refusal,
-    state: null,
-  } as never);
-  const allowance = spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null);
+  const check = fresh(
+    spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
+      allowed: false,
+      refusal,
+      state: null,
+    } as never),
+  );
+  const allowance = fresh(spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null));
   const metrics = {
     histogram: () => ({ record() {}, observe() {} }),
     counter: () => ({ add() {}, inc() {} }),
