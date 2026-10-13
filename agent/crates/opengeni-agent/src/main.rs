@@ -53,6 +53,7 @@ mod legacy;
 mod metrics;
 mod ops;
 mod overrides;
+mod rpc_replay;
 mod service;
 mod supervisor;
 mod uninstall;

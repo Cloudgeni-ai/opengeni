@@ -18,6 +18,45 @@ generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
 generation and invalidates existing grants.
 
+### Control transport recovery
+
+The API/worker uses its shared NATS connection for control RPC, operation frames,
+and acknowledgements. The native supervisor treats either control- or bulk-lane
+loss, including scheduled five-minute user-JWT expiry, as a transport-generation
+change: it reconnects, authenticates again, resubscribes, and detaches rather than
+restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+it does not carry these NATS control requests. Codemode's NATS dispatch is only
+a wake-up for its PostgreSQL operation journal; clients re-notify the same
+operation, and the worker claims that row before execution.
+
+For control reply recovery, a read-only ping negotiates the NATS response header
+`Opengeni-Control-Replay: 1`. Supporting agents accept an immutable delivery at
+`<exact-process-rpc-subject>.replay.<expiry-unix-ms>.<delivery-uuid>`, with the
+unchanged protobuf request as its payload. One atomic admission owns execution;
+duplicates join its pending reply or retrieve the exact retained bytes. A changed
+payload or expiry under an existing identity is refused. The journal survives
+socket/JWT/credential replacement, including removal and re-addition of the same
+exact origin/connection/process scope, but is not shared across different scopes.
+Receipts are collected after expiry; the expired delivery itself remains
+inadmissible, including after an observed wall-clock rollback. Controller and
+machine clocks must be synchronized, as for absolute command deadlines.
+
+The requester retries transient transport failures within the operation's request
+timeout plus a two-minute recovery allowance, preserving the delivery identity
+and bytes. It never retries a received tool error. A later no-responder cannot
+erase uncertainty from an earlier send. Accepted physical work and any unflushed
+reply retain the existing update-drain reservation until a successful socket
+publication; expiry without that proof remains unsettled. This is transport proof,
+not proof that a caller consumed the reply.
+
+The guarantee requires both the updated server runtime and a native agent with
+the journal. An older agent does not advertise the header and retains the
+existing conservative mutation behavior. Native process replacement, revoked
+authority, genuine tool errors, and outages beyond the recovery deadline are not
+transparent successes: the existing failure/unknown-outcome semantics remain,
+and ambiguous mutations are never automatically reissued as fresh deliveries.
+No model-visible schema, result text, or previously sent history changes.
+
 ### Enrollment maintenance boundary
 
 Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval
