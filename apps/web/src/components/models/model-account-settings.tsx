@@ -614,9 +614,54 @@ export function useWorkspaceModelAccountSettings(
   return { settings, error, saving, reload, update };
 }
 
-/** True when the workspace sets any of these rules itself. */
-export function changesAccountRules(settings: Pick<WorkspaceModelAccountSettings, "sources">) {
-  return ACCOUNT_RULES.some((rule) => settings.sources[rule] === "workspace");
+const onOff = (value: boolean) => (value ? "On" : "Off");
+
+/**
+ * What a workspace set for itself instead of following the organization, in
+ * words: "Claude: Primary only", "Switch models: On", "Own fallback order".
+ * A locked rule is the organization's, so it is never a change.
+ */
+export function accountRuleChanges(
+  settings: Pick<WorkspaceModelAccountSettings, "values" | "sources" | "entrySources">,
+): string[] {
+  const own = (rule: AccountRule) => settings.sources[rule] === "workspace";
+  const { values } = settings;
+  return [
+    ...(own("rotation")
+      ? rotationProviders(values.rotation)
+          .filter((provider) => settings.entrySources.rotation[provider] === "workspace")
+          .map(
+            (provider) =>
+              `${providerName(provider)}: ${
+                values.rotation[provider]?.mode === "primary_first" ? "Primary only" : "Spread work"
+              }`,
+          )
+      : []),
+    ...(own("personalConnectionsAllowed")
+      ? [`Personal subscriptions: ${onOff(values.personalConnectionsAllowed)}`]
+      : []),
+    ...(own("personalFallbackAllowed")
+      ? [`Personal fallback: ${onOff(values.personalFallbackAllowed)}`]
+      : []),
+    ...(own("crossProviderFailover")
+      ? [`Switch models: ${onOff(values.crossProviderFailover)}`]
+      : []),
+    ...(own("fallbackOrder") ? ["Own fallback order"] : []),
+  ];
+}
+
+/** "This workspace follows Acme’s rules." or "2 rules changed here. The rest follow Acme." */
+function workspaceRulesSummary(
+  changes: number,
+  organizationName: string,
+  canEdit: boolean,
+): string {
+  if (changes > 0) {
+    return `${changes === 1 ? "1 rule" : `${changes} rules`} changed here. The rest follow ${organizationName}.`;
+  }
+  return canEdit
+    ? `This workspace follows ${organizationName}’s rules. Change one here to set it for this workspace only.`
+    : `This workspace follows ${organizationName}’s rules.`;
 }
 
 export function WorkspaceAccountRulesSection({
@@ -663,11 +708,11 @@ export function WorkspaceAccountRulesSection({
   return (
     <Section
       title="How accounts are used"
-      description={
-        settings.canEdit
-          ? `This workspace follows ${organizationName} unless you change a rule here.`
-          : `This workspace follows ${organizationName} unless its admins change a rule here.`
-      }
+      description={workspaceRulesSummary(
+        accountRuleChanges(settings).length,
+        organizationName,
+        settings.canEdit,
+      )}
     >
       <SettingRowGroup>
         <AccountRuleRows

@@ -37,7 +37,7 @@ import { DefaultSessionModelPreferenceRow } from "@/components/default-session-m
 import { compactionSummary } from "@/components/models/model-compaction-page";
 import {
   OrganizationAccountRulesSection,
-  changesAccountRules,
+  accountRuleChanges,
   type ModelAccountSettingsOverviewState,
 } from "@/components/models/model-account-settings";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
@@ -150,8 +150,8 @@ export interface WorkspaceModelsSnapshot {
   allowed: string | null;
   /** It has its own default model, Allowed models or a compaction limit. */
   changesDefaults: boolean;
-  /** What it sets itself instead of following the organization. */
-  own: { defaultModel: boolean; allowed: boolean; compaction: boolean; accountRules: boolean };
+  /** What it sets itself instead of following the organization; account rules in words. */
+  own: { defaultModel: boolean; allowed: boolean; compaction: boolean; accountRules: string[] };
 }
 
 async function readWorkspaceModels(
@@ -187,7 +187,7 @@ async function readWorkspaceModels(
     allowed: policy.status === "fulfilled" && policy.value.source === "workspace",
     compaction: models.some((model) => (model.compactionPolicy?.overrideTokens ?? null) !== null),
     accountRules:
-      rules.status === "fulfilled" && rules.value !== null && changesAccountRules(rules.value),
+      rules.status === "fulfilled" && rules.value !== null ? accountRuleChanges(rules.value) : [],
   };
   return {
     codexOwn: codexAccounts.filter((account) => account.source !== "organization"),
@@ -1068,13 +1068,18 @@ function WorkspaceRow({
   );
 }
 
-/** "Default: GPT-6 Astra · Codex", "3 models allowed", "Own account rules", or "Follows Acme". */
+/**
+ * "Default: GPT-6 Astra · Codex", "3 models allowed", what it changed in its
+ * account rules ("Claude: Primary only"), or "Follows Acme".
+ */
 function workspaceDifferences(snapshot: WorkspaceModelsSnapshot, organizationName: string) {
   const facts = [
     snapshot.own.defaultModel && snapshot.defaultModel ? `Default: ${snapshot.defaultModel}` : null,
     snapshot.own.allowed && snapshot.allowed ? `${snapshot.allowed} allowed` : null,
     snapshot.own.compaction ? "Own compaction limits" : null,
-    snapshot.own.accountRules ? "Own account rules" : null,
   ].filter((fact): fact is string => fact !== null);
+  const rules = snapshot.own.accountRules;
+  // Two changes read at a glance; more would crowd the row, so they're counted.
+  facts.push(...(rules.length > 2 ? [`${rules.length} account rules changed`] : rules));
   return facts.length > 0 ? facts : [`Follows ${organizationName}`];
 }
