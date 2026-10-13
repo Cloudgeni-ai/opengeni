@@ -76,18 +76,6 @@ const repos: RepositoryContextPickerProps = {
   onStartGitHubApp: noop,
   onDisconnectInstallation: asyncNoop,
 };
-const session = {
-  id: "preview-session",
-  workspaceId: "preview",
-  status: "idle" as const,
-  activeTurnId: null,
-  tenancy: {
-    visibility: "workspace" as const,
-    authorityEpoch: 1,
-    ownedByCurrentUser: true,
-    fork: null,
-  },
-};
 const initialItems: TimelineItem[] = [
   {
     kind: "user-message",
@@ -226,9 +214,9 @@ function Review() {
               <div className="max-w-md text-center">
                 <p className="text-sm font-medium">The real session composer</p>
                 <p className="mt-2 text-xs leading-5 text-fg-muted">
-                  ConsoleComposer, ChatComposer, model picker, tools, repositories
-                  are imported unchanged from the app. Attached resources need no additional
-                  authorization control.
+                  ConsoleComposer, ChatComposer, model picker, tools, repositories are imported
+                  unchanged from the app. Attached resources need no additional authorization
+                  control.
                 </p>
               </div>
             </div>
