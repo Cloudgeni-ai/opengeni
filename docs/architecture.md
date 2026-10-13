@@ -92,6 +92,12 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
+Settled one-shot and bounded interval schedules retire to `paused` when they
+cannot fire again. The existing 24-hour Temporal catch-up window and pending
+occurrences remain authoritative. Retirement atomically enqueues external
+schedule reconciliation; its per-schedule lock rereads the latest saved task,
+so a concurrent future reschedule is preserved.
+
 Temporal coordinates; activities read Postgres obligations, not signals.
 Conversation/goals/queues/usage/provider/tool transcripts never enter workflow history.
 

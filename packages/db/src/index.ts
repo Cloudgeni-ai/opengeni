@@ -1,3 +1,10 @@
+export {
+  listExhaustedScheduledTasks,
+  retireExhaustedScheduledTask,
+  listScheduledTaskScheduleReconciliations,
+  acknowledgeScheduledTaskScheduleReconciliation,
+  deferScheduledTaskScheduleReconciliation,
+} from "./scheduled-task-lifecycle";
 export * from "./session-target";
 export * from "./human-input-secret-answers";
 import { sessionRetentionFromRow } from "./session-archive";

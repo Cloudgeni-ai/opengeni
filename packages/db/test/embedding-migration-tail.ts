@@ -243,6 +243,7 @@ export const embeddingMigrationTail = [
   "0755_turn_connection_account_intent.sql",
   "0756_turn_connection_account_intent_schema.sql",
   "0758_connection_account_intent_grants.sql",
+  "0761_exhausted_scheduled_tasks.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501

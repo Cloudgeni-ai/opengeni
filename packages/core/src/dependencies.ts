@@ -73,7 +73,7 @@ export type SessionWorkflowClient = {
     workflowWakeRevision: number;
   }) => Promise<void>;
   syncScheduledTask: (input: {
-    task: ScheduledTask;
+    task: Pick<ScheduledTask, "id" | "workspaceId" | "temporalScheduleId">;
     /**
      * Compensate under the same per-schedule writer lock. Return the error to
      * throw only after this transaction commits; lock/commit failures bypass

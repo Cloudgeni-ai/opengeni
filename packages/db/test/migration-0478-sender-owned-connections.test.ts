@@ -99,6 +99,7 @@ const withheldMigrations = [
   "0755_turn_connection_account_intent.sql",
   "0756_turn_connection_account_intent_schema.sql",
   "0758_connection_account_intent_grants.sql",
+  "0761_exhausted_scheduled_tasks.sql",
   "0746_subscription_failover_readiness_and_request_fence.sql",
   "0749_subscription_shared_personal_choice.sql",
   "0750_subscription_waiter_candidates.sql",
