@@ -675,7 +675,7 @@ export function OrganizationModelsList({
           <SettingRowGroup>
             <SettingRow
               label="Sharing work between accounts"
-              description={`Spread work sends new chats to the account with the most usage left, in every workspace that uses ${possessive(organizationName)} Codex accounts. Primary only uses the primary account.`}
+              description={`Spread work shares new chats evenly across accounts that can serve them, in every workspace that uses ${possessive(organizationName)} Codex accounts. Primary first starts new chats on the primary account and uses another account when it can't serve them.`}
               controlWidth="auto"
               control={
                 <SegmentedControl<"spread" | "primary">
@@ -686,7 +686,7 @@ export function OrganizationModelsList({
                   onValueChange={(value) => void orgCodex.setRotation(value === "spread")}
                   options={[
                     { value: "spread", label: "Spread work" },
-                    { value: "primary", label: "Primary only" },
+                    { value: "primary", label: "Primary first" },
                   ]}
                 />
               }

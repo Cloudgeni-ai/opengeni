@@ -113,11 +113,11 @@ function rotationProviders(rotation: ModelAccountSettingValues["rotation"]): str
 /** Sharing is on unless the provider keeps new chats on its primary subscription. */
 const sharing = (mode: ModelAccountRotationMode | undefined) => mode !== "primary_first";
 
-/** "3 connected. Each new chat goes to the subscription with the most usage left." */
+/** "3 connected. New chats are shared evenly across subscriptions that can serve them." */
 function rotationDescription(mode: ModelAccountRotationMode, count: number | undefined): string {
   const outcome = sharing(mode)
-    ? "Each new chat goes to the subscription with the most usage left."
-    : "New chats use the primary subscription.";
+    ? "New chats are shared evenly across subscriptions that can serve them."
+    : "New chats start on the primary subscription and use another when it can't serve them.";
   return count === undefined ? outcome : `${count} connected. ${outcome}`;
 }
 

@@ -293,7 +293,7 @@ export default function SwitchSection() {
         ]}
         avoid={[
           "Inside a form with a Save button: use a checkbox",
-          "Choosing between two named options (Spread work | Primary only): use a segmented control",
+          "Choosing between two named options (Spread work | Primary first): use a segmented control",
           "Anything that needs a confirmation, like Delete or Revoke: use a button",
           "A disabled switch without a reason: say why and who can change it",
         ]}
