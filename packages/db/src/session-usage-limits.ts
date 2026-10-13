@@ -24,7 +24,8 @@ import { lockSessionEventWriteRows } from "./session-control";
  *
  * All state lives in owner-only FORCE-RLS private tables reached through one
  * SECURITY DEFINER command routine. Settlement is synchronous and exactly-once
- * per canonical producer identity; admission reads one indexed counter row.
+ * per canonical producer identity; admission reads one indexed counter row and
+ * probes the partial index of open single-call custody markers.
  * Limits are admission policy, never reservations: already admitted requests
  * may finish above the limit.
  */

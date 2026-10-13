@@ -7,7 +7,9 @@
  * - Admission: p50/p95 of the hot read with 0, 10k and 100k receipts on the
  *   root, against a plain `select 1` round trip on the same pool. A flat
  *   latency across receipt counts plus the plans below show that admission
- *   reads one indexed counter row and never scans receipts or events.
+ *   reads one indexed counter row and never scans receipts or events; its only
+ *   receipt access is one probe of the partial index of open custody markers
+ *   (pending single calls), which stays empty however many receipts exist.
  * - Settlement contention: 20 concurrent settlements on 20 siblings of ONE
  *   root versus 20 concurrent settlements on 20 SEPARATE roots. Same-root
  *   settlements serialize on that root's counter row only; separate roots
@@ -168,11 +170,21 @@ async function main(): Promise<void> {
         )
       ).map((row) => String((row as Record<string, unknown>)["QUERY PLAN"]));
     }
-    // Admission must never touch receipts or events: prove it from the
-    // database's own statistics around a burst of admissions.
+    // Admission must never scan receipts or events: prove it from the
+    // database's own statistics around a burst of admissions. The only receipt
+    // access allowed is one probe of the partial open-marker index each.
     const scansBefore = await receiptScans(shared.admin);
     await timeAdmission(root);
     const scansAfter = await receiptScans(shared.admin);
+    const pendingProbePlan = (
+      await shared.admin.unsafe(
+        `explain (analyze, buffers, costs off, timing off, summary off)
+           select 1 from opengeni_private.session_usage_limit_receipts r
+            where r.workspace_id = $1 and r.root_session_id = $2 and r.status = 'pending'
+              and (r.fenced or r.recorded_at < clock_timestamp() - interval '15 minutes')`,
+        [scope.workspaceId, root],
+      )
+    ).map((row) => String((row as Record<string, unknown>)["QUERY PLAN"]));
 
     const children: string[] = [];
     for (let i = 0; i < fanout; i += 1) children.push(await newSession(root));
@@ -244,7 +256,9 @@ async function main(): Promise<void> {
       admissionReceiptScans: {
         before: scansBefore,
         after: scansAfter,
-        note: "seq/idx scans on the receipts table across a burst of admissions; equal means admission never read receipts",
+        admissions: samples,
+        pendingProbePlanAt100k: pendingProbePlan,
+        note: "seq scans and per-index scans on the receipts table across a burst of admissions: no seq scan and no scan of the full receipt index; one probe per admission of the partial open-marker index",
       },
       unrelatedRootAdmissionMs: {
         idle: unrelatedIdle,
@@ -276,7 +290,9 @@ async function main(): Promise<void> {
       sameRoot.failures + separate.failures > 0 ||
       receipt.settlement.deadlocksInDatabase > 0 ||
       scansAfter.seq !== scansBefore.seq ||
-      scansAfter.idx !== scansBefore.idx
+      scansAfter.full !== scansBefore.full ||
+      scansAfter.pending - scansBefore.pending > samples ||
+      scansAfter.idx - scansBefore.idx !== scansAfter.pending - scansBefore.pending
     ) {
       throw new Error("session usage limit benchmark invariants failed");
     }
@@ -288,7 +304,7 @@ async function main(): Promise<void> {
 
 async function receiptScans(
   admin: NonNullable<Awaited<ReturnType<typeof acquireSharedTestDatabase>>>["admin"],
-): Promise<{ seq: number; idx: number }> {
+): Promise<{ seq: number; idx: number; full: number; pending: number }> {
   // Application backends flush statistics when idle at most once a second.
   await Bun.sleep(2_000);
   const [row] = await admin.unsafe(
@@ -296,7 +312,19 @@ async function receiptScans(
        from pg_stat_all_tables
       where schemaname = 'opengeni_private' and relname = 'session_usage_limit_receipts'`,
   );
-  return { seq: Number(row?.seq ?? 0), idx: Number(row?.idx ?? 0) };
+  const indexes = await admin.unsafe(
+    `select indexrelname as name, coalesce(idx_scan, 0)::bigint as scans
+       from pg_stat_all_indexes
+      where schemaname = 'opengeni_private' and relname = 'session_usage_limit_receipts'`,
+  );
+  const scansOf = (name: string) =>
+    Number(indexes.find((index) => index.name === name)?.scans ?? 0);
+  return {
+    seq: Number(row?.seq ?? 0),
+    idx: Number(row?.idx ?? 0),
+    full: scansOf("session_usage_limit_receipts_root"),
+    pending: scansOf("session_usage_limit_receipts_pending"),
+  };
 }
 
 if (import.meta.main) {
