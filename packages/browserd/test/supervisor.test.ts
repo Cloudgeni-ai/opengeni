@@ -1773,7 +1773,7 @@ const workingAuthority = {
 };
 
 describe("same-working-directory controller restart", () => {
-  test.each(["failed-close", "suspend-write", "completion-write"] as const)(
+  test.each(["failed-close", "failed-detach", "suspend-write", "completion-write"] as const)(
     "%s during shutdown cannot admit recovery",
     async (failure) => {
       await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
@@ -1787,6 +1787,13 @@ describe("same-working-directory controller restart", () => {
             close: async () => {
               if (failure === "failed-close") throw new Error("synthetic close failure");
             },
+            ...(failure === "failed-detach"
+              ? {
+                  detach: async () => {
+                    throw new Error("synthetic detach failure");
+                  },
+                }
+              : {}),
           }),
         });
         await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
@@ -1923,6 +1930,7 @@ describe("same-working-directory controller restart", () => {
   });
 
   test("graceful shutdown preserves exact profile recovery without replaying uncertain input", async () => {
+    // Without live detach, recovery relaunches in the exact preserved profile.
     await withWorkingCrashFixture(
       async ({ options, action, rootDirectory, socketRootDirectory }) => {
         let dispatches = 0;
@@ -2469,6 +2477,64 @@ describe("same-working-directory controller restart", () => {
         await supervisor.close();
       }
     });
+  });
+
+  test("graceful shutdown keeps the live browser running and the successor adopts it", async () => {
+    await withWorkingCrashFixture(
+      async ({ options, action, rootDirectory, socketRootDirectory }) => {
+        let closes = 0,
+          detaches = 0,
+          dispatches = 0;
+        const contexts: BrowserSupervisorDriverContext[] = [];
+        const open = () =>
+          BrowserSupervisor.open({
+            rootDirectory,
+            socketRootDirectory,
+            inspectOwnedProcess: async () => "live",
+            createDriver: async (context) => {
+              contexts.push(context);
+              return {
+                ...fakeDriver(context, {
+                  dispatch: () => {
+                    dispatches++;
+                  },
+                }),
+                ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+                close: async () => {
+                  closes++;
+                },
+                detach: async () => {
+                  detaches++;
+                },
+              };
+            },
+          });
+        const first = await open();
+        await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        await first.close();
+        expect({ closes, detaches }).toEqual({ closes: 0, detaches: 1 });
+        const second = await open();
+        try {
+          const result = await second.createSession({
+            ...options,
+            recoverExistingWorkingDirectory: true,
+          });
+          expect(result.browserSessionId).toBe(options.browserSessionId);
+          expect(contexts).toHaveLength(2);
+          expect(contexts[1]!.recoverOwnedProcess?.profileDirectory).toBe(
+            contexts[0]!.profileDirectory,
+          );
+          expect(contexts[1]!.restoredProfile).toBe(false);
+          // An action the old controller never confirmed is not replayed.
+          expect((await second.action(action)).state).toBe("outcome_unknown");
+          expect(dispatches).toBe(0);
+        } finally {
+          await second.close();
+        }
+        // The successor also shut down gracefully, so it kept the browser too.
+        expect({ closes, detaches }).toEqual({ closes: 0, detaches: 2 });
+      },
+    );
   });
 });
 
