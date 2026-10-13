@@ -20,7 +20,10 @@ export {
 export { NativeBrokerRetainedCommand } from "./providers/native-command-broker-retained-command";
 export { startNativeBrokerCommand } from "./providers/native-command-broker-start";
 export { NativeBrokerCommandSession } from "./providers/native-command-broker-session";
-export { installModalNativeBrokerSession } from "./providers/modal-native-broker-session";
+export {
+  installModalNativeBrokerSession,
+  modalNativeBrokerSessionContext,
+} from "./providers/modal-native-broker-session";
 export {
   NativeBrokerCoordinator,
   NativeBrokerReconciliationRequiredError,
@@ -124,6 +127,8 @@ import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
 import type { ModalCreateIntent } from "./providers/modal-create-boundary";
+import type { ModalCreateLifecycle } from "./providers/modal-create-session";
+export type { ModalCreateLifecycle } from "./providers/modal-create-session";
 export { readModalCreateImagePreparation } from "./providers/modal-create-boundary";
 export { readModalNativeBrokerCreate } from "./providers/modal-native-broker-create";
 import type { ProviderRegistration } from "./providers/types";
@@ -1526,6 +1531,7 @@ type ResumeCapableClient = {
     lifecycle: {
       beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
       onCreated: (session: unknown, intent: ModalCreateIntent) => Promise<void>;
+      nativeBroker?: ModalCreateLifecycle["nativeBroker"];
     },
   ) => Promise<unknown>;
 };
@@ -1922,6 +1928,9 @@ export async function establishSandboxSessionFromEnvelope(
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
+    /** Internal owner-qualified lifecycle, never request metadata. Fresh
+     * broker creation defers SDK command setup until canonical warm admission. */
+    modalNativeBroker?: ModalCreateLifecycle["nativeBroker"];
     /** Durable lease owners fence the attempt before invoking a provider create.
      * Called for each physical attempt, including logical-image fallback. A
      * rejected hook prevents dispatch; a lost create reply is never permission
@@ -2029,6 +2038,11 @@ export async function establishSandboxSessionFromEnvelope(
     );
     const objectRef = parseWorkspaceArchiveObjectRef(archiveState?.workspaceArchiveRef);
     const objectDescriptor = parseWorkspaceArchiveDescriptor(workspaceArchiveMetadata);
+    if (opts.modalNativeBroker && (backend !== "modal" || workspaceArchive || objectRef))
+      throw new SandboxConfigError(
+        backend,
+        "Native broker snapshot restore requires qualified preservation",
+      );
     if (
       process.platform === "linux" &&
       objectRef &&
@@ -2120,6 +2134,7 @@ export async function establishSandboxSessionFromEnvelope(
           return await candidate.createWithLifecycle(
             { manifest: createManifest },
             {
+              ...(opts.modalNativeBroker ? { nativeBroker: opts.modalNativeBroker } : {}),
               beforeDispatch: async (intent, providerContext) => {
                 providerDispatchAttempted = true;
                 await opts.onBeforeSandboxCreate!(createSettings, intent, providerContext);
@@ -2139,6 +2154,11 @@ export async function establishSandboxSessionFromEnvelope(
             },
           );
         }
+        if (opts.modalNativeBroker)
+          throw new SandboxConfigError(
+            backend,
+            "Native broker creation requires the lease-owned provider boundary",
+          );
         // Non-Modal providers and isolated client-factory fixtures retain their
         // ordinary admission hook. Production Modal requires the wire intent.
         await opts.onBeforeSandboxCreate?.(createSettings);

@@ -592,7 +592,8 @@ surfaces, not one polling task per command. New work needs a fresh bounded
 query outside the input queue; exact cancellation and output retirement do not
 depend on that query succeeding. Retain definite faults before refusal, never
 turn timeout into fault or exit proof, and abort/join the final owner's actual
-read before replacement. The adapter remains uninstalled in application routing.
+read before replacement. Application installation still requires the original
+qualified broker birth; no deployment or enrollment follows from a source edit.
 
 New command routing must select its pipe/PTY protocol from the original frozen
 qualification before admission. Keep exact-protocol retained inspection separate;
@@ -604,7 +605,23 @@ operation's exact backend with separate canonical pipe admissions. Do not let
 SDK path, editor, archive or cached list helpers regain TaskExec. File writes
 need the enclosing mutation admission. Preserve the sandbox object's identity
 for snapshot wrappers; closing the bridge never terminates the physical box.
-Fresh/warm application installation and initial setup remain incomplete.
+Fresh/warm application installation uses the qualified core composition below;
+snapshot restoration and full remote qualification remain separate gates.
+
+Core's `native-command-broker-session.ts` composes qualified bootstrap with one
+shared physical coordinator and exact SDK wrappers. Warm attachment requires
+the retained original prefix, source and provider namespace. Close joins host
+observers without deleting the box. Its create selector accepts only the frozen
+broker birth; the runtime skips only an empty initial manifest at `/workspace`,
+deferring setup commands until warm routing. Worker and API spawners select that
+recipe before the original lease-owned create; warm callers attach before
+readiness or commands. Pair every wrapper with explicit host ownership: eager
+turn cancellation drops only the holder, while finalization closes the wrapper
+after its users leave. API cache borrows are separate tokens; eviction and idle
+expiry close only after the last borrower. Never call legacy SDK close. Viewer
+desktop/terminal setup takes an exact-instance direct holder and canonical
+home-only routing, refusing an active-machine change. These application seams
+do not qualify snapshot restore, legacy physical replacement or a live release.
 
 Broker stdin framing preserves one canonical child admission for the full
 write. Retain the complete payload and byte range before chunk dispatch; frame

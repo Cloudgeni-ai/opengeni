@@ -146,11 +146,45 @@ command methods. Keep the physical sandbox object's identity so existing
 snapshot-retention wrappers are not applied twice.
 
 Adapter close releases host ownership only, never initial stdin or the physical
-sandbox. SDK restore and readiness execs remain refused: fresh/warm application
-establishment must explicitly connect qualified bootstrap, lease publication,
-deferred initial setup and the shared coordinator before this adapter can be
-activated. Real-SDK/local-native tests prove this bridge, not that missing
-application lifecycle or remote provider qualification.
+sandbox. SDK restore and unqualified readiness execs remain refused. Fresh/warm
+application establishment explicitly connects qualified bootstrap, lease
+publication, deferred initial setup and the shared coordinator as described
+below. Real-SDK/local-native tests do not replace remote provider qualification.
+
+Core's `native-command-broker-session.ts` is the application composition seam.
+It selects only the original frozen broker birth and rejects a changed baked
+source, provider namespace, image or encryption identity. Attachment derives
+the original operation and physical identity from the live lease, then verifies
+the existing bootstrap admission before installing the real SDK bridge. Warm
+reattachment requires the retained prefix; it cannot reread and register a new
+one. Sibling wrappers share one host coordinator and connection. Last release
+joins observations before closing that connection, with a failed join retained
+as a quarantine rather than allowing an overlapping replacement owner. There
+is no provider deletion or initial-stdin EOF in this disposal path.
+
+Qualified fresh creation no longer runs the SDK's initial `mkdir` through
+TaskExec while the lease is warming. Only an empty manifest at `/workspace`
+is accepted for deferral; entries, noncanonical roots and mounts refuse before
+dispatch. The selected stock image must already contain that root as part of
+physical image qualification. Initial broker bootstrap and diagnostics provide
+readiness; later manifest work uses ordinary warm routing and its independent
+mutation admissions. Worker and API spawners select the recipe before the
+original durable create callback and warm attachments install before readiness.
+Turn cancellation eagerly releases its holder, not its still-used broker
+connection. The finalizer separately joins host-only disposal after wrapper
+users leave; this never substitutes for physical writer quiescence or native
+exit evidence. A late or failed establishment still owns its wrapper cleanup.
+
+API read/process caches preserve separate SDK identities and five-minute idle
+retention. Each borrower receives a separate idempotent token; eviction removes
+the entry immediately but disposal waits for all old borrowers. Idle expiry
+also runs without a later HTTP request. Only a known broker attachment is
+closed; legacy SDK close remains forbidden because it can terminate the box.
+Viewer desktop/terminal setup acquires an exact-instance direct holder and
+uses canonical command admission through home-only routing. Active-machine
+drift refuses setup rather than changing the target behind the tunnel. Snapshot
+restoration and remote physical acceptance remain separate gates. Application
+composition tests do not activate deployment cohorts or certify those paths.
 
 ## Bounded framing
 
@@ -448,9 +482,9 @@ retroactively proves that an earlier dispatch did not occur.
 Last owner release aborts and joins the actual query; a replacement owner waits
 for that cleanup before reading. Closing one session cannot close a sibling's
 observer. Idle coordinator construction does no provider I/O. This lifecycle
-ownership is implemented in the adapter, not yet installed into application
-routing; physical provider qualification and actual application ownership
-remain activation gates.
+ownership is installed through the qualified core composition and the explicit
+worker/API wrapper lifetimes described above. Physical provider qualification
+remains an activation gate; adapter and composition tests cannot replace it.
 
 Output pages commit before the driver asks for a successor. Restartable bounded
 frame reads verify immutable ciphertext/hash/scope and the numeric sequence
@@ -554,8 +588,8 @@ session surface aborts only its observations and leaves the shared coordinator
 and physical commands owned by their existing lifecycle. Stdin requires its
 exact existing private child admission. Larger writes use one retained payload
 plan and frame-sized native requests, never fresh child admissions or truncation.
-Application installation, physical diagnostics qualification and setup-command
-ownership remain gates. A positive prelaunch cancel reply can
+Application installation and setup-command ownership use the qualified core
+composition; physical diagnostics qualification remains a gate. A positive prelaunch cancel reply can
 now settle its exact original reservation; uncertainty still cannot.
 
 `NativeBrokerRetainedCommand` bridges an already retained command to that
@@ -618,10 +652,10 @@ a replacement admission. The coordinator releases its shared input queue while
 waiting for delivery, so cancellation and other commands remain usable.
 
 The shared coordinator provides input scheduling and demand-driven observation. The dedicated
-command-session surface carries exact private admissions; selecting/installing
-it in application sessions remains an unimplemented gate. Routing's qualified
-protocol selection is present for new commands, but cannot authorize a missing
-session adapter or bypass its bootstrap/setup ownership.
+command-session surface carries exact private admissions. The qualified core
+composition installs it for the original broker birth, with explicit worker/API
+ownership. Routing's protocol selector cannot authorize a missing session adapter
+or bypass bootstrap/setup ownership, and no live cohort is enabled by this code.
 
 Rolling migration `0748` adds immutable `request_reply` and
 `stdin_reservation` indexes. Native status/error replies commit with their
@@ -658,7 +692,8 @@ evidence of product-reachable command admission. Ordinary CI does not require
 that local native build; the deterministic provider boundary
 and real database transport cases remain separate. This fixture does not
 establish Modal admission, image provenance, old-warm compatibility or release
-qualification. No runtime application session currently constructs the driver.
+qualification. Application composition constructs the same driver only for the
+original qualified broker birth; these test-seeded rows do not enable it live.
 
 Before any physical write, the control plane must persist the exact broker,
 physical instance, writer epoch, request ID, provider input index, body and

@@ -209,6 +209,30 @@ test("close is host-only, idempotent, and prevents later helper execution", asyn
   expect(f.events).not.toContain("terminate");
 });
 
+test("qualified bootstrap readiness is host-only and preserves rejection and cancellation", async () => {
+  const f = fixture();
+  let reads = 0;
+  installModalNativeBrokerSession(
+    f.session,
+    f.commands,
+    async () => {},
+    async (signal) => {
+      signal?.throwIfAborted();
+      reads++;
+      if (reads > 1) throw new Error("qualified bootstrap is no longer current");
+    },
+  );
+  const check = Reflect.get(f.session, "verifyExecReadiness").bind(f.session);
+  expect(await check()).toBe(0);
+  await expect(check()).rejects.toThrow("no longer current");
+  const aborted = AbortSignal.abort(new Error("cancelled readiness"));
+  await expect(check(aborted)).rejects.toThrow("cancelled readiness");
+  expect(reads).toBe(2);
+  expect(f.calls).toHaveLength(0);
+  await f.session.close();
+  await expect(check()).rejects.toThrow("session is closed");
+});
+
 test("installation refuses active SDK commands and duplicate wrappers", () => {
   const f = fixture();
   f.sdk.activeProcesses.set(12, {});

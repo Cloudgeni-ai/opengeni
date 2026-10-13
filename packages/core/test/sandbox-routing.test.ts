@@ -1,14 +1,67 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, spyOn } from "bun:test";
+import * as dbModule from "@opengeni/db";
+import { testSettings } from "@opengeni/testing";
+import { RoutingActiveRouteChangedError } from "@opengeni/runtime/sandbox";
 import {
   directRetainedProcessBackgroundCommand,
   directRetainedProcessMatchesBackend,
   retainedProcessBackgroundSettlement,
+  wrapChannelABoxWithRouting,
 } from "../src/sandbox/routing";
 import {
   managedSessionGroupBackend,
   managedSessionGroupOs,
   sessionGroupMachinePresentation,
 } from "../src/sandbox/runtime-settings";
+
+test("placement-bound viewer setup rejects a machine pointer even when hot-swap is disabled", async () => {
+  const read = spyOn(dbModule, "readActiveSandbox").mockResolvedValue({
+    activeSandboxId: "machine-1",
+    activeEpoch: 7,
+  } as never);
+  let invoked = 0;
+  try {
+    const handle = wrapChannelABoxWithRouting(
+      {
+        db: {} as never,
+        settings: testSettings({ sandboxSelfhostedEnabled: false }),
+      },
+      {
+        accountId: "account",
+        workspaceId: "workspace",
+        sessionId: "session",
+        resourceSubjectId: "human",
+        homeOnly: true,
+        homeLease: {
+          sandboxGroupId: "group",
+          leaseEpoch: 2,
+          instanceId: "sb-home",
+          backend: "modal",
+        },
+        directRequest: { requestId: "request", holderId: "holder" },
+      },
+      {
+        session: {
+          pathExists: async () => {
+            invoked++;
+            return true;
+          },
+        },
+        backendId: "modal",
+        instanceId: "sb-home",
+        client: {},
+        sessionState: {},
+      },
+    );
+    await expect(
+      (handle.session as { pathExists(path: string): Promise<boolean> }).pathExists("/workspace"),
+    ).rejects.toBeInstanceOf(RoutingActiveRouteChangedError);
+    expect(invoked).toBe(0);
+    expect(read).toHaveBeenCalledWith(expect.anything(), "workspace", "session");
+  } finally {
+    read.mockRestore();
+  }
+});
 
 describe("managed session-group backend", () => {
   test("uses the deployment provider only for an explicit machine-home fallback", () => {

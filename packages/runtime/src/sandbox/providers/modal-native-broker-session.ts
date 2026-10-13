@@ -6,11 +6,37 @@ import type { ChannelAExecArgs, ChannelASession } from "../channel-a";
 import type { SynchronousCommandResult } from "../synchronous-command";
 import { admittedProviderCommandHandle } from "../provider-command-session";
 import { NativeBrokerCommandSession } from "./native-command-broker-session";
+import { ModalNativeBrokerChannel } from "./modal-native-broker-channel";
+import type { ModalClient } from "modal";
 
 type Executor = (args: ChannelAExecArgs) => Promise<SynchronousCommandResult>;
 type Scope = { session: object; execute: Executor; closed: boolean };
 const scopes = new AsyncLocalStorage<Scope>();
 const installed = new WeakSet<object>();
+
+/** Inspect the actual pinned SDK wrapper, not a caller-provided provider ID or
+ * ambient credential. The returned channel opens only when its owner elects
+ * this wrapper to supply a physical broker transport. */
+export function modalNativeBrokerSessionContext(value: unknown) {
+  if (!(value instanceof ModalSandboxSession))
+    throw new Error("Native broker requires the pinned Modal SDK session");
+  const sdk = value as unknown as {
+    modal: ModalClient;
+    sandbox: { sandboxId: string };
+  };
+  const sandboxId = value.state.sandboxId;
+  if (!sandboxId || sdk.sandbox.sandboxId !== sandboxId || sdk.modal.version() !== "0.9.0")
+    throw new Error("Native broker SDK wrapper changed physical identity");
+  return {
+    session: value,
+    sandboxId,
+    root: value.state.manifest.root,
+    environment: () => ({ ...value.state.environment }),
+    connect: (signal?: AbortSignal) =>
+      ModalNativeBrokerChannel.connect(sdk.modal, sandboxId, signal),
+    closeTransport: () => sdk.modal.close(),
+  };
+}
 
 /** Routing owns this exact-backend callback. An inherited task cannot retain
  * setup authority after its enclosing operation has completed. This context
@@ -68,6 +94,7 @@ export function installModalNativeBrokerSession(
   session: ModalSandboxSession,
   commands: NativeBrokerCommandSession,
   closeTransport: () => Promise<void>,
+  verifyBootstrapReadiness?: (signal?: AbortSignal) => Promise<void>,
 ): ModalSandboxSession {
   if (!(session instanceof ModalSandboxSession) || installed.has(session))
     throw new Error("Modal broker requires one fresh SDK session wrapper");
@@ -187,7 +214,13 @@ export function installModalNativeBrokerSession(
     if (!(await session.pathExists(path)))
       throw new Error("Modal broker materialized path is absent");
   });
-  Reflect.set(session, "verifyExecReadiness", async () => {
+  Reflect.set(session, "verifyExecReadiness", async (signal?: AbortSignal) => {
+    if (closed) throw new Error("Modal broker SDK session is closed");
+    if (verifyBootstrapReadiness) {
+      await verifyBootstrapReadiness(signal);
+      if (closed) throw new Error("Modal broker SDK session is closed");
+      return 0;
+    }
     throw new Error(
       "Modal broker readiness requires its qualified initial bootstrap, not TaskExec",
     );

@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, test, spyOn } from "bun:test";
+import * as commandControl from "../src/sandbox/providers/modal-legacy-command-control";
 import { ModalNativeBrokerChannel } from "../src/sandbox/providers/modal-native-broker-channel";
 import { ModalClient } from "modal";
 
@@ -190,6 +191,93 @@ test("production factory requires original authenticated profile and exact SDK",
       taskId: "ta-exact",
     }),
   ).toThrow("authenticated");
+});
+
+test("connect discovers the exact initial task once with a deadline and owns only its new client", async () => {
+  let closed = 0;
+  const calls: unknown[] = [];
+  const original = {} as ModalClient;
+  const factory = spyOn(commandControl, "createModalSingleDispatchClient").mockReturnValue({
+    cpClient: {
+      sandboxGetTaskId: async (request: unknown, options: { signal: AbortSignal }) => {
+        expect(options.signal.aborted).toBe(false);
+        calls.push(request);
+        return { taskId: "ta-discovered" };
+      },
+    },
+    close: () => {
+      closed++;
+    },
+  } as never);
+  try {
+    const channel = await ModalNativeBrokerChannel.connect(original, "sb-exact");
+    expect(factory).toHaveBeenCalledWith(original);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([{ sandboxId: "sb-exact", timeout: 10, waitUntilReady: true }]);
+    expect(channel.taskId).toBe("ta-discovered");
+    expect(closed).toBe(0);
+    channel.close();
+    channel.close();
+    expect(closed).toBe(1);
+  } finally {
+    factory.mockRestore();
+  }
+});
+
+test("connect rejects absent/terminal tasks and late cancellation, closing its client without replay", async () => {
+  for (const mode of ["missing", "terminal", "cancelled"] as const) {
+    let closed = 0,
+      reads = 0;
+    const controller = new AbortController();
+    const factory = spyOn(commandControl, "createModalSingleDispatchClient").mockReturnValue({
+      cpClient: {
+        sandboxGetTaskId: async (_input: unknown, options: { signal: AbortSignal }) => {
+          reads++;
+          if (mode === "cancelled") {
+            controller.abort(new Error("discovery cancelled"));
+            expect(options.signal.aborted).toBe(true);
+          }
+          return mode === "missing"
+            ? {}
+            : {
+                taskId: "ta-exact",
+                ...(mode === "terminal" ? { taskResult: { exitcode: 0 } } : {}),
+              };
+        },
+      },
+      close: () => {
+        closed++;
+      },
+    } as never);
+    try {
+      await expect(
+        ModalNativeBrokerChannel.connect({} as ModalClient, "sb-exact", controller.signal),
+      ).rejects.toThrow(mode === "cancelled" ? "discovery cancelled" : "no live initial task");
+      expect(reads).toBe(1);
+      expect(closed).toBe(1);
+    } finally {
+      factory.mockRestore();
+    }
+  }
+});
+
+test("connect validates and observes pre-cancellation before allocating any client", async () => {
+  const factory = spyOn(commandControl, "createModalSingleDispatchClient");
+  try {
+    await expect(ModalNativeBrokerChannel.connect({} as ModalClient, "wrong")).rejects.toThrow(
+      "physical binding",
+    );
+    await expect(
+      ModalNativeBrokerChannel.connect(
+        {} as ModalClient,
+        "sb-exact",
+        AbortSignal.abort(new Error("already cancelled")),
+      ),
+    ).rejects.toThrow("already cancelled");
+    expect(factory).not.toHaveBeenCalled();
+  } finally {
+    factory.mockRestore();
+  }
 });
 
 test("initial diagnostics use separate stderr and recheck the exact live task after query completion", async () => {

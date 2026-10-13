@@ -107,14 +107,25 @@ New worker/API command routing selects its pipe/PTY protocol from the frozen
 birth and exact physical qualification, never from provider capability fallback.
 `selectNativeCommandProviderProtocol` is distinct from exact-protocol inspection
 of an already retained command. Broker session creation/setup installation is
-still incomplete, so protocol selection alone is not activation.
+qualified separately below; protocol selection alone is not activation.
 `modal-native-broker-session.ts` redirects the SDK's hidden foreground execs
 and cached list-directory runner through exact-backend synchronous routing.
 Helpers receive distinct canonical pipe admissions and retained output; file
 writes still need their enclosing mutation admission. Unscoped helpers and
 unqualified SDK restore/readiness paths refuse. Adapter close is host-only and
-preserves the physical snapshot wrapper's identity. This bridge is not yet
-connected to fresh/warm application establishment.
+preserves the physical snapshot wrapper's identity. Core connects this bridge
+to fresh/warm application establishment only for the original qualified birth.
+Core's `native-command-broker-session.ts` provides the qualified composition:
+original physical creation and authenticated namespace, immutable source,
+retained bootstrap, one shared coordinator per physical broker and host-only
+wrapper disposal. Fresh creation can defer its empty initial manifest until
+ordinary warm admission. Worker finalization separates eager holder release
+from host-only wrapper disposal. API `host-handle-cache.ts` gives each request
+an idempotent borrow and joins disposal only after eviction/idle expiry and the
+last borrower; legacy SDK close remains forbidden. Viewer setup takes an
+exact-instance direct holder and home-only canonical command routing, refusing
+active-machine drift rather than setting up a different box than its tunnel.
+This composition is not live activation or snapshot-restore qualification.
 The retained-input transaction locks an existing stdin admission and commits
 its command byte offset with the encrypted request. Larger writes retain one
 complete encrypted payload plan and storage pages (`0753`) before dispatch;

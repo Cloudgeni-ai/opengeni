@@ -113,7 +113,8 @@ Then open the smallest source files that answer the question:
   check before new work joins the input queue. Exact recovery controls bypass
   that observation gate, not the canonical input state machine. Last release
   aborts and joins the read; closing a sibling does not terminate another owner.
-  Application installation and physical provider qualification remain open.
+  Application installation uses the qualified core composition below; physical
+  provider qualification remains open.
   Worker/API new-command routing uses `selectNativeCommandProviderProtocol` in
   `packages/db/src/native-command-qualification.ts` to select the original
   frozen tuple's pipe/PTY protocol. Retained exact-protocol inspection remains
@@ -122,9 +123,20 @@ Then open the smallest source files that answer the question:
   `modal-native-broker-session.ts` bridges SDK-internal foreground execs and
   cached list helpers to exact-backend synchronous routing, with distinct
   canonical pipe admissions and retained output. Unscoped calls and unsupported
-  SDK restore/readiness refuse; file writes retain enclosing mutation authority.
+  SDK restore and unqualified readiness refuse; file writes retain enclosing mutation authority.
   Host-only close preserves physical ownership and snapshot-wrapper identity.
-  Fresh/warm application installation remains separate and incomplete.
+  Qualified fresh/warm application installation is composed in core; it is not
+  an enrollment switch or a substitute for remote physical qualification.
+  Core's `native-command-broker-session.ts` composes those pieces with one shared
+  physical coordinator, immutable birth/source/namespace checks, retained warm
+  bootstrap and host-only disposal. Its fresh-create selector defers only the
+  empty canonical initial manifest until warm routing. Callers must explicitly
+  own wrapper disposal. Worker cancellation drops its holder without closing a
+  still-used connection; finalization joins host-only disposal. API cache entries
+  have separate request borrows, last-borrower eviction and idle cleanup. Viewer
+  setup uses an exact-instance direct holder and canonical home-only routing,
+  never a bare SDK exec or an active-machine fallback. Snapshot restoration
+  remains unqualified. Do not equate composition fixtures with live activation.
   `native-command-broker-coordinator.ts` shares one demand-driven output reader,
   serializes input through native acceptance and never silently replays uncertain
   dispatch. Explicit global output ACK retires only the committed transport
@@ -140,8 +152,8 @@ Then open the smallest source files that answer the question:
   surface without a legacy setup or TaskExec fallback. Output commits before
   presentation, and an uncertain global ACK retains the captured page without
   replaying input. Session-surface close does not close the shared coordinator.
-  Application installation remains incomplete; do not
-  confuse adapter tests with activation or cancellation ACKs with settlement.
+  Application installation uses the qualified core composition; do not confuse
+  adapter tests with activation or cancellation ACKs with settlement.
   Its distinct broker command locator and atomic retained output live in
   `packages/contracts/src/sandbox-provider-command.ts` and
   `packages/db/src/retained-provider-commands.ts`; TaskExec adapters must refuse
@@ -170,7 +182,8 @@ Then open the smallest source files that answer the question:
   artifact pin and original create recipe without enrolling old groups. See
   `native-command-qualification.ts` and migration `0749`; snapshot capture/drain
   remains separate from as-yet-unqualified broker snapshot restore.
-  Application selection and physical qualification remain incomplete gates.
+  Application selection requires the original qualified birth; physical
+  qualification remains an incomplete gate.
   Journal capture/dispatch and a passing native fixture do not imply canonical
   application admission or old-group enrollment. Follow the remaining gates in
   `docs/design/native-command-broker.md` before enabling that path.

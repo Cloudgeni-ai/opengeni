@@ -48,6 +48,35 @@ export class ModalNativeBrokerChannel implements NativeBrokerChannel {
     }
   }
 
+  /** Discover only the initial task of the supplied exact physical instance.
+   * The separate single-dispatch client owns this bounded read and every later
+   * channel operation. Discovery neither creates nor qualifies a sandbox. */
+  static async connect(client: ModalClient, sandboxId: string, signal?: AbortSignal) {
+    if (!locator.test(sandboxId) || !sandboxId.startsWith("sb-"))
+      throw new Error("Invalid native broker physical binding");
+    signal?.throwIfAborted();
+    const controlled = createModalSingleDispatchClient(client);
+    try {
+      const deadline = AbortSignal.timeout(15_000);
+      const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
+      const task = await controlled.cpClient.sandboxGetTaskId(
+        { sandboxId, timeout: 10, waitUntilReady: true },
+        { signal: bounded },
+      );
+      bounded.throwIfAborted();
+      if (!task.taskId || task.taskResult)
+        throw new Error("Native broker has no live initial task");
+      return new ModalNativeBrokerChannel(
+        controlled.cpClient,
+        { sandboxId, taskId: task.taskId },
+        () => controlled.close(),
+      );
+    } catch (error) {
+      controlled.close();
+      throw error;
+    }
+  }
+
   private signal(signal?: AbortSignal) {
     if (this.closed) throw new Error("Native broker channel is closed");
     signal?.throwIfAborted();

@@ -62,7 +62,9 @@ let failure: unknown;
 try {
   const session = await createModalSessionWithLifecycle({
     appName: "fixture", imageTag: "fixture", ...(mode.startsWith("late-") ? { sandboxCreateTimeoutS: 0.005 } : {}),
-  }, { manifest: { root: "/workspace", entries: {} } }, {
+  }, { manifest: { root: mode === "foreign-root" ? "/other" : "/workspace",
+    entries: mode === "initial-entries" ? { child: { type: "dir", children: {} } } : {},
+  } }, {
     beforeDispatch: async () => {
       events.push("lease-admission");
       if (mode === "late-admission") await new Promise(resolve => setTimeout(resolve, 30));
@@ -83,7 +85,7 @@ try {
         if (mode === "late-bootstrap") await new Promise(resolve => setTimeout(resolve, 30));
       },
     } }),
-  }, session => session);
+  }, createdSession => createdSession);
   assert.equal(session.state.useSleepCmd, mode === "ordinary");
   await session.close();
 } catch (error) { failure = error; }
@@ -91,7 +93,7 @@ if (mode.startsWith("late-")) await new Promise(resolve => setTimeout(resolve, 6
 switch (mode) {
   case "broker":
     assert.equal(failure, undefined);
-    assert.deepEqual(events, ["lease-admission", "broker-admission", "physical", "physical-receipt", "bootstrap", "manifest", "session-close", "transport-close"]);
+    assert.deepEqual(events, ["lease-admission", "broker-admission", "physical", "physical-receipt", "bootstrap", "session-close", "transport-close"]);
     assert.equal(wire.definition.workdir, "/");
     assert.deepEqual(wire.definition.entrypointArgs, ["/usr/local/bin/opengeni-command-supervisor", "broker", "--broker-id", plan.brokerId]);
     break;
@@ -103,6 +105,12 @@ switch (mode) {
     break;
   case "missing-gate":
     assert.match(String(failure), /durable admission and bootstrap gates/);
+    assert.equal(instanceCount, 0);
+    assert.deepEqual(events, []);
+    break;
+  case "foreign-root":
+  case "initial-entries":
+    assert.match(String(failure), /initial manifest entries or noncanonical root/);
     assert.equal(instanceCount, 0);
     assert.deepEqual(events, []);
     break;

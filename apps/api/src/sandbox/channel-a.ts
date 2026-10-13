@@ -93,6 +93,7 @@ import {
   type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
 import {
+  attachQualifiedModalNativeBrokerSession,
   managedSessionGroupBackend,
   managedSessionGroupOs,
   providerSettingsForSessionSandboxRuntime,
@@ -101,6 +102,7 @@ import {
   wrapChannelABoxWithRouting,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
+import { SandboxHostHandleCache, releaseSandboxHostHandle } from "./host-handle-cache";
 
 export type ChannelAServices = {
   db: Database;
@@ -212,8 +214,8 @@ export type ChannelAHandle = {
  *
  * The key includes the session, lease epoch, and immutable provider instance id.
  * A rotation can therefore never inherit an old handle. Entries are bounded and
- * expire opportunistically; eviction only drops local references and never
- * terminates the lease-owned sandbox.
+ * expire after their final borrow becomes idle. Eviction joins installed broker
+ * host transports only after all borrowers leave; it never terminates the box.
  */
 // Read/viewer handles and process-capable handles deliberately have separate
 // caches. The pinned Modal patch rotates a handle's command-router transport in
@@ -228,17 +230,15 @@ export type ChannelAHandle = {
 const CHANNEL_A_READ_HANDLE_CACHE_IDLE_TTL_MS = 5 * 60_000;
 const CHANNEL_A_PROCESS_HANDLE_CACHE_IDLE_TTL_MS = 5 * 60_000;
 const CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES = 64;
-type CachedReadHandle = {
-  promise: Promise<EstablishedSandboxSession>;
-  lastUsedAtMonotonicMs: number;
-};
-type CachedProcessHandle = {
-  promise: Promise<EstablishedSandboxSession>;
-  lastUsedAtMonotonicMs: number;
-};
 export type EstablishedHandleCacheKind = "read" | "process" | "none";
-const establishedReadHandleCache = new Map<string, CachedReadHandle>();
-const establishedProcessHandleCache = new Map<string, CachedProcessHandle>();
+const establishedReadHandleCache = new SandboxHostHandleCache(
+  CHANNEL_A_READ_HANDLE_CACHE_IDLE_TTL_MS,
+  CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES,
+);
+const establishedProcessHandleCache = new SandboxHostHandleCache(
+  CHANNEL_A_PROCESS_HANDLE_CACHE_IDLE_TTL_MS,
+  CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES,
+);
 
 function establishedHandleCacheKey(
   workspaceId: string,
@@ -264,86 +264,6 @@ export function isChannelAProcessHandleCacheEntryFresh(
   return nowMonotonicMs - lastUsedAtMonotonicMs < idleTtlMs;
 }
 
-function pruneEstablishedReadHandleCache(nowMonotonicMs: number): void {
-  for (const [key, entry] of establishedReadHandleCache) {
-    if (!isChannelAHandleCacheEntryFresh(entry.lastUsedAtMonotonicMs, nowMonotonicMs)) {
-      establishedReadHandleCache.delete(key);
-    }
-  }
-}
-
-function pruneEstablishedProcessHandleCache(nowMonotonicMs: number): void {
-  for (const [key, entry] of establishedProcessHandleCache) {
-    if (!isChannelAProcessHandleCacheEntryFresh(entry.lastUsedAtMonotonicMs, nowMonotonicMs)) {
-      establishedProcessHandleCache.delete(key);
-    }
-  }
-}
-
-function enforceEstablishedHandleCacheSize<T>(cache: Map<string, T>): void {
-  while (cache.size > CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES) {
-    const oldestKey = cache.keys().next().value as string | undefined;
-    if (oldestKey === undefined) break;
-    cache.delete(oldestKey);
-  }
-}
-
-async function establishCachedReadHandle(
-  key: string,
-  establish: () => Promise<EstablishedSandboxSession>,
-): Promise<EstablishedSandboxSession> {
-  const now = performance.now();
-  pruneEstablishedReadHandleCache(now);
-  const cached = establishedReadHandleCache.get(key);
-  if (cached) {
-    cached.lastUsedAtMonotonicMs = now;
-    // Refresh insertion order so the bounded map evicts the least-recently used
-    // exact lease identity first.
-    establishedReadHandleCache.delete(key);
-    establishedReadHandleCache.set(key, cached);
-    return await cached.promise;
-  }
-
-  const promise = establish();
-  const entry: CachedReadHandle = { promise, lastUsedAtMonotonicMs: now };
-  establishedReadHandleCache.set(key, entry);
-  enforceEstablishedHandleCacheSize(establishedReadHandleCache);
-  try {
-    return await promise;
-  } catch (error) {
-    if (establishedReadHandleCache.get(key) === entry) establishedReadHandleCache.delete(key);
-    throw error;
-  }
-}
-
-async function establishCachedProcessHandle(
-  key: string,
-  establish: () => Promise<EstablishedSandboxSession>,
-): Promise<EstablishedSandboxSession> {
-  const now = performance.now();
-  pruneEstablishedProcessHandleCache(now);
-  const cached = establishedProcessHandleCache.get(key);
-  if (cached) {
-    cached.lastUsedAtMonotonicMs = now;
-    establishedProcessHandleCache.delete(key);
-    establishedProcessHandleCache.set(key, cached);
-    return await cached.promise;
-  }
-
-  const promise = establish();
-  const entry: CachedProcessHandle = { promise, lastUsedAtMonotonicMs: now };
-  establishedProcessHandleCache.set(key, entry);
-  enforceEstablishedHandleCacheSize(establishedProcessHandleCache);
-  try {
-    return await promise;
-  } catch (error) {
-    if (establishedProcessHandleCache.get(key) === entry) {
-      establishedProcessHandleCache.delete(key);
-    }
-    throw error;
-  }
-}
-
 /** Reuse the exact lease-fenced provider handle across API-direct surfaces.
  * Stream capability negotiation and the first Files/Changes reads commonly run
  * back-to-back; sharing this handle avoids paying the same Modal resume twice. */
@@ -353,7 +273,7 @@ export async function establishCachedChannelAHandle(
   lease: LeaseSnapshot,
   establish: () => Promise<EstablishedSandboxSession>,
 ): Promise<EstablishedSandboxSession> {
-  return await establishCachedReadHandle(
+  return await establishedReadHandleCache.acquire(
     establishedHandleCacheKey(workspaceId, sessionId, lease),
     establish,
   );
@@ -365,7 +285,7 @@ async function establishCachedChannelAProcessHandle(
   lease: LeaseSnapshot,
   establish: () => Promise<EstablishedSandboxSession>,
 ): Promise<EstablishedSandboxSession> {
-  return await establishCachedProcessHandle(
+  return await establishedProcessHandleCache.acquire(
     establishedHandleCacheKey(workspaceId, sessionId, lease),
     establish,
   );
@@ -474,38 +394,22 @@ function isRetryableControllerTransport(error: unknown): boolean {
 }
 
 function evictEstablishedHandle(key: string, cacheKind: EstablishedHandleCacheKind): void {
-  if (cacheKind === "read") establishedReadHandleCache.delete(key);
-  if (cacheKind === "process") establishedProcessHandleCache.delete(key);
+  if (cacheKind === "read") establishedReadHandleCache.evict(key);
+  if (cacheKind === "process") establishedProcessHandleCache.evict(key);
 }
 
 function evictAllEstablishedHandles(key: string): void {
-  establishedReadHandleCache.delete(key);
-  establishedProcessHandleCache.delete(key);
+  establishedReadHandleCache.evict(key);
+  establishedProcessHandleCache.evict(key);
 }
 
-function rememberEstablishedHandle(
+async function rememberEstablishedHandle(
   key: string,
   established: EstablishedSandboxSession,
   cacheKind: Exclude<EstablishedHandleCacheKind, "none">,
-): void {
-  const now = performance.now();
-  if (cacheKind === "read") {
-    pruneEstablishedReadHandleCache(now);
-    establishedReadHandleCache.delete(key);
-    establishedReadHandleCache.set(key, {
-      promise: Promise.resolve(established),
-      lastUsedAtMonotonicMs: now,
-    });
-    enforceEstablishedHandleCacheSize(establishedReadHandleCache);
-    return;
-  }
-  pruneEstablishedProcessHandleCache(now);
-  establishedProcessHandleCache.delete(key);
-  establishedProcessHandleCache.set(key, {
-    promise: Promise.resolve(established),
-    lastUsedAtMonotonicMs: now,
-  });
-  enforceEstablishedHandleCacheSize(establishedProcessHandleCache);
+): Promise<EstablishedSandboxSession> {
+  const cache = cacheKind === "read" ? establishedReadHandleCache : establishedProcessHandleCache;
+  return await cache.remember(key, established);
 }
 
 /**
@@ -946,13 +850,28 @@ async function withChannelAOperation<T>(
     cacheKind: EstablishedHandleCacheKind,
   ): Promise<{ established: EstablishedSandboxSession; cacheKey: string }> => {
     const cacheKey = establishedHandleCacheKey(workspaceId, session.id, live);
-    const establish = () =>
-      establishSandboxSessionFromEnvelope(sandboxRuntime.settings, live.resumeState, {
-        sessionId: session.id,
-        recovery: "resume-only",
-        backendOverride: session.sandboxBackend,
-        environment,
-      });
+    const establish = async () => {
+      const handle = await establishSandboxSessionFromEnvelope(
+        sandboxRuntime.settings,
+        live.resumeState,
+        {
+          sessionId: session.id,
+          recovery: "resume-only",
+          backendOverride: session.sandboxBackend,
+          environment,
+        },
+      );
+      if (session.sandboxBackend === "modal") {
+        await attachQualifiedModalNativeBrokerSession({
+          db,
+          settings: sandboxRuntime.settings,
+          scope: { accountId, workspaceId, sandboxGroupId },
+          session: handle.session,
+          ...(ctx.waitSignal ? { signal: ctx.waitSignal } : {}),
+        });
+      }
+      return handle;
+    };
     try {
       const attached =
         cacheKind === "read"
@@ -1029,7 +948,11 @@ async function withChannelAOperation<T>(
         leaseSnapshot = result.lease;
         establishedCacheKey = establishedHandleCacheKey(workspaceId, session.id, leaseSnapshot);
         establishedCacheKind = requestedCacheKind;
-        rememberEstablishedHandle(establishedCacheKey, established, establishedCacheKind);
+        established = await rememberEstablishedHandle(
+          establishedCacheKey,
+          established,
+          establishedCacheKind,
+        );
       } catch (error) {
         throw new HTTPException(409, {
           message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
@@ -1166,7 +1089,11 @@ async function withChannelAOperation<T>(
               establishedCacheKey = refreshed.cacheKey;
               establishedCacheKind = "read";
               leaseSnapshot = live;
-              rememberEstablishedHandle(refreshed.cacheKey, refreshed.established, "read");
+              established = await rememberEstablishedHandle(
+                refreshed.cacheKey,
+                refreshed.established,
+                "read",
+              );
               observeRefresh("ok");
             } catch (error) {
               observeRefresh("failed");
@@ -1203,8 +1130,11 @@ async function withChannelAOperation<T>(
     throw mapChannelAError(error, ctx.waitSignal);
   } finally {
     clearInterval(directHolderHeartbeat);
-    await release();
-    await dropEstablishedHandle(established);
+    try {
+      await release();
+    } finally {
+      await dropEstablishedHandle(established);
+    }
   }
 }
 
@@ -1495,7 +1425,5 @@ export function observeChannelAOperationFailure(
 async function dropEstablishedHandle(
   established: EstablishedSandboxSession | undefined,
 ): Promise<void> {
-  // No-op beyond dropping the reference: the lease owns lifecycle, the reaper
-  // owns teardown. Never session.close()/terminate() a non-owned handle here.
-  void established;
+  await releaseSandboxHostHandle(established);
 }

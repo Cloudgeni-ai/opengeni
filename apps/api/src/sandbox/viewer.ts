@@ -82,6 +82,7 @@ import {
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 import {
+  attachQualifiedModalNativeBrokerSession,
   managedSessionGroupBackend,
   managedSessionGroupOs,
   providerSettingsForSessionSandboxRuntime,
@@ -90,6 +91,8 @@ import {
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
+import { releaseSandboxHostHandle } from "./host-handle-cache";
+import { withViewerBrokerSetup } from "./viewer-broker-setup";
 import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
@@ -440,6 +443,14 @@ export async function attachViewer(
         backendOverride: session.sandboxBackend,
         environment,
       });
+      if (session.sandboxBackend === "modal") {
+        await attachQualifiedModalNativeBrokerSession({
+          db,
+          settings: sandboxRuntime.settings,
+          scope: { accountId, workspaceId, sandboxGroupId },
+          session: observed.session,
+        });
+      }
       await verifySandboxExecReadiness(observed);
     } catch (error) {
       if (
@@ -635,9 +646,9 @@ export function viewerHeartbeatIntervalMs(settings: Settings): number {
 
 // Drop a transiently-established, NON-OWNED handle. The box is owned by the LEASE
 // (resumed by id), not by this in-process handle, so we MUST NOT terminate it on
-// drop — we only release the local reference and let GC reclaim the client's
-// transport. This mirrors the worker's resume-by-id path (sandbox-resume.ts),
-// which injects the session NON-OWNED and never closes it.
+// drop. Legacy handles only lose their local reference. Explicitly installed
+// broker handles have separate host-only disposal, joined after the last cache
+// borrower leaves, matching the worker's separate closeHostHandle boundary.
 //
 // CRITICAL (deployed-integration bug, prove-it D1/D2/D5): a provider session's
 // `close()` is NOT a neutral "free local resources" call. For Modal,
@@ -645,14 +656,13 @@ export function viewerHeartbeatIntervalMs(settings: Settings): number {
 // Calling it here terminated the very box the lease had just committed warm, so
 // every viewer attach / Channel-A op spawned a box and immediately destroyed it
 // (the lease showed warm while Modal showed the box gone; reads 404'd against a
-// fresh box). We therefore DO NOT call session.close()/shutdown()/delete() — the
-// reaper (provider stop at refcount 0) is the ONLY sanctioned box terminator.
+// fresh box). Never call an unqualified SDK close/shutdown/delete here — the
+// reaper owns physical teardown. releaseSandboxHostHandle only recognizes the
+// explicitly installed broker host-only close, not legacy SDK close semantics.
 async function dropEstablishedHandle(
   established: EstablishedSandboxSession | undefined,
 ): Promise<void> {
-  // Intentionally a no-op beyond dropping the reference: terminating the box here
-  // is wrong (see above). The lease owns lifecycle; the reaper owns teardown.
-  void established;
+  await releaseSandboxHostHandle(established);
 }
 
 /** A stream resolver is an attached observer, never a box creator. If its
@@ -957,17 +967,25 @@ export async function mintDesktopStream(
       input.resourceSubjectId ?? null,
     );
     try {
-      const establish = () =>
-        (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
-          settings,
-          envelope,
-          {
-            sessionId: session.id,
-            recovery: "resume-only",
-            backendOverride: session.sandboxBackend,
-            environment,
-          },
-        );
+      const establish = async () => {
+        const handle = await (
+          services.establishSandboxSession ?? establishSandboxSessionFromEnvelope
+        )(settings, envelope, {
+          sessionId: session.id,
+          recovery: "resume-only",
+          backendOverride: session.sandboxBackend,
+          environment,
+        });
+        if (session.sandboxBackend === "modal") {
+          await attachQualifiedModalNativeBrokerSession({
+            db,
+            settings,
+            scope: { accountId, workspaceId, sandboxGroupId: session.sandboxGroupId },
+            session: handle.session,
+          });
+        }
+        return handle;
+      };
       established = input.establish
         ? await input.establish(envelope)
         : services.establishSandboxSession
@@ -981,13 +999,18 @@ export async function mintDesktopStream(
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
     try {
-      await ensureDisplayStack(established.session, {
-        telemetryContext: {
-          callerKind: "viewer",
-          ...(lease.instanceId ? { sandboxId: lease.instanceId } : {}),
-          leaseEpoch: lease.leaseEpoch,
-        },
-      });
+      await withViewerBrokerSetup(
+        services,
+        { ...input, lease, established },
+        async (setupSession) =>
+          await ensureDisplayStack(setupSession, {
+            telemetryContext: {
+              callerKind: "viewer",
+              ...(lease.instanceId ? { sandboxId: lease.instanceId } : {}),
+              leaseEpoch: lease.leaseEpoch,
+            },
+          }),
+      );
     } catch (error) {
       if (error instanceof DisplayStackUnsupportedError) {
         return null;
@@ -1223,17 +1246,25 @@ export async function mintTerminalStream(
       input.resourceSubjectId ?? null,
     );
     try {
-      const establish = () =>
-        (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
-          settings,
-          envelope,
-          {
-            sessionId: session.id,
-            recovery: "resume-only",
-            backendOverride: session.sandboxBackend,
-            environment,
-          },
-        );
+      const establish = async () => {
+        const handle = await (
+          services.establishSandboxSession ?? establishSandboxSessionFromEnvelope
+        )(settings, envelope, {
+          sessionId: session.id,
+          recovery: "resume-only",
+          backendOverride: session.sandboxBackend,
+          environment,
+        });
+        if (session.sandboxBackend === "modal") {
+          await attachQualifiedModalNativeBrokerSession({
+            db,
+            settings,
+            scope: { accountId, workspaceId, sandboxGroupId: session.sandboxGroupId },
+            session: handle.session,
+          });
+        }
+        return handle;
+      };
       established = input.establish
         ? await input.establish(envelope)
         : services.establishSandboxSession
@@ -1247,9 +1278,14 @@ export async function mintTerminalStream(
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
     // genuinely can't run it degrades to the sse-events firehose, not a throw.
     try {
-      await ensureTerminalServer(established.session, {
-        port: TERMINAL_STREAM_PORT,
-      });
+      await withViewerBrokerSetup(
+        services,
+        { ...input, lease, established },
+        async (setupSession) =>
+          await ensureTerminalServer(setupSession, {
+            port: TERMINAL_STREAM_PORT,
+          }),
+      );
     } catch (error) {
       if (error instanceof TerminalServerUnsupportedError) {
         return null;

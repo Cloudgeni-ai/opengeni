@@ -1,4 +1,6 @@
-import { beforeAll, afterAll, expect, test } from "bun:test";
+import { beforeAll, afterAll, expect, test, spyOn } from "bun:test";
+import * as serverSourceIdentity from "@opengeni/config/server-source-identity";
+import { getSettings } from "@opengeni/config";
 import { randomBytes } from "node:crypto";
 import { createHash } from "node:crypto";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
@@ -6,13 +8,24 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { ModalBrokerProviderCommand } from "@opengeni/contracts";
+import {
+  ModalBrokerProviderCommand,
+  OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
+} from "@opengeni/contracts";
 import { modalBrokerSdkFixture } from "../../runtime/test/fixtures/modal-broker-sdk-session";
+import { withViewerBrokerSetup } from "../../../apps/api/src/sandbox/viewer-broker-setup";
+import {
+  attachQualifiedModalNativeBrokerSession,
+  qualifiedModalNativeBrokerCreateLifecycle,
+} from "../src/native-command-broker-session";
+import { ModalNativeBrokerChannel, verifySandboxExecReadiness } from "@opengeni/runtime/sandbox";
 import {
   bootstrapWorkspace,
   createDb,
   createSession,
   getRetainedProcess,
+  getSession,
+  readLease,
   beginModalProviderCreate,
   recordWarmingSandboxCreated,
   commitWarmingToWarm,
@@ -233,7 +246,7 @@ async function fixture(register = true, qualifiedPin?: NativeBrokerArtifactPin) 
   if (register) await registerNativeBrokerTransport(client.db, key, binding, initial);
   const store = nativeBrokerTransportStore(client.db, key, binding);
   const service = () => createDurableNativeBrokerTransport(client.db, key, binding);
-  return { binding, initial, store, service, sessionId: session.id };
+  return { binding, initial, store, service, sessionId: session.id, subjectId };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
@@ -320,6 +333,264 @@ function bootstrapAdmission(f: Fixture) {
   };
 }
 
+test("application composition shares one broker owner and requires exact qualified attachment", async () => {
+  const { f, channel } = await bootstrapFixture(true);
+  const source = spyOn(serverSourceIdentity, "readImmutableServerSourceSha").mockResolvedValue(
+    f.binding.sourceSha,
+  );
+  let connections = 0,
+    channelCloses = 0,
+    wrapperCloses = 0,
+    bootstrapReads = 0;
+  const connected = spyOn(ModalNativeBrokerChannel, "connect").mockImplementation(async () => {
+    connections++;
+    return {
+      ...channel,
+      async *output() {
+        bootstrapReads++;
+        yield* channel.output();
+      },
+      close: () => {
+        channelCloses++;
+      },
+      write: async () => {
+        throw new Error("Attachment must not dispatch broker input");
+      },
+    } as unknown as ModalNativeBrokerChannel;
+  });
+  const sdk = (workspaceName = "test") =>
+    modalBrokerSdkFixture({
+      sandboxId: f.binding.sandboxId,
+      root: "/workspace",
+      environment: {},
+      readFile: async () => new Uint8Array(),
+      modal: {
+        version: () => "0.9.0",
+        profile: { serverUrl: "https://api.modal.test" },
+        cpClient: { workspaceNameLookup: async () => ({ workspaceName }) },
+        environmentName: () => "test",
+        close: () => {
+          wrapperCloses++;
+        },
+      },
+    });
+  const first = sdk(),
+    second = sdk();
+  const settings = getSettings({
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.from(key).toString("base64"),
+  });
+  const input = { db: client.db, settings, scope: bootstrapAdmission(f) };
+  try {
+    expect(
+      await Promise.all(
+        [first, second].map((session) =>
+          attachQualifiedModalNativeBrokerSession({ ...input, session }),
+        ),
+      ),
+    ).toEqual([true, true]);
+    expect(connections).toBe(1);
+    expect(bootstrapReads).toBe(1);
+    await expect(
+      attachQualifiedModalNativeBrokerSession({ ...input, session: sdk("foreign") }),
+    ).rejects.toThrow("original physical creation");
+    const changedKey = {
+      ...settings,
+      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+    };
+    await expect(
+      attachQualifiedModalNativeBrokerSession({ ...input, settings: changedKey, session: second }),
+    ).rejects.toThrow("attachment scope");
+    await expect(
+      attachQualifiedModalNativeBrokerSession({ ...input, settings: changedKey, session: sdk() }),
+    ).rejects.toThrow("database or encryption identity");
+    expect(connections).toBe(1);
+    expect(channelCloses).toBe(0);
+    const rejectedWrapperCloses = wrapperCloses;
+    for (const session of [first, second]) {
+      await verifySandboxExecReadiness({
+        client: {},
+        session,
+        sessionState: session.state,
+        instanceId: f.binding.sandboxId,
+        backendId: "modal",
+      });
+      await expect(session.execCommand({ cmd: "true" })).rejects.toThrow();
+    }
+    await first.close();
+    expect(channelCloses).toBe(0);
+    expect(wrapperCloses).toBe(rejectedWrapperCloses + 1);
+    expect(
+      (
+        await commitWarmingToWarm(client.db, {
+          ...bootstrapAdmission(f),
+          expectedEpoch: 1,
+          instanceId: f.binding.sandboxId,
+          leaseTtlMs: 60_000,
+        })
+      ).committed,
+    ).toBe(true);
+    await verifySandboxExecReadiness({
+      client: {},
+      session: second,
+      sessionState: second.state,
+      instanceId: f.binding.sandboxId,
+      backendId: "modal",
+    });
+    await second.close();
+    expect(channelCloses).toBe(1);
+    expect(wrapperCloses).toBe(rejectedWrapperCloses + 2);
+    await expect(
+      attachQualifiedModalNativeBrokerSession({ ...input, session: second }),
+    ).rejects.toThrow("attachment scope");
+    const recovered = sdk();
+    try {
+      expect(await attachQualifiedModalNativeBrokerSession({ ...input, session: recovered })).toBe(
+        true,
+      );
+      expect(connections).toBe(2);
+      expect(bootstrapReads).toBe(1);
+    } finally {
+      await recovered.close();
+    }
+    expect(channelCloses).toBe(2);
+    source.mockResolvedValue("d".repeat(40));
+    await expect(
+      attachQualifiedModalNativeBrokerSession({ ...input, session: sdk() }),
+    ).rejects.toThrow("frozen qualified source");
+    expect(connections).toBe(2);
+  } finally {
+    await Promise.all([first.close(), second.close()]);
+    connected.mockRestore();
+    source.mockRestore();
+  }
+}, 60_000);
+
+test("application composition leaves legacy births unchanged without inspecting a provider", async () => {
+  const f = await fixture(false);
+  expect(
+    await attachQualifiedModalNativeBrokerSession({
+      db: client.db,
+      settings: getSettings({}),
+      scope: bootstrapAdmission(f),
+      session: {},
+    }),
+  ).toBe(false);
+  expect(
+    await qualifiedModalNativeBrokerCreateLifecycle({
+      db: client.db,
+      settings: getSettings({}),
+      scope: bootstrapAdmission(f),
+    }),
+  ).toBeUndefined();
+}, 60_000);
+
+test("application create selection preserves its exact birth and requires an issued recipe", async () => {
+  const { f, pin } = await bootstrapFixture(true);
+  const source = spyOn(serverSourceIdentity, "readImmutableServerSourceSha").mockResolvedValue(
+    f.binding.sourceSha,
+  );
+  const settings = {
+    ...getSettings({ OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.from(key).toString("base64") }),
+    modalImageRef: `ghcr.io/cloudgeni-ai/opengeni-desktop@sha256:${"e".repeat(64)}`,
+  };
+  const input = { db: client.db, settings, scope: bootstrapAdmission(f) };
+  try {
+    const selected = await qualifiedModalNativeBrokerCreateLifecycle(input);
+    expect(selected?.plan).toMatchObject({
+      version: 1,
+      sourceSha: f.binding.sourceSha,
+      imageId: "im-bootstrap-fixture",
+      artifact: pin,
+    });
+    expect(selected?.plan.brokerId).not.toBe(f.binding.brokerId);
+    await expect(selected!.beforeDispatch({} as never, {})).rejects.toThrow(
+      "issued physical recipe",
+    );
+    await expect(
+      qualifiedModalNativeBrokerCreateLifecycle({
+        ...input,
+        settings: { ...settings, modalImageRef: "other" },
+      }),
+    ).rejects.toThrow("qualified source and image");
+    await expect(
+      qualifiedModalNativeBrokerCreateLifecycle({
+        ...input,
+        settings: { ...settings, environmentsEncryptionKey: undefined },
+      }),
+    ).rejects.toThrow("encrypted durable transport");
+    await expect(
+      qualifiedModalNativeBrokerCreateLifecycle({
+        ...input,
+        signal: AbortSignal.abort(new Error("cancelled creation")),
+      }),
+    ).rejects.toThrow("cancelled creation");
+  } finally {
+    source.mockRestore();
+  }
+}, 60_000);
+
+test("warm application attachment refuses missing original bootstrap instead of reenrolling", async () => {
+  const { f, channel } = await bootstrapFixture(true);
+  expect(
+    (
+      await commitWarmingToWarm(client.db, {
+        ...bootstrapAdmission(f),
+        expectedEpoch: 1,
+        instanceId: f.binding.sandboxId,
+        leaseTtlMs: 60_000,
+      })
+    ).committed,
+  ).toBe(true);
+  const source = spyOn(serverSourceIdentity, "readImmutableServerSourceSha").mockResolvedValue(
+    f.binding.sourceSha,
+  );
+  let read = false,
+    closed = false;
+  const connected = spyOn(ModalNativeBrokerChannel, "connect").mockImplementation(
+    async () =>
+      ({
+        ...channel,
+        async *output() {
+          read = true;
+          yield* channel.output();
+        },
+        close: () => {
+          closed = true;
+        },
+      }) as unknown as ModalNativeBrokerChannel,
+  );
+  const session = modalBrokerSdkFixture({
+    sandboxId: f.binding.sandboxId,
+    root: "/workspace",
+    environment: {},
+    readFile: async () => new Uint8Array(),
+    modal: {
+      version: () => "0.9.0",
+      profile: { serverUrl: "https://api.modal.test" },
+      cpClient: { workspaceNameLookup: async () => ({ workspaceName: "test" }) },
+      environmentName: () => "test",
+      close() {},
+    },
+  });
+  try {
+    await expect(
+      attachQualifiedModalNativeBrokerSession({
+        db: client.db,
+        settings: getSettings({
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.from(key).toString("base64"),
+        }),
+        scope: bootstrapAdmission(f),
+        session,
+      }),
+    ).rejects.toThrow("existing durable bootstrap evidence");
+    expect(read).toBe(false);
+    expect(closed).toBe(true);
+  } finally {
+    connected.mockRestore();
+    source.mockRestore();
+  }
+}, 60_000);
+
 test("qualified creation and bootstrap compose without guest-selected pins or warm reenrollment", async () => {
   const { f, channel, captured } = await bootstrapFixture(true);
   const input = bootstrapAdmission(f);
@@ -359,6 +630,125 @@ test("qualified creation and bootstrap compose without guest-selected pins or wa
     }),
   ).rejects.toThrow("fenced");
 });
+
+test("qualified viewer setup borrows an exact direct holder and releases it without closing the caller", async () => {
+  const { f, channel } = await bootstrapFixture(true);
+  const source = spyOn(serverSourceIdentity, "readImmutableServerSourceSha").mockResolvedValue(
+    f.binding.sourceSha,
+  );
+  let writes = 0,
+    closes = 0;
+  const connected = spyOn(ModalNativeBrokerChannel, "connect").mockResolvedValue({
+    ...channel,
+    close: () => {
+      closes++;
+    },
+    write: async () => {
+      writes++;
+      throw new Error("No command expected in holder fixture");
+    },
+  } as unknown as ModalNativeBrokerChannel);
+  const sdk = modalBrokerSdkFixture({
+    sandboxId: f.binding.sandboxId,
+    root: "/workspace",
+    environment: {},
+    readFile: async () => new Uint8Array(),
+    modal: {
+      version: () => "0.9.0",
+      profile: { serverUrl: "https://api.modal.test" },
+      cpClient: { workspaceNameLookup: async () => ({ workspaceName: "test" }) },
+      environmentName: () => "test",
+      close: () => {},
+    },
+  });
+  const settings = getSettings({
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.from(key).toString("base64"),
+  });
+  try {
+    await attachQualifiedModalNativeBrokerSession({
+      db: client.db,
+      settings,
+      scope: bootstrapAdmission(f),
+      session: sdk,
+    });
+    const warm = await commitWarmingToWarm(client.db, {
+      ...bootstrapAdmission(f),
+      expectedEpoch: 1,
+      instanceId: f.binding.sandboxId,
+      leaseTtlMs: 60_000,
+      resumeBackendId: "modal",
+      resumeState: { [OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD]: f.binding.sandboxId },
+    });
+    expect(warm.committed).toBe(true);
+    const session = await getSession(client.db, f.binding.workspaceId, f.sessionId);
+    if (!session || !warm.lease) throw new Error("Missing viewer fixture session/lease");
+    const input = {
+      accountId: f.binding.accountId,
+      workspaceId: f.binding.workspaceId,
+      session,
+      lease: warm.lease,
+      resourceSubjectId: f.subjectId,
+      established: {
+        session: sdk,
+        instanceId: f.binding.sandboxId,
+        backendId: "modal",
+        client: {},
+        sessionState: sdk.state,
+      },
+    };
+    const holders = async () => {
+      const rows =
+        await database.admin`select count(*)::integer as count from sandbox_lease_holders where workspace_id=${f.binding.workspaceId} and lease_id=${f.binding.leaseId} and kind='direct'`;
+      return rows[0]!.count;
+    };
+    expect(await holders()).toBe(0);
+    expect(
+      await withViewerBrokerSetup({ db: client.db, settings }, input, async (routed) => {
+        expect(routed).not.toBe(sdk);
+        expect(typeof (routed as { exec: unknown }).exec).toBe("function");
+        expect(await holders()).toBe(1);
+        return "setup fixture";
+      }),
+    ).toBe("setup fixture");
+    expect(await holders()).toBe(0);
+    await expect(
+      withViewerBrokerSetup({ db: client.db, settings }, input, async () => {
+        expect(await holders()).toBe(1);
+        throw new Error("setup fixture failure");
+      }),
+    ).rejects.toThrow("setup fixture failure");
+    expect(await holders()).toBe(0);
+    await expect(
+      withViewerBrokerSetup(
+        { db: client.db, settings },
+        { ...input, resourceSubjectId: null },
+        async () => {
+          throw new Error("must not run");
+        },
+      ),
+    ).rejects.toThrow("authorized exact home");
+    await expect(
+      withViewerBrokerSetup(
+        { db: client.db, settings },
+        { ...input, lease: { ...input.lease, leaseEpoch: input.lease.leaseEpoch + 1 } },
+        async () => {
+          throw new Error("must not run");
+        },
+      ),
+    ).rejects.toThrow();
+    expect(await holders()).toBe(0);
+    expect(writes).toBe(0);
+    expect(closes).toBe(0);
+    expect(
+      (await readLease(client.db, f.binding.workspaceId, f.binding.sandboxGroupId))?.instanceId,
+    ).toBe(f.binding.sandboxId);
+  } finally {
+    await sdk.close();
+    connected.mockRestore();
+    source.mockRestore();
+  }
+  expect(closes).toBe(1);
+}, 60_000);
 
 test("qualified bootstrap rejects old groups, mismatched host source and unattested warm histories", async () => {
   for (const qualified of [false, true]) {

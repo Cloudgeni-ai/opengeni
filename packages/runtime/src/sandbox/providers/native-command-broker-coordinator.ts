@@ -90,6 +90,12 @@ export class NativeBrokerCoordinator {
     return this.diagnostics.acquire();
   }
 
+  /** Bootstrap readiness and new work share the same owned observer. A clean
+   * read is not command admission and does not clear a retained fault. */
+  async checkDiagnostics(signal?: AbortSignal) {
+    await this.diagnostics.check(this.signal(signal));
+  }
+
   private signal(signal?: AbortSignal) {
     return signal ? AbortSignal.any([signal, this.stopped.signal]) : this.stopped.signal;
   }

@@ -278,6 +278,10 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         "late sandbox quiesced release failed (turn outcome unaffected)",
         safeErrorDiagnostic(error),
       );
+    } finally {
+      // The late wrapper has no remaining caller. This host-only close carries
+      // no writer-drain or provider-termination authority.
+      await sandbox.closeHostHandle?.();
     }
   };
   const requireResolvedSandboxForMutation = (message: string): ResumedTurnSandbox => {

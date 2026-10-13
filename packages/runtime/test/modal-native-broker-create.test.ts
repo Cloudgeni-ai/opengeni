@@ -203,6 +203,8 @@ test.each([
   "bad-admission",
   "bad-bootstrap",
   "missing-gate",
+  "foreign-root",
+  "initial-entries",
   "late-admission",
   "late-broker-admission",
   "late-bootstrap",

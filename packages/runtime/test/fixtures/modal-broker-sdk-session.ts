@@ -8,12 +8,14 @@ export function modalBrokerSdkFixture(input: {
   root: string;
   environment: Record<string, string>;
   readFile: (path: string) => Promise<Uint8Array>;
+  modal?: unknown;
 }) {
   return new ModalSandboxSession({
-    modal: {},
+    modal: input.modal ?? {},
     app: {},
     ownsSandbox: false,
     sandbox: {
+      sandboxId: input.sandboxId,
       exec: async () => { throw new Error("SDK TaskExec must not run"); },
       filesystem: { readBytes: input.readFile },
     },

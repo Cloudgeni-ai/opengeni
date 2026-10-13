@@ -34,8 +34,8 @@ export type ModalCreateLifecycle = {
   onCreated: (session: ModalSandboxSession, intent: ModalCreateIntent) => Promise<void>;
   /** Internal opt-in only, not a create option. Both extra gates are required:
    * persist qualified broker creation after ordinary lease admission, then
-   * verify/retain authenticated initial bootstrap before any manifest setup.
-   * No application caller selects this while qualification is incomplete. */
+   * verify/retain authenticated initial bootstrap before lease publication.
+   * SDK command setup is deferred until ordinary warm mutation admission. */
   nativeBroker?: {
     plan: ModalNativeBrokerCreatePlan;
     beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
@@ -180,6 +180,8 @@ export async function createModalSessionWithLifecycle(
   }
   const manifest = create.manifest;
   validateManifest(manifest);
+  if (nativeBroker && (manifest.root !== "/workspace" || Object.keys(manifest.entries).length))
+    unsupported("native broker initial manifest entries or noncanonical root");
   if (nativeBroker && manifest.mountTargets().length) unsupported("native broker initial mounts");
   // Validate mount configuration before any provider resource is requested.
   for (const { entry } of manifest.mountTargets()) {
@@ -395,7 +397,12 @@ export async function createModalSessionWithLifecycle(
           .finally(() => modal.close());
     }
     if (!session) throw new Error("Modal create bypassed the required physical receipt boundary");
-    await session.applyManifest(withoutMounts(manifest));
+    // The qualified stock image contains /workspace. Applying even an empty
+    // SDK manifest runs mkdir through TaskExec while the lease is warming,
+    // before ordinary mutation admission exists. Broker bootstrap establishes
+    // readiness; the provided-session manifest is applied through routing only
+    // after the lease is warm. No entries or mounts may be skipped here.
+    if (!nativeBroker) await session.applyManifest(withoutMounts(manifest));
     return session;
   } catch (error) {
     // Timed-out work still owns its transport until its late receipt settles.

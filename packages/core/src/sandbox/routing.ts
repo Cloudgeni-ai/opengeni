@@ -46,6 +46,7 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   RoutingSandboxSession,
+  RoutingActiveRouteChangedError,
   RoutingMutationOutputRejectedError,
   resolveModalCheckpointProviderBindingForSession,
   type ControlRpc,
@@ -239,6 +240,9 @@ export function wrapChannelABoxWithRouting(
     workspaceId: string;
     sessionId: string;
     resourceSubjectId: string;
+    /** Placement-bound setup (desktop/terminal) must reject an active-machine
+     * change instead of running against a different box than its tunnel. */
+    homeOnly?: boolean;
     homeLease?: {
       sandboxGroupId: string;
       leaseEpoch: number;
@@ -261,6 +265,8 @@ export function wrapChannelABoxWithRouting(
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
   const homeLease = ids.homeLease;
+  if (ids.homeOnly && (!homeLease || ids.pinnedSelfhosted))
+    throw new Error("Home-only setup requires an exact provider home lease");
   const beforeMutation = homeLease
     ? async ({
         op,
@@ -646,10 +652,16 @@ export function wrapChannelABoxWithRouting(
         : {}),
     },
     readPointer: async () => {
-      if (!routingEnabled(settings)) {
+      if (!routingEnabled(settings) && !ids.homeOnly) {
         return { activeSandboxId: null, activeEpoch: 0 };
       }
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
+      if (ids.homeOnly && pointer?.activeSandboxId) {
+        throw new RoutingActiveRouteChangedError(
+          { activeSandboxId: null, activeEpoch: pointer.activeEpoch },
+          pointer,
+        );
+      }
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,

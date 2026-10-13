@@ -1,5 +1,9 @@
 import type { Settings } from "@opengeni/config";
 import { readImmutableServerSourceSha } from "@opengeni/config/server-source-identity";
+import {
+  closeQualifiedModalNativeBrokerSession,
+  qualifiedModalNativeBrokerCreateLifecycle,
+} from "@opengeni/core";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   adoptLegacyModalCheckpointArtifact,
@@ -27,6 +31,7 @@ import {
   requirePersistableReplacementSandboxEnvelope,
   resolveModalCheckpointProviderBindingForSession,
   readModalCreateImagePreparation,
+  readModalNativeBrokerCreate,
   serializeReplacementSandboxEnvelope,
   SandboxProviderContinuityUnavailableError,
   tagModalSandbox,
@@ -173,6 +178,7 @@ export async function establishApiSandboxSpawner(input: {
       ? fallbackArchiveEnvelope
       : input.acquiredLease.resumeState;
   let established: EstablishedSandboxSession | null = null;
+  let transferred = false;
   let providerCreateOperationId: string | undefined;
   let providerCreateBindingKey: string | undefined;
   let rematerialization: {
@@ -250,11 +256,24 @@ export async function establishApiSandboxSpawner(input: {
     }
 
     const hydrateEnvelope = await materializeArchiveObjectRef(spawnEnvelope, input.objectStorage);
+    const modalNativeBroker =
+      input.backend === "modal"
+        ? await qualifiedModalNativeBrokerCreateLifecycle({
+            db: input.db,
+            settings: input.settings,
+            scope: {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: input.sandboxGroupId,
+            },
+          })
+        : undefined;
 
     const providerCreateStartedAt = new Date();
     established = await establishSandboxSessionFromEnvelope(input.settings, hydrateEnvelope, {
       sessionId: input.sessionId,
       recovery: "create-or-restore",
+      ...(modalNativeBroker ? { modalNativeBroker } : {}),
       ...(input.objectStorage
         ? {
             loadHostWorkspaceArchive: async (ref) => {
@@ -290,6 +309,7 @@ export async function establishApiSandboxSpawner(input: {
         );
         const nativeSourceSha = await readImmutableServerSourceSha();
         const nativeImagePreparation = readModalCreateImagePreparation(intent);
+        const nativeBroker = readModalNativeBrokerCreate(intent)?.plan;
         await beginModalProviderCreate(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -306,6 +326,7 @@ export async function establishApiSandboxSpawner(input: {
           requestSha256: intent.requestSha256,
           ...(nativeSourceSha ? { nativeSourceSha } : {}),
           ...(nativeImagePreparation ? { nativeImagePreparation } : {}),
+          ...(nativeBroker ? { nativeBroker } : {}),
         });
         providerCreateOperationId = intent.operationId;
         providerCreateBindingKey = binding.key;
@@ -497,6 +518,7 @@ export async function establishApiSandboxSpawner(input: {
       }
       throw new SandboxLeaseSupersededError(input.sandboxGroupId, input.expectedEpoch);
     }
+    transferred = true;
     return { established, lease: committed.lease };
   } catch (error) {
     if (error instanceof SandboxLeaseSupersededError) throw error;
@@ -536,5 +558,7 @@ export async function establishApiSandboxSpawner(input: {
       }
     }
     throw error;
+  } finally {
+    if (!transferred) await closeQualifiedModalNativeBrokerSession(established?.session);
   }
 }
