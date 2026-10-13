@@ -97,6 +97,11 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
   session: Session | null;
   personalConnectionDelegations: readonly McpPersonalConnectionDelegation[];
   personalResourceAuthoritySubjectId?: string | null;
+  /**
+   * The tools a run that has no session yet will start with; a schedule that
+   * follows the workspace defaults resolves them per run.
+   */
+  plannedTools?: Session["tools"];
   executionPolicy?: {
     tools: ScheduledTaskRunAcceptedExecution["resolvedTools"];
     firstPartyMcpTools: ScheduledTaskRunAcceptedExecution["resolvedFirstPartyMcpTools"];
@@ -122,7 +127,7 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
     ? input.executionPolicy.tools
     : input.session
       ? input.session.tools
-      : withFirstPartyTools(input.settings, input.task.agentConfig.tools);
+      : (input.plannedTools ?? withFirstPartyTools(input.settings, input.task.agentConfig.tools));
   const resolvedToolPolicy = resolveIncidentTelemetryResponderToolPolicy({
     settingsMcpServerIds: input.settings.mcpServers.map((server) => server.id),
     capabilityServerIds,

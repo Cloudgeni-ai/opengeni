@@ -27,6 +27,8 @@ import {
   inspectRuntimeDatabasePosture,
   withSessionRlsActorContext,
   type DbClient,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
 } from "../src";
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
@@ -383,10 +385,16 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "subscription M3 precursor private routine begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid) is missing or unsafe",
       "subscription M3 precursor private routine record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone) is missing or unsafe",
     ];
-    expect(posture).toEqual({
-      unprovisioned: missing0735Routines,
-      provisioned: missing0735Routines,
-    });
+    // Nor the later provider cutovers (0747, 0748), the drained retirement
+    // (0751) or personal sharing (0752), whose absence readiness also reports.
+    const expected = [
+      ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+      "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
+      ...missing0735Routines,
+    ];
+    expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });
 
   test("every binding the previous binary wrote keeps every value across 0733", async () => {

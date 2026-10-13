@@ -951,26 +951,46 @@ export async function settingsWithEnabledCapabilityMcpServers(
      * its cutover once), or what it knows for resolving it here.
      */
     codexApps?: Promise<CodexAppsDesignationForRun | null> | CodexAppsRunContext;
+    /**
+     * `db` is one bounded transaction: run the reads one after another, since
+     * its RLS scopes must not overlap.
+     */
+    oneReadAtATime?: boolean;
   },
 ): Promise<Settings> {
-  const apiIntegrationsPromise = options?.subjectId
-    ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
-    : listInstalledApiIntegrationsForDelegations(
-        db,
-        workspaceId,
-        options?.personalConnectionDelegations ?? [],
-      );
-  const [enabled, apiIntegrations, codexAppsDesignation] = await Promise.all([
-    listEnabledMcpCapabilityServers(db, workspaceId),
-    apiIntegrationsPromise,
-    // Registration is dropped below when Apps are off for the deployment, so
-    // resolving the designation then would be pure cost.
+  const readApiIntegrations = () =>
+    options?.subjectId
+      ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
+      : listInstalledApiIntegrationsForDelegations(
+          db,
+          workspaceId,
+          options?.personalConnectionDelegations ?? [],
+        );
+  // Registration is dropped below when Apps are off for the deployment, so
+  // resolving the designation then would be pure cost.
+  const readCodexAppsDesignation = () =>
     !settings.codexConnectedAppsEnabled
       ? Promise.resolve(null)
       : options?.codexApps instanceof Promise
         ? options.codexApps
-        : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {}),
-  ]);
+        : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {});
+  let enabled: Awaited<ReturnType<typeof listEnabledMcpCapabilityServers>>;
+  let apiIntegrations: Awaited<ReturnType<typeof readApiIntegrations>>;
+  let codexAppsDesignation: Awaited<ReturnType<typeof readCodexAppsDesignation>>;
+  if (options?.oneReadAtATime) {
+    enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
+    apiIntegrations = await readApiIntegrations();
+    codexAppsDesignation = await readCodexAppsDesignation();
+  } else {
+    // The integration read starts first: callers that pass a transaction rely
+    // on its subject scope being established before the other reads begin.
+    const apiIntegrationsPromise = readApiIntegrations();
+    [enabled, apiIntegrations, codexAppsDesignation] = await Promise.all([
+      listEnabledMcpCapabilityServers(db, workspaceId),
+      apiIntegrationsPromise,
+      readCodexAppsDesignation(),
+    ]);
+  }
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   options?.onResolvedCapabilityServers?.(enabled);
   return settingsWithCodexAppsMcpServer(

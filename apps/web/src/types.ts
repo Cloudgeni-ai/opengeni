@@ -126,6 +126,7 @@ export type {
   SandboxBackend,
   ScheduledTask,
   ScheduledTaskAccessAttention,
+  ScheduledTaskAccountPlan,
   ScheduledTaskAgentConfig,
   ScheduledTaskPolicyDrift,
   ScheduledTaskRun,

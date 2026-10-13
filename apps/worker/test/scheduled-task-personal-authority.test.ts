@@ -417,7 +417,7 @@ describe("scheduled task personal MCP authority", () => {
     180_000,
   );
 
-  test("validated create and material update freeze an empty set; explicit replacement stays exact through dispatch", async () => {
+  test("validated create and edits store no accounts; Default resolves live; a person's pin stays exact through dispatch", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const mcpServers = [
@@ -453,10 +453,8 @@ describe("scheduled task personal MCP authority", () => {
         },
       }),
     });
-    expect(task.agentConfig).toMatchObject({
-      connectionAccounts: [],
-      connectionAccountsFrozen: true,
-    });
+    expect(task.agentConfig).not.toHaveProperty("pinnedAccounts");
+    expect(task.agentConfig).not.toHaveProperty("connectionAccounts");
     const first = await commonConnectionDelegationFixture(workspace);
     const second = await commonConnectionDelegationFixture(workspace);
     const update = await validatedScheduledTaskUpdate({
@@ -470,10 +468,8 @@ describe("scheduled task personal MCP authority", () => {
       }),
       toolsProvided: true,
     });
-    expect(update.agentConfig).toMatchObject({
-      connectionAccounts: [],
-      connectionAccountsFrozen: true,
-    });
+    expect(update.agentConfig).not.toHaveProperty("pinnedAccounts");
+    expect(update.agentConfig).not.toHaveProperty("connectionAccounts");
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, update);
     const scheduler = activities({ mcpServers });
     const dispatch = (producerKey = crypto.randomUUID()) =>
@@ -483,14 +479,16 @@ describe("scheduled task personal MCP authority", () => {
         triggerType: "scheduled",
         producerKey,
       });
-    const emptyRun = await dispatch();
-    expect(emptyRun.action).toBe("start");
+    const defaultRun = await dispatch();
+    expect(defaultRun.action).toBe("start");
     const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
-    const emptyAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+    const defaultAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
       workspaceId: workspace.workspaceId,
       runId: runs[0]!.id,
     });
-    expect(emptyAccepted?.mcpAccountBindings).toEqual([]);
+    expect(
+      defaultAccepted?.mcpAccountBindings?.map((binding) => binding.connectionId).sort(),
+    ).toEqual([first.connection.id, second.connection.id].sort());
     const existing = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
     await expect(
       validatedScheduledTaskUpdate({
@@ -515,10 +513,14 @@ describe("scheduled task personal MCP authority", () => {
       objectStorage: null,
       grant,
       existing,
-      payload: UpdateScheduledTaskRequest.parse({ connectionAccounts: selections }),
+      payload: UpdateScheduledTaskRequest.parse({
+        pinnedAccounts: selections,
+        pinnedAccountsRequired: true,
+      }),
     });
-    expect(selectedUpdate.agentConfig).toMatchObject({ connectionAccountsFrozen: true });
-    expect(selectedUpdate.agentConfig?.connectionAccounts).toHaveLength(2);
+    expect(selectedUpdate.agentConfig).toMatchObject({ pinnedAccountsRequired: true });
+    expect(selectedUpdate.agentConfig?.pinnedAccounts).toHaveLength(2);
+    expect(selectedUpdate.agentConfig).not.toHaveProperty("connectionAccountsFrozen");
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, selectedUpdate);
     await commonConnectionDelegationFixture(workspace);
     const acceptedProducer = crypto.randomUUID();
@@ -584,7 +586,6 @@ describe("scheduled task personal MCP authority", () => {
         resources: [],
         tools: [{ kind: "mcp", id: "mail" }],
         metadata: {},
-        connectionAccounts: [],
       },
       metadata: {},
     });
@@ -672,7 +673,8 @@ describe("scheduled task personal MCP authority", () => {
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: {
         ...task.agentConfig,
-        connectionAccounts: [{ serverId: "mail", connectionId: firstAccount }],
+        pinnedAccounts: [{ serverId: "mail", connectionId: firstAccount }],
+        pinnedAccountsRequired: true,
       },
     });
     expect(
@@ -2189,7 +2191,7 @@ describe("scheduled task personal MCP authority", () => {
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: {
         ...task.agentConfig,
-        connectionAccounts: [{ serverId: "scheduled-common", connectionId: laterAccount }],
+        pinnedAccounts: [{ serverId: "scheduled-common", connectionId: laterAccount }],
         prompt: "Changed only after the earlier occurrence was accepted",
       },
     });
@@ -2239,7 +2241,7 @@ describe("scheduled task personal MCP authority", () => {
     });
     expect(
       (await getScheduledTask(client.db, workspace.workspaceId, task.id))?.agentConfig
-        .connectionAccounts,
+        .pinnedAccounts,
     ).toEqual([{ serverId: "scheduled-common", connectionId: laterAccount }]);
   });
 
@@ -2359,7 +2361,7 @@ describe("scheduled task personal MCP authority", () => {
       runMode: "reusable_session",
       overlapPolicy: "buffer_one",
       agentConfig: {
-        connectionAccounts: originalDelegations.map(({ serverId, connectionId }) => ({
+        pinnedAccounts: originalDelegations.map(({ serverId, connectionId }) => ({
           serverId,
           connectionId,
         })),
@@ -2385,7 +2387,7 @@ describe("scheduled task personal MCP authority", () => {
       runMode: "new_session_per_run",
       overlapPolicy: "skip",
       agentConfig: {
-        connectionAccounts: changedDelegations.map(({ serverId, connectionId }) => ({
+        pinnedAccounts: changedDelegations.map(({ serverId, connectionId }) => ({
           serverId,
           connectionId,
         })),

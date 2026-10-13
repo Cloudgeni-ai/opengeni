@@ -1,4 +1,5 @@
 import {
+  ConnectionAccountIntent,
   McpConnectionAccountBindings,
   type McpConnectionAccountBinding,
 } from "@opengeni/contracts";
@@ -57,4 +58,10 @@ export function parseAcceptedMcpAccountBindings(
   value: unknown,
 ): McpConnectionAccountBinding[] | null {
   return value == null ? null : McpConnectionAccountBindings.parse(value);
+}
+
+/** NULL marks a turn accepted before account intent existed. Its
+ * continuations copy its exact accounts; it is never read as an empty intent. */
+export function parseConnectionAccountIntent(value: unknown): ConnectionAccountIntent | null {
+  return value == null ? null : ConnectionAccountIntent.parse(value);
 }

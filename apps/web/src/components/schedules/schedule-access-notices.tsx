@@ -25,27 +25,32 @@ export function scheduledTaskAttentionText(
 }
 
 /**
- * What the task's owner needs to know about its frozen access: new runs cannot
- * start because a chosen account is gone, the latest run could not use a
- * connector, and what an access refresh would change. The refresh is offered
- * only to a signed-in person who can manage schedules. Defaults the owner does
- * not want can be hidden for this task head.
+ * What the task's owner needs to know about its access: an account a person
+ * pinned is gone, the latest run could not use a connector, and what an access
+ * refresh would change. The refresh is offered only to a signed-in person who
+ * can manage schedules; it never changes pins. Defaults the owner does not want
+ * can be hidden for this task head.
  */
 export function ScheduledTaskAccessNotices(props: {
   policyDrift: ScheduledTask["policyDrift"];
   attention: ScheduledTaskAccessAttention | null;
+  /** The schedule skips runs instead of going ahead without a stale pin. */
+  pinnedAccountsRequired?: boolean;
   ownsTask: boolean;
   busy: boolean;
   onRefreshAccess: () => void;
   onDismissDrift?: () => void;
   className?: string;
 }) {
-  const blockedText = scheduledTaskUnavailableAccountsText(props.attention?.unavailableAccounts);
+  const blockedText = scheduledTaskUnavailableAccountsText(props.attention?.unavailableAccounts, {
+    skipsRuns: props.pinnedAccountsRequired === true,
+  });
   const failuresText = scheduledTaskAccessFailuresText(props.attention?.failures);
   const awaitingHumanText = scheduledTaskAwaitingHumanText(props.attention?.awaitingHuman);
   // The blocked-account sentence is said once, in the louder notice.
   const driftLines = scheduledTaskPolicyDriftLines(props.policyDrift, {
     omitUnavailableAccounts: Boolean(blockedText),
+    skipsRuns: props.pinnedAccountsRequired === true,
   });
   const canRefreshAccess = Boolean(props.policyDrift?.canRefresh) && props.ownsTask;
   const dismissible =
@@ -57,20 +62,22 @@ export function ScheduledTaskAccessNotices(props: {
       size="xs"
       disabled={props.busy}
       onClick={props.onRefreshAccess}
-      title="Save this schedule again with your current connectors, accounts and tools"
+      title="Save this schedule again with your current connectors and tools"
     >
       <ShieldCheckIcon className="size-3" />
       Refresh access
     </Button>
   ) : null;
   const refreshInDrift = driftLines.length > 0;
-  const hint = canRefreshAccess
-    ? refreshInDrift
-      ? "Refreshing access below may fix it."
-      : "Refreshing access uses the accounts you can use now."
-    : blockedText && !failuresText
-      ? "Reconnect the account in Capabilities, or edit the schedule to choose another one."
-      : "Check the connection in Capabilities, then run the schedule again.";
+  // A refresh never changes pins, so only a failed run can be helped by it.
+  const hint =
+    blockedText && !failuresText
+      ? "Reconnect the account in Capabilities, or edit the schedule to pin another one or use your current accounts."
+      : canRefreshAccess
+        ? refreshInDrift
+          ? "Refreshing access below may fix it."
+          : "Refreshing access uses the accounts you can use now."
+        : "Check the connection in Capabilities, then run the schedule again.";
   return (
     <div className={cn("grid gap-2", props.className)} data-scheduled-task-access>
       {awaitingHumanText ? (
@@ -83,10 +90,12 @@ export function ScheduledTaskAccessNotices(props: {
           tone="failed"
           title={
             blockedText
-              ? "New runs of this schedule cannot start"
+              ? props.pinnedAccountsRequired
+                ? "Runs of this schedule are being skipped"
+                : "A pinned account can no longer be used"
               : "The last run could not use a connector"
           }
-          action={refreshInDrift ? null : refreshButton}
+          action={refreshInDrift || !failuresText ? null : refreshButton}
         >
           {[blockedText, failuresText && blockedText ? `Last run: ${failuresText}` : failuresText]
             .filter(Boolean)

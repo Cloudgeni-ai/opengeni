@@ -43,6 +43,32 @@ export function historyItemType(item: Record<string, unknown>): string | null {
 export const NOT_STARTED_TOOL_CALL_EVENT_TEXT =
   "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run again.";
 
+/**
+ * Model-visible result for a function call whose command was proven never
+ * dispatched. Unlike an interrupted call, nothing ran, so the model may run it
+ * again without inspecting state first.
+ */
+export const NOT_STARTED_TOOL_CALL_RESULT_TEXT =
+  "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run it again.";
+
+/** Provider-valid result for a function call proven never started. */
+export function notStartedToolCallResult(input: {
+  callId: string;
+  callItem: Record<string, unknown>;
+}): Record<string, unknown> {
+  const name = typeof input.callItem.name === "string" ? input.callItem.name : "tool";
+  return {
+    type: "function_call_result",
+    name,
+    ...(typeof input.callItem.namespace === "string"
+      ? { namespace: input.callItem.namespace }
+      : {}),
+    callId: input.callId,
+    status: "incomplete",
+    output: { type: "text", text: NOT_STARTED_TOOL_CALL_RESULT_TEXT },
+  };
+}
+
 /** Provider-valid result for a started call whose durable outcome is unknown. */
 export function interruptedToolCallResult(input: {
   callType: string;
@@ -343,12 +369,14 @@ export async function closePendingSessionToolCallsInTransaction(
     const interrupted = !existingResult && !call.resultItem;
     const notStarted =
       interrupted && call.callType === "function_call" && notStartedCallIds.has(call.callId);
-    const interruptedResult = interruptedToolCallResult({
-      callType: call.callType,
-      callId: call.callId,
-      callItem: call.callItem,
-      reason: input.reason,
-    });
+    const interruptedResult = notStarted
+      ? notStartedToolCallResult({ callId: call.callId, callItem: call.callItem })
+      : interruptedToolCallResult({
+          callType: call.callType,
+          callId: call.callId,
+          callItem: call.callItem,
+          reason: input.reason,
+        });
     return {
       call,
       existingCall,

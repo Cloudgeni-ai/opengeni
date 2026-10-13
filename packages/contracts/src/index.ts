@@ -781,6 +781,7 @@ export const ErrorCode = z.enum([
   "codex_compaction_v2_provider_locked",
   "provider_verification_failed",
   "upstream_unavailable",
+  "tab_not_responding",
   "internal_error",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
@@ -5212,6 +5213,31 @@ export const McpConnectionAccountSelections = z
     }
   });
 
+/**
+ * What a person decided about connector accounts for a turn, as opposed to the
+ * accounts that turn was bound to. Autonomous work that continues the turn
+ * (goal continuations, wait wake-ups, command results, child results) carries
+ * this intent and resolves it again for the same person at each turn, so it
+ * uses that person's current accounts instead of a copy of earlier ones.
+ *
+ * `principal` is whose personal accounts may be used: the person whose
+ * authenticated request accepted the turn, or `none` when that request could
+ * not use personal accounts (service work, delegated bearers). `selections`
+ * are the accounts the person explicitly picked; every other connector uses
+ * the principal's default accounts.
+ */
+export const ConnectionAccountIntent = z
+  .object({
+    version: z.literal(1),
+    principal: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("subject"), subjectId: z.string().min(1).max(512) }).strict(),
+      z.object({ kind: z.literal("none") }).strict(),
+    ]),
+    selections: McpConnectionAccountSelections,
+  })
+  .strict();
+export type ConnectionAccountIntent = z.infer<typeof ConnectionAccountIntent>;
+
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -9272,6 +9298,11 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       scheduledTaskRunId: z.string().uuid(),
       resources: z.array(ResourceRef).optional(),
       tools: z.array(ToolRef).optional(),
+      /**
+       * Connectors this occurrence runs without because every account a
+       * person pinned for them can no longer be used.
+       */
+      unavailableConnectors: z.array(z.string().min(1).max(256)).max(128).optional(),
     })
     .passthrough(),
   z
@@ -9528,6 +9559,11 @@ function renderScheduledOccurrenceTaskBatch(
         ...(occurrence.update.createdAt
           ? [`Created: ${formatModelContextTimestamp(occurrence.update.createdAt)}`]
           : []),
+        ...(occurrence.payload.unavailableConnectors?.length
+          ? [
+              `Unavailable in this occurrence: ${occurrence.payload.unavailableConnectors.join(", ")}. The accounts a person pinned for these connectors can no longer be used, so their tools are absent and the schedule owner is told. Do not reach them another way; if the instructions need them, say so in your result.`,
+            ]
+          : []),
         "Instructions:",
         occurrence.payload.text,
       ];
@@ -9554,6 +9590,200 @@ export function sessionSystemUpdateBatchHistoryItem(
       scheduledTask ?? renderSessionSystemUpdateBatch(updates, options),
     ].join("\n\n"),
   };
+}
+
+const SESSION_GOAL_CONTEXT_PREFIX = `${SESSION_GOAL_CONTEXT_LABEL}\n`;
+const SESSION_GOAL_CONTEXT_HEADER =
+  /^(?:Standing|Previous) session goal \(frozen at logical-turn acceptance; objective revision (\d+); status ([a-z_]+)\)/;
+const SESSION_GOAL_CONTEXT_UNCHANGED =
+  /^Standing session goal unchanged: identical to the full goal text shown earlier \(objective revision (\d+); status ([a-z_]+)\)\.$/;
+const SESSION_SYSTEM_UPDATE_BATCH_BODY_LABELS = [
+  "[Opengeni internal updates]",
+  SCHEDULED_OCCURRENCE_TASK_LABEL,
+] as const;
+
+type SessionGoalContextIdentity = { objectiveRevision: string; state: string };
+
+function sessionGoalContextIdentity(block: string): SessionGoalContextIdentity | null {
+  if (!block.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const match = SESSION_GOAL_CONTEXT_HEADER.exec(block.slice(SESSION_GOAL_CONTEXT_PREFIX.length));
+  return match ? { objectiveRevision: match[1]!, state: match[2]! } : null;
+}
+
+function unchangedSessionGoalContextIdentity(block: string): SessionGoalContextIdentity | null {
+  if (!block.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const match = SESSION_GOAL_CONTEXT_UNCHANGED.exec(
+    block.slice(SESSION_GOAL_CONTEXT_PREFIX.length),
+  );
+  return match ? { objectiveRevision: match[1]!, state: match[2]! } : null;
+}
+
+/**
+ * The short stand-in for a goal context identical to the most recent one the
+ * model has already been given in the same request.
+ */
+export function renderUnchangedSessionGoalContext(goalContextBlock: string): string | undefined {
+  const identity = sessionGoalContextIdentity(goalContextBlock);
+  if (!identity) return undefined;
+  return `${SESSION_GOAL_CONTEXT_PREFIX}Standing session goal unchanged: identical to the full goal text shown earlier (objective revision ${identity.objectiveRevision}; status ${identity.state}).`;
+}
+
+/** Split a durable system-batch string into its leading goal block and body. */
+function splitSystemBatchGoalContext(content: string): { goal: string; body: string } | null {
+  if (!content.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const boundaries = SESSION_SYSTEM_UPDATE_BATCH_BODY_LABELS.flatMap((label) => {
+    const index = content.indexOf(`\n\n${label}\n`);
+    return index >= 0 ? [index] : [];
+  });
+  if (boundaries.length === 0) return null;
+  const boundary = Math.min(...boundaries);
+  return {
+    goal: content.slice(0, boundary),
+    body: content.slice(boundary + 2),
+  };
+}
+
+type GoalContextRewrite = (block: string) => string;
+
+function rewriteGoalContextBlocks<T extends Record<string, unknown>>(
+  items: readonly T[],
+  rewrite: GoalContextRewrite,
+): T[] {
+  let changedAny = false;
+  const result = items.map((item) => {
+    if (item.type !== "message" || (item.role !== "user" && item.role !== "system")) return item;
+    const content = item.content;
+    if (typeof content === "string") {
+      const split = splitSystemBatchGoalContext(content);
+      if (!split) return item;
+      const goal = rewrite(split.goal);
+      if (goal === split.goal) return item;
+      changedAny = true;
+      return { ...item, content: `${goal}\n\n${split.body}` };
+    }
+    if (!Array.isArray(content)) return item;
+    let changed = false;
+    const parts = content.map((part: unknown) => {
+      if (!part || typeof part !== "object") return part;
+      const record = part as Record<string, unknown>;
+      if (typeof record.text !== "string" || !record.text.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) {
+        return part;
+      }
+      const text = rewrite(record.text);
+      if (text === record.text) return part;
+      changed = true;
+      return { ...record, text };
+    });
+    if (!changed) return item;
+    changedAny = true;
+    return { ...item, content: parts };
+  });
+  return changedAny ? result : (items as T[]);
+}
+
+/**
+ * Restore every "unchanged" stand-in to the full goal context it refers to,
+ * using the most recent full context earlier in the same list. A stand-in
+ * without a matching earlier context is left as it is.
+ */
+export function expandUnchangedSessionGoalContexts<T extends Record<string, unknown>>(
+  items: readonly T[],
+): T[] {
+  let latest: { block: string; identity: SessionGoalContextIdentity } | null = null;
+  return rewriteGoalContextBlocks(items, (block) => {
+    const unchanged = unchangedSessionGoalContextIdentity(block);
+    if (unchanged) {
+      return latest &&
+        latest.identity.objectiveRevision === unchanged.objectiveRevision &&
+        latest.identity.state === unchanged.state
+        ? latest.block
+        : block;
+    }
+    const identity = sessionGoalContextIdentity(block);
+    if (identity) latest = { block, identity };
+    return block;
+  });
+}
+
+/**
+ * Accepted turns freeze the session goal onto their input, so a long session
+ * repeats the same goal on every message. Give the model each distinct goal
+ * context once: a context identical to the most recent one earlier in the list
+ * becomes a one-line "unchanged" stand-in, while a changed goal (new revision,
+ * state or text) is rendered in full. Each item depends only on the items
+ * before it, so appending history never rewrites an earlier request prefix.
+ */
+export function collapseRepeatedSessionGoalContexts<T extends Record<string, unknown>>(
+  items: readonly T[],
+): T[] {
+  const expanded = expandUnchangedSessionGoalContexts(items);
+  let latest: string | null = null;
+  return rewriteGoalContextBlocks(expanded, (block) => {
+    if (unchangedSessionGoalContextIdentity(block)) return block;
+    if (block === latest) return renderUnchangedSessionGoalContext(block) ?? block;
+    if (sessionGoalContextIdentity(block)) latest = block;
+    return block;
+  });
+}
+
+/**
+ * Machine-update kinds that only report status of work the agent already
+ * started (or a nudge to continue). Once newer input exists, the compaction
+ * summary carries what they said; retaining them verbatim only repeats it.
+ */
+const TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS: ReadonlySet<string> = new Set<SessionSystemUpdateKind>(
+  [
+    "goal_continuation",
+    "session_wait_timeout",
+    "background_command_result",
+    "child_progress",
+    "child_waiting_capacity",
+    "child_requires_action_resolved",
+  ],
+);
+
+/**
+ * True when a durable machine-update batch message consists only of transient
+ * status updates. Scheduled occurrences, agent messages, steering, child
+ * results and anything unparseable are never transient.
+ */
+export function isTransientSessionSystemUpdateBatch(item: Record<string, unknown>): boolean {
+  if (item.type !== "message" || item.role !== "system" || typeof item.content !== "string") {
+    return false;
+  }
+  const body = splitSystemBatchGoalContext(item.content)?.body ?? item.content;
+  if (!body.startsWith("[Opengeni internal updates]\n")) return false;
+  const json = body.split("\n").find((line) => line.startsWith('{"updates":'));
+  if (!json) return false;
+  try {
+    const parsed = JSON.parse(json) as { updates?: unknown };
+    if (!Array.isArray(parsed.updates) || parsed.updates.length === 0) return false;
+    return parsed.updates.every(
+      (update) =>
+        update !== null &&
+        typeof update === "object" &&
+        typeof (update as { kind?: unknown }).kind === "string" &&
+        TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS.has((update as { kind: string }).kind),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The full goal context leading a message, if any. */
+export function leadingSessionGoalContext(item: Record<string, unknown>): string | undefined {
+  if (item.type !== "message") return undefined;
+  const content = item.content;
+  if (typeof content === "string") {
+    const goal = splitSystemBatchGoalContext(content)?.goal;
+    return goal && sessionGoalContextIdentity(goal) ? goal : undefined;
+  }
+  if (!Array.isArray(content)) return undefined;
+  for (const part of content) {
+    const text = (part as { text?: unknown } | null)?.text;
+    if (typeof text === "string" && sessionGoalContextIdentity(text)) return text;
+  }
+  return undefined;
 }
 
 export const VariableSetVariableName = z
@@ -10484,6 +10714,18 @@ export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
 export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS = 60;
 export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS = 30 * 24 * 60 * 60;
 
+/**
+ * A schedule that follows the workspace's default connectors at each run,
+ * the way a new chat does. Connectors a person turned off stay off.
+ */
+export const ScheduledTaskToolPolicy = /* @__PURE__ */ z
+  .object({
+    mode: z.literal("workspace_default"),
+    excludedMcpServerIds: SessionExcludedMcpServerIds,
+  })
+  .strict();
+export type ScheduledTaskToolPolicy = z.infer<typeof ScheduledTaskToolPolicy>;
+
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
     .object({
@@ -10510,6 +10752,15 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
           .max(SCHEDULED_TASK_TOOL_MAX_COUNT - 1)
           .default([])
       : z.array(ToolRef).default([]),
+    /**
+     * How a schedule that starts its own session chooses connectors.
+     * `workspace_default`: every run gets the workspace's default connectors
+     * as they are when it starts (except `excludedMcpServerIds`), like a new
+     * chat, plus the tools listed in `tools`. Absent: runs get exactly
+     * `tools`. A schedule that posts into an existing chat never has it; that
+     * chat supplies its connectors.
+     */
+    toolPolicy: ScheduledTaskToolPolicy.optional(),
     metadata: bounded
       ? ScheduledTaskMetadataInput.default({})
       : z.record(z.string(), z.unknown()).default({}),
@@ -10578,9 +10829,21 @@ function refineScheduledTaskAgentConfig(
 export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
   .object(scheduledTaskAgentConfigShape(false))
   .extend({
-    /** Exact accepted choices when frozen; legacy omission retains historical selection. */
-    connectionAccounts: McpConnectionAccountSelections.optional(),
-    connectionAccountsFrozen: z.literal(true).optional(),
+    /**
+     * Connector accounts a person explicitly pinned for a schedule that starts
+     * its own session. Each pinned pair narrows its connector to exactly those
+     * accounts; every other connector follows the owner's current accounts at
+     * each run. Never derived from what a run resolved, and never set on a
+     * schedule that posts into an existing chat (that chat supplies its
+     * connectors and the owner's live accounts).
+     */
+    pinnedAccounts: McpConnectionAccountSelections.optional(),
+    /**
+     * Skip an occurrence instead of running without a connector whose pinned
+     * account can no longer be used. Omitted: the run continues without that
+     * connector and the owner is told.
+     */
+    pinnedAccountsRequired: z.literal(true).optional(),
   })
   .superRefine(refineScheduledTaskAgentConfig);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
@@ -10669,11 +10932,12 @@ export type ScheduledTaskAccessConnector = z.infer<typeof ScheduledTaskAccessCon
 export const SCHEDULED_TASK_ACCESS_CONNECTORS_MAX = 64;
 
 /**
- * What a scheduled task's frozen tools and connector accounts lack compared
- * with what its owner would get by saving it again now. A task freezes its
- * connectors, its connector accounts and (when an agent created it, migration
- * 0428) its Opengeni tool policy, so later workspace changes never reach its
- * runs on their own. This read-only projection names what
+ * What a scheduled task's saved tools lack compared with what its owner would
+ * get by saving it again now, plus the accounts a person pinned that can no
+ * longer be used. A separate-agent task saves its connectors and (when an
+ * agent created it, migration 0428) its Opengeni tool policy; connector
+ * accounts are never saved, they follow the owner's current accounts at each
+ * run unless a person pinned one. This read-only projection names what
  * `POST .../scheduled-tasks/:taskId/refresh-access` would add or remove; the
  * refresh adds only the Opengeni permissions those named tools need and drops
  * frozen permissions the refreshing person no longer holds.
@@ -10694,12 +10958,12 @@ export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
       .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
     /** Default Opengeni tools missing from an agent-created task's frozen tools. */
     missingOpenGeniTools: z.array(FirstPartyMcpToolName).max(FIRST_PARTY_MCP_TOOL_NAMES.length),
-    /** Connectors whose chosen account can no longer be used by this schedule. */
+    /**
+     * Connectors whose pinned account can no longer be used. Runs continue
+     * without them (or are skipped when the schedule requires its pinned
+     * accounts) until a person pins another account or unpins them.
+     */
     unavailableAccounts: z
-      .array(ScheduledTaskAccessConnector)
-      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
-    /** Connectors this schedule has no account for, although one is now available. */
-    attachableAccounts: z
       .array(ScheduledTaskAccessConnector)
       .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
     /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
@@ -10707,6 +10971,60 @@ export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
   })
   .strict();
 export type ScheduledTaskPolicyDrift = z.infer<typeof ScheduledTaskPolicyDrift>;
+
+export const SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX = 32;
+
+/** One connector account a scheduled run would act as. */
+export const ScheduledTaskAccountPlanAccount = /* @__PURE__ */ z
+  .object({
+    connectionId: z.string().uuid(),
+    label: z.string().min(1).max(512),
+    /** `personal`: the schedule owner's own account. `shared`: a workspace account. */
+    scope: z.enum(["personal", "shared"]),
+  })
+  .strict();
+export type ScheduledTaskAccountPlanAccount = z.infer<typeof ScheduledTaskAccountPlanAccount>;
+
+export const ScheduledTaskAccountPlanConnector = /* @__PURE__ */ z
+  .object({
+    id: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    /**
+     * `default`: each run uses the owner's current accounts for this
+     * connector. `pinned`: a person chose the accounts; runs use only those.
+     */
+    mode: z.enum(["default", "pinned"]),
+    /**
+     * The accounts a run would use if it started now. Empty when none can be
+     * used: a run then goes without this connector (or, for a pinned connector
+     * on a schedule that requires its pinned accounts, is skipped).
+     */
+    accounts: z
+      .array(ScheduledTaskAccountPlanAccount)
+      .max(SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX),
+    /** Pinned accounts that can no longer be used. Always empty in `default` mode. */
+    unavailablePins: z
+      .array(z.object({ connectionId: z.string().uuid() }).strict())
+      .max(SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX),
+  })
+  .strict();
+export type ScheduledTaskAccountPlanConnector = z.infer<typeof ScheduledTaskAccountPlanConnector>;
+
+/**
+ * Which connector accounts a run of this schedule would use if it started
+ * now, per connector: Default (the owner's current accounts) or Pinned (the
+ * accounts a person chose), resolved at read time from the owner's live
+ * connections. Nothing here is stored; runs resolve again when they start.
+ * Connectors whose credentials an embedding host supplies are not listed.
+ */
+export const ScheduledTaskAccountPlan = /* @__PURE__ */ z
+  .object({
+    connectors: z
+      .array(ScheduledTaskAccountPlanConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+  })
+  .strict();
+export type ScheduledTaskAccountPlan = z.infer<typeof ScheduledTaskAccountPlan>;
 
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
@@ -10751,6 +11069,12 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   updatedAt: z.string(),
   /** Read-only response projection; never stored and never execution authority. */
   policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
+  /**
+   * Read-only response projection for a viewer who can act on the task (the
+   * same viewers as `policyDrift`); never stored and never execution
+   * authority. Absent when it could not be computed.
+   */
+  accountPlan: ScheduledTaskAccountPlan.optional(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
@@ -10787,6 +11111,30 @@ export const ListPrivateScheduledTaskSummariesResponse = /* @__PURE__ */ z
 export type ListPrivateScheduledTaskSummariesResponse = z.infer<
   typeof ListPrivateScheduledTaskSummariesResponse
 >;
+
+/**
+ * A pinned connector account an admitted run could not use. The run went
+ * ahead without that connector; it never substitutes another account.
+ */
+export const ScheduledTaskDegradedAccount = /* @__PURE__ */ z
+  .object({
+    serverId: z.string().min(1).max(256),
+    /** Null when the whole connector became unusable (for example the owner lost access). */
+    connectionId: z.string().uuid().nullable(),
+    reason: z.enum([
+      "connector_unavailable",
+      "account_not_visible",
+      "account_inactive",
+      "account_mismatch",
+      "selection_unavailable",
+      "owner_access_unavailable",
+    ]),
+  })
+  .strict();
+export type ScheduledTaskDegradedAccount = z.infer<typeof ScheduledTaskDegradedAccount>;
+export const ScheduledTaskDegradedAccounts = /* @__PURE__ */ z
+  .array(ScheduledTaskDegradedAccount)
+  .max(128);
 
 /**
  * Complete credential-free execution truth accepted for one scheduled agent
@@ -10952,6 +11300,14 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     xaiAuthoritySubjectId: z.string().min(1).nullable(),
     claudeAuthoritySubjectId: z.string().min(1).nullable().default(null),
     connectionAuthoritySubjectId: z.string().min(1).nullable(),
+    /** Pinned accounts this occurrence could not use; it runs without those connectors. */
+    degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
+    /**
+     * The occurrence's account intent: the owner (or none for a schedule
+     * without one) and the pinned accounts it used. Work that continues the
+     * occurrence resolves this intent again instead of copying its accounts.
+     */
+    connectionAccountIntent: ConnectionAccountIntent.nullable().optional(),
     triggerInitiator: TurnInitiator,
     agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
     incidentPreflightRequired: z.boolean(),
@@ -11120,6 +11476,12 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
   admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
+  /**
+   * Pinned connector accounts this run could not use. The run went ahead
+   * without those connectors; no other account was used in their place.
+   * Absent or empty when every pinned account was usable.
+   */
+  degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
   /** Why the scheduler refused this occurrence before running it (see the schema). */
   admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
   /**
@@ -11146,10 +11508,10 @@ export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
  * A schedule that needs its owner's attention because of connector access:
  * - its latest run with a turn failed closed on a connector and no later run
  *   has cleared it (`runId`, `firedAt` and `failures`); and/or
- * - a connector account it chose can no longer be used
- *   (`unavailableAccounts`), so every fresh occurrence is refused before it
- *   creates a run. There is no run to point at, so `runId` and `firedAt` are
- *   null when only this applies.
+ * - a connector account a person pinned can no longer be used
+ *   (`unavailableAccounts`): runs go ahead without that connector, or are
+ *   skipped when the schedule requires its pinned accounts. `runId` and
+ *   `firedAt` are null when only this applies.
  * At least one of `failures` and `unavailableAccounts` is non-empty. Listed
  * for its owner; a task without an owner is listed only for a key or service
  * that manages schedules.
@@ -11163,7 +11525,7 @@ export const ScheduledTaskAccessAttention = /* @__PURE__ */ z
     runId: z.string().uuid().nullable(),
     firedAt: z.string().nullable(),
     failures: z.array(ScheduledTaskRunAccessFailure).max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
-    /** Connectors whose chosen account can no longer be used; new runs cannot start. */
+    /** Connectors whose pinned account can no longer be used. */
     unavailableAccounts: z
       .array(ScheduledTaskAccessConnector)
       .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
@@ -11248,7 +11610,14 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     /** Who can see it. Omitted: the organization's default for new schedules. */
     visibility: SessionVisibility.optional(),
     connectionAuthorities: z.never().optional(),
-    connectionAccounts: McpConnectionAccountSelections.default([]),
+    /**
+     * Connector accounts a person pins for a schedule that starts its own
+     * session (never an existing-chat schedule, never an agent). Omitted
+     * connectors follow the owner's current accounts at each run.
+     */
+    pinnedAccounts: McpConnectionAccountSelections.optional(),
+    /** Skip an occurrence instead of running without an unusable pinned account. */
+    pinnedAccountsRequired: z.boolean().optional(),
 
     agentConfig: ScheduledTaskAgentConfigInput,
     status: ScheduledTaskStatus.default("active"),
@@ -11263,13 +11632,24 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
   },
-  { rejectKeys: ["selectedHostMcpDelegations"] },
+  { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
 ).superRefine((value, context) => {
   if (value.runMode === "existing_session" && !value.targetSessionId) {
     context.addIssue({
       code: "custom",
       path: ["targetSessionId"],
       message: "targetSessionId is required when runMode=existing_session",
+    });
+  }
+  if (
+    value.runMode === "existing_session" &&
+    (value.pinnedAccounts !== undefined || value.pinnedAccountsRequired !== undefined)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["pinnedAccounts"],
+      message:
+        "An existing-chat schedule uses that chat's connectors with the owner's current accounts; pin accounts only on a schedule that starts its own session",
     });
   }
   if (value.runMode !== "existing_session" && value.targetSessionId) {
@@ -11314,7 +11694,6 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     variableSetId: null,
     environmentId: null,
     rigId: null,
-    connectionAccounts: [],
   }));
 
 /** Schedule a message in an existing chat, whose execution settings are inherited. */
@@ -11326,7 +11705,6 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
     targetSessionId: z.string().uuid(),
     /** A schedule posting into an Only me chat is always Only me. */
     visibility: SessionVisibility.optional(),
-    connectionAccounts: McpConnectionAccountSelections.default([]),
     runMode: z.literal("existing_session").default("existing_session"),
     overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
     status: ScheduledTaskStatus.default("active"),
@@ -11394,7 +11772,13 @@ export const UpdateScheduledTaskRequest =
       /** Change who can see it. Only the owner can, and a schedule posting into an Only me chat stays Only me. */
       visibility: SessionVisibility.optional(),
       connectionAuthorities: z.never().optional(),
-      connectionAccounts: McpConnectionAccountSelections.optional(),
+      /**
+       * Replace the person-pinned connector accounts of a schedule that starts
+       * its own session; `[]` unpins every connector. Omitted keeps the pins.
+       */
+      pinnedAccounts: McpConnectionAccountSelections.optional(),
+      /** Skip occurrences instead of running without an unusable pinned account. */
+      pinnedAccountsRequired: z.boolean().optional(),
 
       /** Compare against the reviewed execution digest; rejects concurrent edits. */
       expectedExecutionDigest: z.string().min(1).max(128).optional(),
@@ -11425,7 +11809,7 @@ export const UpdateScheduledTaskRequest =
       rigId: z.string().uuid().nullable().optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
     },
-    { rejectKeys: ["selectedHostMcpDelegations"] },
+    { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
   ).superRefine((value, context) => {
     if (value.adoptSessionSettings && !value.expectedExecutionDigest) {
       context.addIssue({
@@ -11464,6 +11848,17 @@ export const UpdateScheduledTaskRequest =
         code: "custom",
         path: ["targetSessionId"],
         message: "targetSessionId cannot be null when runMode=existing_session",
+      });
+    }
+    if (
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId)) &&
+      ((value.pinnedAccounts?.length ?? 0) > 0 || value.pinnedAccountsRequired === true)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pinnedAccounts"],
+        message:
+          "An existing-chat schedule uses that chat's connectors with the owner's current accounts; pin accounts only on a schedule that starts its own session",
       });
     }
     if (

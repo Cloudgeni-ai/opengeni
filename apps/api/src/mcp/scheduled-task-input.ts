@@ -49,17 +49,20 @@ export function scheduledTaskCreateToolInput() {
           ),
         agentConfig: z
           .object(ScheduledTaskAgentConfigInput.shape)
-          .omit({ slackBotChannelId: true })
+          .omit({ slackBotChannelId: true, toolPolicy: true })
           .strict()
           .optional()
           .describe(
             "Creation settings for a separate scheduled agent. For an existing chat, supply prompt instead.",
           ),
       })
+      // Only a person pins connector accounts; agents never do.
       // Variable Sets were removed (RM-1); agents choose vaults via vaultPolicy.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
+        pinnedAccounts: true,
+        pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
       })

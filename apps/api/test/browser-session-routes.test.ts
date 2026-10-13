@@ -16,6 +16,7 @@ import {
   parseBrowserScreenshotOptions,
   browserScreenshotResponse,
   browserScreenshotError,
+  browserTabNotRespondingError,
   browserCreateInput,
 } from "../src/routes/browser-sessions";
 
@@ -664,6 +665,46 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("preserves a definite tab diagnosis in GET and DOM-read POST API envelopes", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const internal = new BrowserControlRequestError(409, {
+      code: "tab_not_responding",
+      message: "This tab is not responding. Reload or close it.",
+      retryable: false,
+    });
+    app.on(["GET", "POST"], "/v1/test/tab-not-responding", () => {
+      throw browserTabNotRespondingError(internal);
+    });
+    for (const method of ["GET", "POST"] as const) {
+      const response = await app.request("http://localhost/v1/test/tab-not-responding", {
+        method,
+        headers: { "x-opengeni-correlation-id": "hung-tab-request" },
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: {
+          status: 409,
+          code: "tab_not_responding",
+          message: internal.error.message,
+          retryable: false,
+          requestId: "hung-tab-request",
+        },
+      });
+    }
+    const uncertain = new BrowserControlRequestError(409, {
+      code: "outcome_unknown",
+      message: "input sent",
+      retryable: false,
+    });
+    expect(browserTabNotRespondingError(uncertain)).toBe(uncertain);
+  });
+
   test("publishes a definite screenshot timeout through the ordinary API error envelope", async () => {
     const app = createApp({
       settings: testSettings(),

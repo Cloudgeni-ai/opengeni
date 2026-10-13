@@ -6,7 +6,13 @@ import {
   type AttachedBrowserBridgeOptions,
 } from "./attached-bridge";
 import { type BrowserCdpConnection, type BrowserCommandRunner } from "./cdp-driver";
-import { CdpProtocolError, CdpSessionDetachedError, CdpTransportError, type CdpEvent } from "./cdp";
+import {
+  CdpCommandTimeoutError,
+  CdpProtocolError,
+  CdpSessionDetachedError,
+  CdpTransportError,
+  type CdpEvent,
+} from "./cdp";
 
 const POLL_INTERVAL_MS = 50;
 const POLL_LIMIT = 1_000;
@@ -178,7 +184,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       return (await this.browserCommand(method, params)) as T;
     } catch (error) {
-      throw mapBridgeError(method, error);
+      throw mapBridgeError(method, error, options.sessionId);
     }
   }
 
@@ -503,7 +509,7 @@ function requireTab(value: unknown): AttachedTab {
   };
 }
 
-function mapBridgeError(method: string, error: unknown): Error {
+function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
   if (error instanceof InteractionControllerError) return error;
   if (
     error instanceof CdpProtocolError ||
@@ -512,6 +518,7 @@ function mapBridgeError(method: string, error: unknown): Error {
   )
     return error;
   if (error instanceof AttachedBrowserBridgeError) {
+    if (error.code === "timeout" && sessionId) return new CdpCommandTimeoutError(method, sessionId);
     if (error.code === "debugger_unavailable")
       return new InteractionControllerError(
         "resource_unavailable",
