@@ -471,13 +471,20 @@ function isRequestTimeoutError(err: unknown): boolean {
  * shape does not change.
  */
 export class NatsControlRpc implements ControlRpc {
-  private readonly recovery = new ControlReplyRecovery();
+  private readonly recovery: ControlReplyRecovery;
   private readonly connect: () => Promise<NatsRequestConnection | null>;
   private connection: NatsRequestConnection | undefined;
   private connecting: Promise<NatsRequestConnection | null> | undefined;
 
-  constructor(connect: () => Promise<NatsRequestConnection | null>) {
+  constructor(
+    connect: () => Promise<NatsRequestConnection | null>,
+    options: {
+      /** Transient-failure recovery allowance beyond the operation timeout (default two minutes). */
+      recoveryMs?: number;
+    } = {},
+  ) {
     this.connect = connect;
+    this.recovery = new ControlReplyRecovery(options.recoveryMs);
   }
 
   private async resolveConnection(): Promise<NatsRequestConnection | null> {
