@@ -49,6 +49,10 @@
       "sha256": "92543a710cd808d8d930c827c8f877953406993e8965e1c01d1097afef7f9a47"
     },
     {
+      "path": ".github/workflows/publish-browser-extension.yml",
+      "sha256": "db8d4155f396094f43283f98a521327000cda3d722aac44d627d2e8970f25480"
+    },
+    {
       "path": ".github/workflows/publish-canary-chart.yml",
       "sha256": "4cb5d3bb038e0a1f8997b83b93d02c7dbb579ef3c4bcc84cd831f2e3210c1288"
     },
@@ -916,6 +920,36 @@
       "job": "admit-head",
       "step": "Require main or hotfix/* head",
       "sha256": "908ca29300a102728fbafc0c6b501bfe098c335138c8be1dbf852e40dd46f5b0"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Admit protected main",
+      "sha256": "7ef4625258376bb691af17bdf48bc3fb109cc39e963cd852b74e230a60ee83aa"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Build store ZIP",
+      "sha256": "9936df9bc7d412a04b7af314b1b19203ba2699fd3a7bce41554e9ce0b5721852"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Install dependencies",
+      "sha256": "1cd1c6c436f7ed4dc025c83963fd1c032f0b4493bc78c225fcb0d1d76c6cfae8"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Test publisher",
+      "sha256": "732302fc33663d81adfe2bd6efd3941c356e9074eb74252ad68a00d7494f6d7a"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Upload and submit",
+      "sha256": "43ac13a8054a46653f52363073da632dede951e3b2e8fc019d83c591fd071b24"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",
