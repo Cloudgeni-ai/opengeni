@@ -10,6 +10,8 @@
      ?section=models&workspace=<id>&account=codex:<id>   an account owned by that workspace
      ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only
      ?section=models&workspace=<id>&view=allowed-models  its Allowed models (form page)
+     ?section=models&view=account-rules                  the organization's account rules
+     ?section=models&workspace=<id>&view=account-rules   one workspace's account rules
      ?section=models&account=...&view=model-access       Models an account can serve
 
    `workspace` also names the workspace a page was opened from, so an
@@ -32,6 +34,7 @@ export type ModelsView =
   | `connect-org:${ModelsProvider}`
   | "allowed-models"
   | "compaction"
+  | "account-rules"
   | "model-access";
 
 const PROVIDERS: readonly ModelsProvider[] = [
@@ -51,6 +54,7 @@ const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
   "allowed-models",
   "compaction",
+  "account-rules",
   "model-access",
 ]);
 

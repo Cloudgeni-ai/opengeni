@@ -2,14 +2,18 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { ModelAccountSettingsOverview, ModelAccountPreferences } from "@opengeni/sdk";
+import type {
+  ModelAccountPreferences,
+  ModelAccountSettingValues,
+  ModelAccountSettingsOverview,
+} from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
    Account rules against a mocked client: the organization's locks, every
    workspace's sources, and a workspace's one-step return to the organization.
    -------------------------------------------------------------------------- */
 
-const VALUES = {
+const VALUES: ModelAccountSettingValues = {
   rotation: {
     codex: { mode: "spread" as const },
     claude: { mode: "spread" as const },
@@ -109,6 +113,7 @@ const {
   rotationSummary,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
+  workspaceRuleChanges,
 } = await import("./model-account-settings");
 const { PersonalFallbackPreference } = await import("./model-account-policy-controls");
 
@@ -148,6 +153,12 @@ const buttons = (container: HTMLElement, text: string) =>
     (candidate) => candidate.textContent?.trim() === text,
   );
 
+/** A rule's lock: a toggle button, pressed while the rule is locked. */
+const lock = (container: HTMLElement, rule: string) =>
+  container.querySelector(
+    `button[aria-label="Lock for every workspace: ${rule}"]`,
+  ) as HTMLButtonElement;
+
 function Organization() {
   const state = useModelAccountSettingsOverview("acme", true);
   return (
@@ -186,7 +197,7 @@ test("fallback mappings save exact order and support an explicit empty override"
       expectedVersion: 7,
     });
     // A completed save releases the writer; locking still works without remounting.
-    await act(async () => buttons(view.container, "Lock for every workspace").at(-1)!.click());
+    await act(async () => lock(view.container, "Fallback order").click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenLastCalledWith("acme", {
       locked: ["personalFallbackAllowed", "fallbackOrder"],
       expectedVersion: 7,
@@ -228,7 +239,7 @@ test("overview loads subsequent pages once and deduplicates workspace identities
       after: "next",
     });
     expect(
-      view.container.querySelectorAll('ul[aria-label="Account rules by workspace"] li'),
+      view.container.querySelectorAll('ul[aria-label="Workspaces with their own rules"] li'),
     ).toHaveLength(2);
     expect(buttons(view.container, "Show more workspaces")).toHaveLength(0);
   } finally {
@@ -307,19 +318,42 @@ test("a late personal preference save cannot overwrite the newly selected organi
   }
 });
 
-test("rotation saves the selected provider without guessing another provider's policy", async () => {
+test("sharing work is one switch that sets every provider", async () => {
   const view = await render(<Organization />);
   try {
-    const select = view.container.querySelector(
-      'select[aria-label="Claude account rotation"]',
-    ) as HTMLSelectElement;
-    await act(async () => {
-      select.value = "primary_first";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    const sharing = view.container.querySelectorAll("[role='switch']")[0] as HTMLButtonElement;
+    expect(sharing.getAttribute("aria-checked")).toBe("true");
+    await act(async () => sharing.click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenCalledWith("acme", {
-      rotation: { claude: { mode: "primary_first" } },
+      rotation: {
+        codex: { mode: "primary_first" },
+        claude: { mode: "primary_first" },
+        xai: { mode: "primary_first" },
+      },
       expectedVersion: 7,
+    });
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("a workspace with mixed sharing says which providers share, and the switch sets them all", async () => {
+  client.getWorkspaceModelAccountSettings.mockImplementationOnce(async () => ({
+    ...workspaceSettings(),
+    values: {
+      ...workspaceSettings().values,
+      rotation: { codex: { mode: "primary_first" }, claude: { mode: "spread" } },
+    },
+  }));
+  const view = await render(<Workspace />);
+  try {
+    expect(view.container.textContent).toContain("Off for Codex, on for Claude.");
+    const sharing = view.container.querySelectorAll("[role='switch']")[0] as HTMLButtonElement;
+    expect(sharing.getAttribute("aria-checked")).toBe("false");
+    await act(async () => sharing.click());
+    expect(client.updateWorkspaceModelAccountSettings).toHaveBeenCalledWith("design", {
+      rotation: { codex: { mode: "spread" }, claude: { mode: "spread" } },
+      expectedVersion: 3,
     });
   } finally {
     await view.cleanup();
@@ -369,9 +403,9 @@ test("the organization locks a rule with the version it read", async () => {
   const view = await render(<Organization />);
   try {
     expect(view.container.textContent).toContain("Opus → Sonnet");
-    expect(buttons(view.container, "Locked · Unlock")).toHaveLength(1);
-    // Rotation is the first rule; lock it.
-    await act(async () => buttons(view.container, "Lock for every workspace")[0]!.click());
+    expect(view.container.querySelectorAll('button[aria-pressed="true"]')).toHaveLength(1);
+    expect(lock(view.container, "Fall back to personal accounts").textContent).toBe("Locked");
+    await act(async () => lock(view.container, "Share work between accounts").click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenCalledWith("acme", {
       locked: ["personalFallbackAllowed", "rotation"],
       expectedVersion: 7,
@@ -383,22 +417,53 @@ test("the organization locks a rule with the version it read", async () => {
   }
 });
 
-test("the overview names each rule's source", async () => {
+test("the overview lists only workspaces that changed a rule, with what they changed", async () => {
   const view = await render(<Organization />);
   try {
-    const row = view.container.querySelector("ul[aria-label='Account rules by workspace'] li");
+    const rows = view.container.querySelectorAll(
+      "ul[aria-label='Workspaces with their own rules'] li",
+    );
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
     expect(row?.textContent).toContain("Design");
-    expect(row?.textContent).toContain(", set by this workspace");
-    expect(row?.textContent).toContain(", locked by Acme");
+    expect(row?.textContent).toContain("Personal accounts: Off");
+    // A locked rule is the organization's, not a change.
+    expect(row?.textContent).not.toContain("Personal fallback");
   } finally {
     await view.cleanup();
   }
 });
 
+test("rule changes name each changed rule and per-provider entries", () => {
+  expect(
+    workspaceRuleChanges({
+      values: { ...VALUES, crossProviderFailover: false },
+      sources: {
+        ...SOURCES,
+        personalConnectionsAllowed: "organization",
+        crossProviderFailover: "workspace",
+      },
+      entrySources: {
+        rotation: { codex: "workspace" },
+        providers: {},
+        fallbackOrder: { "claude/opus": "workspace" },
+      },
+    }),
+  ).toEqual(["Sharing work: On", "Failover: Off", "Own fallback order"]);
+  expect(
+    workspaceRuleChanges({
+      values: VALUES,
+      sources: { ...SOURCES, personalConnectionsAllowed: "organization" },
+      entrySources: { rotation: {}, providers: {}, fallbackOrder: {} },
+    }),
+  ).toEqual([]);
+});
+
 test("a workspace admin goes back to the organization's value in one step", async () => {
   const view = await render(<Workspace />);
   try {
-    const fallback = view.container.querySelectorAll("[role='switch']")[1]!;
+    // Sharing work, personal accounts, then the locked personal fallback.
+    const fallback = view.container.querySelectorAll("[role='switch']")[2]!;
     expect(fallback.getAttribute("aria-disabled")).toBe("true");
     expect(view.container.textContent).toContain("Locked by Acme.");
     const reset = buttons(view.container, "Use Acme’s setting");

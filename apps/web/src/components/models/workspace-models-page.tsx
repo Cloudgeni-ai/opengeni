@@ -11,7 +11,7 @@ import {
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { KeyRoundIcon, PlusIcon } from "lucide-react";
+import { KeyRoundIcon, LockIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -111,6 +111,8 @@ import { DetailSkeleton } from "@/components/ui/detail-sheet";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { ListRow, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRowGroup } from "@/components/ui/setting-row";
@@ -128,9 +130,13 @@ import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
+  AccountRulesOverviewSection,
+  AccountRulesRow,
+  OrganizationAccountRulesSection,
   WorkspaceAccountRulesSection,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
+  workspaceRulesSummary,
   type WorkspaceModelAccountSettingsState,
 } from "./model-account-settings";
 import { PersonalFallbackPreference } from "./model-account-policy-controls";
@@ -915,6 +921,76 @@ export function WorkspaceModelsPageBody({
           fields={note}
         />
       );
+  } else if (view === "account-rules" && !workspacePage) {
+    // The organization's rules, and the workspaces that changed one for themselves.
+    const modelLabel = (id: string) => catalog.models.find((model) => model.id === id)?.label ?? id;
+    page = (
+      <DetailPage
+        back={{ label: "Models", onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailPageHeader
+          title={
+            organizationAdmin
+              ? "Account rules"
+              : "Only organization owners and admins can open this"
+          }
+          meta={organizationAdmin ? [`For every workspace in ${organizationName}`] : undefined}
+        />
+        {organizationAdmin ? (
+          <div className="mt-8 min-w-0">
+            <SectionStack>
+              <OrganizationAccountRulesSection
+                title="Rules"
+                organizationName={organizationName}
+                state={accountRules}
+                modelLabel={modelLabel}
+              />
+              <AccountRulesOverviewSection
+                organizationName={organizationName}
+                state={accountRules}
+                onOpenWorkspace={(id) => nav.openWorkspace(id, undefined, "account-rules")}
+              />
+            </SectionStack>
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-fg-muted">
+            Each workspace’s admins can change its own rules on the workspace’s page.
+          </p>
+        )}
+      </DetailPage>
+    );
+  } else if (view === "account-rules") {
+    // One workspace's rules. A Personal workspace has none of its own, only the person's preference.
+    page = (
+      <DetailPage
+        back={{ label: personal ? "Your Personal workspace" : workspaceName, onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailPageHeader
+          title="Account rules"
+          meta={[personal ? "Your Personal workspace" : workspaceName, "This workspace only"]}
+        />
+        <div className="mt-8 min-w-0">
+          <SectionStack>
+            {personal ? null : (
+              <WorkspaceAccountRulesSection
+                title="Rules"
+                organizationName={organizationName}
+                state={workspaceAccountRules}
+              />
+            )}
+            <PersonalFallbackPreference
+              organizationId={organizationId}
+              allowed={
+                workspaceAccountRules.settings?.values.personalConnectionsAllowed === true &&
+                workspaceAccountRules.settings.values.personalFallbackAllowed
+              }
+            />
+          </SectionStack>
+        </div>
+      </DetailPage>
+    );
   } else if ((view === "compaction" || view === "allowed-models") && !workspacePage) {
     // Opened from the organization's list: the defaults every workspace follows.
     page = !organizationAdmin ? (
@@ -1078,7 +1154,7 @@ export function WorkspaceModelsPageBody({
         client={client}
         organizationDefaults={organizationAdmin ? organizationDefaults : null}
         accountRules={organizationAdmin ? accountRules : null}
-        modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
+        onOpenAccountRules={() => nav.openView("account-rules")}
         onEditAllowed={() => nav.openView("allowed-models")}
         onEditCompaction={() => nav.openView("compaction")}
         organizationName={organizationName}
@@ -1142,9 +1218,12 @@ export function WorkspaceModelsPageBody({
         back={{ label: "Models", onClick: () => nav.openWorkspace(undefined) }}
         className={FLUSH_DETAIL_PAGE_CLASS}
       >
+        {/* Says plainly that this is one workspace, not the organization's Models page. */}
         <DetailPageHeader
+          leading={personal ? <LogoTile icon={<LockIcon />} /> : <LogoTile name={workspaceName} />}
           title={personal ? "Your Personal workspace" : workspaceName}
-          meta={personal ? ["Only you"] : undefined}
+          chips={<MetaChip variant="soft">Workspace</MetaChip>}
+          meta={[...(personal ? ["Only you"] : []), "Changes here apply only to this workspace"]}
         />
         <div className="mt-8 min-w-0">
           <ModelsList
@@ -1169,6 +1248,7 @@ export function WorkspaceModelsPageBody({
             }
             onEditAllowed={() => nav.openView("allowed-models")}
             onEditCompaction={() => nav.openView("compaction")}
+            onOpenAccountRules={() => nav.openView("account-rules")}
             onConnect={() => nav.openView("connect")}
             accountsNote={
               <CodexPoolNotice
@@ -1489,6 +1569,7 @@ function ModelsList({
   whoCanConnect,
   onEditAllowed,
   onEditCompaction,
+  onOpenAccountRules,
   onConnect,
   accountsNote,
   accounts,
@@ -1513,6 +1594,7 @@ function ModelsList({
   whoCanConnect: ReactNode;
   onEditAllowed: () => void;
   onEditCompaction: () => void;
+  onOpenAccountRules: () => void;
   onConnect: () => void;
   /** The line above the list that says which Codex accounts new work uses. */
   accountsNote?: ReactNode;
@@ -1531,32 +1613,12 @@ function ModelsList({
       Connect account
     </RowButton>
   );
-  // Defaults first: what a new chat here starts with, and who pays for it.
+  // Accounts first: what pays for models here. Then what a new chat starts with.
   return (
     <SectionStack>
-      <WorkspaceDefaultsSection
-        key={`defaults:${workspaceId}:${revision}`}
-        workspaceId={workspaceId}
-        organizationName={organizationName}
-        canManage={canManageSettings}
-        policy={policy}
-        describePayer={describePayer}
-        onEditAllowed={onEditAllowed}
-        onEditCompaction={onEditCompaction}
-      />
-      {personal ? null : (
-        <WorkspaceAccountRulesSection organizationName={organizationName} state={accountRules} />
-      )}
-      <PersonalFallbackPreference
-        organizationId={organizationId}
-        allowed={
-          accountRules.settings?.values.personalConnectionsAllowed === true &&
-          accountRules.settings.values.personalFallbackAllowed
-        }
-      />
       <Section
         title="Accounts"
-        description="Subscriptions, API keys and credits that pay for models here."
+        description="Subscriptions, API keys and credits that pay for models in this workspace."
         action={canConnect && !empty ? connect : null}
       >
         {empty ? (
@@ -1580,6 +1642,33 @@ function ModelsList({
         )}
         {whoCanConnect}
       </Section>
+      <WorkspaceDefaultsSection
+        key={`defaults:${workspaceId}:${revision}`}
+        workspaceId={workspaceId}
+        organizationName={organizationName}
+        canManage={canManageSettings}
+        policy={policy}
+        describePayer={describePayer}
+        onEditAllowed={onEditAllowed}
+        onEditCompaction={onEditCompaction}
+        accountRules={
+          personal
+            ? undefined
+            : {
+                value: workspaceRulesSummary(accountRules.settings, organizationName),
+                onOpen: onOpenAccountRules,
+              }
+        }
+      />
+      {personal ? (
+        <PersonalFallbackPreference
+          organizationId={organizationId}
+          allowed={
+            accountRules.settings?.values.personalConnectionsAllowed === true &&
+            accountRules.settings.values.personalFallbackAllowed
+          }
+        />
+      ) : null}
       {providerSections}
     </SectionStack>
   );
@@ -1599,6 +1688,7 @@ export function WorkspaceDefaultsSection({
   describePayer,
   onEditAllowed,
   onEditCompaction,
+  accountRules,
 }: {
   workspaceId: string;
   organizationName: string;
@@ -1608,6 +1698,8 @@ export function WorkspaceDefaultsSection({
   describePayer?: ((model: WorkspaceModelCatalogModel) => string) | undefined;
   onEditAllowed: () => void;
   onEditCompaction: () => void;
+  /** The row that opens this workspace's account rules, with its current value. */
+  accountRules?: { value: string; onOpen: () => void } | undefined;
 }) {
   return (
     <Section
@@ -1633,6 +1725,7 @@ export function WorkspaceDefaultsSection({
           value={compactionSummary(policy.models, { organizationName })}
           onOpen={onEditCompaction}
         />
+        {accountRules ? <AccountRulesRow {...accountRules} /> : null}
       </SettingRowGroup>
     </Section>
   );

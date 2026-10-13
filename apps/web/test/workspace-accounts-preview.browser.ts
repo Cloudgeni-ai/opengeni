@@ -109,7 +109,7 @@ try {
     assert((await page.getByText("Research team plan").count()) === 1, "Research listed twice");
     await page.getByText("Research only").waitFor();
     await page.getByText("Your Personal workspace").waitFor();
-    await page.getByText("Sharing work between accounts").waitFor();
+    await page.getByText("Account rules", { exact: true }).waitFor();
     await noOverflow();
     await shot("1-list");
 
@@ -179,7 +179,7 @@ try {
     await open("reach=people");
     await page.getByText("Selected people").waitFor();
     await page.getByText("Design only").waitFor();
-    await page.getByText("Sharing work between accounts").waitFor();
+    await page.getByText("Account rules", { exact: true }).waitFor();
     await shot("6-list-after-people");
     await open(`reach=people&account=${ACME_PRO}`);
     await page.getByText("2 people").waitFor();

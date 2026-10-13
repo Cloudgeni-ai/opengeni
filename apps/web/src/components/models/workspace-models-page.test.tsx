@@ -558,7 +558,8 @@ beforeEach(async () => {
   context.clientConfig.claudeSubscriptionEnabled = false;
 });
 
-const ACCOUNTS_SECTION = "Subscriptions, API keys and credits that pay for models here.";
+const ACCOUNTS_SECTION =
+  "Subscriptions, API keys and credits that pay for models in this workspace.";
 
 let organizationAdmin = false;
 
@@ -857,9 +858,12 @@ describe("Models list", () => {
       expect(view.container.textContent).not.toContain("New chats here start with");
       const row = view.container.querySelector('[data-testid="default-model-row"]');
       expect(row?.textContent).toContain("paid by this workspace's Codex subscription");
-      // Defaults come before Accounts.
+      // Accounts come first: what pays for models here. Then Defaults.
       const headings = [...view.container.querySelectorAll("h2")].map((h) => h.textContent);
-      expect(headings.indexOf("Defaults")).toBeLessThan(headings.indexOf("Accounts"));
+      expect(headings.indexOf("Accounts")).toBeLessThan(headings.indexOf("Defaults"));
+      // The header says this is one workspace's page, not the organization's.
+      expect(view.container.querySelector("header")?.textContent).toContain("Workspace");
+      expect(view.container.textContent).toContain("Changes here apply only to this workspace");
     } finally {
       await cleanup(view);
     }
@@ -1137,7 +1141,7 @@ describe("Codex pool controls", () => {
     }
   });
 
-  test("core settings provide one rotation control instead of a second legacy provider control", async () => {
+  test("core settings provide one sharing switch, on the account rules page", async () => {
     accounts = {
       ...accounts,
       accounts: [codexAccount(), codexAccount({ id: "acct-2", label: "Backup plan" })],
@@ -1149,9 +1153,16 @@ describe("Codex pool controls", () => {
     });
     const view = await render();
     try {
-      expect(
-        view.container.querySelectorAll('select[aria-label="Codex account rotation"]'),
-      ).toHaveLength(1);
+      expect(button(view.container, "Spread work")).toBeUndefined();
+      expect(view.container.textContent).not.toContain("Share work between accounts");
+      await act(async () => button(view.container, /^Account rules/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Account rules");
+      const sharing = [...view.container.querySelectorAll("[data-slot=setting-row]")].filter(
+        (row) => row.textContent?.includes("Share work between accounts"),
+      );
+      expect(sharing).toHaveLength(1);
+      expect(sharing[0]!.querySelector("[role=switch]")?.getAttribute("aria-checked")).toBe("true");
       expect(button(view.container, "Spread work")).toBeUndefined();
     } finally {
       await cleanup(view);

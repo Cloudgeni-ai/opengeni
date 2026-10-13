@@ -405,6 +405,17 @@ Learned on Settings > Models, 27 Sep 2026.
   model (with who pays and the one can't-run warning), Allowed models, the accounts it uses
   (muted "Not in use" with the reason when one is set aside), its Codex and SuperGrok settings and
   the Codex Apps row. Pages opened from it go back to it, named ("← Design preview").
+- **Account rules live on their own page.** Decided 13 Oct 2026 by Bendik. Organization > Models
+  opens with Accounts, then Workspaces, then "Defaults for every workspace", whose last row,
+  "Account rules", opens `?view=account-rules`: one switch per rule ("Share work between
+  accounts" is one switch for every provider, with a quiet "Off for Codex, on for Claude." line
+  only while providers differ), each with a lock toggle (a pressed "Locked" pill, never a
+  "Lock for every workspace" link), then "Workspaces with their own rules", listing only the
+  workspaces that changed one and what they changed. A workspace's page has the same row, valued
+  "Follows Acme" or "2 changed here".
+- **A workspace's model page says it is a workspace.** Its header has the workspace tile, its
+  name, a "Workspace" chip and "Changes here apply only to this workspace", and it lists
+  Accounts before Defaults, so it never reads as the organization's page.
 - **Connect is for the organization.** Connect account makes an organization account and asks
   which workspaces use it: all (new ones too) or selected ones, which is its "Available in". An
   account owned by one workspace is offered only to owners and admins, and only where it is

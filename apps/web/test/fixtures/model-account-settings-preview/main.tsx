@@ -32,7 +32,6 @@ function Organization() {
       <AccountRulesOverviewSection
         organizationName="Acme"
         state={state}
-        modelLabel={(id) => LABELS[id] ?? id}
         onOpenWorkspace={(id) => {
           document.body.dataset.opened = id;
         }}

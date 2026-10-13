@@ -65,25 +65,45 @@ try {
         "horizontal overflow",
       );
 
-    // The organization: its rules with locks, then every workspace's rules.
+    // The organization: its rules with locks, then the workspaces that changed one.
     await open("view=organization");
-    await page.getByText("Account rules by workspace").waitFor();
+    await page.getByText("Workspaces with their own rules").waitFor();
     await page.getByText("Claude Opus 5.5 → Claude Sonnet 5.5 → GPT-6.1 Sol").waitFor();
-    await page.getByRole("button", { name: "Locked · Unlock" }).waitFor();
+    const lock = (rule: string) =>
+      page.getByRole("button", { name: `Lock for every workspace: ${rule}`, exact: true });
+    assert(
+      (await lock("Fall back to personal accounts").getAttribute("aria-pressed")) === "true",
+      "locked rule shows unlocked",
+    );
     await page.getByRole("button", { name: "Show more workspaces" }).click();
     await page.getByText("Research").waitFor();
     await noOverflow();
     await shot("organization");
 
-    // Locking rotation clears Research's own rotation.
-    await page.getByRole("button", { name: "Lock for every workspace" }).first().click();
-    await page.getByRole("button", { name: "Locked · Unlock" }).nth(1).waitFor();
+    // Locking sharing work clears Research's own setting.
+    await lock("Share work between accounts").click();
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('[aria-label="Lock for every workspace: Share work between accounts"]')
+          ?.getAttribute("aria-pressed") === "true",
+    );
     assert(
       (await receipts(page)).includes('"locked":["personalFallbackAllowed","rotation"]'),
       `lock not saved: ${await receipts(page)}`,
     );
     await noOverflow();
     await shot("organization-locked-rotation");
+
+    // Sharing work is one switch for every provider.
+    await page.getByRole("switch", { name: "Share work between accounts" }).click();
+    await page.waitForFunction(() =>
+      JSON.stringify(
+        (window as unknown as { settingsReceipts: unknown[] }).settingsReceipts,
+      ).includes(
+        '"rotation":{"codex":{"mode":"primary_first"},"claude":{"mode":"primary_first"},"xai":{"mode":"primary_first"}}',
+      ),
+    );
 
     await page.getByRole("button", { name: "Edit order", exact: true }).click();
     await page.getByRole("button", { name: "Move GPT-6.1 Sol up", exact: true }).click();
@@ -113,11 +133,10 @@ try {
 
     // A member reads the rules without changing them.
     await open("view=workspace&workspace=research&readonly=1");
-    assert(
-      (await page.getByRole("combobox", { name: "Codex account rotation" }).inputValue()) ===
-        "primary_first",
-      "wrong rotation value",
-    );
+    const sharing = page.getByRole("switch", { name: "Share work between accounts" });
+    assert((await sharing.getAttribute("aria-checked")) === "false", "wrong sharing value");
+    assert((await sharing.getAttribute("aria-disabled")) === "true", "member can share work");
+    await page.getByText("Off for Codex, on for Claude, on for SuperGrok.").waitFor();
     await page.getByText("Set for this workspace.").first().waitFor();
     assert(
       (await page.getByRole("button", { name: "Use Acme’s setting" }).count()) === 0,

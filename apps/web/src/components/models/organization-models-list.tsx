@@ -36,8 +36,9 @@ import {
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { compactionSummary } from "@/components/models/model-compaction-page";
 import {
-  AccountRulesOverviewSection,
-  OrganizationAccountRulesSection,
+  AccountRulesRow,
+  organizationRulesSummary,
+  workspaceRuleChanges,
   type ModelAccountSettingsOverviewState,
 } from "@/components/models/model-account-settings";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
@@ -256,7 +257,7 @@ export function OrganizationModelsList({
   client,
   organizationDefaults,
   accountRules,
-  modelLabel,
+  onOpenAccountRules,
   onEditAllowed,
   onEditCompaction,
   organizationName,
@@ -282,8 +283,8 @@ export function OrganizationModelsList({
   organizationDefaults: OrganizationModelDefaultsState | null;
   /** The organization's account rules and every workspace's; owners and admins only, otherwise null. */
   accountRules?: ModelAccountSettingsOverviewState | null;
-  /** A model's name, for the fallback order. */
-  modelLabel?: (id: string) => string;
+  /** Opens the account rules page. */
+  onOpenAccountRules?: () => void;
   onEditAllowed: () => void;
   onEditCompaction: () => void;
   organizationName: string;
@@ -479,33 +480,17 @@ export function OrganizationModelsList({
   );
   const shared = workspaces.filter((workspace) => !workspace.personal);
   const personal = workspaces.filter((workspace) => workspace.personal);
+  // How many account rules each workspace changed for itself, from the rules overview.
+  const ruleChanges = new Map(
+    (accountRules?.overview?.workspaces ?? []).map((workspace) => [
+      workspace.workspaceId,
+      workspaceRuleChanges(workspace).length,
+    ]),
+  );
 
+  // Accounts and workspaces first: what people come here to see.
   return (
     <SectionStack>
-      {organizationDefaults ? (
-        <OrganizationDefaultsSection
-          organizationName={organizationName}
-          anchorWorkspaceId={anchorWorkspaceId}
-          defaults={organizationDefaults}
-          onEditAllowed={onEditAllowed}
-          onEditCompaction={onEditCompaction}
-        />
-      ) : null}
-      {accountRules ? (
-        <>
-          <OrganizationAccountRulesSection
-            organizationName={organizationName}
-            state={accountRules}
-            modelLabel={modelLabel}
-          />
-          <AccountRulesOverviewSection
-            organizationName={organizationName}
-            state={accountRules}
-            modelLabel={modelLabel}
-            onOpenWorkspace={(id) => onOpenWorkspace(id)}
-          />
-        </>
-      ) : null}
       <Section
         title="Accounts"
         description={
@@ -556,7 +541,7 @@ export function OrganizationModelsList({
         title="Workspaces"
         description={
           organizationDefaults
-            ? "Each workspace follows the defaults above unless its admins change them there."
+            ? "Open a workspace to see and change its own models, defaults and rules."
             : "Each workspace's default model and the models people can pick there."
         }
       >
@@ -566,6 +551,7 @@ export function OrganizationModelsList({
               key={workspace.id}
               workspace={workspace}
               snapshot={snapshots[workspace.id]}
+              ruleChanges={ruleChanges.get(workspace.id) ?? 0}
               onOpen={() => onOpenWorkspace(workspace.id)}
             />
           ))}
@@ -577,6 +563,21 @@ export function OrganizationModelsList({
           </p>
         ) : null}
       </Section>
+
+      {organizationDefaults ? (
+        <OrganizationDefaultsSection
+          organizationName={organizationName}
+          anchorWorkspaceId={anchorWorkspaceId}
+          defaults={organizationDefaults}
+          onEditAllowed={onEditAllowed}
+          onEditCompaction={onEditCompaction}
+          accountRules={
+            accountRules && onOpenAccountRules
+              ? { value: organizationRulesSummary(accountRules), onOpen: onOpenAccountRules }
+              : undefined
+          }
+        />
+      ) : null}
 
       {!accountRules && administrator && orgCodex.accounts.length >= 2 ? (
         <Section title="Codex">
@@ -626,6 +627,7 @@ export function OrganizationDefaultsSection({
   defaults,
   onEditAllowed,
   onEditCompaction,
+  accountRules,
 }: {
   organizationName: string;
   /** Whose catalog lists the models to choose from. */
@@ -633,6 +635,8 @@ export function OrganizationDefaultsSection({
   defaults: OrganizationModelDefaultsState;
   onEditAllowed: () => void;
   onEditCompaction: () => void;
+  /** The row that opens the account rules page, with its current value. */
+  accountRules?: { value: string; onOpen: () => void } | undefined;
 }) {
   const policy = useModelAccessPolicy({
     kind: "organization",
@@ -668,6 +672,7 @@ export function OrganizationDefaultsSection({
             })}
             onOpen={onEditCompaction}
           />
+          {accountRules ? <AccountRulesRow {...accountRules} /> : null}
         </SettingRowGroup>
       )}
     </Section>
@@ -966,10 +971,13 @@ function OrganizationKeyRow({
 function WorkspaceRow({
   workspace,
   snapshot,
+  ruleChanges = 0,
   onOpen,
 }: {
   workspace: ModelsWorkspace;
   snapshot: WorkspaceModelsSnapshot | "loading" | "error" | undefined;
+  /** Account rules this workspace changed for itself. */
+  ruleChanges?: number;
   onOpen: () => void;
 }) {
   const title = workspace.personal ? "Your Personal workspace" : workspace.name;
@@ -997,6 +1005,7 @@ function WorkspaceRow({
             snapshot.defaultModel,
             snapshot.allowed,
             snapshot.changesDefaults ? "Changes some defaults" : null,
+            ruleChanges > 0 ? "Own account rules" : null,
           ]
         : [];
   return (
