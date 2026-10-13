@@ -704,7 +704,9 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
     const restricted = await acquireRestrictedRuntimeTestDatabase("session-usage-limit-schema");
     if (!restricted) throw new Error("Restricted PostgreSQL database unavailable");
     const searchPath = dbSearchPath({ dbSchema: restricted.schema });
-    expect(searchPath).toContain("opengeni_private");
+    if (!searchPath?.includes("opengeni_private")) {
+      throw new Error(`unexpected deployment search path: ${String(searchPath)}`);
+    }
     const runtime = createDb(restricted.appUrl, { searchPath, rlsStrategy: "force" });
     try {
       const options = {
