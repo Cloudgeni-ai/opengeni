@@ -108,8 +108,11 @@ try {
     // Research's own account too: once, tagged with its workspace.
     assert((await page.getByText("Research team plan").count()) === 1, "Research listed twice");
     await page.getByText("Research only").waitFor();
-    await page.getByText("Your Personal workspace").waitFor();
-    await page.getByText("Codex accounts", { exact: true }).waitFor();
+    // Every workspace, the Personal one too, is a scope in "Models for".
+    await page.getByRole("combobox", { name: "Models for" }).click();
+    await page.getByRole("option", { name: /Your Personal workspace/ }).waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByText("Share work between Codex subscriptions", { exact: true }).waitFor();
     await noOverflow();
     await shot("1-list");
 
@@ -179,7 +182,7 @@ try {
     await open("reach=people");
     await page.getByText("Selected people").waitFor();
     await page.getByText("Design only").waitFor();
-    await page.getByText("Codex accounts", { exact: true }).waitFor();
+    await page.getByText("Share work between Codex subscriptions", { exact: true }).waitFor();
     await shot("6-list-after-people");
     await open(`reach=people&account=${ACME_PRO}`);
     await page.getByText("2 people").waitFor();

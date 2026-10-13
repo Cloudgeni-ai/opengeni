@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { chromium, type Page } from "playwright";
 
-// How accounts are used: the organization's rules, which of them workspaces
+// Sharing subscriptions: the default rules, which of them workspaces
 // can change, and one workspace's rules, rendered with real components
 // against a synthetic client.
 const base = process.env.OPENGENI_SETTINGS_PREVIEW_URL ?? "http://127.0.0.1:4195";
@@ -68,20 +68,20 @@ try {
     // The organization: its rules, one row per provider, and which of them
     // workspaces can change on its own page.
     await open("view=organization");
-    await page.getByText("How accounts are used").waitFor();
+    await page.getByText("Sharing subscriptions", { exact: true }).waitFor();
     await page.getByText("Claude Opus 5.5 → Claude Sonnet 5.5 → GPT-6.1 Sol").waitFor();
-    await page.getByText("Same in every workspace").waitFor();
-    await page.getByRole("radiogroup", { name: "Codex accounts" }).waitFor();
+    await page.getByText("Used by every workspace. Workspaces can’t change it.").first().waitFor();
+    await page.getByRole("switch", { name: "Share work between Codex subscriptions" }).waitFor();
     await noOverflow();
     await shot("organization");
 
     // Keeping rotation the same everywhere clears Research's own rotation.
     await page.getByRole("button", { name: /What workspaces can change/ }).click();
-    await page.getByRole("checkbox", { name: "Sharing work between accounts" }).uncheck();
+    await page.getByRole("checkbox", { name: "Share work between subscriptions" }).uncheck();
     await noOverflow();
     await shot("organization-locks");
     await page.getByRole("button", { name: "Save", exact: true }).click();
-    await page.getByText("How accounts are used").waitFor();
+    await page.getByText("Sharing subscriptions", { exact: true }).waitFor();
     assert(
       (await receipts(page)).includes('"locked":["rotation","personalFallbackAllowed"]'),
       `lock not saved: ${await receipts(page)}`,
@@ -104,32 +104,31 @@ try {
     // A workspace: its own value with a one-step return, and a locked rule
     // that shows once the rule it depends on is on again.
     await open("view=workspace&workspace=design");
-    await page.getByText("This workspace follows Acme unless you change a rule here.").waitFor();
+    await page.getByText("Sharing subscriptions", { exact: true }).waitFor();
     const fallback = page.getByRole("switch", { name: "Fall back to personal subscriptions" });
     assert((await fallback.count()) === 0, "dependent rule shown while its rule is off");
     await noOverflow();
     await shot("workspace");
-    await page.getByRole("button", { name: "Use Acme’s setting" }).click();
+    await page.getByRole("button", { name: /Use the default/ }).click();
     await page.waitForFunction(() =>
       JSON.stringify(
         (window as unknown as { settingsReceipts: unknown[] }).settingsReceipts,
       ).includes('"personalConnectionsAllowed":null'),
     );
-    await page.getByRole("button", { name: "Use Acme’s setting" }).waitFor({ state: "detached" });
+    await page.getByRole("button", { name: /Use the default/ }).waitFor({ state: "detached" });
     assert((await fallback.getAttribute("aria-disabled")) === "true", "locked rule is editable");
 
     // A member reads the rules without changing them.
     await open("view=workspace&workspace=research&readonly=1");
     assert(
       (await page
-        .getByRole("radiogroup", { name: "Codex accounts" })
-        .getByRole("radio", { name: "Primary only" })
-        .getAttribute("aria-checked")) === "true",
+        .getByRole("switch", { name: "Share work between Codex subscriptions" })
+        .getAttribute("aria-checked")) === "false",
       "wrong rotation value",
     );
-    await page.getByText("Set for this workspace.").first().waitFor();
+    await page.getByText("Changed for Research").first().waitFor();
     assert(
-      (await page.getByRole("button", { name: "Use Acme’s setting" }).count()) === 0,
+      (await page.getByRole("button", { name: /Use the default/ }).count()) === 0,
       "member can reset",
     );
     await noOverflow();

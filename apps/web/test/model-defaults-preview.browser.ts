@@ -42,12 +42,12 @@ try {
         "horizontal overflow",
       );
 
-    // A workspace that follows Acme says so on every row.
+    // A workspace that uses the defaults says so on every row.
     await open("view=workspace");
     await page
-      .getByText("This workspace uses Acme’s defaults unless you change them here.")
+      .getByText("What new chats in this workspace start with and which models people can pick.")
       .waitFor();
-    await page.getByText("Following Acme.", { exact: false }).first().waitFor();
+    await page.getByText("Uses the default.", { exact: false }).first().waitFor();
     await page.getByText("Acme’s limits").waitFor();
     await noOverflow();
     await shot("workspace-following");
@@ -57,7 +57,7 @@ try {
     await page.getByText("Changed for this workspace.", { exact: false }).first().waitFor();
     await page.getByText("1 custom limit").waitFor();
     await shot("workspace-own");
-    await page.getByRole("button", { name: "Use Acme’s default" }).click();
+    await page.getByRole("button", { name: "Use the default" }).click();
     await page.waitForFunction(() =>
       JSON.stringify(
         (window as unknown as { defaultsReceipts: unknown[] }).defaultsReceipts,
@@ -66,7 +66,7 @@ try {
 
     // The organization's own defaults.
     await open("view=organization");
-    await page.getByText("Models for every workspace").waitFor();
+    await page.getByText("New chats", { exact: true }).waitFor();
     await page.getByText("3 models").waitFor();
     await page.getByText("1 limit").waitFor();
     await page.getByRole("button", { name: "Make automatic" }).waitFor();

@@ -15,6 +15,7 @@ import "../../../src/styles.css";
 const params = new URLSearchParams(window.location.search);
 document.documentElement.dataset.ogTheme = params.get("theme") === "dark" ? "dark" : "light";
 const view = params.get("view") ?? "organization";
+const NAMES: Record<string, string> = { design: "Design", platform: "Platform", research: "Research" };
 const LABELS: Record<string, string> = {
   "claude-sub/opus": "Claude Opus 5.5",
   "claude-sub/sonnet": "Claude Sonnet 5.5",
@@ -41,10 +42,15 @@ function Organization() {
 }
 
 function Workspace() {
-  const state = useWorkspaceModelAccountSettings(params.get("workspace") ?? "design", true);
+  const workspaceId = params.get("workspace") ?? "design";
+  const state = useWorkspaceModelAccountSettings(workspaceId, true);
   return (
     <SectionStack>
-      <WorkspaceAccountRulesSection organizationName="Acme" state={state} />
+      <WorkspaceAccountRulesSection
+        organizationName="Acme"
+        workspaceName={NAMES[workspaceId] ?? workspaceId}
+        state={state}
+      />
       <PersonalFallbackPreference organizationId="acme" allowed={state.settings?.values.personalConnectionsAllowed === true && state.settings.values.personalFallbackAllowed} />
     </SectionStack>
   );

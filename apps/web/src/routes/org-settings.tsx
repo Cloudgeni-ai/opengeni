@@ -344,7 +344,8 @@ export function OrgSettingsRoute({
   const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
 
   const subPage =
-    (section === "models" && Boolean(modelsAccount || modelsView || workspace)) ||
+    // A workspace picked in "Models for" is a scope of the same page, so it keeps the header.
+    (section === "models" && Boolean(modelsAccount || modelsView)) ||
     (section === "people" && Boolean(person || invitation || organizationView)) ||
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
     (section === "developer" && (organizationView === "new-key" || developerSubPage)) ||

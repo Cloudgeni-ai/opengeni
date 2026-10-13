@@ -620,7 +620,7 @@ describe("organization billing StrictMode ownership", () => {
         "Only admins manage models. Ask an admin to add one.",
       );
       expect(container.textContent).not.toContain("Identity and mission");
-      expect(container.textContent).not.toContain("Connect account");
+      expect(container.textContent).not.toContain("Connect provider");
       expect(container.querySelector("#organization-model-connections-heading")).toBeNull();
       expect(
         container.querySelector('nav[aria-label="Organization settings"] a[aria-current="page"]'),
