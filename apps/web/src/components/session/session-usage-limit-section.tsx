@@ -9,7 +9,10 @@ import {
   DEFAULT_SESSION_USAGE_LIMIT_LABELS as LABELS,
   summarizeSessionUsageLimit,
 } from "@opengeni/react/usage";
-import { formatSessionUsageMicros } from "@opengeni/sdk/session-usage-limits";
+import {
+  formatSessionUsageMicros,
+  type SessionUsageLimit,
+} from "@opengeni/sdk/session-usage-limits";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -24,6 +27,7 @@ import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   classifySessionUsageLimitSaveError,
+  isOutcomeUnknown,
   parseSessionUsageLimitDraft,
   sessionUsageLimitCapability,
   sessionUsageLimitInputValue,
@@ -35,6 +39,16 @@ import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
 const DISABLED_REASON = "New limits are turned off here. You can still remove a limit.";
+
+type EditBase = { version: number; limitMicros: number | null };
+type PendingSave = { operationId: string; limitMicros: number | null; expectedVersion: number };
+
+/** Waits before re-sending a save whose outcome is unknown (same operation). */
+export const SESSION_USAGE_LIMIT_UNKNOWN_RETRY_MS = [500, 1_500] as const;
+
+function limitText(limitMicros: number | null): string {
+  return limitMicros === null ? "no limit" : formatSessionUsageMicros(limitMicros);
+}
 
 export function sessionHref(workspaceId: string, sessionId: string): string {
   return `/workspaces/${workspaceId}/sessions/${sessionId}`;
@@ -72,13 +86,23 @@ export function SessionUsageLimitSection(props: {
   const child = Boolean(session.parentSessionId) || usage?.inherited === true;
   const rootSessionId = usage?.rootSessionId ?? null;
   const editable = capability !== "absent" && canControl && !child && usage !== null;
-  const summary = summarizeSessionUsageLimit(usage);
+  // A refresh failed after a good read: keep the last known amount (and any
+  // reached state), labelled as possibly out of date. Never $0.
+  const stale = usage !== null && limit.error !== null;
+  const summary = summarizeSessionUsageLimit(usage, undefined, { stale });
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<SessionUsageLimitDraft>({ kind: "none" });
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<SessionUsageLimitSaveFailure | null>(null);
   const [touched, setTouched] = useState(false);
+  // What the person started editing from. Save sends this version, never one
+  // a background refresh advanced meanwhile, so someone else's change in the
+  // meantime is a conflict, not a silent overwrite.
+  const [editBase, setEditBase] = useState<EditBase | null>(null);
+  // A save whose response was lost: an exact retry reuses its operationId so
+  // it can never apply twice; any other request gets a new one.
+  const pendingSave = useRef<PendingSave | null>(null);
   const changeButton = useRef<HTMLButtonElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const amountInput = useRef<HTMLInputElement>(null);
@@ -86,6 +110,8 @@ export function SessionUsageLimitSection(props: {
   const statusId = useId();
 
   const openEditor = () => {
+    if (usage) setEditBase({ version: usage.version, limitMicros: usage.limitMicros });
+    pendingSave.current = null;
     setDraft(
       usage?.limitMicros === null || usage?.limitMicros === undefined
         ? { kind: "none" }
@@ -146,14 +172,35 @@ export function SessionUsageLimitSection(props: {
 
   async function save() {
     if (!usage || saving || !parsed.ok || settingBlocked) return;
+    const base = editBase ?? { version: usage.version, limitMicros: usage.limitMicros };
+    const request = { limitMicros: parsed.limitMicros, expectedVersion: base.version };
+    const previous = pendingSave.current;
+    const operationId =
+      previous &&
+      previous.limitMicros === request.limitMicros &&
+      previous.expectedVersion === request.expectedVersion
+        ? previous.operationId
+        : crypto.randomUUID();
+    pendingSave.current = { ...request, operationId };
     setSaving(true);
     setFailure(null);
     try {
-      const committed = await context.client.setSessionUsageLimit(session.workspaceId, session.id, {
-        limitMicros: parsed.limitMicros,
-        expectedVersion: usage.version,
-        operationId: crypto.randomUUID(),
-      });
+      let committed: SessionUsageLimit | null = null;
+      for (let attempt = 0; committed === null; attempt += 1) {
+        try {
+          committed = await context.client.setSessionUsageLimit(session.workspaceId, session.id, {
+            ...request,
+            operationId,
+          });
+        } catch (error) {
+          // The response was lost: re-send the same operation, which the
+          // server applies at most once, until it answers.
+          const retryIn = SESSION_USAGE_LIMIT_UNKNOWN_RETRY_MS[attempt];
+          if (!isOutcomeUnknown(error) || retryIn === undefined) throw error;
+          await new Promise((resolve) => setTimeout(resolve, retryIn));
+        }
+      }
+      pendingSave.current = null;
       limit.apply(committed);
       closeEditor();
       const title =
@@ -166,9 +213,25 @@ export function SessionUsageLimitSection(props: {
       );
     } catch (error) {
       const classified = classifySessionUsageLimitSaveError(error);
-      setFailure(classified);
-      // Someone else saved meanwhile: show theirs, keep this draft to retry.
-      if (classified.kind === "conflict" || classified.kind === "preparing") void refresh();
+      // Still unknown: keep the operation so Save again is the same request.
+      if (classified.kind !== "unknown") pendingSave.current = null;
+      if (classified.kind === "conflict") {
+        // Someone else saved meanwhile. Show theirs and keep this draft; the
+        // next Save is a deliberate choice to replace it.
+        const latest = await refresh();
+        if (latest && latest.version !== base.version) {
+          setEditBase({ version: latest.version, limitMicros: latest.limitMicros });
+          setFailure({
+            ...classified,
+            message: `Someone changed this limit to ${limitText(latest.limitMicros)} while you were editing. Save again to use your amount instead.`,
+          });
+        } else {
+          setFailure(classified);
+        }
+      } else {
+        setFailure(classified);
+        if (classified.kind === "preparing") void refresh();
+      }
     } finally {
       setSaving(false);
     }
@@ -234,11 +297,24 @@ export function SessionUsageLimitSection(props: {
         {secondaryLine ? (
           <p className="text-xs leading-4.5 text-fg-muted">{secondaryLine}</p>
         ) : null}
-        {summary.notes.map((note) => (
-          <p key={note} className="text-xs leading-4.5 text-fg-muted">
-            {note}
-          </p>
-        ))}
+        {summary.notes
+          .filter((note) => !(summary.stale && note === LABELS.staleNote))
+          .map((note) => (
+            <p key={note} className="text-xs leading-4.5 text-fg-muted">
+              {note}
+            </p>
+          ))}
+        {summary.stale ? (
+          <InlineHelp
+            action={
+              <HelpLink onClick={() => void refresh()} className="text-xs">
+                Try again
+              </HelpLink>
+            }
+          >
+            <span data-usage-limit-stale>{LABELS.staleNote}</span>
+          </InlineHelp>
+        ) : null}
         {child && rootSessionId ? (
           <InlineHelp
             action={

@@ -57,6 +57,51 @@ mock.module("sonner", () => ({
 }));
 const { SessionUsageLimitSection } = await import("./session-usage-limit-section");
 const { UsageLimitMenuBody } = await import("./new-session-settings-menu");
+const { useSessionUsageLimit } = await import("@/lib/session-usage-limit");
+
+const defaultSet = setSessionUsageLimit.getMockImplementation()!;
+type SaveRequest = { limitMicros: number | null; expectedVersion: number; operationId: string };
+
+/** A server with real compare-and-set: a save from an older version is a 409. */
+function casServer() {
+  setSessionUsageLimit.mockClear();
+  setSessionUsageLimit.mockImplementation(async (_ws, _id, request) => {
+    const save = request as SaveRequest;
+    if (save.expectedVersion !== current.version) {
+      throw Object.assign(new Error("Opengeni API 409: conflict"), {
+        status: 409,
+        code: "conflict",
+        details: { code: "session_usage_limit_conflict" },
+      });
+    }
+    current = { ...current, limitMicros: save.limitMicros, version: current.version + 1 };
+    return current;
+  });
+  return () => setSessionUsageLimit.mockImplementation(defaultSet);
+}
+
+function saves(): SaveRequest[] {
+  return setSessionUsageLimit.mock.calls.map((call) => call[2] as SaveRequest);
+}
+
+/** The chat route's live reader, sharing the store with the section. */
+let liveRefresh: () => Promise<unknown> = async () => undefined;
+function LiveReader() {
+  const state = useSessionUsageLimit({
+    client: context.client as Parameters<typeof useSessionUsageLimit>[0]["client"],
+    workspaceId,
+    sessionId,
+    enabled: true,
+    live: { events: [], active: false, connectionState: "live" },
+  });
+  liveRefresh = state.refresh;
+  return null;
+}
+async function backgroundRefresh() {
+  await act(async () => {
+    await liveRefresh();
+  });
+}
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -190,6 +235,177 @@ test("a stale version keeps the draft, rereads and says so", async () => {
   expect(getSessionUsageLimit.mock.calls.length).toBeGreaterThan(readsBefore);
 });
 
+test("Save sends the version editing began from, not one a background read advanced (the parent's repro)", async () => {
+  current = usage();
+  const restore = casServer();
+  try {
+    await render(
+      <>
+        <LiveReader />
+        <SessionUsageLimitSection session={session()} />
+      </>,
+    );
+    await act(async () => button("Change").click());
+    await typeInto(container.querySelector<HTMLInputElement>("input[inputmode=decimal]")!, "75");
+    // Someone else sets $40 meanwhile and the live reader picks it up.
+    current = usage({ limitMicros: 40_000_000, version: 4 });
+    await backgroundRefresh();
+    await act(async () => button("Save").click());
+    await settle();
+    expect(saves()[0]?.expectedVersion).toBe(3);
+    // So the server refuses it instead of overwriting their $40.
+    expect(current.limitMicros).toBe(40_000_000);
+  } finally {
+    restore();
+  }
+});
+
+test("a conflict shows the other person's amount, keeps the draft, and Save again replaces it", async () => {
+  current = usage();
+  const restore = casServer();
+  try {
+    await render(
+      <>
+        <LiveReader />
+        <SessionUsageLimitSection session={session()} />
+      </>,
+    );
+    await act(async () => button("Change").click());
+    await typeInto(container.querySelector<HTMLInputElement>("input[inputmode=decimal]")!, "75");
+    current = usage({ limitMicros: 40_000_000, version: 4 });
+    await act(async () => button("Save").click());
+    await settle();
+    const alert = container.querySelector('[role="alert"]')?.textContent ?? "";
+    expect(alert).toContain("Someone changed this limit to $40.00 while you were editing");
+    expect(alert).toContain("Save again to use your amount instead");
+    expect(container.querySelector<HTMLInputElement>("input[inputmode=decimal]")!.value).toBe("75");
+    expect(container.textContent).toContain("of $40.00");
+    // The deliberate retry is against what they now see.
+    await act(async () => button("Save").click());
+    await settle();
+    expect(saves().map((save) => save.expectedVersion)).toEqual([3, 4]);
+    expect(saves()[1]!.operationId).not.toBe(saves()[0]!.operationId);
+    expect(current.limitMicros).toBe(75_000_000);
+    expect(container.querySelector("[data-usage-limit-editor]")).toBeNull();
+  } finally {
+    restore();
+  }
+});
+
+test("a lost save response is re-sent with the same operation until it is answered", async () => {
+  current = usage();
+  const restore = casServer();
+  const cas = setSessionUsageLimit.getMockImplementation()!;
+  const lost = () =>
+    Object.assign(new Error("Failed to fetch"), { outcomeUnknown: true, status: undefined });
+  try {
+    await render(<SessionUsageLimitSection session={session()} />);
+    await act(async () => button("Change").click());
+    await typeInto(container.querySelector<HTMLInputElement>("input[inputmode=decimal]")!, "80");
+    // The first send is applied but its answer is lost; the re-send gets the answer.
+    setSessionUsageLimit.mockImplementationOnce(async (ws, id, request) => {
+      await cas(ws, id, request);
+      throw lost();
+    });
+    setSessionUsageLimit.mockImplementationOnce(async () => current);
+    await act(async () => button("Save").click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+    await settle();
+    const sent = saves();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.operationId).toBe(sent[0]!.operationId);
+    expect(sent[1]!.expectedVersion).toBe(sent[0]!.expectedVersion);
+    expect(current.limitMicros).toBe(80_000_000);
+    expect(current.version).toBe(4); // applied once
+    expect(container.querySelector("[data-usage-limit-editor]")).toBeNull();
+  } finally {
+    restore();
+  }
+});
+
+test("still unknown after the retries: says so, and Save again is the same operation", async () => {
+  current = usage();
+  const restore = casServer();
+  try {
+    await render(<SessionUsageLimitSection session={session()} />);
+    await act(async () => button("Change").click());
+    await typeInto(container.querySelector<HTMLInputElement>("input[inputmode=decimal]")!, "80");
+    setSessionUsageLimit.mockImplementation(async () => {
+      throw Object.assign(new Error("Failed to fetch"), { outcomeUnknown: true });
+    });
+    await act(async () => button("Save").click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_200));
+    });
+    await settle();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "Couldn't confirm the save",
+    );
+    expect(container.querySelector<HTMLInputElement>("input[inputmode=decimal]")!.value).toBe("80");
+    const first = saves();
+    expect(first).toHaveLength(3);
+    expect(new Set(first.map((save) => save.operationId)).size).toBe(1);
+    setSessionUsageLimit.mockImplementation(async () => ({
+      ...current,
+      limitMicros: 80_000_000,
+      version: 4,
+    }));
+    await act(async () => button("Save").click());
+    await settle();
+    expect(saves()[3]!.operationId).toBe(first[0]!.operationId);
+    expect(saves()[3]!.expectedVersion).toBe(3);
+  } finally {
+    restore();
+  }
+}, 10_000);
+
+test("a failed refresh after a good read keeps the amount, marked possibly out of date (the parent's repro)", async () => {
+  current = usage({ usedMicros: 12_000_000 });
+  await render(
+    <>
+      <LiveReader />
+      <SessionUsageLimitSection session={session()} />
+    </>,
+  );
+  expect(container.textContent).toContain("$12.00 of $50.00");
+  getSessionUsageLimit.mockImplementationOnce(async () => {
+    throw Object.assign(new Error("Opengeni API 503"), { status: 503 });
+  });
+  await backgroundRefresh();
+  await settle();
+  const text = container.textContent ?? "";
+  expect(text).toContain("$12.00 of $50.00");
+  expect(text).toContain("may be out of date");
+  expect(text).toContain("The limit still applies");
+  expect(text).not.toContain("$0.00");
+  expect(container.querySelector("[data-usage-limit-stale]")).not.toBeNull();
+  // Try again reads; a good answer clears the label.
+  await act(async () => button("Try again").click());
+  await settle();
+  expect(container.querySelector("[data-usage-limit-stale]")).toBeNull();
+});
+
+test("a failed refresh keeps a known reached state", async () => {
+  current = usage({ status: "reached", usedMicros: 52_100_000 });
+  await render(
+    <>
+      <LiveReader />
+      <SessionUsageLimitSection session={session()} />
+    </>,
+  );
+  getSessionUsageLimit.mockImplementationOnce(async () => {
+    throw new Error("offline");
+  });
+  await backgroundRefresh();
+  await settle();
+  const text = container.textContent ?? "";
+  expect(text).toContain("$52.10 of $50.00");
+  expect(text).toContain("Reached");
+  expect(text).toContain("may be out of date");
+});
+
 test("preparing and partial usage never read as $0", async () => {
   current = usage({ status: "preparing", usedMicros: null, history: "preparing" });
   await render(<SessionUsageLimitSection session={session()} />);
@@ -292,5 +508,11 @@ test("new chat: Pause at reveals a labelled dollar input with a described error"
   expect(input.getAttribute("aria-invalid")).toBe("true");
   const describedBy = input.getAttribute("aria-describedby")!.split(" ");
   expect(document.getElementById(describedBy[0]!)?.textContent).toContain("up to 2 decimals");
-  expect(container.textContent).toContain("It's not your bill");
+  // One short explanation; what the amount is not sits behind help.
+  expect(container.textContent).toContain("API-equivalent model usage for this chat");
+  expect(container.textContent).not.toContain("not your bill");
+  expect(container.querySelector('button[aria-label="About usage limits"]')).not.toBeNull();
+  // A dialog body: a radio group, never menu items around a text field.
+  expect(container.querySelector('[role="menu"], [role="menuitemradio"]')).toBeNull();
+  expect(container.querySelectorAll('[role="radiogroup"] [role="radio"]')).toHaveLength(2);
 });
