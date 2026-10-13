@@ -46,7 +46,18 @@ export default function RootLayout() {
               <AppLinkRouting />
               <Stack screenOptions={{ headerShown: true }}>
                 <Stack.Screen name="index" options={{ title: "Opengeni" }} />
-                <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
+                {/* The sessions list is the menu behind Home's top-left button, so it
+                    slides in from the left like a side menu and slides back out to the
+                    left; a swipe to the left closes it, matching the motion. */}
+                <Stack.Screen
+                  name="sessions"
+                  options={{
+                    title: "Sessions",
+                    animation: "slide_from_left",
+                    animationMatchesGesture: true,
+                    fullScreenGestureEnabled: true,
+                  }}
+                />
                 <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
                 <Stack.Screen name="session/[id]" options={{ title: "" }} />
                 <Stack.Screen name="settings" options={{ title: "Settings" }} />
